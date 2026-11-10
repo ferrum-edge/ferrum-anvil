@@ -25,9 +25,9 @@ pub struct Env {
     pub fixtures: CoreFixtures,
     pub gateway: Gateway,
     pub trusted: bool,
-    /// The instance's primary admin key, known to the harness on Ferrum Edge
-    /// v0.9.9 and later only, to sign G01 lookup tokens ([`crate::g01`]).
-    pub admin_secret: Option<String>,
+    /// The instance's primary admin key, known to the harness to sign G01
+    /// lookup tokens ([`crate::g01`]).
+    pub admin_secret: String,
 }
 
 impl LabEnv for Env {
@@ -449,10 +449,9 @@ pub fn profile() -> Profile {
 
 async fn start() -> anyhow::Result<Env> {
     let fixtures = CoreFixtures::start().await?;
-    // G01 (v0.9.9 and later): diagnostic references on, with an admin key the
-    // harness knows. Older releases reject nothing here: they never see these.
-    let admin_secret = crate::g01::skip_reason().is_none().then(crate::gateway::random_secret);
-    let env = admin_secret.as_deref().map(crate::g01::gateway_env).unwrap_or_default();
+    // G01: diagnostic references on, with an admin key the harness knows.
+    let admin_secret = crate::gateway::random_secret();
+    let env = crate::g01::gateway_env(&admin_secret);
     let gateway = Gateway::start("core", "core.conf", "core.yaml", &[], 18090, &env).await?;
     Ok(Env { engine: Engine::new(), fixtures, gateway, trusted: true, admin_secret })
 }
@@ -460,21 +459,7 @@ async fn start() -> anyhow::Result<Env> {
 async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
     let ctx = RunCtx::new("core")?;
     let mut env = start().await?;
-    let wanted = |id: &str| args.only.is_empty() || args.only.iter().any(|s| s.eq_ignore_ascii_case(id));
-    let mut skipped = Vec::new();
-    let defs: Vec<Def> = match crate::g01::skip_reason() {
-        Some(reason) => {
-            let g01: Vec<&str> = crate::g01::all().iter().map(|d| d.id).collect();
-            for d in crate::g01::all().into_iter().filter(|d| wanted(d.id)) {
-                eprintln!("{:22} skipped {}\n    — {reason}", d.id, d.title);
-                skipped.push(ctx.skipped(d.id, d.title, &reason));
-            }
-            all().into_iter().filter(|d| !g01.contains(&d.id)).collect()
-        }
-        None => all(),
-    };
-    let mut results = harness::run_defs(&ctx, &mut env, defs, &args.only, args.untrusted_pass).await?;
-    results.extend(skipped);
+    let results = harness::run_defs(&ctx, &mut env, all(), &args.only, args.untrusted_pass).await?;
     harness::finish(&ctx, &env, &results)?;
     env.gateway.stop().await;
     Ok(results)
@@ -483,9 +468,7 @@ async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
 async fn up() -> anyhow::Result<()> {
     let env = start().await?;
     println!("core lab running: gateway {GATEWAY} (admin 127.0.0.1:18090); operator log {}", env.gateway.log_path.display());
-    if env.admin_secret.is_some() {
-        println!("diagnostic references: FERRUM_DIAGNOSTIC_REFS=all, retention {}s (G01)", crate::g01::REF_TTL_SECS);
-    }
+    println!("diagnostic references: FERRUM_DIAGNOSTIC_REFS=all, retention {}s (G01)", crate::g01::REF_TTL_SECS);
     println!(
         "routes: /ok/… (healthy), /up/dns /up/refused /up/connect-stall /up/header-stall /up/body-stall /up/reset /up/short-body /up/oversize… /gw/breaker /gw/methods /gw/request-size /gw/app-403 /gw/app-500 /gw/degraded"
     );

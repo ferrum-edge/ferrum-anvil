@@ -126,8 +126,7 @@ request:
 3. The queued datagrams that carry a Handshake packet go out first. The other queued datagrams
    (acknowledgements, and EARLY-002's retry after its 425) wait for the first gateway datagram
    relayed to the Finished's client address after the release, which normally carries
-   HANDSHAKE_DONE, at most 250 ms. On releases before v0.9.8 they then wait 20 ms more (see *Gateway
-   race before v0.9.8*). **Gap:** 1-RTT data that the client coalesced into a datagram with a
+   HANDSHAKE_DONE, at most 250 ms. **Gap:** 1-RTT data that the client coalesced into a datagram with a
    Handshake packet goes out with the Finished, or passes at once while draining, without that wait.
    The hold's check detail counts such datagrams, and the unreadable ones held, so a failure caused
    by either can be told apart.
@@ -147,31 +146,26 @@ refusal logged), is a missed round, and the next round is tried. Any other shape
 the relay did not hold, goes to the strict checks and fails. When the rounds run out the scenario
 **fails**; there is no run-time skip.
 
-The residual timing assumptions:
+The residual timing assumption:
 
 - The gateway acts on a pending 0-RTT request, and its log line lands, within 2 s. A gateway slower
   than that is judged by what it then does. A 425 with its refusal log (EARLY-002) or a GET forwarded
   with `Early-Data: 1` (EARLY-001) still passes. The permitted 200 shape is a missed round and is
   retried, and six missed rounds fail.
-- On releases before v0.9.8 only, the 20 ms after the first gateway datagram following the release
-  are enough for the gateway's accept loop to see its handshake complete.
 
-Neither assumption can make a gateway that processes the PUT early pass.
+It cannot make a gateway that processes the PUT early pass.
 
-**Gateway race before v0.9.8.** v0.9.5 and v0.9.7 can classify an HTTP/3 stream accepted before the
-gateway's own handshake-complete signal as early data (ferrum-edge/ferrum-edge#5761, fixed in v0.9.8
-by #5775), so a request Anvil sent as ordinary 1-RTT data reaches the backend with `Early-Data: 1`,
-or draws 425 when its method is not GET. Lab run 36345042003 saw it on macOS for CTRL-EARLY and
-EARLY-001's ticket GET. On releases before v0.9.8 the ground-truth checks on 1-RTT requests through
-the early-data listener (CTRL-EARLY, EARLY-001's ticket GET, EARLY-005, EARLY-007 and missed 0-RTT
-rounds) therefore accept `Early-Data: 1`, and EARLY-005 accepts a single 425 that Anvil does not
-retry (it retries a 425 only for a method its early-data opt-in allows, and POST never is), whose
-exchange completed without a transport failure, when the gateway log records its HTTP/3 0-RTT refusal of the POST and the backend received nothing; the
-check detail names the misclassification. Anvil's own evidence must still say nothing was sent
-early. On v0.9.8 and later these checks stay strict. EARLY-002's retry must stay outside the race
-even though the relay queues it during the hold: it reaches the gateway only after the first gateway
-datagram relayed after the release and, on these releases, 20 ms more (unless the client coalesced it
-into a Handshake datagram, which the hold's check detail counts).
+**Gateway race before v0.9.8.** v0.9.5 and v0.9.7 could classify an HTTP/3 stream accepted before
+the gateway's own handshake-complete signal as early data (ferrum-edge/ferrum-edge#5761, fixed in
+v0.9.8 by #5775), so a request Anvil sent as ordinary 1-RTT data reached the backend with
+`Early-Data: 1`, or drew 425 when its method was not GET (lab run 36345042003, macOS, CTRL-EARLY and
+EARLY-001's ticket GET). The lab tolerated that on those releases, and its relay held EARLY-002's
+retry 20 ms longer for them; both were removed with the releases. The ground-truth checks on 1-RTT
+requests through the early-data listener (CTRL-EARLY, EARLY-001's ticket GET, EARLY-005, EARLY-007
+and missed 0-RTT rounds) are strict: no `Early-Data` header, and no 425 for EARLY-005's POST.
+EARLY-002's retry reaches the gateway only after the first gateway datagram relayed after the
+release (unless the client coalesced it into a Handshake datagram, which the hold's check detail
+counts).
 
 ## 4. Results
 

@@ -36,9 +36,6 @@ pub const ADMIN: &str = "http://127.0.0.1:18090";
 /// long enough for the lookup Anvil makes as the response arrives, short
 /// enough for TRUST-010 to outlive it.
 pub const REF_TTL_SECS: u64 = 5;
-/// The release that introduced diagnostic references.
-pub const FIRST_RELEASE: &str = "v0.9.9";
-
 /// Gateway environment for the core instance: references on, a short
 /// retention, and the admin key the harness signs lookup tokens with.
 pub fn gateway_env(admin_secret: &str) -> Vec<(&'static str, String)> {
@@ -53,7 +50,7 @@ pub fn gateway_env(admin_secret: &str) -> Vec<(&'static str, String)> {
 /// `viewer` (the lookup needs no more), with the given `scope` and `ns`
 /// claims (`None` leaves the claim out).
 fn token(env: &Env, sub: &str, scope: Option<&str>, ns: Option<&str>) -> String {
-    let secret = env.admin_secret.as_deref().expect("references run on v0.9.9 and later only");
+    let secret = env.admin_secret.as_str();
     let now = chrono::Utc::now().timestamp();
     let mut claims = serde_json::json!({
         "iss": "ferrum-edge",
@@ -340,7 +337,7 @@ fn trust_011(env: &Env) -> Scenario<'_> {
     })
 }
 
-/// The G01 scenarios (Ferrum Edge v0.9.9 and later).
+/// The G01 scenarios (diagnostic references, from Ferrum Edge v0.9.9).
 pub fn all() -> Vec<Def<Env>> {
     vec![
         Def { id: "G01-001", title: "Diagnostic reference resolves to the gateway's own record", run: g01_001 },
@@ -349,10 +346,4 @@ pub fn all() -> Vec<Def<Env>> {
         Def { id: "TRUST-010", title: "Diagnostic reference after its retention", run: trust_010 },
         Def { id: "TRUST-011", title: "Backend-forged diagnostic reference", run: trust_011 },
     ]
-}
-
-/// Why the G01 scenarios do not run on the release under test.
-pub fn skip_reason() -> Option<String> {
-    (!crate::gateway::release_at_least(FIRST_RELEASE))
-        .then(|| crate::gateway::release_text("{release} has no diagnostic references (added in Ferrum Edge v0.9.9)"))
 }

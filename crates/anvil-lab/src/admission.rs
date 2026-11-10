@@ -321,47 +321,25 @@ async fn hold_and_probe(
     (first, o, seen, op_log_class(&m.gateway, from, proxy_id, allowed).await)
 }
 
-/// The first release that dispatches UP-018's bodyless GET on the direct
-/// HTTP/1.1 pool; earlier releases use reqwest.
-const DIRECT_H1_FIRST_RELEASE: &str = "v0.9.11";
-
-/// First published release whose pooled lanes answer a connection ceiling
-/// with its own 503 instead of the shared setup-failure 502 (#6777).
-const POOLED_LIMIT_503_FIRST_RELEASE: &str = "v0.9.19";
-
 /// UP-018 (HTTP/1.1 lane): DestinationRule `maxConnections: 1` on a
 /// mesh_external destination; the only connection is held by a slow
 /// request, so the next request needs a second socket and is refused.
-/// Releases from v0.9.11 through the pinned release use direct H1 for this
-/// bodyless GET (the v0.9.14, v0.9.15 and v0.9.20 source audits found the
-/// lane unchanged); earlier releases use reqwest. From v0.9.19 the direct-H1
-/// ceiling is its own 503 with connection_failure, one catalog outcome.
+/// The gateway dispatches this bodyless GET on its direct HTTP/1.1 pool
+/// (from v0.9.11), whose connection ceiling is its own 503 with
+/// connection_failure, one catalog outcome (from v0.9.19, #6777); the
+/// v0.9.20 source audit found the lane unchanged.
 fn up018(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let m = &env.mesh;
         let log = &m.backend.log;
-        let direct_h1 = crate::gateway::release_from_through_pin(DIRECT_H1_FIRST_RELEASE);
-        let own_503 = direct_h1 && crate::gateway::release_at_least(POOLED_LIMIT_503_FIRST_RELEASE);
-        let (status, marker, body, token, class) = if own_503 {
-            (
-                503,
-                "connection_failure",
-                r#"{"error":"Backend connection limit exceeded"}"#,
-                "ferrum.token.connection_failure",
-                "backend_connection_limit",
-            )
-        } else if direct_h1 {
-            (502, "connection_failure", r#"{"error":"Backend unavailable"}"#, "ferrum.token.connection_failure", "backend_connection_limit")
-        } else {
-            (
-                503,
-                "backend_error",
-                r#"{"error":"Backend connection limit exceeded"}"#,
-                "ferrum.token.backend_error",
-                "dispatch_policy_rejected",
-            )
-        };
+        let (status, marker, body, token, class) = (
+            503,
+            "connection_failure",
+            r#"{"error":"Backend connection limit exceeded"}"#,
+            "ferrum.token.connection_failure",
+            "backend_connection_limit",
+        );
         let connections_before = log.entries().iter().filter(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. })).count();
         let probe_path = "/delay-headers/11";
         let (first, o, seen, ops) = hold_and_probe(env, &H1_LANE, log, H1_PROXY_ID, probe_path, &[class]).await;
@@ -411,59 +389,19 @@ fn up018(env: &Env) -> Fut<'_> {
             no_claim(&mut c, &o, term, Confidence::Unknown);
         }
         if env.trusted {
-            if own_503 {
-                c.scope(&o, token, SourceScope::GatewayToUpstream);
-                c.absent_prefix(&o, "ferrum.token.backend_error");
-                c.absent_prefix(&o, "ferrum.outcome_ambiguous");
-                let got = catalog_outcome(&o);
-                c.add(
-                    CheckKind::Diagnosis,
-                    "catalog outcome upstream.connection_limit.pooled",
-                    got.as_deref() == Some("upstream.connection_limit.pooled"),
-                    format!("{got:?}; {:?}", codes(&o)),
-                );
-                c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
-                for term in ["dns", "tls", "refused"] {
-                    no_claim(&mut c, &o, term, Confidence::Likely);
-                }
-            } else if direct_h1 {
-                c.scope(&o, token, SourceScope::GatewayToUpstream);
-                c.absent_prefix(&o, "ferrum.token.backend_error");
-                c.has(&o, "ferrum.outcome_ambiguous");
-                c.max_confidence(&o, "ferrum.outcome_ambiguous", Confidence::Unknown);
-                c.scope(&o, "ferrum.outcome_ambiguous", SourceScope::Unknown);
-                caveat(&mut c, &o, "ferrum.outcome_ambiguous", "identical");
-                let ids = catalog_ids(&o);
-                c.add(
-                    CheckKind::Diagnosis,
-                    "direct-H1 ceiling stays in the shared pooled setup-failure family",
-                    [
-                        "upstream.connection_limit.pooled",
-                        "upstream.connect.refused",
-                        "upstream.tls.handshake_failed_setup_phase",
-                        "upstream.port_exhaustion",
-                    ]
-                    .iter()
-                    .all(|id| ids.iter().any(|i| i == *id))
-                        && !ids.iter().any(|i| i == "upstream.connection_limit.reqwest")
-                        && !has_code(&o, "ferrum.outcome"),
-                    format!("{ids:?}; {:?}", codes(&o)),
-                );
-                for term in ["dns", "tls", "refused", "connection ceiling", "connection_limit"] {
-                    no_claim(&mut c, &o, term, Confidence::Likely);
-                }
-            } else {
-                c.scope(&o, "ferrum.token.backend_error", SourceScope::Unknown);
-                let got = catalog_outcome(&o);
-                c.add(
-                    CheckKind::Diagnosis,
-                    "catalog outcome upstream.connection_limit.reqwest",
-                    got.as_deref() == Some("upstream.connection_limit.reqwest"),
-                    format!("{got:?}; {:?}", codes(&o)),
-                );
-                c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
-                c.scope(&o, "ferrum.outcome", SourceScope::GatewayAdmission);
-                caveat(&mut c, &o, "ferrum.outcome", "identical");
+            c.scope(&o, token, SourceScope::GatewayToUpstream);
+            c.absent_prefix(&o, "ferrum.token.backend_error");
+            c.absent_prefix(&o, "ferrum.outcome_ambiguous");
+            let got = catalog_outcome(&o);
+            c.add(
+                CheckKind::Diagnosis,
+                "catalog outcome upstream.connection_limit.pooled",
+                got.as_deref() == Some("upstream.connection_limit.pooled"),
+                format!("{got:?}; {:?}", codes(&o)),
+            );
+            c.max_confidence(&o, "ferrum.outcome", Confidence::Likely);
+            for term in ["dns", "tls", "refused"] {
+                no_claim(&mut c, &o, term, Confidence::Likely);
             }
         } else {
             c.absent_prefix(&o, "ferrum.outcome");
@@ -486,12 +424,9 @@ fn up018(env: &Env) -> Fut<'_> {
             !catalog_ids(&look).iter().any(|i| i.starts_with("upstream.connection_limit")),
             format!("{:?}", codes(&look)),
         );
-        // Lookalike B: the same status/body authored by the application.
-        // On direct H1 through v0.9.15 the gateway stamps backend_error, so it
-        // cannot match the pooled connection_failure family. On reqwest, and
-        // from v0.9.19 (an application 503 with the limit body, stamped
-        // backend_error, is the reqwest lane's full signal), the signal is
-        // identical, so attribution remains at most likely.
+        // Lookalike B: the same status/body authored by the application. An
+        // application 503 with the limit body, stamped backend_error, is the
+        // reqwest lane's full signal, so attribution remains at most likely.
         let same_path = format!("/status/{status}?body={}", enc(body));
         let before = log.count_requests();
         let same = send(&env.engine, &mesh::request(m, &H1_LANE, env.trusted, &same_path)).await;
@@ -507,15 +442,7 @@ fn up018(env: &Env) -> Fut<'_> {
         c.token(&same, "ferrum.token.backend_error", env.trusted);
         c.max_confidence(&same, "ferrum.token.backend_error", Confidence::Likely);
         c.max_confidence(&same, "ferrum.outcome", Confidence::Likely);
-        if direct_h1 && !own_503 {
-            c.absent_prefix(&same, "ferrum.token.connection_failure");
-            c.add(
-                CheckKind::Diagnosis,
-                "application 502 with the same body is not called a connection ceiling",
-                !catalog_ids(&same).iter().any(|i| i.starts_with("upstream.connection_limit")),
-                format!("{:?}", codes(&same)),
-            );
-        } else if env.trusted {
+        if env.trusted {
             c.has(&same, "ferrum.outcome");
             c.add(
                 CheckKind::Diagnosis,

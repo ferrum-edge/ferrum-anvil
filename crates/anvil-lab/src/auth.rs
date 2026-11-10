@@ -330,10 +330,9 @@ fn auth001(env: &Env) -> Fut<'_> {
         let o = go(env, &ctx(env, "GET", "/auth/key/echo", api_key("X-API-Key", &key))).await;
         signal(&mut c, &o, 401, "Authentication required");
         let ch = raw_challenge("/auth/key/echo", &[("X-API-Key", key.clone())]).await;
-        // From v0.9.19 (#6779) every gateway 401 carries the challenge of each
-        // mechanism that governs the route: key_auth's here. Earlier releases
-        // send the bare fallback.
-        let want = if crate::gateway::release_at_least("v0.9.19") { r#"ApiKey realm="ferrum-edge""# } else { "ferrum-edge" };
+        // Every gateway 401 carries the challenge of each mechanism that
+        // governs the route (from v0.9.19, #6779): key_auth's here.
+        let want = r#"ApiKey realm="ferrum-edge""#;
         c.add(
             CheckKind::GroundTruth,
             format!("missing-credential challenge WWW-Authenticate: {want}"),
@@ -540,15 +539,14 @@ fn auth009(env: &Env) -> Fut<'_> {
     })
 }
 
-/// Release delta (docs/audit/gateway-0.9.7-delta.md, issue #5522): a token
-/// whose `iss` is an array. Ferrum Edge 0.9.5 accepts it on jwt_auth (no
-/// issuer configured) and on jwks_auth when the array contains the provider's
-/// issuer; 0.9.7 rejects both with the ordinary 401 bodies. Either way the
-/// diagnosis must come from the running release's catalog.
+/// A token whose `iss` is an array (docs/audit/gateway-0.9.7-delta.md, issue
+/// #5522): the gateway rejects it on jwt_auth (no issuer configured) and on
+/// jwks_auth even when the array contains the provider's issuer, with the
+/// ordinary 401 bodies (Ferrum Edge 0.9.5 accepted both), and the diagnosis
+/// comes from the running release's catalog.
 fn auth009_iss_array(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
-        let rejects = crate::gateway::current_lock().release != "v0.9.5";
         let hs = env.fx.hs256(
             &env.fx.secrets.alice_jwt_secret,
             300,
@@ -558,18 +556,10 @@ fn auth009_iss_array(env: &Env) -> Fut<'_> {
         let o = go(env, &ctx(env, "GET", "/auth/jwt/echo", bearer(&hs))).await;
         let es = env.fx.issuer_token_with_iss(serde_json::json!([ISSUER, "https://other-idp.anvil-lab.invalid"]));
         let j = go(env, &ctx(env, "GET", "/auth/jwks/echo", bearer(&es))).await;
-        if rejects {
-            signal(&mut c, &o, 401, "Invalid JWT token");
-            signal(&mut c, &j, 401, "Invalid or unrecognized JWT");
-            gateway_outcome(&mut c, env, &o);
-            gateway_outcome(&mut c, env, &j);
-        } else {
-            c.success(CheckKind::GroundTruth, &o);
-            c.success(CheckKind::GroundTruth, &j);
-            for x in [&o, &j] {
-                c.absent_prefix(x, "ferrum.outcome");
-            }
-        }
+        signal(&mut c, &o, 401, "Invalid JWT token");
+        signal(&mut c, &j, 401, "Invalid or unrecognized JWT");
+        gateway_outcome(&mut c, env, &o);
+        gateway_outcome(&mut c, env, &j);
         for x in [&o, &j] {
             no_confirmed_text(&mut c, x, "issuer");
             c.absent_prefix(x, "ferrum.catalog.unavailable");
@@ -762,11 +752,11 @@ fn authx01(env: &Env) -> Fut<'_> {
     })
 }
 
-/// Release delta (docs/audit/gateway-0.9.7-delta.md, issue #5523): the IdP
-/// reports an active token whose integer `nbf` lies in the future. Ferrum Edge
-/// 0.9.5 ignores introspection `nbf` and forwards the request; 0.9.7 answers
-/// 401 `Token is not yet valid` with a Bearer `invalid_token` challenge — a
-/// credential verdict, never an unavailable dependency.
+/// The IdP reports an active token whose integer `nbf` lies in the future
+/// (docs/audit/gateway-0.9.7-delta.md, issue #5523): the gateway answers 401
+/// `Token is not yet valid` with a Bearer `invalid_token` challenge (Ferrum
+/// Edge 0.9.5 forwarded it) — a credential verdict, never an unavailable
+/// dependency.
 fn authx01_nbf(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -781,24 +771,19 @@ fn authx01_nbf(env: &Env) -> Fut<'_> {
         );
         let o = go(env, &ctx(env, "GET", "/auth/introspect/echo", bearer(early))).await;
         c.add(CheckKind::GroundTruth, "the gateway introspected the token at the IdP", env.fx.idp.introspections() > intro, "");
-        if crate::gateway::current_lock().release == "v0.9.5" {
-            c.success(CheckKind::GroundTruth, &o);
-            c.absent_prefix(&o, "ferrum.outcome");
-        } else {
-            signal(&mut c, &o, 401, "Token is not yet valid");
-            let ch = raw_challenge("/auth/introspect/echo", &[("Authorization", format!("Bearer {early}"))]).await;
-            c.add(
-                CheckKind::GroundTruth,
-                "Bearer invalid_token challenge",
-                ch.as_deref().is_some_and(|v| v.contains("invalid_token")),
-                format!("{ch:?}"),
-            );
-            c.has(&o, "http.unauthorized");
-            c.absent_prefix(&o, "http.service_unavailable");
-            gateway_outcome(&mut c, env, &o);
-            no_confirmed_text(&mut c, &o, "clock");
-            backend_untouched(&mut c, env, before);
-        }
+        signal(&mut c, &o, 401, "Token is not yet valid");
+        let ch = raw_challenge("/auth/introspect/echo", &[("Authorization", format!("Bearer {early}"))]).await;
+        c.add(
+            CheckKind::GroundTruth,
+            "Bearer invalid_token challenge",
+            ch.as_deref().is_some_and(|v| v.contains("invalid_token")),
+            format!("{ch:?}"),
+        );
+        c.has(&o, "http.unauthorized");
+        c.absent_prefix(&o, "http.service_unavailable");
+        gateway_outcome(&mut c, env, &o);
+        no_confirmed_text(&mut c, &o, "clock");
+        backend_untouched(&mut c, env, before);
         let good = "idp-at-lab-registered-0004";
         env.fx.idp.register_token(
             good,
@@ -923,28 +908,21 @@ fn auth020(env: &Env) -> Fut<'_> {
     })
 }
 
-/// A `;` path parameter in the signed path. From v0.9.9 the gateway refuses
-/// it with 400 before any plugin unless the proxy sets
-/// `allow_path_parameters` (GHSA-fcqw-793q-wg5x, ferrum-edge#5936), a field
-/// the older supported releases reject; there AUTH-021 signs a path with the
-/// other sub-delims and checks the refusal separately.
+/// A `;` path parameter in the signed path: the gateway refuses it with 400
+/// before any plugin unless the proxy sets `allow_path_parameters`
+/// (GHSA-fcqw-793q-wg5x, ferrum-edge#5936, from v0.9.9), so AUTH-021 checks
+/// that refusal and signs a path with the other sub-delims.
 const AUTH021_PARAM_PATH: &str = "/auth/hmac/echo/a;b=c/x:y@z";
-
-fn auth021_path() -> &'static str {
-    if crate::gateway::release_at_least("v0.9.9") { "/auth/hmac/echo/a,b=c/x:y@z" } else { AUTH021_PARAM_PATH }
-}
 
 fn auth021(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
-        let (path, query) = (auth021_path(), "b=2&a=1&a=0&empty=&z=%41");
-        if path != AUTH021_PARAM_PATH {
-            let before = env.fx.echo.log.count_requests();
-            let refused = go(env, &ctx(env, "GET", &format!("{AUTH021_PARAM_PATH}?{query}"), hmac_cfg(env))).await;
-            signal(&mut c, &refused, 400, "Request path contains a path parameter");
-            gateway_outcome(&mut c, env, &refused);
-            backend_untouched(&mut c, env, before);
-        }
+        let (path, query) = ("/auth/hmac/echo/a,b=c/x:y@z", "b=2&a=1&a=0&empty=&z=%41");
+        let before = env.fx.echo.log.count_requests();
+        let refused = go(env, &ctx(env, "GET", &format!("{AUTH021_PARAM_PATH}?{query}"), hmac_cfg(env))).await;
+        signal(&mut c, &refused, 400, "Request path contains a path parameter");
+        gateway_outcome(&mut c, env, &refused);
+        backend_untouched(&mut c, env, before);
         let before = env.fx.echo.log.count_requests();
         let o = go(env, &ctx(env, "GET", &format!("{path}?{query}"), hmac_cfg(env))).await;
         c.success(CheckKind::Diagnosis, &o);
@@ -1743,13 +1721,13 @@ pub fn all() -> Vec<Def> {
         Def { id: "AUTH-007", title: "JWT without the configured consumer claim", run: auth007 },
         Def { id: "AUTH-008", title: "JWKS: token signed by an unpublished key (unknown kid)", run: auth008 },
         Def { id: "AUTH-009", title: "JWKS: issuer and audience mismatch", run: auth009 },
-        Def { id: "AUTH-009.iss-array", title: "Multi-valued JWT issuer (release-dependent verdict)", run: auth009_iss_array },
+        Def { id: "AUTH-009.iss-array", title: "Multi-valued JWT issuer is rejected", run: auth009_iss_array },
         Def { id: "AUTH-010", title: "JWT algorithm confusion (alg none, HS256 on a JWKS route)", run: auth010 },
         Def { id: "AUTH-X03", title: "JWKS provider outage past max-stale: same 401 as a bad token", run: authx03 },
         Def { id: "AUTH-015", title: "OAuth token endpoint outage: API request never sent", run: auth015 },
         Def { id: "AUTH-016", title: "OAuth client credentials + gateway token introspection", run: auth016 },
         Def { id: "AUTH-X01", title: "Introspection: IdP says the token is inactive (credential rejected)", run: authx01 },
-        Def { id: "AUTH-X01.nbf", title: "Introspection: active token not yet valid (release-dependent verdict)", run: authx01_nbf },
+        Def { id: "AUTH-X01.nbf", title: "Introspection: active token not yet valid is rejected", run: authx01_nbf },
         Def { id: "AUTH-X02", title: "Introspection endpoint unavailable (dependency failure)", run: authx02 },
         Def { id: "AUTH-018", title: "HMAC v2 signed GET and POST", run: auth018 },
         Def { id: "AUTH-018.skew", title: "HMAC Date header outside the clock-skew window", run: auth018_skew },

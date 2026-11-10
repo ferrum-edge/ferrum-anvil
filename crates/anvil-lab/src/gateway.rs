@@ -162,39 +162,6 @@ pub fn compatibility_id() -> String {
     current_lock().catalog_compatibility_id().unwrap_or_else(|e| panic!("trusted lab profile: {e:#}"))
 }
 
-/// Whether the release under test is `min` or a later one (`v0.9.10`-style
-/// tags), for scenarios whose public signal changed in a release.
-pub fn release_at_least(min: &str) -> bool {
-    release_order(&current_lock().release) >= release_order(min)
-}
-
-/// The release named by the default pin (`lab/gateway/RELEASE.lock`), the
-/// repository's pinned Edge release. A lab check whose public signal the pin
-/// itself qualifies ([`DEFAULT_LOCK`], source-audited in
-/// `docs/audit/gateway-0.9.20-delta.md`) keys on this instead of a version
-/// literal, so moving the pin moves the check with it.
-pub fn pinned_release() -> &'static str {
-    static PINNED: OnceLock<String> = OnceLock::new();
-    PINNED.get_or_init(|| {
-        let text = std::fs::read_to_string(repo_root().join(DEFAULT_LOCK)).unwrap_or_default();
-        parse_lock(&text, DEFAULT_LOCK).expect("reading the default gateway lock").release
-    })
-}
-
-/// Whether the release under test is `min` (the first release with a changed
-/// public signal) or a later one up to the default pin ([`pinned_release`]).
-/// Every release in that range keeps the signal, which the pin's source audit
-/// re-qualifies, so the check follows the pin and is never assumed for a
-/// release past it.
-pub fn release_from_through_pin(min: &str) -> bool {
-    release_in(&current_lock().release, min, pinned_release())
-}
-
-fn release_in(release: &str, min: &str, max: &str) -> bool {
-    let r = release_order(release);
-    release_order(min) <= r && r <= release_order(max)
-}
-
 fn release_order(tag: &str) -> Vec<u64> {
     tag.trim().trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect()
 }
@@ -497,24 +464,6 @@ mod tests {
     }
 
     /// The pin-derived release reads the default lock, not the selected one.
-    #[test]
-    fn pinned_release_is_the_default_lock_release() {
-        assert_eq!(pinned_release(), lock_at(DEFAULT_LOCK).release);
-    }
-
-    /// A signal that changed in `min` is expected from `min` through the pin,
-    /// never before it or past it.
-    #[test]
-    fn release_range_runs_from_the_first_release_through_the_pin() {
-        let pin = lock_at(DEFAULT_LOCK).release;
-        assert!(release_in(&pin, "v0.9.11", &pin));
-        assert!(release_in("v0.9.11", "v0.9.11", &pin));
-        assert!(release_in("v0.9.15", "v0.9.11", "v0.9.20"));
-        assert!(release_in("v0.9.20", "v0.9.11", "v0.9.20"));
-        assert!(!release_in("v0.9.10", "v0.9.11", "v0.9.20"));
-        assert!(!release_in("v0.9.21", "v0.9.11", "v0.9.20"));
-    }
-
     /// Every supported release has a well-formed lock and an embedded
     /// diagnostics catalog, so the lab's trusted profile never falls back.
     /// v0.9.5 to v0.9.15 were retired (their DTLS 1.3 listeners send the

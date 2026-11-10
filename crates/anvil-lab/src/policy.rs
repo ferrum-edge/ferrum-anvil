@@ -193,11 +193,11 @@ fn gw010_body(env: &Env) -> Fut<'_> {
     })
 }
 
-/// Release delta (docs/audit/gateway-0.9.7-delta.md, issue #5685): an
-/// allow_list entry ending in punctuation (`anvil-lab-monitor/`) followed by a
-/// non-word character. Ferrum Edge 0.9.5 anchors every entry with `\b...\b`,
-/// which can never match at that edge, so the bot pattern wins (403); 0.9.7
-/// anchors only word-character edges and lets the request through.
+/// An allow_list entry ending in punctuation (`anvil-lab-monitor/`) followed
+/// by a non-word character (docs/audit/gateway-0.9.7-delta.md, issue #5685):
+/// the gateway anchors only word-character edges and lets the request
+/// through (Ferrum Edge 0.9.5 anchored every entry with `\b...\b`, which can
+/// never match at that edge, so its bot pattern won with a 403).
 fn gw010_bot_allow_edge(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -206,15 +206,9 @@ fn gw010_bot_allow_edge(env: &Env) -> Fut<'_> {
         let ua = "anvil-lab-bot/1.0 (anvil-lab-monitor/)";
         let o = env.send(&with_header(env.req("GET", "/gw/bot/"), "User-Agent", ua)).await;
         let ops = env.op(from, "gw010-bot").await;
-        if crate::gateway::current_lock().release == "v0.9.5" {
-            backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "bot block despite the allow entry", &mut c);
-            plugin_reject(&mut c, &o, 403, "http.forbidden");
-            no_claim(&mut c, &o, "bot", Confidence::Likely);
-        } else {
-            backend_hits(before, env.fixtures.echo.log.count_requests(), 1, "allow entry with a punctuation edge admits", &mut c);
-            c.success(CheckKind::GroundTruth, &o);
-            c.absent_prefix(&o, "ferrum.outcome");
-        }
+        backend_hits(before, env.fixtures.echo.log.count_requests(), 1, "allow entry with a punctuation edge admits", &mut c);
+        c.success(CheckKind::GroundTruth, &o);
+        c.absent_prefix(&o, "ferrum.outcome");
         operator_field(&mut c, &ops, "/request_user_agent", &[ua]);
         let r = env.send(&with_header(env.req("GET", "/gw/bot/"), "User-Agent", "anvil-lab-client/1.0")).await;
         c.success(CheckKind::Recovery, &r);
@@ -825,21 +819,10 @@ fn gw019_error(env: &Env) -> Fut<'_> {
         c.token(&o, "ferrum.token.connection_failure", env.trusted);
         c.max_confidence(&o, "ferrum.token.connection_failure", Confidence::Likely);
         c.absent_prefix(&o, "ferrum.marker.unknown_token");
-        if strips_injected_upstream_status() {
-            // 0.9.8 (#5759): the builder strips the hook's copy too.
-            let stripped = header(&o, "x-gateway-upstream-status").is_empty();
-            c.add(CheckKind::GroundTruth, "hook-injected X-Gateway-Upstream-Status was stripped", stripped, "");
-            c.absent_prefix(&o, "ferrum.degraded_routing");
-        } else {
-            // The hook's X-Gateway-Upstream-Status survives: never above likely,
-            // and the caveat that a non-gateway writer can set it is shown.
-            let spoofed_degraded = !header(&o, "x-gateway-upstream-status").is_empty();
-            c.add(CheckKind::GroundTruth, "hook-injected X-Gateway-Upstream-Status reached the client", spoofed_degraded, "");
-            if env.trusted {
-                c.max_confidence(&o, "ferrum.degraded_routing", Confidence::Likely);
-                caveat(&mut c, &o, "ferrum.degraded_routing", "plugin");
-            }
-        }
+        // The builder strips the hook's X-Gateway-Upstream-Status too (0.9.8, #5759).
+        let stripped = header(&o, "x-gateway-upstream-status").is_empty();
+        c.add(CheckKind::GroundTruth, "hook-injected X-Gateway-Upstream-Status was stripped", stripped, "");
+        c.absent_prefix(&o, "ferrum.degraded_routing");
         let r = env.get("/ok/echo").await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
@@ -851,7 +834,7 @@ fn gw019_ok(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let o = env.get("/gw/header-mutation-ok/").await;
-        forged_checks(&mut c, env, &o, "response hook");
+        forged_checks(&mut c, &o, "response hook");
         let r = env.get("/ok/echo").await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
@@ -871,59 +854,33 @@ fn gw019_forged(env: &Env) -> Fut<'_> {
             ))
             .await;
         backend_hits(before, env.fixtures.forged.log.count_requests(), 1, "forging backend answered", &mut c);
-        forged_checks(&mut c, env, &o, "backend");
+        forged_checks(&mut c, &o, "backend");
         let r = env.get("/ok/echo").await;
         c.success(CheckKind::Recovery, &r);
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
     })
 }
 
-/// Whether the release under test strips a backend- or hook-written
-/// `X-Gateway-Upstream-Status` on its backend-response builder (0.9.8, #5759).
-fn strips_injected_upstream_status() -> bool {
-    crate::gateway::release_at_least("v0.9.8")
-}
-
-/// Injected gateway headers on a 200: `X-Gateway-Error` is stripped; the
-/// degraded marker passes (0.9.5 / 0.9.7) and may only surface as a capped
-/// warning, or is stripped too (0.9.8) and surfaces as nothing.
-fn forged_checks(c: &mut Checks, env: &Env, o: &ExecutionOutput, who: &str) {
+/// Injected gateway headers on a 200: `X-Gateway-Error` and
+/// `X-Gateway-Upstream-Status` are both stripped on the backend-response
+/// builder (the latter from 0.9.8, #5759), so the forgery surfaces as
+/// nothing.
+fn forged_checks(c: &mut Checks, o: &ExecutionOutput, who: &str) {
     c.success(CheckKind::Diagnosis, o);
     c.add(CheckKind::GroundTruth, format!("{who}-injected X-Gateway-Error was stripped"), header(o, "x-gateway-error").is_empty(), "");
-    if strips_injected_upstream_status() {
-        c.add(
-            CheckKind::GroundTruth,
-            format!("{who}-injected X-Gateway-Upstream-Status was stripped"),
-            header(o, "x-gateway-upstream-status").is_empty(),
-            "",
-        );
-        c.absent_prefix(o, "ferrum.");
-        c.add(
-            CheckKind::Diagnosis,
-            "no gateway-marker warning",
-            !o.record.outcome.warnings.iter().any(|w| matches!(w.code, WarningCode::DegradedRouting | WarningCode::UnverifiedFerrumMarker)),
-            "",
-        );
-        return;
-    }
     c.add(
         CheckKind::GroundTruth,
-        format!("{who}-injected X-Gateway-Upstream-Status passed"),
-        !header(o, "x-gateway-upstream-status").is_empty(),
+        format!("{who}-injected X-Gateway-Upstream-Status was stripped"),
+        header(o, "x-gateway-upstream-status").is_empty(),
         "",
     );
-    c.absent_prefix(o, "ferrum.token");
-    let want = if env.trusted { WarningCode::DegradedRouting } else { WarningCode::UnverifiedFerrumMarker };
+    c.absent_prefix(o, "ferrum.");
     c.add(
         CheckKind::Diagnosis,
-        format!("marker surfaced only as a {want:?} warning"),
-        o.record.outcome.warnings.iter().any(|w| w.code == want),
+        "no gateway-marker warning",
+        !o.record.outcome.warnings.iter().any(|w| matches!(w.code, WarningCode::DegradedRouting | WarningCode::UnverifiedFerrumMarker)),
         "",
     );
-    if env.trusted {
-        c.max_confidence(o, "ferrum.degraded_routing", Confidence::Likely);
-        caveat(c, o, "ferrum.degraded_routing", "backend");
-    }
 }
 
 /// GW-019 (d) / TRUST-003: a reject-path hook adds a value outside the
@@ -996,11 +953,7 @@ pub fn all() -> Vec<Def> {
         Def { id: "GW-010", title: "WAF header-rule block vs byte-identical application 403", run: gw010 },
         Def { id: "GW-010-BODY", title: "WAF request-body rule block", run: gw010_body },
         Def { id: "GW-010-BOT", title: "Bot-detection 403 indistinguishable from WAF 403", run: gw010_bot },
-        Def {
-            id: "GW-010-BOT.allow-edge",
-            title: "Bot allow-list entry with a punctuation edge (release-dependent)",
-            run: gw010_bot_allow_edge,
-        },
+        Def { id: "GW-010-BOT.allow-edge", title: "Bot allow-list entry with a punctuation edge admits", run: gw010_bot_allow_edge },
         Def { id: "GW-012", title: "OPA explicit denial (+ application 403 lookalikes)", run: gw012 },
         Def { id: "GW-013-TIMEOUT", title: "OPA stalls; gateway fails closed (+ application 503 lookalike)", run: gw013_timeout },
         Def { id: "GW-013-REFUSED", title: "OPA unreachable; recovery restores the policy service", run: gw013_refused },
