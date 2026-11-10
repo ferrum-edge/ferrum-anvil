@@ -578,6 +578,16 @@ a hold stage (`[{0 s → N}, {D s → N}]`). `--iterations` runs a fixed count o
 over a 10 s window. `--fresh` selects the fresh connection mode; the default is
 persistent. `--csv` writes the summary CSV.
 
+`anvil load run` exit codes follow the CLI convention (as `anvil send` and
+`anvil run`):
+
+| Code | When |
+|---|---|
+| 0 | the run completed and every unit passed |
+| 2 | a unit failed an assertion, whatever else failed |
+| 1 | otherwise, a unit failed (transport failure, timeout, application failure), or the run was partial or did not complete (canceled, aborted by its rule, worker crash, profile locked) |
+| 3 | the run could not start: refused plan, missing `--i-am-authorized`, locked profile, usage error |
+
 ## Measured on this hardware (not product claims)
 
 Apple M4, 10 cores, 16 GB, macOS 26.6.1, release build. The fixture HTTP

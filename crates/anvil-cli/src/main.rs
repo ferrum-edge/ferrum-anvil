@@ -8,7 +8,9 @@
 //! failed an assertion (and assertions count as failures), otherwise 1 when
 //! any step failed or could not be sent, or the run was canceled/aborted;
 //! 3 when the run could not start (untrusted scenario, invalid scenario or
-//! dataset, locked profile, usage error).
+//! dataset, locked profile, usage error). `anvil load run` does the same: 2
+//! when any unit failed an assertion, otherwise 1 when any unit failed or
+//! timed out, or the run was partial, aborted or canceled.
 //!
 //! Unlocking a passphrase profile: `--passphrase-stdin` (preferred) or the
 //! `ANVIL_PASSPHRASE` environment variable (visible to other processes of the
