@@ -452,7 +452,11 @@ arguments** (it exits with 64 if given any).
   (≤ 4/s; lossy under backpressure; carries a balanced snapshot plus only the
   timeline buckets finalized since the last delivered progress) and exactly one
   `report`. A refused job yields `error` and exit code 2, and the error text
-  never quotes job content (serde messages can echo values).
+  never quotes job content (serde messages can echo values). The `error`
+  carries the refusal's kind (`invalid`, `not_acknowledged`, `unsupported`,
+  `refused` with the typed LOAD-013 refusal, `io`, `protocol`, `report`) and
+  its own message, and the controller returns the same `LoadError` the worker
+  raised, so the host names the cause once and keeps a typed refusal typed.
 
 **Secret handling.** `WorkerJob::from_load_job` resolves only the secrets the
 plan's requests actually reference — the effective auth profile, the client
