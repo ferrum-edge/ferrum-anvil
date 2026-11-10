@@ -721,7 +721,6 @@ pub(crate) fn uncarried_warnings(
     Ok(warnings)
 }
 
-/// Secret references in the graph whose values were not included.
 /// "label (id)" of every secret an object of the graph references (a proxy
 /// password and an integration's credentials as much as a request's auth)
 /// that the bundle does not carry, as a full backup's restore lists them.

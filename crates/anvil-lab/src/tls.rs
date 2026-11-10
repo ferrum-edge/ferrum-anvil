@@ -1189,13 +1189,13 @@ fn up008_http_to_tls(env: &Env) -> Fut<'_> {
     })
 }
 
+/// The gateway error classes UP-016 maps to a public token.
+const UP016_CLASSES: &[&str] = &["connection_pool_error", "tls_error", "connection_reset", "connection_closed", "request_error"];
+
 /// UP-016: repeat the TLS 1.3 backend-mTLS route and check that every
 /// public observation stays consistent with the operator-side class
 /// (pool cancellation ↔ `connection_failure`, post-connect reset ↔
 /// `backend_error`) without Anvil ever claiming the precise cause.
-/// The gateway error classes UP-016 maps to a public token.
-const UP016_CLASSES: &[&str] = &["connection_pool_error", "tls_error", "connection_reset", "connection_closed", "request_error"];
-
 fn up016(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
