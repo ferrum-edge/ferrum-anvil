@@ -447,6 +447,8 @@ pub(crate) fn prepare_http_with_redaction_names(
     // ---- body ----
     let secret_substitutions_before_body = r.secret_substitutions();
     let mut sensitive_body_field = false;
+    // What "send anyway" sent instead of the user's GraphQL variables.
+    let mut graphql_bypass = None;
     let (body, inferred_ct, lint_target): (Vec<u8>, Option<String>, Option<(&str, String)>) = match &spec.body {
         Body::None => (vec![], None, None),
         Body::Raw { text, content_type } => {
@@ -550,13 +552,13 @@ pub(crate) fn prepare_http_with_redaction_names(
                         return Err(local(FailureKind::BodySerialization, "GraphQL variables must be a JSON object", "body.variables"));
                     }
                     Err(e) => {
+                        let problem = format!("GraphQL variables are not valid JSON (line {}, column {}): {e}", e.line(), e.column());
                         if !send_anyway {
-                            return Err(local(
-                                FailureKind::LintBlocked,
-                                format!("GraphQL variables are not valid JSON (line {}, column {}): {e}", e.line(), e.column()),
-                                "body.variables",
-                            ));
+                            return Err(local(FailureKind::LintBlocked, problem, "body.variables"));
                         }
+                        // The text cannot go in a JSON body, so the request is
+                        // sent without `variables`; the record says so.
+                        graphql_bypass = Some(format!("{problem}; the request was sent without variables"));
                         serde_json::Value::Null
                     }
                 }
@@ -598,7 +600,7 @@ pub(crate) fn prepare_http_with_redaction_names(
     let body_uses_secret = sensitive_body_field || r.secret_substitutions() > secret_substitutions_before_body;
 
     // ---- lint ----
-    let mut lint_bypassed = None;
+    let mut lint_bypassed = graphql_bypass;
     if let Some((kind, text)) = lint_target
         && spec.lint_policy != LintSendPolicy::Off
     {
@@ -850,6 +852,39 @@ mod tests {
     /// A form field marked sensitive holds a secret whether its value is a
     /// secret variable or a literal; once form-encoded, a literal's bytes are
     /// not in the body as such.
+    /// "Send anyway" with GraphQL variables that are not JSON sends the query
+    /// without them, and the prepared request says so instead of staying silent.
+    #[test]
+    fn graphql_variables_left_out_by_send_anyway_are_reported() {
+        let mut spec = RequestSpec::http("POST", "https://api.example.com/graphql");
+        spec.body =
+            Body::GraphQl { query: "query Q($id: ID!) { item(id: $id) { id } }".into(), variables: "{id: 1".into(), operation_name: None };
+        let r = Resolver::new(vec![], Some(1));
+        let attachments = crate::context::MemoryAttachments::default();
+
+        let refused = prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap_err();
+        assert_eq!(refused.kind, FailureKind::LintBlocked);
+        assert_eq!(refused.field.as_deref(), Some("body.variables"));
+
+        let sent = prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), true, &["https"]).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+        assert!(body.get("variables").is_none(), "{body}");
+        let note = sent.lint_bypassed.expect("the left-out variables are reported");
+        assert!(note.starts_with("GraphQL variables are not valid JSON (line 1, column 2)"), "{note}");
+        assert!(note.ends_with("the request was sent without variables"), "{note}");
+
+        // Valid variables are sent and nothing is reported.
+        spec.body = Body::GraphQl {
+            query: "query Q($id: ID!) { item(id: $id) { id } }".into(),
+            variables: r#"{"id": 1}"#.into(),
+            operation_name: None,
+        };
+        let ok = prepare_http(&spec, &r, &attachments, &EffectiveSettings::default(), true, &["https"]).unwrap();
+        assert_eq!(ok.lint_bypassed, None);
+        let body: serde_json::Value = serde_json::from_slice(&ok.body).unwrap();
+        assert_eq!(body["variables"], serde_json::json!({"id": 1}));
+    }
+
     #[test]
     fn a_sensitive_form_field_marks_the_body_whatever_its_value() {
         use anvil_domain::request::KeyValue;
