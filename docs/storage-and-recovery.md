@@ -986,7 +986,10 @@ historical data is an intentional owner choice.
 
 Configurable in Settings: enable or disable history, keep or drop response
 bodies, maximum age (days) and total size. Pruning keeps the newest records
-within the budget. "Clear all history" deletes history records only. A
+within the budget. "Clear all history" (or a workspace's history) deletes
+those history records and the response bodies no remaining record uses, in
+one write transaction; deleting a workspace does the same for its records.
+Neither touches stored attachments. A
 history record that is overwritten (an import under Replace) releases its old
 response body unless another record, or the new version of the same record,
 still uses it. Retention and that release look up a blob's uses by index and

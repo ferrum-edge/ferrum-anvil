@@ -237,6 +237,10 @@
   bindings for the requests and datasets it deletes, in the same transaction. They used to stay
   in the vault for good, and a request a reimport brought back under its old id could pick up
   the old binding without the file being chosen again (#530).
+- Clearing history (all of it or a workspace's) and deleting a workspace now also delete the
+  stored response bodies no remaining history record uses, in the same transaction. They used to
+  stay encrypted in `anvil.db` until a later recorded send ran retention, and for good once
+  history was turned off. Stored attachments are not affected (#530).
 
 ## [0.1.7] - 2026-11-03
 
