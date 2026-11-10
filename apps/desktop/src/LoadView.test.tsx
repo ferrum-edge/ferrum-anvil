@@ -579,6 +579,21 @@ describe("LoadView workspace switch", () => {
     await waitFor(() => expect(calls("load_plan_delete")).toEqual([{ planId: "pa" }]));
   });
 
+  it("keeps the plan and its unsaved edit open when the delete is refused (#515)", async () => {
+    backend({
+      load_plan_delete: () => {
+        throw "the store could not be written";
+      },
+    });
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Plan A"));
+    fireEvent.change(planName(), { target: { value: "Edited A" } });
+    fireEvent.click(button("Delete plan"));
+    expect(await screen.findByText("the store could not be written")).toBeTruthy();
+    expect(calls("load_plan_delete")).toEqual([{ planId: "pa" }]);
+    expect(planName().value).toBe("Edited A");
+  });
+
   it("cannot discard a new plan while its save or Run… is on its way", async () => {
     let save = deferred<void>();
     backend({
@@ -895,6 +910,29 @@ describe("PlanEditor save", () => {
     await waitFor(() => expect(saves).toHaveLength(2));
     // The newer edit, with the stored metadata of the first save.
     expect(saves[1]).toMatchObject({ name: "Newer name", updated_at: "2026-09-27T00:00:00Z" });
+  });
+});
+
+describe("PlanEditor numbers", () => {
+  it("keeps a decimal point and an emptied field while typing (#514)", async () => {
+    const saves: LoadPlan[] = [];
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
+      if (cmd === "load_plan_save") {
+        saves.push(args.plan as LoadPlan);
+        return args.plan;
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    render(<PlanEditor plan={{ ...plan(), chain: [], abort: { max_failure_permille: 200, window_secs: 10 } }} {...editorProps} />);
+    const field = screen.getByLabelText("Max failures (%)") as HTMLInputElement;
+    expect(field.value).toBe("20");
+    for (const typed of ["", "1", "12", "12.", "12.5"]) {
+      fireEvent.change(field, { target: { value: typed } });
+      expect(field.value).toBe(typed);
+    }
+    fireEvent.click(button("Save"));
+    await waitFor(() => expect(saves).toHaveLength(1));
+    expect(saves[0].abort).toEqual({ max_failure_permille: 125, window_secs: 10 });
   });
 });
 

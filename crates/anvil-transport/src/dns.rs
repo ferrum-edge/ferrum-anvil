@@ -91,9 +91,22 @@ pub fn fixed_resolution(host: &str, port: u16, cfg: &DnsConfig) -> Option<Result
     None
 }
 
+/// Resolve `host` for dialing. An `Ok` resolution always has at least one
+/// address.
 pub async fn resolve(host: &str, port: u16, cfg: &DnsConfig, timeout: Option<Duration>) -> Result<Resolution, TransportFailure> {
     if let Some(fixed) = fixed_resolution(host, port, cfg) {
-        return fixed;
+        let res = fixed?;
+        if res.addrs.is_empty() {
+            // An override with no addresses, or none of the preferred family
+            // (a literal always has its one address).
+            return Err(TransportFailure::new(
+                Phase::Dns,
+                FailureKind::DnsNoRecords,
+                format!("the DNS override for {host} has no address that matches the IP preference {:?}", cfg.ip_preference),
+            )
+            .with_field("settings.dns_overrides"));
+        }
+        return Ok(res);
     }
 
     let fut = async {
@@ -277,8 +290,35 @@ async fn resolve_custom(host: &str, port: u16, nameservers: &[String], timeout: 
 
 #[cfg(test)]
 mod tests {
-    use super::{is_literal_loopback, is_localhost_name, is_loopback, system_answer};
+    use super::{DnsConfig, is_literal_loopback, is_localhost_name, is_loopback, resolve, system_answer};
+    use anvil_domain::execution::{FailureKind, Phase};
+    use anvil_domain::settings::{DnsOverride, IpPreference};
     use std::net::{IpAddr, SocketAddr};
+
+    fn overridden(addresses: &[&str], ip_preference: IpPreference) -> DnsConfig {
+        DnsConfig {
+            overrides: vec![DnsOverride { host: "api.test".into(), addresses: addresses.iter().map(|a| a.to_string()).collect() }],
+            ip_preference,
+            ..DnsConfig::default()
+        }
+    }
+
+    /// An override that leaves no address to dial is a typed DNS failure
+    /// naming the setting, not an empty answer (which panicked QUIC dials
+    /// and read as a connect timeout on TCP).
+    #[tokio::test]
+    async fn an_override_without_a_usable_address_is_a_typed_dns_failure() {
+        for cfg in [overridden(&[], IpPreference::System), overridden(&["127.0.0.1"], IpPreference::Ipv6Only)] {
+            let f = resolve("api.test", 443, &cfg, None).await.unwrap_err();
+            assert_eq!(f.kind, FailureKind::DnsNoRecords);
+            assert_eq!(f.phase, Phase::Dns);
+            assert_eq!(f.field.as_deref(), Some("settings.dns_overrides"));
+            assert!(f.message.contains("DNS override for api.test"), "{}", f.message);
+        }
+        let ok = resolve("API.test", 443, &overridden(&["127.0.0.1", "::1"], IpPreference::Ipv6Only), None).await.unwrap();
+        assert_eq!(ok.addrs, vec![SocketAddr::new("::1".parse().unwrap(), 443)]);
+        assert_eq!(ok.source, "override");
+    }
 
     #[test]
     fn localhost_name_matching_handles_case_and_root_dot_without_partial_matches() {

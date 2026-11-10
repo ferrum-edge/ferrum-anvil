@@ -187,12 +187,30 @@ enum Out {
     Close,
 }
 
-fn drain(dtls: &mut Dtls, next_timeout: &mut Option<Instant>) -> Vec<Out> {
+/// Every datagram path hands dimpl at most this many bytes per datagram (a
+/// UDP payload, an HBONE `u16`-length record, a QUIC DATAGRAM frame).
+const MAX_DATAGRAM_BYTES: usize = 65_535;
+
+/// The poll buffer during the handshake. dimpl writes the peer's leaf
+/// certificate into it and asserts (panics) when it does not fit, so it must
+/// hold the largest leaf dimpl can assemble: a handshake message of at most
+/// 50 fragments (dimpl's `MAX_DEFRAGMENT_HANDSHAKES`, DTLS 1.2 and 1.3), each
+/// inside one datagram. The zeroed allocation is only backed by memory where
+/// dimpl writes.
+const HANDSHAKE_POLL_BYTES: usize = 50 * MAX_DATAGRAM_BYTES;
+
+/// The poll buffer after the handshake: any record a datagram can carry. A
+/// larger pending output (dimpl's `BufferTooSmall`) grows it.
+const SESSION_POLL_BYTES: usize = MAX_DATAGRAM_BYTES;
+
+fn drain(dtls: &mut Dtls, buf: &mut Vec<u8>, next_timeout: &mut Option<Instant>) -> Vec<Out> {
     let mut outs = Vec::new();
-    let mut buf = vec![0u8; 2048];
     for _ in 0..4096 {
-        match dtls.poll_output(&mut buf) {
+        match dtls.poll_output(&mut buf[..]) {
             Output::Packet(p) => outs.push(Out::Packet(p.to_vec())),
+            // dimpl keeps the pending output (a received record or a packet to
+            // send) until a buffer of `needed` bytes is offered.
+            Output::BufferTooSmall { needed } => buf.resize(needed.max(buf.len()), 0),
             Output::Timeout(t) => {
                 *next_timeout = Some(t);
                 break;
@@ -819,6 +837,7 @@ async fn exchange<C: DatagramChannel>(
     let hs_idx = rec.start(Phase::DtlsHandshake);
     let hs_deadline = Instant::now() + Duration::from_millis(hs_ms);
     let mut next_timeout: Option<Instant> = None;
+    let mut poll_buf = vec![0u8; HANDSHAKE_POLL_BYTES];
     let mut verification = TlsVerification::NotReached;
     let mut peer_chain: Vec<CertificateSummary> = vec![];
     let mut peer_spiffe_id: Option<String> = None;
@@ -858,7 +877,7 @@ async fn exchange<C: DatagramChannel>(
         if Instant::now() >= hs_bound {
             break Err(hs_expired());
         }
-        let outs = drain(&mut dtls, &mut next_timeout);
+        let outs = drain(&mut dtls, &mut poll_buf, &mut next_timeout);
         for o in &outs {
             if let Out::PeerCert(der) = o {
                 peer_chain = vec![summarize(&CertificateDer::from(der.clone()))];
@@ -1012,6 +1031,8 @@ async fn exchange<C: DatagramChannel>(
         return (None, notes.send_interrupted);
     }
     rec.finish_with(hs_idx, PhaseStatus::Completed, version.clone().unwrap_or_else(|| "DTLS".into()));
+    // No certificate follows the handshake: records only from here on.
+    poll_buf = vec![0u8; SESSION_POLL_BYTES];
 
     // ---- application datagrams ----
     let s_idx = rec.start(Phase::Session);
@@ -1037,7 +1058,7 @@ async fn exchange<C: DatagramChannel>(
             ));
             break;
         }
-        let outs = drain(&mut dtls, &mut next_timeout);
+        let outs = drain(&mut dtls, &mut poll_buf, &mut next_timeout);
         if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
             failure = Some(f);
             path_ended = true;
@@ -1085,7 +1106,7 @@ async fn exchange<C: DatagramChannel>(
                     failure = Some(f);
                     break;
                 }
-                let outs = drain(&mut dtls, &mut next_timeout);
+                let outs = drain(&mut dtls, &mut poll_buf, &mut next_timeout);
                 if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
                     failure = Some(f);
                     path_ended = true;
@@ -1110,7 +1131,7 @@ async fn exchange<C: DatagramChannel>(
             Ev::Timer => {
                 next_timeout = None;
                 if dtls.handle_timeout(Instant::now()).is_ok() {
-                    let outs = drain(&mut dtls, &mut next_timeout);
+                    let outs = drain(&mut dtls, &mut poll_buf, &mut next_timeout);
                     if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
                         failure = Some(f);
                         path_ended = true;
@@ -1136,7 +1157,7 @@ async fn exchange<C: DatagramChannel>(
                 };
                 if let Some(p) = payload {
                     if dtls.send_application_data(&p).is_ok() {
-                        let outs = drain(&mut dtls, &mut next_timeout);
+                        let outs = drain(&mut dtls, &mut poll_buf, &mut next_timeout);
                         if let Err(f) = send_bounded(chan, &outs, &mut notes, facts, cancel, total_deadline, total_timeout).await {
                             failure = Some(f);
                             path_ended = true;
@@ -1166,7 +1187,7 @@ async fn exchange<C: DatagramChannel>(
     // nothing more.
     let expired = failure.as_ref().is_some_and(|f| matches!(f.kind, FailureKind::Canceled | FailureKind::TotalTimeout));
     if !expired && !inbox.peer_closed && !path_ended && dtls.close().is_ok() {
-        let outs = drain(&mut dtls, &mut next_timeout);
+        let outs = drain(&mut dtls, &mut poll_buf, &mut next_timeout);
         let bound = earliest(Some(Instant::now() + CLOSE_NOTIFY_WRITE), total_deadline);
         match guarded(send_all(chan, &outs, &mut notes, facts), cancel, bound).await {
             Ok(Ok(())) => tr.control(Direction::Sent, "close_notify", b""),

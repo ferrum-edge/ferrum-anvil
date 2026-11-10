@@ -1911,4 +1911,30 @@ describe("the send shortcut", () => {
     fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
     await waitFor(() => expect(calls("send_request")).toHaveLength(1));
   });
+
+  it("leaves the hidden request tab alone while another view is shown (#513)", async () => {
+    backend();
+    await boot();
+    await openTab("Alpha");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(calls("send_request")).toHaveLength(1));
+
+    for (const other of ["Runner", "Load tests", "API contract"]) {
+      fireEvent.click(screen.getByRole("button", { name: other }));
+      fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
+      fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+      fireEvent.keyDown(window, { key: "n", metaKey: true });
+      fireEvent.keyDown(window, { key: "Escape" });
+      await act(async () => {});
+      expect(calls("send_request")).toHaveLength(1);
+      expect(calls("request_save")).toHaveLength(0);
+      expect(calls("request_create")).toHaveLength(0);
+      expect(calls("cancel_execution")).toHaveLength(0);
+    }
+
+    // Back on Requests, the shortcuts act on the active tab again.
+    fireEvent.click(screen.getByRole("button", { name: "Requests" }));
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(calls("cancel_execution")).toHaveLength(1));
+  });
 });

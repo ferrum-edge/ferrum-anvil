@@ -6,7 +6,7 @@
 import { useEffect, useState } from "react";
 import { api, type TokenFileBinding, type WorkloadProbe } from "./api";
 import type { CheckResult, ClientIdentity, JwtSvidConfig, JwtSvidSource, JwtSvidSummary, WorkloadApiCall, WorkloadApiEvidence } from "./generated/contracts";
-import { SecretField, humanize } from "./ui";
+import { ListText, SecretField, humanize } from "./ui";
 import { Icon } from "./icons";
 
 const ENDPOINT_PLACEHOLDER = "unix:///run/spire/sockets/agent.sock";
@@ -261,11 +261,12 @@ export function JwtSvidFields({ c, onChange, workspaceId }: { c: JwtSvidConfig; 
       {src.kind === "file" && <TokenFileList current={src.path} version={chosen} />}
       <label className="lbl">
         Audiences (comma-separated; each must be in the token's aud)
-        <input
-          className="field mono"
-          value={(c.audiences ?? []).join(", ")}
+        <ListText<string>
+          value={c.audiences ?? []}
+          format={(l) => l.join(", ")}
+          parse={(t) => t.split(",").map((s) => s.trim()).filter((s) => s !== "")}
           placeholder="spiffe://example.org/api"
-          onChange={(e) => onChange({ ...c, audiences: e.target.value.split(",").map((s) => s.trim()).filter((s) => s !== "") })}
+          onChange={(audiences) => onChange({ ...c, audiences })}
         />
       </label>
       {(c.audiences ?? []).length === 0 && <div className="warn-box">Set the verifier's audience; a JWT-SVID profile without one is refused before anything is sent.</div>}

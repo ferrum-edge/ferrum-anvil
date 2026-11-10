@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { KeyValue } from "./generated/contracts";
-import { KeyValueEditor, Modal, fmtBytes, fmtUs, humanize, modalOpen } from "./ui";
+import { KeyValueEditor, ListText, Modal, fmtBytes, fmtUs, humanize, modalOpen } from "./ui";
 
 afterEach(cleanup);
 
@@ -147,5 +147,62 @@ describe("modalOpen", () => {
     } finally {
       window.removeEventListener("keydown", later);
     }
+  });
+});
+
+describe("ListText", () => {
+  // A parent that stores the parsed list, as the editors do.
+  function Harness(props: { initial: string[]; multiline?: boolean; onList: (l: string[]) => void }) {
+    const [list, setList] = useState(props.initial);
+    const sep = props.multiline ? "\n" : ",";
+    return (
+      <>
+        <label>
+          Items
+          <ListText<string>
+            multiline={props.multiline}
+            value={list}
+            format={(l) => l.join(props.multiline ? "\n" : ", ")}
+            parse={(t) => t.split(sep).map((x) => x.trim()).filter(Boolean)}
+            onChange={(l) => {
+              setList(l);
+              props.onList(l);
+            }}
+          />
+        </label>
+        <button onClick={() => setList(["x", "y"])}>Replace</button>
+      </>
+    );
+  }
+
+  it("keeps the separator just typed, so a second item can be entered (#514)", () => {
+    const seen: string[][] = [];
+    render(<Harness initial={[]} onList={(l) => seen.push(l)} />);
+    const field = screen.getByLabelText("Items") as HTMLInputElement;
+    for (const typed of ["a", "a,", "a, ", "a, b"]) {
+      fireEvent.change(field, { target: { value: typed } });
+      expect(field.value).toBe(typed);
+    }
+    expect(seen).toEqual([["a"], ["a"], ["a"], ["a", "b"]]);
+  });
+
+  it("keeps an empty line while typing in a multi-line list", () => {
+    const seen: string[][] = [];
+    render(<Harness initial={["one"]} multiline onList={(l) => seen.push(l)} />);
+    const field = screen.getByLabelText("Items") as HTMLTextAreaElement;
+    expect(field.value).toBe("one");
+    for (const typed of ["one\n", "one\nt", "one\ntwo"]) {
+      fireEvent.change(field, { target: { value: typed } });
+      expect(field.value).toBe(typed);
+    }
+    expect(seen.at(-1)).toEqual(["one", "two"]);
+  });
+
+  it("shows a list replaced from elsewhere", () => {
+    render(<Harness initial={["a"]} onList={() => {}} />);
+    const field = screen.getByLabelText("Items") as HTMLInputElement;
+    fireEvent.change(field, { target: { value: "a," } });
+    fireEvent.click(screen.getByRole("button", { name: "Replace" }));
+    expect(field.value).toBe("x, y");
   });
 });

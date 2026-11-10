@@ -600,7 +600,14 @@ export function PlanEditor(props: {
               disabled={otherWorkspace}
               onClick={async () => {
                 if (otherWorkspace) return;
-                await api.deleteLoadPlan(p.id).catch(() => undefined);
+                setErr(null);
+                try {
+                  await api.deleteLoadPlan(p.id);
+                } catch (e) {
+                  // The plan is still stored: keep it, and its unsaved edits, open.
+                  setErr(String((e as Error).message));
+                  return;
+                }
                 props.onDeleted();
               }}
             >
@@ -946,11 +953,25 @@ function StagesEditor(props: { stages: Stage[]; unit: string; onChange: (s: Stag
   );
 }
 
+/** A number field that keeps the text as typed ("12.", or empty while retyping). */
 function Num(props: { label: string; value: number; onChange: (v: number) => void }) {
+  const [text, setText] = useState(String(props.value));
+  // The text follows the value only when the value changes from elsewhere.
+  useEffect(() => {
+    if ((Number(text) || 0) !== props.value) setText(String(props.value));
+  }, [props.value, text]);
   return (
     <label className="lbl">
       {props.label}
-      <input className="field mono num" inputMode="numeric" value={props.value} onChange={(e) => props.onChange(Number(e.target.value) || 0)} />
+      <input
+        className="field mono num"
+        inputMode="numeric"
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          props.onChange(Number(e.target.value) || 0);
+        }}
+      />
     </label>
   );
 }

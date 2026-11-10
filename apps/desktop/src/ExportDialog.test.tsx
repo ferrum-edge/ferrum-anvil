@@ -1,7 +1,7 @@
 // Export dialog: the preview lists each linked local file path the bundle
 // carries, with the request or dataset that names it, and shows a Windows
 // verbatim path without its `\\?\` prefix. A full-backup preview has no list.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
 
 const invoke = vi.fn();
@@ -41,6 +41,37 @@ function backend(p: ExportPreview) {
     throw new Error(`unexpected command ${cmd}`);
   });
 }
+
+describe("export preview", () => {
+  it("clears a failed preview's error and never shows a stale preview (#515)", async () => {
+    const bindings = (text: string): ExportPreview => {
+      const p = preview();
+      return { ...p, manifest: { ...p.manifest, device_bindings: [text] } };
+    };
+    let previews = 0;
+    let answerSlow!: (p: ExportPreview) => void;
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd !== "export_preview") throw new Error(`unexpected command ${cmd}`);
+      previews += 1;
+      if (previews === 1) throw "the preview failed";
+      if (previews === 2) return new Promise<ExportPreview>((resolve) => (answerSlow = resolve));
+      return bindings("fresh binding");
+    });
+    render(<ExportDialog workspace={WORKSPACE} onClose={vi.fn()} notify={vi.fn()} />);
+    expect(await screen.findByText("the preview failed")).toBeTruthy();
+    // Another option: the old error goes, and this preview is slow.
+    const option = screen.getByRole("checkbox", { name: "Include API standards" });
+    fireEvent.click(option);
+    await waitFor(() => expect(previews).toBe(2));
+    expect(screen.queryByText("the preview failed")).toBeNull();
+    // Back again before it answers: the newer preview is shown, the late one is not.
+    fireEvent.click(option);
+    expect(await screen.findByText(/fresh binding/)).toBeTruthy();
+    await act(async () => answerSlow(bindings("stale binding")));
+    expect(screen.queryByText(/stale binding/)).toBeNull();
+    expect(screen.getByText(/fresh binding/)).toBeTruthy();
+  });
+});
 
 describe("export linked files", () => {
   it("leaves API standards out by default and previews the explicit opt-in", async () => {

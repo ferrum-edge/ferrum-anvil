@@ -157,7 +157,8 @@ export function ResponsePanel(props: {
             <Messages t={stream} />
           </>
         )}
-        {effectiveTab === "body" && <Body view={view} notify={props.notify} />}
+        {/* Keyed by record: each result opens in the view mode its own body has. */}
+        {effectiveTab === "body" && <Body key={view.record.id} view={view} notify={props.notify} />}
         {effectiveTab === "headers" && <Headers view={view} />}
         {effectiveTab === "timing" && <Timing attempt={last} />}
         {effectiveTab === "connection" && (

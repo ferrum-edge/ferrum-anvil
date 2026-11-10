@@ -674,6 +674,16 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       // A confirmation or a dialog is showing, Workbench's own or one a view
       // opened (any Modal): its keys (Escape, ⌘/Ctrl+Enter) are its own.
       if (asking || dialog || modalOpen(e)) return;
+      // The sidebar shows beside every view.
+      if (mod && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setSideCollapsed((c) => !c);
+        return;
+      }
+      // The rest act on the active request tab, which only the Requests view
+      // shows: in Runner, Load tests or Contract they would send, save or
+      // cancel a request the user cannot see.
+      if (view !== "requests") return;
       if (mod && e.key === "Enter") {
         e.preventDefault();
         void send();
@@ -683,9 +693,6 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       } else if (mod && e.key.toLowerCase() === "n") {
         e.preventDefault();
         void newRequest(null);
-      } else if (mod && e.key.toLowerCase() === "b") {
-        e.preventDefault();
-        setSideCollapsed((c) => !c);
       } else if (e.key === "Escape" && tab?.running) {
         void cancel();
       }

@@ -102,6 +102,20 @@
   WS-Security header writes a username (a secret username with `&` or `<` was shown in the
   preview's body); and a multipart part name, whose `"` is written as `%22`. They were already
   redacted raw, percent-encoded, as hex and JSON-escaped.
+- A QUIC peer's close reason (or any TLS, HTTP or Workload API error text) of a few hundred bytes
+  of non-ASCII text no longer panics Anvil when the failure is recorded: the error text is cut at
+  600 bytes on a character boundary instead of inside a character. The server under test, or
+  anything answering on its UDP port before the handshake completed, could end `anvil send` or
+  `anvil run` with exit status 101 and no execution record, or end a load worker, for HTTP/3,
+  WebSocket, SSE and gRPC over HTTP/3, and MASQUE CONNECT-UDP (GHSA-c825-hqr8-8gj8).
+- A DTLS server whose leaf certificate is over 2 KiB (a long SAN list, or any blob the server or
+  something answering on its UDP port sends in the unauthenticated DTLS 1.2 Certificate flight) no
+  longer panics Anvil inside the DTLS library before the certificate is verified, which ended
+  `anvil send` or `anvil run` with exit status 101 and no record, or a load worker. The handshake
+  now offers the library a buffer that holds any certificate it can assemble. After the handshake,
+  a datagram over 2 KiB is sent and received: one to send was silently never sent, and a larger
+  answer was never read and blocked every later one, so the exchange recorded "no response
+  observed" (`datagrams_received: 0`) although the answer had arrived (GHSA-62g8-g8px-5xm3).
 
 ### Changed
 
@@ -246,6 +260,33 @@
   stored response bodies no remaining history record uses, in the same transaction. They used to
   stay encrypted in `anvil.db` until a later recorded send ran retention, and for good once
   history was turned off. Stored attachments are not affected (#530).
+- A DNS override that leaves no address to dial (an empty address list, or only IPv4 addresses
+  under `ipv6_only` and the reverse) fails the DNS phase as `dns_no_records`, naming
+  `settings.dns_overrides`. HTTP/3, WebSocket, SSE and gRPC over HTTP/3 and MASQUE used to panic
+  (exit status 101 and no record), and TCP reported a connect timeout although nothing was dialled
+  (#509).
+- cURL and HAR import read URL userinfo only inside the authority, which ends at the first `/`,
+  `?` or `#`. `curl 'https://api.example.com?email=a@b.com'` used to import as a request to
+  `https://b.com` with Basic auth for the user `api.example.com?email=a` (#511).
+- The desktop response Body tab opens each result in a view its body has (Pretty, Raw or Hex).
+  Switching between request tabs used to keep the previous result's mode, so an image after a
+  JSON response, or the reverse, showed an empty body until a mode button was clicked (#512).
+- Cmd/Ctrl+Enter, Cmd/Ctrl+S, Cmd/Ctrl+N and Escape act only while the desktop Requests view is
+  shown. In the Runner, Load tests or Contract view they used to send, save or cancel the hidden
+  active request tab, or create a "New request". Cmd/Ctrl+B and Cmd/Ctrl+L still work in every
+  view (#513).
+- Desktop list fields keep the text as typed, so a second item can be entered from the keyboard:
+  JWT-SVID audiences, WebSocket subprotocols and messages, gRPC messages, the "Status is one of"
+  assertion, a TLS profile's "Present only to these hosts", gateway frontend hosts, HBONE extra
+  CONNECT headers and the redaction names in Settings. Each keystroke used to render the list
+  back, which dropped the separator or empty line just typed (`200, 404` became `200404`, and
+  `X-Foo: bar` became the header `X` with the value `-Foo: bar`). The load plan's number fields
+  keep a decimal point and an emptied field while typing, so "Max failures (%)" accepts `12.5`
+  (#514).
+- A desktop load plan whose delete the backend refuses (a locked profile, a storage error) stays
+  open with its unsaved edits and shows why. It used to close and drop the unsaved draft while the
+  plan stayed in the list. The export dialog clears an earlier preview's error when the options
+  change, and shows only the preview for the options now chosen, not a slower earlier one (#515).
 
 ## [0.1.7] - 2026-11-03
 

@@ -5,6 +5,7 @@
 //! never infers a phase from message text such as "handshake".
 
 use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
+use anvil_domain::secret::floor_char_boundary;
 use std::error::Error as StdError;
 use std::io;
 
@@ -53,8 +54,14 @@ pub fn display_chain(err: &(dyn StdError + 'static)) -> String {
         }
     }
     let joined = parts.join(": ");
-    if joined.len() > 600 { format!("{}…", &joined[..600]) } else { joined }
+    // The text can carry peer-chosen bytes (a QUIC close reason, a TLS or
+    // HTTP message), so cut on a char boundary, never inside a character.
+    let end = floor_char_boundary(&joined, DISPLAY_CHAIN_MAX_BYTES);
+    if end < joined.len() { format!("{}…", &joined[..end]) } else { joined }
 }
+
+/// Byte bound on [`display_chain`]'s text (before the trailing `…`).
+const DISPLAY_CHAIN_MAX_BYTES: usize = 600;
 
 pub fn io_kind_name(k: io::ErrorKind) -> String {
     format!("{k:?}")
@@ -334,5 +341,45 @@ fn io_to_exchange_kind(k: io::ErrorKind, stage: HyperStage) -> FailureKind {
         (K::TimedOut, HyperStage::Body) => FailureKind::BodyIdleTimeout,
         (K::TimedOut, _) => FailureKind::ResponseHeadersTimeout,
         _ => FailureKind::HttpProtocolError,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Msg(String);
+
+    impl std::fmt::Display for Msg {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    impl StdError for Msg {}
+
+    /// A peer-chosen reason of multi-byte text (here offset by one ASCII
+    /// byte, so byte 600 falls inside a character) is cut on a char
+    /// boundary instead of panicking.
+    #[test]
+    fn display_chain_cuts_multibyte_text_on_a_char_boundary() {
+        let text = format!("x{}", "é".repeat(350));
+        assert!(!text.is_char_boundary(DISPLAY_CHAIN_MAX_BYTES), "the fixture must put the bound inside a character");
+        let shown = display_chain(&Msg(text.clone()));
+        let body = shown.strip_suffix('…').expect("cut text ends with an ellipsis");
+        assert_eq!(body, &text[..DISPLAY_CHAIN_MAX_BYTES - 1]);
+
+        let replacement = format!("x{}", "\u{FFFD}".repeat(250));
+        let shown = display_chain(&Msg(replacement));
+        assert!(shown.ends_with('…'));
+        assert!(shown.len() <= DISPLAY_CHAIN_MAX_BYTES + '…'.len_utf8());
+    }
+
+    #[test]
+    fn display_chain_keeps_short_text_whole() {
+        assert_eq!(display_chain(&Msg("closed by peer: é".into())), "closed by peer: é");
+        let exact = "a".repeat(DISPLAY_CHAIN_MAX_BYTES);
+        assert_eq!(display_chain(&Msg(exact.clone())), exact);
     }
 }
