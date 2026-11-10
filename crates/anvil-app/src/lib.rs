@@ -203,6 +203,31 @@ impl App {
     }
 }
 
+impl App {
+    /// Take restore checkpoint `label` (`VACUUM INTO`), then run the write
+    /// transaction `f`. `f` returns `Ok(Err(_))` to refuse the operation,
+    /// which it does before writing anything; the transaction then commits
+    /// no change, and the checkpoint, a copy of the whole database that a
+    /// refused operation has no use for, is deleted. One that commits keeps
+    /// its checkpoint for a manual restore, as does one that fails (and rolls
+    /// back): checkpoints are never restored automatically.
+    pub(crate) fn checkpointed<T>(
+        &self,
+        label: &str,
+        f: impl FnOnce(&anvil_storage::StoreTx<'_>) -> anvil_storage::store::Result<Result<T>>,
+    ) -> Result<(std::path::PathBuf, T)> {
+        let checkpoint = self.store.checkpoint(label)?;
+        match self.store.atomically(f)? {
+            Ok(done) => Ok((checkpoint, done)),
+            Err(refused) => {
+                // Best effort: a copy that cannot be removed only takes space.
+                let _ = std::fs::remove_file(&checkpoint);
+                Err(refused)
+            }
+        }
+    }
+}
+
 /// Run `f`, which waits on the store or derives a key, on a blocking thread,
 /// so it never holds an async runtime worker: a long store transaction on
 /// another thread (an import, a folder delete) then delays only the work

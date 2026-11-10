@@ -85,6 +85,11 @@ fn a_share_safely_export_names_each_vault_secret_it_leaves_out_by_label() {
     assert_eq!(dry.secrets_included, 1);
 }
 
+/// The restore checkpoints in `app`'s profile.
+fn checkpoints(app: &App) -> usize {
+    std::fs::read_dir(app.dir.join("checkpoints")).map(|d| d.count()).unwrap_or(0)
+}
+
 fn new_app(root: &std::path::Path, name: &str) -> App {
     let pm = ProfileManager::new(root);
     let (s, dek, _recovery) = pm.create_passphrase(name, "correct horse battery", KdfParams::testing()).unwrap();
@@ -462,8 +467,10 @@ async fn a_bundle_that_claims_a_stored_workspace_is_refused_until_approved() {
         let e = a.import_approved(&bytes, Some(EXPORT_PASS), policy, &into(&Id::new(), &bytes)).unwrap_err();
         assert!(matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'Payments'")), "{policy:?}: {e}");
     }
-    // Nothing was written: the workspace, its requests and its secret are as they were.
+    // Nothing was written: the workspace, its requests and its secret are as
+    // they were, and no checkpoint was kept.
     assert_eq!(a.workspaces().unwrap(), vec![ws.clone()]);
+    assert_eq!(checkpoints(&a), 0, "a refused import keeps no checkpoint");
     assert!(a.requests(&ws.meta.id).unwrap().is_empty());
     assert_eq!(a.store.list_secret_ids(Some(&ws.meta.id)).unwrap(), vec![token.id.to_string()]);
 
@@ -473,6 +480,8 @@ async fn a_bundle_that_claims_a_stored_workspace_is_refused_until_approved() {
     let rep = a.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
     let copy_ws: Id = rep.workspace_ids[0].parse().unwrap();
     assert_ne!(copy_ws, ws.meta.id);
+    assert!(std::path::Path::new(rep.checkpoint.as_deref().unwrap()).exists(), "an import keeps its checkpoint");
+    assert_eq!(checkpoints(&a), 1);
     let copy = a.requests(&copy_ws).unwrap().remove(0);
     refused_auth(&a, &copy_ws, &copy.meta.id).await;
     assert_eq!(fx.log.count_requests(), 0, "the stored workspace's secret was never sent");

@@ -208,7 +208,12 @@ Changes that make the profile safer are not asked about.
     transaction.
 
   Changes saved meanwhile by other commands are kept, so the checkpoint is
-  not restored automatically; it stays on disk for a manual restore.
+  not restored automatically; it stays on disk for a manual restore. An
+  import, restore or spec reimport refused by the checks its transaction
+  makes before writing (an unapproved existing workspace, an object of
+  another workspace, a stored file the bundle does not carry, API standards
+  over the profile limits, a spec source changed since its diff) writes
+  nothing, and its checkpoint is deleted.
 
 ## Export and import
 

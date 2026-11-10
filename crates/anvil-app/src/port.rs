@@ -385,12 +385,12 @@ impl App {
         if !proceed() {
             return Err(AppError::Canceled);
         }
-        let checkpoint = self.store.checkpoint("before-import")?;
         let imported_at = chrono::Utc::now();
         // A failure rolls back this import's own transaction and nothing else.
         // The checkpoint is never restored automatically: that would also
-        // erase whatever other callers saved since it was taken.
-        let (plan, notes) = self.store.atomically(|s| {
+        // erase whatever other callers saved since it was taken. A refusal
+        // returns before anything is written, and removes the checkpoint.
+        let (checkpoint, (plan, notes)) = self.checkpointed("before-import", |s| {
             // Read inside the transaction, so merge and naming decisions see
             // exactly what the writes below land on.
             let existing = existing(&s.as_read())?;
@@ -592,7 +592,7 @@ impl App {
             // until the user allows it on this device.
             crate::device_identity::seal_in(s, g.workspaces.iter().map(|w| &w.meta.id))?;
             Ok(Ok((plan, notes)))
-        })??;
+        })?;
         for (sha, bytes) in &g.attachments {
             // The items written above reference it, so it is not marked as
             // added by a user (see `App::put_attachment`).

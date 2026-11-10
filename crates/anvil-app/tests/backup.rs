@@ -558,6 +558,8 @@ fn a_backup_that_claims_a_stored_workspace_is_refused_until_approved() {
     let bytes = export(&a);
     let expected = vec![ExistingWorkspace { id: ws.meta.id, name: "W".into() }];
     let before = b.backup_contents().unwrap();
+    let checkpoints = || std::fs::read_dir(b.dir.join("checkpoints")).unwrap().count();
+    assert_eq!(checkpoints(), 1, "the first restore keeps its checkpoint");
     for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
         // The preview names the stored workspace...
         let preview = b.restore_preview(&bytes, Some(PASS), policy).unwrap();
@@ -569,6 +571,7 @@ fn a_backup_that_claims_a_stored_workspace_is_refused_until_approved() {
         let e = b.restore_approved(&bytes, Some(PASS), policy, &into(&Id::new(), &bytes)).unwrap_err();
         assert!(matches!(&e, AppError::Invalid(m) if m.contains("existing workspace 'W'")), "{policy:?}: {e}");
         assert!(b.backup_contents().unwrap() == before, "a refused restore changed the profile ({policy:?})");
+        assert_eq!(checkpoints(), 1, "a refused restore keeps no checkpoint ({policy:?})");
     }
     assert_eq!(b.requests(&ws.meta.id).unwrap().len(), 1, "nothing was restored");
 
