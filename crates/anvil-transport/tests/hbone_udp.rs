@@ -147,6 +147,8 @@ async fn the_datagram_tunnel_records_the_same_outer_leg_as_the_byte_stream_tunne
         .map(|m| m.preview.as_str())
         .collect();
     assert_eq!(received, vec!["one", "", "three"]);
+    // Counted as direct UDP counts them: every reply echoes a datagram sent.
+    assert_eq!((o.facts.echoed_datagrams, o.facts.repeated_datagrams), (3, 0));
     assert!(a.bytes.connection_bytes_written.unwrap_or(0) > 0, "outer TLS bytes are counted");
     // Ground truth: the destination got the three datagrams, sizes intact.
     let sizes: Vec<u64> = echo

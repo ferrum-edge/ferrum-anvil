@@ -11,7 +11,7 @@ use anvil_domain::execution::*;
 use anvil_domain::outcome::*;
 use anvil_domain::request::*;
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::settings::{HttpVersionPolicy, ProxySelection, SettingsOverrides, TimeoutOverrides};
+use anvil_domain::settings::{EarlyDataPolicy, HttpVersionPolicy, ProxySelection, SettingsOverrides, TimeoutOverrides};
 use anvil_domain::tls::{ClientIdentity, ProxyKind, ProxyProfile, TlsMinVersion, TlsProfile};
 use anvil_domain::{Id, secret::REDACTED};
 use anvil_engine::context::MemoryAttachments;
@@ -1582,6 +1582,37 @@ async fn proto_020_udp_silence_is_only_no_response_observed() {
     assert_eq!(o.record.outcome.transport, TransportState::Completed);
     assert_ne!(o.record.outcome.application, ApplicationState::Success);
     assert_eq!(phase(last(&o), Phase::Connect).unwrap().status, PhaseStatus::NotApplicable);
+}
+
+#[tokio::test]
+async fn tcp_and_udp_sessions_say_the_early_data_setting_is_not_used() {
+    init();
+    let e = Engine::new();
+    let udp = streams::udp("127.0.0.1:0", UdpMode::Silent).await.unwrap();
+    let tcp = streams::tcp("127.0.0.1:0", TcpMode::Echo, None).await.unwrap();
+    let mut u = spec(Protocol::Udp, &format!("udp://{}", udp.addr));
+    u.udp = Some(udp_spec(&["x"], 100));
+    let mut t = spec(Protocol::Tcp, &format!("tcp://{}", tcp.addr));
+    t.tcp = Some(TcpSpec {
+        tls: false,
+        framing: TcpFraming::None,
+        payloads: vec![StreamPayload { data: "x".into(), encoding: PayloadEncoding::Text }],
+        half_close_after_send: false,
+        read_idle_ms: 300,
+        max_read_bytes: 4096,
+        expect_frames: 0,
+        proxy_protocol: None,
+    });
+    for s in [u, t] {
+        let mut c = ctx(s);
+        run_layer(
+            &mut c,
+            SettingsOverrides { early_data: Some(EarlyDataPolicy { enabled: true, extra_methods: vec![] }), ..Default::default() },
+        );
+        let o = run(&e, &c).await;
+        let inferred = &o.record.prepared.inferred;
+        assert!(inferred.iter().any(|i| i.starts_with("0-RTT early data is not used for sessions")), "{inferred:?}");
+    }
 }
 
 #[tokio::test]

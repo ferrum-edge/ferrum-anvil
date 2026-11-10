@@ -287,6 +287,48 @@
   open with its unsaved edits and shows why. It used to close and drop the unsaved draft while the
   plan stayed in the list. The export dialog clears an earlier preview's error when the options
   change, and shows only the preview for the options now chosen, not a slower earlier one (#515).
+- The desktop Body tab shows a body that is not UTF-8 as binary (hex) instead of as text with its
+  last three bytes missing, and a text body over the 2 MiB display cap stays text when the cap cuts
+  a multi-byte character, instead of turning into a hex dump (#516).
+- Enter, F2, Delete or Backspace on a sidebar row's Rename, Duplicate, Folder settings or Delete
+  button no longer also opens, toggles, renames or deletes the row, and opening a request twice
+  while it is read opens one tab (#517).
+- Switching a PROXY protocol header from v2 to v1 in the desktop editor drops the v2 LOCAL command
+  and TLVs, which v1 does not show and the engine refuses, instead of keeping a header that could
+  not be sent (#518).
+- Contract drift judges the latency and size budgets of an operation that several paths share
+  through one Path Item (`$ref`) on the calls to all of those paths, once. The finding and its
+  "Raise the budget" suggestion used to describe only the last such path in the document, even an
+  uncalled one: "in 0 call(s) (largest 0 bytes)", with a patch lowering the budget to 1 byte (#519).
+- `anvil lint-spec` checks every path that shares a Path Item (`$ref`) with another, so
+  `path-trailing-slash` and `path-no-query-string` no longer see only the first such path, and
+  checks an operation's own `servers` (`server-https`), as `docs/contract.md` lists them. A string
+  example under `text/json` is checked as a JSON value, as drift reads that media type, instead of
+  being skipped. A rule turned off (`severity: off`) still has its `description`, `message`,
+  `how_to_fix` and `docs_url` type-checked (#520).
+- An HTTP/3 request, and gRPC over HTTP/3, ends at the attempt's total deadline (`total_ms`) while
+  its QUIC connection is set up, while the request is written and while a 0-RTT handshake
+  completes, as `total_timeout`, as HTTP/1.1 and HTTP/2 do. With `total_ms: 5000` an HTTP/3
+  attempt to a UDP port that never answers used to end after the handshake deadline (about 10 s)
+  as `quic_handshake_timeout`, and a stalled upload after the write deadline (#521).
+- Session transcripts no longer drop send failures: a UDP datagram the OS refused to send (on the
+  retry after an ICMP port-unreachable, or from an interactive Send) and an interactive DTLS
+  datagram DTLS could not send are noted as "datagram not sent"; a TLS alert that ends an
+  interactive raw TLS write (a post-handshake mTLS rejection) is classified by the alert, as on the
+  scripted path; and a WebSocket Pong whose write failed is no longer recorded as sent, and ends the
+  session as a failed send does. UDP through an HBONE or MASQUE tunnel counts echoed datagrams
+  as direct UDP does, so a load run's `echoed_payloads` is no longer 0 through a tunnel (#522).
+- A JWT auth profile whose `expires_in_secs` or `not_before_offset_secs` puts `exp` or `nbf` out of
+  range is refused ("JWT expires-in offset is out of range") instead of panicking in a debug build
+  or wrapping to an already-expired token in a release build. A JWT-SVID whose `exp` is far out of
+  range fails its expiry check instead of wrapping into a pass, and its cache refresh time no longer
+  overflows (#523).
+- A URL without a scheme that carries a URL in its query
+  (`localhost:8080/cb?next=https://example.com`) gets the inferred `http://` instead of failing
+  with "scheme 'localhost:8080/cb?next=https' is not supported": only a leading `scheme://` is a
+  scheme, in request preparation and in the load and OAuth worker preflights' origin split. A
+  `tls://` TCP session or a UDP/DTLS session with the early-data setting on now notes that 0-RTT
+  is not used for sessions, as WebSocket, SSE and gRPC sessions do (#524).
 
 ## [0.1.7] - 2026-11-03
 

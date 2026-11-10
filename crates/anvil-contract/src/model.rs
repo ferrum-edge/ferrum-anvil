@@ -641,9 +641,10 @@ impl<'a> ModelBuilder<'a> {
     }
 
     fn push(&mut self, kind: TargetKind, pointer: String, label: String, view: Value) {
-        // An operation reached through several paths (one Path Item `$ref`'d
-        // by each) is a target per path: its path template differs.
-        let key = if kind == TargetKind::Operation { format!("{pointer}#{label}") } else { pointer.clone() };
+        // A Path Item, or an operation, reached through several paths (one
+        // Path Item `$ref`'d by each) is a target per path: its path template
+        // differs.
+        let key = if matches!(kind, TargetKind::Operation | TargetKind::Path) { format!("{pointer}#{label}") } else { pointer.clone() };
         if !self.seen.insert((kind, key)) {
             return;
         }
@@ -917,7 +918,8 @@ impl<'a> ModelBuilder<'a> {
         // Paths.
         for (path, i) in &path_items {
             let item = &items[*i];
-            if !self.is_seen(TargetKind::Path, &item.pointer) {
+            let label = format!("path {path}");
+            if !self.is_seen(TargetKind::Path, &format!("{}#{label}", item.pointer)) {
                 let methods: Vec<&str> = item.operations.iter().map(|(m, _, _)| m.as_str()).collect();
                 let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
                 let static_segments: Vec<&str> = segments.iter().copied().filter(|s| !s.contains('{')).collect();
@@ -935,7 +937,7 @@ impl<'a> ModelBuilder<'a> {
                 self.push(
                     TargetKind::Path,
                     item.pointer.clone(),
-                    format!("path {path}"),
+                    label,
                     json!({
                         "path": path,
                         "operations": methods,
@@ -969,6 +971,8 @@ impl<'a> ModelBuilder<'a> {
                     item_pointer: item.pointer.clone(),
                 };
                 self.operation(&op, &declared_tag_set, &global_security_names, &scheme_names, &id_counts, examples);
+                // Once per operation object, however many paths reach it.
+                self.servers(value.get("servers"), &ptr(pointer, "servers"), "operation", &mut vec![]);
             }
         }
 

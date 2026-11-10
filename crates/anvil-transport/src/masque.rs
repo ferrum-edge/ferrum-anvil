@@ -41,6 +41,7 @@ use crate::http::{AttemptOutput, sleep_until_opt};
 use crate::recorder::{EventCtx, Recorder};
 use crate::session::*;
 use crate::tls::PreparedTls;
+use crate::udp::PayloadTally;
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_domain::execution::*;
 use anvil_domain::outcome::{ClosedBy, MasqueEncoding, MasqueTunnel, ProtocolStatus};
@@ -48,8 +49,7 @@ use anvil_domain::request::MasqueDatagramMode;
 use anvil_domain::settings::{Limits, Timeouts};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{HeaderName, HeaderValue, Method, Request};
-use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -1021,6 +1021,7 @@ async fn send_recorded(
     chan: &mut MasqueChannel,
     tr: &mut Transcript,
     sent: &mut u64,
+    tally: &mut PayloadTally,
     payload: &[u8],
     cancel: &CancellationToken,
     deadline: Option<Instant>,
@@ -1055,6 +1056,7 @@ async fn send_recorded(
     match outcome {
         Sent::Sent(note) => {
             *sent += 1;
+            tally.sent(payload);
             tr.data(Direction::Sent, "datagram", payload);
             if let Some(n) = note {
                 tr.note("encoding", &n);
@@ -1095,14 +1097,15 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
     let mut sent = 0u64;
     let mut received = 0u64;
     let mut failure: Option<TransportFailure> = None;
-    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    // Repeats and echoes, counted as direct UDP counts them.
+    let mut tally = PayloadTally::default();
     let mut dropped_noted = false;
 
     // A send the tunnel did not take before cancel or the deadline.
     let mut interrupted_send = false;
     let interrupted = |f: &TransportFailure| matches!(f.kind, FailureKind::Canceled | FailureKind::TotalTimeout);
     for d in &plan.datagrams {
-        if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, d, cancel, total_deadline).await {
+        if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, &mut tally, d, cancel, total_deadline).await {
             interrupted_send = interrupted(&f);
             failure = Some(f);
             break;
@@ -1137,11 +1140,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
         match ev {
             Ev::In(Inbound::Datagram(p)) => {
                 received += 1;
-                let mut digest = [0u8; 32];
-                digest.copy_from_slice(&Sha256::digest(&p));
-                if !seen.insert(digest) {
-                    facts.repeated_datagrams += 1;
-                }
+                tally.received(&p, &mut facts);
                 tr.data(Direction::Received, "datagram", &p);
                 if received >= plan.max_datagrams as u64 {
                     tr.note("note", &format!("stopped receiving at max_datagrams ({})", plan.max_datagrams));
@@ -1163,7 +1162,8 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
             Ev::In(Inbound::PortUnreachable(e) | Inbound::Error(e)) => tr.note("error", &format!("receive error: {e}")),
             Ev::Cmd(c) => match c {
                 Some(SessionCommand::SendText { text }) => {
-                    if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, text.as_bytes(), cancel, total_deadline).await {
+                    if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, &mut tally, text.as_bytes(), cancel, total_deadline).await
+                    {
                         interrupted_send = interrupted(&f);
                         failure = Some(f);
                     }
@@ -1171,7 +1171,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
                 }
                 Some(SessionCommand::SendBinaryHex { hex }) => match decode_hex(&hex) {
                     Ok(b) => {
-                        if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, &b, cancel, total_deadline).await {
+                        if let Err(f) = send_recorded(&mut chan, &mut tr, &mut sent, &mut tally, &b, cancel, total_deadline).await {
                             interrupted_send = interrupted(&f);
                             failure = Some(f);
                         }

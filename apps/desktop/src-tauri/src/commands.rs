@@ -672,10 +672,15 @@ const MAX_TEXT: usize = 2 * 1024 * 1024;
 pub fn body_view(raw: &[u8], decoded: Option<&[u8]>, content_type: Option<&str>) -> BodyView {
     let bytes = decoded.unwrap_or(raw);
     let shown = &bytes[..bytes.len().min(MAX_TEXT)];
-    let text = std::str::from_utf8(shown).ok().map(|s| s.to_string()).or_else(|| {
-        // Allow a truncated UTF-8 tail at the display cap.
-        std::str::from_utf8(&shown[..shown.len().saturating_sub(3)]).ok().map(|s| s.to_string())
-    });
+    let text = match std::str::from_utf8(shown) {
+        Ok(s) => Some(s.to_string()),
+        // The display cap may cut a multi-byte character: show the text up to
+        // it. Anything else that is not UTF-8 is binary.
+        Err(err) if bytes.len() > MAX_TEXT && err.error_len().is_none() => {
+            std::str::from_utf8(&shown[..err.valid_up_to()]).ok().map(|s| s.to_string())
+        }
+        Err(_) => None,
+    };
     let is_binary = text.is_none() || shown.iter().take(4096).any(|b| *b == 0);
     let ct = content_type.unwrap_or("").to_ascii_lowercase();
     let pretty = match &text {
@@ -1551,6 +1556,30 @@ pub(crate) mod tests {
         assert_eq!(st.epoch(), epoch);
         assert!(st.running.lock().is_empty(), "execution registered");
         assert!(st.sessions.lock().is_empty(), "session registered");
+    }
+
+    #[test]
+    fn body_view_keeps_a_short_non_utf8_body_binary() {
+        let view = body_view(b"caf\xe9", None, Some("text/plain"));
+        assert!(view.is_binary);
+        assert_eq!(view.text, None);
+        assert_eq!(view.hex.as_deref(), Some("63 61 66 e9"));
+    }
+
+    #[test]
+    fn body_view_shows_text_cut_inside_a_character_at_the_display_cap() {
+        // The cap keeps one byte of a four-byte character after a
+        // three-byte one: dropping a fixed three bytes would split both.
+        let mut body = "a".repeat(MAX_TEXT - 4).into_bytes();
+        body.extend_from_slice("中".as_bytes());
+        body.extend_from_slice("😀😀".as_bytes());
+        assert!(body.len() > MAX_TEXT);
+        let view = body_view(&body, None, Some("text/plain"));
+        assert!(!view.is_binary);
+        assert_eq!(view.hex, None);
+        let text = view.text.unwrap();
+        assert!(text.ends_with("a中"));
+        assert_eq!(text.len(), MAX_TEXT - 1);
     }
 
     #[test]

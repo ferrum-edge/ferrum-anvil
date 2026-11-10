@@ -631,11 +631,16 @@ pub fn check_jwt_svid(
         None => s.checks.push(check(K::Expiry, Failed, "the token has no exp claim")),
         Some(exp) => {
             s.expires_at = when(exp);
-            let left = exp - now.timestamp();
+            // `exp` and `nbf` come from the token: saturate, never wrap.
+            let left = exp.saturating_sub(now.timestamp());
             if left <= 0 {
-                s.checks.push(check(K::Expiry, Failed, format!("exp is {}s in the past by this machine's clock", -left)));
+                s.checks.push(check(K::Expiry, Failed, format!("exp is {}s in the past by this machine's clock", left.unsigned_abs())));
             } else if let Some(nbf) = ts(c.get("nbf")).filter(|n| *n > now.timestamp()) {
-                s.checks.push(check(K::Expiry, Failed, format!("nbf is {}s in the future by this machine's clock", nbf - now.timestamp())));
+                s.checks.push(check(
+                    K::Expiry,
+                    Failed,
+                    format!("nbf is {}s in the future by this machine's clock", nbf.saturating_sub(now.timestamp())),
+                ));
             } else {
                 s.checks.push(check(K::Expiry, Passed, format!("expires in {left}s by this machine's clock")));
             }
@@ -764,7 +769,8 @@ async fn acquire_jwt_svid(
                             let iat = claims.as_ref().and_then(|c| ts(c.get("iat"))).unwrap_or(now.timestamp());
                             if let Some(exp) = exp {
                                 // Reuse until half its lifetime, and never within the margin.
-                                let refresh = (iat + (exp - iat) / 2).min(exp - JWT_REFRESH_MARGIN_SECS);
+                                let refresh =
+                                    iat.saturating_add(exp.saturating_sub(iat) / 2).min(exp.saturating_sub(JWT_REFRESH_MARGIN_SECS));
                                 if let Some(r) = when(refresh).filter(|r| *r > now) {
                                     engine.workload.publish(generation, |s| {
                                         s.jwt.insert(key, CachedJwt { token: f.token.clone(), refresh_after: r });
@@ -1063,6 +1069,18 @@ mod tests {
         assert_eq!(r.resolve("{{key}}", "test").unwrap(), "vault-value");
         let SensitiveValue::Secret { secret } = token else { panic!("the token is an ephemeral secret") };
         assert_eq!(wrapped.resolve(&secret).unwrap().as_str(), "jwt-svid");
+    }
+
+    #[test]
+    fn a_jwt_svid_expiry_out_of_range_fails_the_expiry_check() {
+        use base64::Engine as _;
+        let seg = |v: serde_json::Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+        let claims = serde_json::json!({"sub": "spiffe://example.org/w", "aud": ["a"], "exp": i64::MIN});
+        let token = format!("{}.{}.c2ln", seg(serde_json::json!({"alg": "ES256"})), seg(claims));
+        let s = check_jwt_svid(&token, &["a".into()], None, None, JwtSvidSourceKind::Value, Utc::now());
+        let expiry = s.checks.iter().find(|c| c.check == JwtSvidCheckKind::Expiry).unwrap();
+        assert_eq!(expiry.result, CheckResult::Failed, "{expiry:?}");
+        assert!(expiry.detail.contains("in the past"), "{expiry:?}");
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {

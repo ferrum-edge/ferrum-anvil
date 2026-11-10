@@ -325,7 +325,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const openRequest = async (id: string) => {
     if (!tabsRef.current.some((t) => t.req.id === id)) {
       const req = await api.getRequest(id);
-      setTabs((ts) => [...ts, { wsId: req.workspace_id, req, saved: snap(req), view: null, running: false, execId: null, progress: null }]);
+      // A second open may have added the tab while this read was in flight.
+      setTabs((ts) => (ts.some((t) => t.req.id === id) ? ts : [...ts, { wsId: req.workspace_id, req, saved: snap(req), view: null, running: false, execId: null, progress: null }]));
     }
     setActive(id);
   };
@@ -1401,6 +1402,8 @@ function Tree(props: {
               }}
               onClick={() => (folder ? props.onToggle(n.id) : props.onOpen(n.id))}
               onKeyDown={(e) => {
+                // Keys on the row's own action buttons belong to those buttons.
+                if (e.target !== e.currentTarget) return;
                 if (e.key === "Enter") folder ? props.onToggle(n.id) : props.onOpen(n.id);
                 if (e.key === "F2") props.onRename(n);
                 if (e.key === "Delete" || e.key === "Backspace") props.onDelete(n);

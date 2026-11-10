@@ -46,11 +46,15 @@ pub fn sign(
     if let Some(v) = &claims.aud {
         body.insert("aud".into(), v.clone().into());
     }
+    // The offsets come from a profile (possibly imported): out of range is
+    // refused, never wrapped into another time.
     if let Some(e) = claims.expires_in_secs {
-        body.insert("exp".into(), (ts + e).into());
+        let exp = ts.checked_add(e).ok_or_else(|| AuthError::Invalid("JWT expires-in offset is out of range".into()))?;
+        body.insert("exp".into(), exp.into());
     }
     if let Some(n) = claims.not_before_offset_secs {
-        body.insert("nbf".into(), (ts + n).into());
+        let nbf = ts.checked_add(n).ok_or_else(|| AuthError::Invalid("JWT not-before offset is out of range".into()))?;
+        body.insert("nbf".into(), nbf.into());
     }
     let mut header = Header::new(alg(algorithm));
     header.kid = kid.map(|s| s.to_string());
@@ -150,6 +154,19 @@ mod tests {
         v.required_spec_claims.clear();
         jsonwebtoken::decode::<serde_json::Value>(&t, &jsonwebtoken::DecodingKey::from_secret(b"bob-jwt-secret-key-12345678901234"), &v)
             .unwrap();
+    }
+
+    #[test]
+    fn time_offsets_out_of_range_are_refused() {
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        // The offsets are refused before the key is read.
+        let key = "tok-SENSITIVE-jwt-hmac-test-key";
+        let exp = JwtClaims { expires_in_secs: Some(i64::MAX), ..Default::default() };
+        let e = sign(JwtAlgorithm::HS256, key, &exp, &serde_json::Value::Null, None, now).unwrap_err();
+        assert_eq!(e.to_string(), "JWT expires-in offset is out of range");
+        let nbf = JwtClaims { not_before_offset_secs: Some(i64::MAX - 1), ..Default::default() };
+        let e = sign(JwtAlgorithm::HS256, key, &nbf, &serde_json::Value::Null, None, now).unwrap_err();
+        assert_eq!(e.to_string(), "JWT not-before offset is out of range");
     }
 
     #[test]

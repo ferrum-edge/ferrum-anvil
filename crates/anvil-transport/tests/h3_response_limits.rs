@@ -335,6 +335,25 @@ async fn sessions_and_masque_advertise_the_header_limit_and_refuse_larger_header
 // ---- deadlines and cancellation hold through the whole response ----
 
 #[tokio::test]
+async fn the_total_deadline_bounds_the_quic_connection_setup() {
+    init();
+    // A UDP port that takes datagrams and never answers: the 5 s handshake
+    // deadline would end the attempt much later than the total one.
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a silent UDP port");
+    let mut p = plan(silent.local_addr().unwrap());
+    p.timeouts.total_ms = Some(800);
+    for early in [EarlyDataIntent::Off, EarlyDataIntent::Send] {
+        p.early_data = early;
+        let started = std::time::Instant::now();
+        let out = send(&H3Transport::new(), &p, &CancellationToken::new()).await;
+        assert_eq!(failure(&out), (FailureKind::TotalTimeout, Phase::QuicHandshake), "{early:?}");
+        assert_eq!(out.observation.failure.as_ref().unwrap().deadline_ms, Some(800), "{early:?}");
+        assert_eq!(out.observation.dispatch, DispatchState::NotDispatched, "{early:?}");
+        assert!(started.elapsed() < Duration::from_secs(4), "{early:?}: {:?}", started.elapsed());
+    }
+}
+
+#[tokio::test]
 async fn a_body_dripped_past_the_total_deadline_stops_at_it() {
     init();
     let o = origin(vec![answer(&[ok_head(), h3raw::frame(DATA, b"x")], End::Drip(Duration::from_millis(50)))]).await;
