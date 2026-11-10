@@ -125,6 +125,23 @@ fn failed_delivery_or_acknowledgment_keeps_old_linked_offline_recovery() {
 }
 
 #[test]
+fn an_empty_or_missing_stdin_line_is_refused_before_anything_changes() {
+    let (root, dir, h, rk) = fixture();
+    for (input, missing) in [
+        (format!("{rk}\n\n"), "provide the new passphrase on stdin"),
+        (format!("{rk}\n"), "provide the new passphrase on stdin"),
+        ("\n".to_string(), "provide the current recovery key on stdin"),
+    ] {
+        let out = cli(root.path(), FLAGS, &input);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{missing}: {stderr}");
+        assert!(stderr.contains(missing), "{stderr}");
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("RECOVERY KEY"), "no replacement key is generated");
+        assert_eq!(vault::read_header(&dir).unwrap().key_check, h.key_check);
+    }
+}
+
+#[test]
 fn post_commit_output_loss_retains_acknowledged_linked_offline_recovery() {
     let (root, dir, h, rk) = fixture();
     let mut child = spawn(root.path(), FLAGS);

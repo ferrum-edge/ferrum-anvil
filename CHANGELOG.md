@@ -227,6 +227,12 @@
   settings, and re-running the corrected command then made the name ambiguous. The command now
   checks everything first and saves the complete scenario once; a dataset stored for a scenario
   that is then refused is removed again (#527).
+- `anvil profile rotate-key` and `anvil profile enroll-policy` refuse an empty or missing stdin
+  line for the current recovery key (`--recovery-key-stdin`), the new passphrase and the
+  recovery key acknowledgment with "provide the … on stdin", before anything is generated. An
+  empty new-passphrase line used to be taken as an empty passphrase. The code also named
+  `ANVIL_RECOVERY_KEY` and `ANVIL_NEW_PASSPHRASE` as fallbacks it never read; those names are
+  gone (stdin is the only source, as documented) (#528).
 
 ## [0.1.7] - 2026-11-03
 
