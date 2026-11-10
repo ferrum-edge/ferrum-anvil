@@ -580,6 +580,7 @@ impl App {
         self.store.atomically(|s| {
             let d: Option<Dataset> = s.get(kind::DATASET, id)?;
             s.delete(kind::DATASET, id)?;
+            crate::linked_files::drop_bindings_in(s, &std::collections::HashSet::from([*id]))?;
             if let Some(anvil_domain::request::AttachmentRef::Stored { sha256, .. }) = d.map(|d| d.attachment) {
                 release_held_attachment_in(s, &sha256)?;
             }

@@ -26,6 +26,7 @@ use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::KdfParams;
 use anvil_transport::recorder::EventCtx;
 use sha2::Digest;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
@@ -500,6 +501,42 @@ fn an_import_that_overwrites_a_request_drops_its_linked_file_binding() {
     assert!(app.linked_file_bindings().unwrap().is_empty());
     let err = refused(app.build_context(Some(r.meta.id), &ws.meta.id, None, &SendOptions::default()), "replaced");
     assert!(err.contains("not chosen on this device") && !err.contains(CANARY), "{err}");
+}
+
+#[test]
+fn deleting_a_request_folder_dataset_or_workspace_drops_their_linked_file_bindings() {
+    let root = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let path = canonical(&canary_file(files.path(), "upload.bin"));
+    let app = new_app(root.path(), "delete");
+    let bound = |app: &App| -> HashSet<Id> { app.linked_file_bindings().unwrap().into_iter().map(|b| b.referrer.id()).collect() };
+    let new_request = |ws: Id, folder: Option<Id>, name: &str| {
+        let spec = with_body(Body::Binary { attachment: linked(&path), content_type: None });
+        let r = app.create_request(&ws, folder, name, spec).unwrap();
+        app.bind_linked_file(request(&r), &path).unwrap();
+        r.meta.id
+    };
+    let new_dataset = |ws: Id| {
+        let d = app.save_dataset(linked_dataset(ws, &path)).unwrap();
+        app.bind_linked_file(LinkedFileReferrer::Dataset { id: d.meta.id }, &path).unwrap();
+        d.meta.id
+    };
+    let ws = app.create_workspace("W").unwrap().meta.id;
+    let other = app.create_workspace("Other").unwrap().meta.id;
+    let folder = app.create_folder(&ws, None, "F").unwrap().meta.id;
+    let alone = new_request(ws, None, "alone");
+    let in_folder = new_request(ws, Some(folder), "in folder");
+    let dataset = new_dataset(ws);
+    let (in_ws, ws_dataset) = (new_request(ws, None, "kept"), new_dataset(ws));
+    let (elsewhere, elsewhere_dataset) = (new_request(other, None, "elsewhere"), new_dataset(other));
+    assert_eq!(bound(&app).len(), 7);
+
+    app.delete_request(&alone).unwrap();
+    app.delete_folder(&folder).unwrap();
+    app.delete_dataset(&dataset).unwrap();
+    assert_eq!(bound(&app), HashSet::from([in_ws, ws_dataset, elsewhere, elsewhere_dataset]), "{alone} {in_folder} {dataset}");
+    app.delete_workspace(&ws).unwrap();
+    assert_eq!(bound(&app), HashSet::from([elsewhere, elsewhere_dataset]));
 }
 
 #[test]

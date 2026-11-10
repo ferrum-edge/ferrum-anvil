@@ -233,6 +233,10 @@
   empty new-passphrase line used to be taken as an empty passphrase. The code also named
   `ANVIL_RECOVERY_KEY` and `ANVIL_NEW_PASSPHRASE` as fallbacks it never read; those names are
   gone (stdin is the only source, as documented) (#528).
+- Deleting a request, folder, dataset or workspace now also deletes this device's linked-file
+  bindings for the requests and datasets it deletes, in the same transaction. They used to stay
+  in the vault for good, and a request a reimport brought back under its old id could pick up
+  the old binding without the file being chosen again (#530).
 
 ## [0.1.7] - 2026-11-03
 
