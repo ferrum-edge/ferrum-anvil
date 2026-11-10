@@ -13,8 +13,9 @@ fn vectors() -> Vec<serde_json::Value> {
     v["vectors"].as_array().unwrap().clone()
 }
 
-fn s<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
-    v[key].as_str().unwrap_or_else(|| panic!("missing {key} in {v}"))
+fn s<'a>(v: &'a serde_json::Value, field: &str) -> &'a str {
+    // The field name only: the vector holds the password and its digests.
+    v[field].as_str().unwrap_or_else(|| panic!("the vector has no string field {field}"))
 }
 
 fn b64(text: &str) -> Vec<u8> {
