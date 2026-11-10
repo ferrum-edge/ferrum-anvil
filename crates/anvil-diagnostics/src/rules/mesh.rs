@@ -35,17 +35,6 @@ pub const UDP_UNAVAILABLE: &str = "alt.hbone.udp_unavailable";
 /// Catalog fragment: silence through an open UDP tunnel.
 pub const UDP_SILENCE: &str = "alt.hbone.udp_silence";
 
-/// Alerts that concern the client's certificate (the endpoint judged the SVID).
-const CLIENT_CERT_ALERTS: &[&str] = &[
-    "bad_certificate",
-    "unsupported_certificate",
-    "certificate_revoked",
-    "certificate_expired",
-    "certificate_unknown",
-    "unknown_ca",
-    "access_denied",
-];
-
 fn body_error(ctx: &Ctx<'_>, t: &TunnelObservation) -> String {
     let Some(b) = t.refusal_body.as_deref() else { return "no body".into() };
     let trimmed = b.trim();
@@ -159,7 +148,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             } else if alert == "certificate_required" && !presented {
                 base("hbone.client_svid_required", Confidence::Confirmed, Owner::Caller)
             } else if presented
-                && (CLIENT_CERT_ALERTS.contains(&alert.as_str())
+                && (super::tls::CLIENT_CERT_ALERTS.contains(&alert.as_str())
                     // TLS 1.3: after Anvil's Finished, the endpoint's only
                     // remaining handshake decision is the client certificate.
                     || (ik == K::TlsAlertAfterHandshake && alert == "handshake_failure"))
