@@ -217,6 +217,9 @@
   have been read, the id is shown as it is (#471).
 - Escape and Cmd/Ctrl+Enter in a dialog a view opened itself (for example the JWT inspector) no
   longer also cancel or send the request in the active tab; Cmd/Ctrl+L still locks (#471).
+- The desktop Body tab shows a body that is not UTF-8 as binary (hex) instead of as text with its
+  last three bytes missing, and a text body over the 2 MiB display cap stays text when the cap cuts
+  a multi-byte character, instead of turning into a hex dump (#516).
 
 ## [0.1.7] - 2026-11-03
 
