@@ -64,6 +64,27 @@ fn app_export_preview_and_write_agree_at_the_attachment_entry_boundary() {
     }
 }
 
+#[test]
+fn a_share_safely_export_names_each_vault_secret_it_leaves_out_by_label() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path(), "share");
+    let ws = app.create_workspace("Share").unwrap().meta.id;
+    app.create_request(&ws, None, "Ping", RequestSpec::http("GET", "https://api.example.test/")).unwrap();
+    let bearer = app.set_secret(&ws, "bearer", TOKEN).unwrap();
+    let entry = format!("secret 'bearer' ({})", bearer.id);
+    let dry = app.export_preview_with_standards(Some(&ws), ExportMode::ShareSafely, false, false).unwrap();
+    let (bytes, written) = app.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, false, false).unwrap();
+    for excluded in [&dry.manifest.excluded, &written.manifest.excluded] {
+        assert!(excluded.contains(&entry), "{excluded:?}");
+    }
+    assert_eq!(written.secrets_included, 0);
+    assert!(!bytes.windows(TOKEN.len()).any(|w| w == TOKEN.as_bytes()), "a share-safely bundle carries no secret value");
+    // An encrypted transfer carries the secret instead of naming it.
+    let dry = app.export_preview_with_standards(Some(&ws), ExportMode::EncryptedTransfer, false, false).unwrap();
+    assert!(!dry.manifest.excluded.contains(&entry), "{:?}", dry.manifest.excluded);
+    assert_eq!(dry.secrets_included, 1);
+}
+
 fn new_app(root: &std::path::Path, name: &str) -> App {
     let pm = ProfileManager::new(root);
     let (s, dek, _recovery) = pm.create_passphrase(name, "correct horse battery", KdfParams::testing()).unwrap();

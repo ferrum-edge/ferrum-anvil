@@ -214,7 +214,7 @@ Changes that make the profile safer are not asked about.
 
 | Mode | Contents | Secrets |
 |---|---|---|
-| Share safely | One workspace, or every workspace when none is chosen | None: literal secrets become `{{placeholders}}` listed in the manifest |
+| Share safely | One workspace, or every workspace when none is chosen | None: literal secrets become `{{placeholders}}` listed in the manifest, and each vault secret left out is listed among its excluded items by label |
 | Encrypted transfer | One workspace, or every workspace when none is chosen | Vault secrets and the literal secrets, encrypted with a passphrase you share separately |
 | Full backup | Everything, including history and settings | Encrypted; an ANVILBAK file, not a bundle ([below](#full-backups)) |
 

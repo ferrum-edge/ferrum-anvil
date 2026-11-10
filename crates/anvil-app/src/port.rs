@@ -106,6 +106,8 @@ pub fn file_sha256(file: &[u8]) -> String {
 
 impl App {
     /// Build the portable graph for one workspace (or all when `None`).
+    /// Without `include_secrets`, each vault secret is listed among the
+    /// graph's omitted items by label and id, never by value.
     pub fn graph(&self, ws: Option<&Id>, include_secrets: bool, include_history: bool) -> Result<PortableGraph> {
         let wss = match ws {
             Some(w) => vec![self.workspace(w)?],
@@ -131,12 +133,16 @@ impl App {
             g.integrations.extend(self.integrations(&id)?);
             g.datasets.extend(self.datasets(&id)?);
             g.scenarios.extend(self.scenarios(&id)?);
-            if include_secrets {
-                for sid in self.store.list_secret_ids(Some(&id))? {
-                    if let Ok(parsed) = sid.parse::<Id>()
-                        && let Some((label, value)) = self.store.get_secret(&parsed)?
-                    {
+            for sid in self.store.list_secret_ids(Some(&id))? {
+                if let Ok(parsed) = sid.parse::<Id>()
+                    && let Some((label, value)) = self.store.get_secret(&parsed)?
+                {
+                    if include_secrets {
                         g.secrets.insert(sid, SecretValue { label, value: value.to_string(), workspace_id: Some(id.to_string()) });
+                    } else {
+                        // Left out by label only, so the export lists
+                        // what the receiver has to set up again.
+                        g.omitted.push(format!("secret '{label}' ({sid})"));
                     }
                 }
             }
