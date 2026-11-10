@@ -684,7 +684,7 @@ fn prove_url(resolver: &Resolver, template: &str, field: &str) -> std::result::R
 /// per-run stand-ins) when a per-run value reaches it, or which part of its
 /// origin a per-run value reaches when that cannot be proven local. The URL
 /// is split as `parse_target` splits it (`anvil_engine::prepare::split_origin`,
-/// shared with the OAuth worker endpoint check): the scheme ends at the first `://`
+/// shared with the OAuth worker endpoint check): a leading scheme ends at its `://`
 /// (with none, a fixed one is inferred), the authority at the first `/`, `?`
 /// or `#`, and the host at the `:` before the port (after the `]` of an IPv6
 /// literal). A per-run port is accepted only after a fixed loopback host,

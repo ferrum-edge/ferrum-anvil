@@ -152,19 +152,30 @@ fn encode_target_part(s: &str) -> String {
 /// the query parameters an earlier profile added exactly as they are sent.
 pub use anvil_auth::encode_query_component as encode_component;
 
+/// The scheme and what follows its `://` when `url` starts with a scheme
+/// (RFC 3986 §3.1: a letter, then letters, digits, `+`, `-` or `.`). A `://`
+/// later in the URL (a URL in the query) is not a scheme.
+fn scheme_split(url: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let mut chars = scheme.chars();
+    let valid =
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    valid.then_some((scheme, rest))
+}
+
 /// Parse a resolved URL into a target without normalizing the path.
 pub fn parse_target(raw: &str, allowed_schemes: &[&str], inferred: &mut Vec<String>) -> Result<Target, TransportFailure> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(local(FailureKind::InvalidUrl, "the URL is empty", "url"));
     }
-    let with_scheme = if raw.contains("://") {
+    let with_scheme = if scheme_split(raw).is_some() {
         raw.to_string()
     } else {
         inferred.push(format!("no scheme given; using {}://", allowed_schemes[0]));
         format!("{}://{raw}", allowed_schemes[0])
     };
-    let (scheme, rest) = with_scheme.split_once("://").ok_or_else(|| local(FailureKind::InvalidUrl, "the URL has no scheme", "url"))?;
+    let (scheme, rest) = scheme_split(&with_scheme).ok_or_else(|| local(FailureKind::InvalidUrl, "the URL has no scheme", "url"))?;
     let scheme = scheme.to_ascii_lowercase();
     if !allowed_schemes.contains(&scheme.as_str()) {
         return Err(local(
@@ -237,7 +248,8 @@ pub fn parse_target(raw: &str, allowed_schemes: &[&str], inferred: &mut Vec<Stri
 /// splits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OriginSplit<'a> {
-    /// Up to the first `://`; empty when the URL has none.
+    /// Up to the `://` the URL starts with (see [`parse_target`]); empty when
+    /// it does not start with a scheme.
     pub scheme: &'a str,
     /// After the scheme's `://` (or from the start), up to the first `/`,
     /// `?` or `#`.
@@ -260,7 +272,7 @@ pub struct PortSpan<'a> {
 
 /// Split `url` into its scheme, authority, host and port (see [`OriginSplit`]).
 pub fn split_origin(url: &str) -> OriginSplit<'_> {
-    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let (scheme, rest) = scheme_split(url).unwrap_or(("", url));
     let authority_start = url.len() - rest.len();
     let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
     let host_end = if authority.starts_with('[') { authority.find(']').map(|end| end + 1) } else { authority.find(':') };
@@ -671,7 +683,7 @@ mod tests {
     #[test]
     fn split_origin_ends_each_part_where_parse_target_does() {
         type Case = (&'static str, &'static str, &'static str, &'static str, Option<(&'static str, std::ops::Range<usize>)>);
-        let cases: [Case; 14] = [
+        let cases: [Case; 15] = [
             ("http://127.0.0.1:8080/a?b#c", "http", "127.0.0.1:8080", "127.0.0.1", Some(("8080", 17..21))),
             ("http://127.0.0.1/a:1", "http", "127.0.0.1", "127.0.0.1", None),
             ("http://127.0.0.1?x=:1", "http", "127.0.0.1", "127.0.0.1", None),
@@ -686,6 +698,7 @@ mod tests {
             ("http://u@h:5/", "http", "u@h:5", "u@h", Some(("5", 11..12))),
             ("http:///p", "http", "", "", None),
             ("a://b://c:1/", "a", "b:", "b", Some(("", 6..6))),
+            ("localhost:8080/cb?next=https://x", "", "localhost:8080", "localhost", Some(("8080", 10..14))),
         ];
         for (url, scheme, authority, host, port) in cases {
             let split = split_origin(url);
@@ -695,6 +708,15 @@ mod tests {
                 assert_eq!(&url[p.range], p.text, "{url}: the range is the port text");
             }
         }
+    }
+
+    #[test]
+    fn a_url_in_the_query_is_not_a_scheme() {
+        let mut inf = vec![];
+        let t = parse_target("localhost:8080/cb?next=https://example.com", &["http", "https"], &mut inf).unwrap();
+        assert_eq!((t.scheme.as_str(), t.host.as_str(), t.port), ("http", "localhost", 8080));
+        assert_eq!(t.path, "/cb");
+        assert_eq!(inf, ["no scheme given; using http://"]);
     }
 
     #[test]
