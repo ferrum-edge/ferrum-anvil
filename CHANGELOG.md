@@ -226,6 +226,10 @@
 - Switching a PROXY protocol header from v2 to v1 in the desktop editor drops the v2 LOCAL command
   and TLVs, which v1 does not show and the engine refuses, instead of keeping a header that could
   not be sent (#518).
+- Contract drift judges the latency and size budgets of an operation that several paths share
+  through one Path Item (`$ref`) on the calls to all of those paths, once. The finding and its
+  "Raise the budget" suggestion used to describe only the last such path in the document, even an
+  uncalled one: "in 0 call(s) (largest 0 bytes)", with a patch lowering the budget to 1 byte (#519).
 
 ## [0.1.7] - 2026-11-03
 
