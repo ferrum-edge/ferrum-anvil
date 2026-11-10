@@ -743,10 +743,6 @@ pub async fn client_credentials(cfg: &OAuthResolved, http: &dyn TokenHttp) -> Re
     Ok(request_token(cfg, form, http).await?)
 }
 
-pub async fn refresh(cfg: &OAuthResolved, refresh_token: &str, http: &dyn TokenHttp) -> Result<CachedToken, AuthError> {
-    Ok(request_token(cfg, refresh_form(refresh_token), http).await?)
-}
-
 /// Redeem an authorization code (RFC 6749 §4.1.3 with the RFC 7636 verifier).
 pub async fn exchange_code(
     cfg: &OAuthResolved,

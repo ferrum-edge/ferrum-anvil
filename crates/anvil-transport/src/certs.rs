@@ -9,6 +9,20 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
+/// PEM-encode `der` under `label` (`CERTIFICATE`, `PRIVATE KEY`, ...), 64
+/// base64 characters per line.
+pub fn pem(label: &str, der: &[u8]) -> String {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut s = format!("-----BEGIN {label}-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        s.push_str(std::str::from_utf8(chunk).unwrap_or_default());
+        s.push('\n');
+    }
+    s.push_str(&format!("-----END {label}-----\n"));
+    s
+}
+
 fn fingerprint(der: &[u8]) -> String {
     let h = Sha256::digest(der);
     h.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")

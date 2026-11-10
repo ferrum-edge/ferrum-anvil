@@ -6,7 +6,7 @@
 use anvil_auth::AuthError;
 use anvil_auth::oauth::{
     BoxFut, CachedToken, DEFAULT_EXPIRES_IN_SECS, MAX_EXPIRES_IN_SECS, OAuthResolved, TokenCache, TokenHttp, TokenKey, client_credentials,
-    exchange_code, refresh,
+    exchange_code,
 };
 use anvil_domain::auth::OAuthGrant;
 use chrono::{DateTime, Duration, Utc};
@@ -64,16 +64,17 @@ fn cfg(grant: OAuthGrant) -> OAuthResolved {
     }
 }
 
-/// Every public way a token response is acquired, each on a task of its own
-/// so a panic shows up as a join error instead of ending the test.
+/// Every public way a token response is acquired outside the cache (a
+/// refresh goes only through `TokenCache`; see the refresh tests below), each
+/// on a task of its own so a panic shows up as a join error instead of ending
+/// the test.
 async fn acquire_all_ways(issuer: &FixedIssuer) -> Vec<(&'static str, Result<CachedToken, AuthError>)> {
     let mut out = vec![];
-    for way in ["client_credentials", "refresh", "exchange_code"] {
+    for way in ["client_credentials", "exchange_code"] {
         let issuer = issuer.clone();
         let joined = tokio::spawn(async move {
             match way {
                 "client_credentials" => client_credentials(&cfg(OAuthGrant::ClientCredentials), &issuer).await,
-                "refresh" => refresh(&cfg(OAuthGrant::AuthorizationCodePkce), "rt", &issuer).await,
                 _ => exchange_code(&cfg(OAuthGrant::AuthorizationCodePkce), "code", "verifier", "http://127.0.0.1:1/cb", &issuer).await,
             }
         })
