@@ -467,7 +467,7 @@ pub fn split_query(url: &str) -> (String, Vec<(String, String)>) {
 /// at the first `/`, `?` or `#` (RFC 3986 section 3.2), so an `@` in the path,
 /// query or fragment is not one.
 pub fn userinfo_end(after_scheme: &str) -> Option<usize> {
-    let authority_end = after_scheme.find(|c| matches!(c, '/' | '?' | '#')).unwrap_or(after_scheme.len());
+    let authority_end = after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
     after_scheme[..authority_end].find('@')
 }
 
