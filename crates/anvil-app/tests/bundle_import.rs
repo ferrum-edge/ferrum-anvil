@@ -930,7 +930,7 @@ async fn an_export_with_history_lists_the_records_it_leaves_out() {
     let opts = SendOptions { record_history: true, ..Default::default() };
     a.send(Some(request.meta.id), &ws.meta.id, None, opts, EventCtx::none(), CancellationToken::new()).await.unwrap();
     let preview = a.export_preview(Some(&ws.meta.id), ExportMode::ShareSafely, true).unwrap();
-    assert_eq!(preview.manifest.counts["history"] as usize, 1);
+    assert_eq!(preview.manifest.counts["history"], 1);
     let excluded = &preview.manifest.excluded;
     assert!(!excluded.iter().any(|x| x.starts_with("history records")), "{excluded:?}");
 
@@ -950,7 +950,7 @@ async fn an_export_with_history_lists_the_records_it_leaves_out() {
         })
         .unwrap();
     let (_, written) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, true).unwrap();
-    assert_eq!(written.manifest.counts["history"] as usize, EXPORT_HISTORY_LIMIT);
+    assert_eq!(written.manifest.counts["history"], EXPORT_HISTORY_LIMIT);
     let excluded = &written.manifest.excluded;
     let note = format!("history records of workspace 'Payments' older than its newest {EXPORT_HISTORY_LIMIT}");
     assert!(excluded.iter().any(|x| x.starts_with(&note)), "{excluded:?}");
