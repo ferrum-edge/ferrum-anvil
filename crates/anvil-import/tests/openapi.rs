@@ -248,6 +248,40 @@ fn grouping_by_tags_and_paths() {
     assert_eq!(folder_names, vec!["pets", "store", "tree", "shapes", "external", "contradiction"]);
 }
 
+/// A request body declared only as a media range is never sent with that
+/// range as its `Content-Type`: `*/*` is generated as JSON (sent as
+/// `application/json`), `text/*` as plain text, and a binary range without a
+/// type; Swagger 2.0 `consumes: ["*/*"]` likewise (#538).
+#[test]
+fn request_body_media_ranges_never_become_a_content_type() {
+    let body = |mt: &str| json!({"content": {mt: {"schema": {"type": "object", "properties": {"id": {"type": "integer"}}}}}});
+    let doc = json!({
+        "openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+        "paths": {
+            "/any": {"post": {"operationId": "any", "requestBody": body("*/*"), "responses": {}}},
+            "/text": {"post": {"operationId": "text", "requestBody": body("text/*"), "responses": {}}},
+            "/binary": {"post": {"operationId": "binary", "requestBody": body("application/*"), "responses": {}}}
+        }
+    });
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    for key in ["any", "text", "binary"] {
+        assert!(header(&req(&r, key).spec, "Content-Type").is_none(), "{key}");
+    }
+    assert!(matches!(req(&r, "any").spec.body, Body::Json { .. }), "{:?}", req(&r, "any").spec.body);
+    assert!(matches!(&req(&r, "text").spec.body, Body::Raw { content_type: None, .. }), "{:?}", req(&r, "text").spec.body);
+
+    let swagger = json!({
+        "swagger": "2.0", "info": {"title": "t", "version": "1"},
+        "consumes": ["*/*"],
+        "paths": {"/any": {"post": {"operationId": "any", "parameters": [
+            {"name": "body", "in": "body", "schema": {"type": "object", "properties": {"id": {"type": "integer"}}}}
+        ], "responses": {"200": {"description": "ok"}}}}}
+    });
+    let r = import(swagger.to_string().as_bytes(), &opts()).unwrap();
+    assert!(header(&req(&r, "any").spec, "Content-Type").is_none());
+    assert!(matches!(req(&r, "any").spec.body, Body::Json { .. }), "{:?}", req(&r, "any").spec.body);
+}
+
 #[test]
 fn operation_keys_and_generated_hashes() {
     let r = run(PETSTORE, &opts());

@@ -232,6 +232,14 @@
   be refused only when run (#537).
 - The load report's timeline table shows "—" for the p50 and p99 of a second with no successful
   unit, as the chart and the summary tiles do, instead of "0 µs" (#537).
+- cURL import: `--max-redirs -1` (curl's "unlimited") follows up to 255 redirects, with a
+  `curl_unlimited_redirects` warning; it was imported as "follow at most 0 redirects" (#538).
+- OpenAPI import: a request body declared only as a media range (`*/*`, `text/*`, `application/*`,
+  or Swagger 2.0 `consumes: ["*/*"]`) no longer sends the range as its `Content-Type`; the body's
+  own type applies (`application/json` for a generated JSON body) (#538).
+- WSDL import: integer and decimal facets bound the sample outside the default sample range
+  (`minInclusive=-100 maxInclusive=-1` on `xsd:int` gave `1`), a lone `maxInclusive` included, and
+  facets no value of the type satisfies are reported as `contradictory_schema` (#538).
 
 ## [0.1.7] - 2026-11-03
 
