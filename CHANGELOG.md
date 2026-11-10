@@ -236,6 +236,9 @@
   `settings.dns_overrides`. HTTP/3, WebSocket, SSE and gRPC over HTTP/3 and MASQUE used to panic
   (exit status 101 and no record), and TCP reported a connect timeout although nothing was dialled
   (#509).
+- cURL and HAR import read URL userinfo only inside the authority, which ends at the first `/`,
+  `?` or `#`. `curl 'https://api.example.com?email=a@b.com'` used to import as a request to
+  `https://b.com` with Basic auth for the user `api.example.com?email=a` (#511).
 
 ## [0.1.7] - 2026-11-03
 

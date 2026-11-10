@@ -623,7 +623,7 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     // Credentials embedded in the URL are moved to Basic auth.
     let mut auth = auth;
     if let Some((scheme, rest)) = url.split_once("://")
-        && let Some(at_pos) = rest.find('@').filter(|p| rest[..*p].find('/').is_none())
+        && let Some(at_pos) = crate::common::userinfo_end(rest)
     {
         let userinfo = rest[..at_pos].to_string();
         let (user, pass) =

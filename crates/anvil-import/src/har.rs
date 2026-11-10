@@ -11,7 +11,7 @@
 use crate::builder::Builder;
 use crate::common::{
     body_from_text, credential, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, query_decode, redact_raw_query,
-    scrub_json_text, split_query,
+    scrub_json_text, split_query, userinfo_end,
 };
 use crate::util::{is_json_media, media_essence, ptr, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -86,7 +86,7 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     let mut url = crate::common::strip_fragment(raw_url).to_string();
     // Userinfo is never kept in the URL (the engine refuses it).
     if let Some((scheme, rest)) = url.split_once("://").map(|(a, c)| (a.to_string(), c.to_string()))
-        && let Some(p) = rest.find('@').filter(|p| !rest[..*p].contains('/'))
+        && let Some(p) = userinfo_end(&rest)
     {
         let userinfo = &rest[..p];
         let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));

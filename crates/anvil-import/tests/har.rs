@@ -1,5 +1,6 @@
 mod common;
 
+use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::Body;
 use anvil_import::{Dialect, ImportOptions, detect};
 use common::*;
@@ -88,6 +89,35 @@ fn grouping_and_skips() {
 #[test]
 fn deterministic() {
     assert_eq!(run(HAR, &opts()), run(HAR, &opts()));
+}
+
+fn har_get(url: &str) -> anvil_import::ImportResult {
+    let doc = serde_json::json!({ "log": { "version": "1.2", "entries": [{ "request": {
+        "method": "GET", "url": url, "headers": [], "queryString": []
+    } }] } });
+    anvil_import::import(doc.to_string().as_bytes(), &opts()).unwrap()
+}
+
+/// Userinfo moves to Basic auth with the password redacted; an `@` in the
+/// query is not userinfo (the authority ends at `?`), so the host stays
+/// (#511).
+#[test]
+fn url_userinfo_becomes_basic_auth_only_inside_the_authority() {
+    let r = har_get("https://bob:pw-secret@example.test/x");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://example.test/x");
+    assert!(
+        matches!(&s.auth, AuthConfig::Basic { username, password } if username == "bob" && password.is_pure_reference()),
+        "{:?}",
+        s.auth
+    );
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("pw-secret"));
+
+    let r = har_get("https://example.test?next=a@b");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://example.test");
+    assert!(matches!(s.auth, AuthConfig::Inherit), "{:?}", s.auth);
+    assert_eq!(param(s, "next").unwrap().value, "a@b");
 }
 
 fn har_post(headers: serde_json::Value, mime: &str, text: &str) -> anvil_import::ImportResult {
