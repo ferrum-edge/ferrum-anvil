@@ -1352,14 +1352,13 @@ fn auth029(env: &Env) -> Fut<'_> {
         c.success(CheckKind::Diagnosis, &ok);
         c.add(CheckKind::Diagnosis, "PasswordDigest never puts the password on the wire", !echoed_body(&ok).contains(&pw), "");
         record_excludes(&mut c, &ok, &pw, "the WS-Security password");
-        // Wrong password.
-        let wrong = go(
-            env,
-            &soap_ctx(env, "/soap/digest/echo", wsse("not-the-password", WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE),
-        )
-        .await;
+        // Wrong password: generated per run, like the lab's own secrets.
+        let wrong_pw = crate::gateway::random_secret();
+        let wrong =
+            go(env, &soap_ctx(env, "/soap/digest/echo", wsse(&wrong_pw, WssePasswordType::PasswordDigest, Some(60), None), SOAP_ENVELOPE))
+                .await;
         soap_rejection(&mut c, env, &wrong, "WS-Security: invalid credentials");
-        record_excludes(&mut c, &wrong, "not-the-password", "the wrong password");
+        record_excludes(&mut c, &wrong, &wrong_pw, "the wrong password");
         // Replay: the identical captured envelope, twice (raw bytes; Anvil's
         // own signer would never reuse a nonce).
         let captured = captured_wsse(env, WssePasswordType::PasswordDigest, 60);
