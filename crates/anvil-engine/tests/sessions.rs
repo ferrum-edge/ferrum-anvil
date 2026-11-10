@@ -1721,7 +1721,7 @@ async fn proto_022_dtls_large_certificate_and_datagrams() {
     assert_eq!(phase(a, Phase::DtlsHandshake).unwrap().status, PhaseStatus::Completed);
     let tls = a.connection.as_ref().unwrap().tls.as_ref().unwrap();
     assert_eq!(tls.verification, TlsVerification::Verified);
-    assert!(tls.peer_certificates[0].subject.contains("anvil-lab-server-large"), "{:?}", tls.peer_certificates);
+    assert!(tls.peer_certificates[0].subject.contains("anvil-lab-server-large"), "the large lab leaf is the one presented");
     assert!(matches!(o.record.outcome.protocol_status, ProtocolStatus::Udp { datagrams_sent: 1, datagrams_received: 1, .. }));
     let received: Vec<u64> =
         stream(&o).messages.iter().filter(|m| m.direction == Direction::Received && m.kind == "datagram").map(|m| m.size).collect();
