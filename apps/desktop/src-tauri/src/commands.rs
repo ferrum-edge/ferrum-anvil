@@ -16,6 +16,7 @@ use anvil_domain::Id;
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_domain::execution::{ExecutionListing, ExecutionRecord};
 use anvil_domain::integration::IntegrationProfile;
+use anvil_domain::outcome::{ApplicationState, TransportState};
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::SecretRef;
 use anvil_domain::settings::AppSettings;
@@ -1051,6 +1052,10 @@ pub struct HistoryItem {
     pub url: String,
     pub summary: String,
     pub status: Option<u16>,
+    /// The exchange failed: the transport failed or ended early, or the
+    /// application reported a failure. Colours a row without an HTTP status
+    /// (a session, a transport failure) by what happened.
+    pub failed: bool,
     pub request_id: Option<String>,
 }
 
@@ -1081,6 +1086,8 @@ pub async fn history_list(handle: AppHandle, workspace_id: String, request_id: O
                 started_at: h.started_at,
                 method: rec.prepared.method,
                 url: rec.prepared.url,
+                failed: matches!(rec.outcome.transport, TransportState::Failed | TransportState::Incomplete)
+                    || rec.outcome.application == ApplicationState::Failure,
                 summary: rec.outcome.summary,
                 status: rec.response.map(|r| r.status),
                 request_id: rec.request_id.map(|r| r.to_string()),

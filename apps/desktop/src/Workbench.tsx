@@ -907,6 +907,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                   <Tree
                     nodes={filtered}
                     depth={0}
+                    parentId={null}
                     expanded={filter ? new Set(allIds(filtered)) : expanded}
                     activeId={active}
                     onToggle={(id) => setExpanded((s) => (s.has(id) ? new Set([...s].filter((x) => x !== id)) : new Set(s).add(id)))}
@@ -943,7 +944,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                       <span className="hist-url">{h.url}</span>
                     </div>
                     <div className="hist-line">
-                      <span className={`status-pill s${String(h.status ?? 5)[0]}`}>{h.status ?? "—"}</span>
+                      <span className={historyPill(h)}>{h.status ?? "—"}</span>
                       <span className="hist-meta">{h.summary}</span>
                       <span className="hist-when" title={new Date(h.started_at).toLocaleString()}>
                         {fmtAgo(h.started_at)}
@@ -1346,6 +1347,14 @@ function allIds(nodes: TreeNode[]): string[] {
   return nodes.flatMap((n) => [n.id, ...allIds(n.children)]);
 }
 
+/** A History row's status pill, coloured by HTTP status class or, without
+ * one (a session, a transport failure), in the error colour only for a
+ * failed exchange. */
+function historyPill(h: HistoryItem): string {
+  if (h.status != null) return `status-pill s${String(h.status)[0]}`;
+  return h.failed ? "status-pill s5" : "status-pill";
+}
+
 function onDropTo(e: React.DragEvent, folderId: string | null, move: (id: string, kind: string, folder: string | null) => void) {
   e.preventDefault();
   e.stopPropagation();
@@ -1358,6 +1367,8 @@ function onDropTo(e: React.DragEvent, folderId: string | null, move: (id: string
 function Tree(props: {
   nodes: TreeNode[];
   depth: number;
+  /** The folder these nodes are in (null: the workspace root). */
+  parentId: string | null;
   expanded: Set<string>;
   activeId: string | null;
   onToggle: (id: string) => void;
@@ -1399,6 +1410,9 @@ function Tree(props: {
               onDrop={(e) => {
                 setOver(null);
                 if (folder) onDropTo(e, n.id, props.onMove);
+                // A drop on a request files the dragged node in that request's
+                // folder; a node already in it (the row itself, a sibling) stays put.
+                else onDropTo(e, props.parentId, (id, kind, to) => !props.nodes.some((x) => x.id === id) && props.onMove(id, kind, to));
               }}
               onClick={() => (folder ? props.onToggle(n.id) : props.onOpen(n.id))}
               onKeyDown={(e) => {
@@ -1447,7 +1461,7 @@ function Tree(props: {
                 </button>
               </span>
             </div>
-            {folder && isOpen && <Tree {...props} nodes={n.children} depth={props.depth + 1} />}
+            {folder && isOpen && <Tree {...props} nodes={n.children} depth={props.depth + 1} parentId={n.id} />}
           </div>
         );
       })}

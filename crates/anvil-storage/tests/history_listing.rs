@@ -21,7 +21,12 @@ fn record(id: Id, ws: Id, request: Id, status: Option<u16>) -> Value {
         "started_at": "2026-11-06T10:00:00Z",
         "prepared": {"protocol": "http", "method": "POST", "url": format!("https://api.invalid/{id}"), "headers": [{"name": "a", "value": "b"}]},
         "attempts": [{"transcript": "x".repeat(4096)}],
-        "outcome": {"summary": format!("summary of {id}"), "warnings": []},
+        "outcome": {
+            "transport": if status.is_some() { "completed" } else { "failed" },
+            "application": if status == Some(404) { "failure" } else { "not_evaluated" },
+            "summary": format!("summary of {id}"),
+            "warnings": [],
+        },
         "findings": [],
     });
     if let Some(status) = status {
@@ -80,6 +85,8 @@ fn the_listing_decodes_the_same_fields_as_reading_each_record() {
         assert_eq!(rec.prepared.method, full["prepared"]["method"].as_str().unwrap());
         assert_eq!(rec.prepared.url, full["prepared"]["url"].as_str().unwrap());
         assert_eq!(rec.outcome.summary, full["outcome"]["summary"].as_str().unwrap());
+        assert_eq!(serde_json::to_value(rec.outcome.transport).unwrap(), full["outcome"]["transport"]);
+        assert_eq!(serde_json::to_value(rec.outcome.application).unwrap(), full["outcome"]["application"]);
         assert_eq!(rec.response.map(|r| u64::from(r.status)), full["response"]["status"].as_u64());
         assert_eq!(rec.request_id.map(|r| r.to_string()), h.request_id);
         assert_eq!(rec.started_at, serde_json::from_value::<chrono::DateTime<chrono::Utc>>(full["started_at"].clone()).unwrap());
