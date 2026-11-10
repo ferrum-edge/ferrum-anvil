@@ -157,8 +157,8 @@
   (`lab/gateway/releases/`) are removed, so `anvil-lab --release` refuses them, and the nightly
   lab runs only the default pin. Their diagnostics catalogs stay embedded, so profiles and
   imports that name them keep their diagnoses.
-- The vendored dimpl (`vendor/dimpl-0.8.0-empty-ca`): Anvil uses dimpl 0.8.0 from crates.io
-  again. That copy accepted the empty `certificate_authorities` list that Ferrum Edge DTLS 1.3
+- The vendored dimpl (`vendor/dimpl-0.8.0-empty-ca`): Anvil uses dimpl from crates.io again
+  (0.9.0 since #482). That copy accepted the empty `certificate_authorities` list that Ferrum Edge DTLS 1.3
   listeners requiring client certificates sent before v0.9.20 (ferrum-edge/ferrum-edge#7001).
   Against those releases, DTLS 1.3 with a client certificate now times out again
   (`client.dtls.handshake_timeout`) without presenting the identity; DTLS 1.2, and listeners

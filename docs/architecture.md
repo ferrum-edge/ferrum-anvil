@@ -295,8 +295,9 @@ secrets its requests reference. See [load.md](load.md#worker-process-and-ipc).
    final bytes. HMAC digests and DPoP proofs are regenerated on every send.
 3. **Send and observe.** `anvil-transport` resolves, connects, negotiates TLS
    and ALPN, writes the request and reads the response. It records each phase
-   with a status (completed, failed, timed out, reused, not applicable) and
-   tracks written bytes, so dispatch is never guessed from error text.
+   with a status (completed, failed, timed out, canceled, reused, not
+   applicable or unknown) and tracks written bytes, so dispatch is never
+   guessed from error text.
 4. **Assemble the record.** The engine combines attempts (redirects and safe
    retries) into one redacted `ExecutionRecord` with three separate
    dimensions: transport completion, application status and assertions.

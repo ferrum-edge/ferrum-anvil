@@ -11,7 +11,7 @@ sufficient proof of dispatch safety").
   socket in `CountingIo`.
 - Record phases (DNS, connect, TLS, protocol handshake, request write, await
   headers, body) with status `completed | failed | timed_out | canceled |
-  reused | not_applicable`. A pooled connection reports `reused`, never a
+  reused | not_applicable | unknown`. A pooled connection reports `reused`, never a
   zero-length handshake.
 - Capture TLS evidence with an observing certificate verifier and client-cert
   resolver: peer chain, verification result or bypass (with the would-have-

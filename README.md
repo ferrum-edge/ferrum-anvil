@@ -19,8 +19,11 @@ A local-first API client for desktop and the command line. Send requests,
 run tests and load tests, and get failure explanations based on what actually
 happened on the wire. No account, works offline.
 
-> **Pre-release:** there are no signed installers yet, so build from source
-> for now (see [docs/release.md](docs/release.md)).
+> **Preview:** installers are published on the
+> [Releases](https://github.com/ferrum-edge/ferrum-anvil/releases) page but are
+> not code-signed yet, so macOS Gatekeeper and Windows SmartScreen warn (check
+> downloads against `SHA256SUMS`). You can also build from source (see
+> [docs/release.md](docs/release.md)).
 
 ## Features
 
@@ -49,7 +52,7 @@ happened on the wire. No account, works offline.
 
 ## Getting started
 
-You need [Rust](https://rustup.rs) (stable), Node.js 22 or later (CI uses
+You need [Rust](https://rustup.rs) (stable), Node.js 22.12 or later (CI uses
 22.23.3) and npm. On Linux, also install
 [Tauri's WebKitGTK dependencies](https://tauri.app/start/prerequisites/).
 

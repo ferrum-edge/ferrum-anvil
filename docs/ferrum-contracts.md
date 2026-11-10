@@ -10,8 +10,9 @@ the successful [main validation](https://github.com/ferrum-edge/ferrum-contracts
 and the [tag release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.20).
 The lab and new-profile default select v0.9.20, source-audited with
 [hosted Anvil qualification](audit/gateway-0.9.20-delta.md#qualification-status)
-recorded. Earlier catalogs and locks remain supported, each tied to its own
-contracts tag:
+recorded. Earlier catalogs stay embedded for existing profiles, each tied to
+its own contracts tag; their lab locks were retired (see
+[lab/README.md](lab/README.md)):
 
 | Edge release | Contracts tag |
 | --- | --- |

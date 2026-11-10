@@ -348,7 +348,7 @@ without `host` has no `server` target.
 
 `anvil lint-spec <SPEC> [--ruleset FILE]... [--format text|json|sarif]
 [--output FILE] [--fail-on error|warn|info|hint|never] [--no-examples]
-[--list-rules]` needs no profile, so it runs in CI. `-` reads the spec from
+[--list-rules] [--allow-incomplete]` needs no profile, so it runs in CI. `-` reads the spec from
 stdin. Without `--ruleset`, the recommended rules apply. Exit codes: `0` no
 finding at or above `--fail-on` (default `error`), `2` otherwise, `3` a
 local error (unreadable file, invalid spec or ruleset, or a description too

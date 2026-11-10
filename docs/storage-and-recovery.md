@@ -914,8 +914,8 @@ historical data is an intentional owner choice.
   open or unlock; free space and try again. A new profile has nothing to copy
   and takes none, and restoring a checkpoint takes none, since the
   checkpoint is itself the earlier copy.
-- Explicit catalogue enrollment rotates the data key and advances to schema 5
-  in the same atomic transaction. It does not automatically save an old-key
+- Explicit catalogue enrollment rotates the data key and advances the database
+  to the current schema (6) in the same atomic transaction. It does not automatically save an old-key
   checkpoint; the owner should retain a deliberate backup for historical recovery.
 - The history table is indexed by the response body each record references,
   so releasing a replaced body and retention find a blob's uses without a

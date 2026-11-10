@@ -196,12 +196,12 @@ artifact per OS and release.
 | actions/upload-artifact | v7.0.2 `cf430e030ddbb5b0abf93d22962f4752f3646cd9` |
 | actions/download-artifact | v8.0.2 `9000827ccba6bdab643e8b6fd33ac0654aef8333` |
 | Swatinem/rust-cache | v2.9.3 `d1527c8f67ef9af357290475d4af4b0fab8f12e0` |
-| taiki-e/install-action | v2.87.31 `1e29709c0ec63babbe8f266397a465f29a825f91` |
+| taiki-e/install-action | v2.90.2 `3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2` |
 | Node.js | 22.23.3 |
 | cargo-deny / cargo-cyclonedx | 0.20.2 / 0.5.9 |
 | gitleaks | 8.30.1 (linux x64 SHA-256 `551f6fc8…f2470eb`) |
 | @cyclonedx/cyclonedx-npm | 6.0.1 (release workflow, via `npx`) |
-| WebdriverIO / @wdio/tauri-service | 9.32.0 / 1.5.1 (direct `devDependencies` in `apps/desktop/package.json`, locked in `package-lock.json`; `@wdio/cli` and `@wdio/mocha-framework` 10.1.0 bring a nested WebdriverIO 10.1.0, see [release.md](release.md)) |
+| WebdriverIO / @wdio/tauri-service | 9.33.1 / 1.5.1 (direct `devDependencies` in `apps/desktop/package.json`, locked in `package-lock.json`; `@wdio/cli` and `@wdio/mocha-framework` 10.1.0 bring a nested WebdriverIO 10.1.0, see [release.md](release.md)) |
 | Rust | `stable` from `rust-toolchain.toml` (not pinned; the exact `rustc` of each release build is recorded in its `build-info.json` and `release-evidence.json`) |
 
 ## Not yet exercised
