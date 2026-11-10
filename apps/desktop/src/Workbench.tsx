@@ -6,7 +6,7 @@ import { useConfirm } from "./Confirm";
 import { SessionConsole } from "./SessionConsole";
 import { ScopeSettingsDialog } from "./ScopeSettings";
 import mark from "./assets/ferrum-anvil-mark.png";
-import type { Environment, Protocol, RequestDefinition, Workspace } from "./generated/contracts";
+import type { Environment, Folder, Protocol, RequestDefinition, Workspace } from "./generated/contracts";
 import { EnvironmentsDialog, ExportDialog, ImportDialog, ProfilesDialog, SettingsDialog } from "./Dialogs";
 import { RequestEditor, newSpec, type Profiles } from "./RequestEditor";
 import { ResponsePanel } from "./ResponsePanel";
@@ -207,8 +207,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
 
   useEffect(() => {
     void loadWorkspaces().catch(fail);
-    api.systemInfo().then((i) => setCatalog(i.catalog));
-    api.settings().then((s) => document.documentElement.setAttribute("data-theme", s.theme));
+    api.systemInfo().then((i) => setCatalog(i.catalog), fail);
+    api.settings().then((s) => document.documentElement.setAttribute("data-theme", s.theme), fail);
   }, []);
   useEffect(() => {
     if (!ws) return;
@@ -324,7 +324,13 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   // ---------------------------------------------------------------- actions
   const openRequest = async (id: string) => {
     if (!tabsRef.current.some((t) => t.req.id === id)) {
-      const req = await api.getRequest(id);
+      let req: RequestDefinition;
+      try {
+        req = await api.getRequest(id);
+      } catch (e) {
+        fail(e);
+        return;
+      }
       // A second open may have added the tab while this read was in flight.
       setTabs((ts) => (ts.some((t) => t.req.id === id) ? ts : [...ts, { wsId: req.workspace_id, req, saved: snap(req), view: null, running: false, execId: null, progress: null }]));
     }
@@ -333,8 +339,15 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
 
   const newRequest = async (folderId: string | null) => {
     if (!ws) return;
-    const req = await api.createRequest(ws.id, folderId, "New request", newSpec());
-    await loadTree();
+    let req: RequestDefinition;
+    try {
+      req = await api.createRequest(ws.id, folderId, "New request", newSpec());
+    } catch (e) {
+      fail(e);
+      return;
+    }
+    // Created: open it even if the tree does not refresh (said).
+    await loadTree().catch(fail);
     if (folderId) setExpanded((s) => new Set(s).add(folderId));
     setTabs((ts) => [...ts, { wsId: ws.id, req, saved: snap(req), view: null, running: false, execId: null, progress: null }]);
     setActive(req.id);
@@ -342,8 +355,14 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
 
   const newFolder = async (parentId: string | null) => {
     if (!ws) return;
-    const f = await api.createFolder(ws.id, parentId, "New folder");
-    await loadTree();
+    let f: Folder;
+    try {
+      f = await api.createFolder(ws.id, parentId, "New folder");
+    } catch (e) {
+      fail(e);
+      return;
+    }
+    await loadTree().catch(fail);
     setExpanded((s) => new Set(s).add(f.id));
     setDialog({ kind: "rename", id: f.id, isFolder: true, name: f.name });
   };
@@ -485,7 +504,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     try {
       const view = await api.send({ workspace_id: t.wsId, request_id: rid, spec: t.req.spec, environment_id: envOf(t.wsId), send_anyway: sendAnyway }, execId);
       updateTab(rid, { view, running: false, execId: null });
-      void loadHistory();
+      void loadHistory().catch(fail);
       if (!sendAnyway && view.record.findings.some((f) => f.code === "local.lint_blocked")) {
         const go = await ask("The body failed syntax validation and this request blocks invalid bodies. Send it anyway?", {
           title: "Invalid body",
@@ -541,11 +560,24 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   const show = (v: View) => {
     setView(v);
     setMounted((m) => (m.has(v) ? m : new Set(m).add(v)));
-    if (v !== "requests") void loadTree();
+    if (v !== "requests") void loadTree().catch(fail);
+  };
+
+  // A history entry that no longer opens (a damaged record, a lock) says why.
+  const openHistory = async (id: string) => {
+    try {
+      setDialog({ kind: "history", view: await api.historyGet(id) });
+    } catch (e) {
+      fail(e);
+    }
   };
 
   const cancel = async () => {
-    if (tab?.execId) await api.cancel(tab.execId);
+    try {
+      if (tab?.execId) await api.cancel(tab.execId);
+    } catch (e) {
+      fail(e);
+    }
   };
 
   // Abort a session, or an open still connecting; an open it abandons is not an
@@ -709,7 +741,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
       const n = Date.now();
       if (n - last > 15000) {
         last = n;
-        void api.touch();
+        // Best effort: a profile that locked meanwhile shows the lock screen itself.
+        void api.touch().catch(() => {});
       }
     };
     window.addEventListener("pointerdown", ping);
@@ -752,9 +785,13 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                 value={ws?.id ?? ""}
                 onChange={async (e) => {
                   if (e.target.value === "__new") {
-                    const w = await api.createWorkspace("New workspace");
-                    await loadWorkspaces(w.id);
-                    setDialog({ kind: "rename", id: w.id, isFolder: false, name: w.name });
+                    try {
+                      const w = await api.createWorkspace("New workspace");
+                      await loadWorkspaces(w.id);
+                      setDialog({ kind: "rename", id: w.id, isFolder: false, name: w.name });
+                    } catch (err) {
+                      fail(err);
+                    }
                   } else {
                     const w = workspaces.find((x) => x.id === e.target.value);
                     if (w) setWs(w);
@@ -781,7 +818,13 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                 onChange={async (e) => {
                   if (!ws) return;
                   if (e.target.value === "__manage") return setDialog("env");
-                  const w = await api.saveWorkspace({ ...ws, active_environment_id: e.target.value || null });
+                  let w: Workspace;
+                  try {
+                    w = await api.saveWorkspace({ ...ws, active_environment_id: e.target.value || null });
+                  } catch (err) {
+                    fail(err);
+                    return;
+                  }
                   setWs(w);
                   setWorkspaces((l) => l.map((x) => (x.id === w.id ? w : x)));
                 }}
@@ -877,7 +920,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                 aria-selected={side === "history"}
                 onClick={() => {
                   setSide("history");
-                  void loadHistory();
+                  void loadHistory().catch(fail);
                 }}
               >
                 <Icon name="history" size={14} />
@@ -917,8 +960,12 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                     onRename={(n) => setDialog({ kind: "rename", id: n.id, isFolder: n.kind === "folder", name: n.name })}
                     onFolderSettings={(id) => setDialog({ kind: "folder", id })}
                     onDuplicate={async (n) => {
-                      await api.duplicateRequest(n.id);
-                      await loadTree();
+                      try {
+                        await api.duplicateRequest(n.id);
+                        await loadTree();
+                      } catch (e) {
+                        fail(e);
+                      }
                     }}
                     onDelete={removeNode}
                     onMove={moveInto}
@@ -936,8 +983,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                     role="button"
                     tabIndex={0}
                     title={`${h.method} ${h.url}\n${h.summary}`}
-                    onClick={async () => setDialog({ kind: "history", view: await api.historyGet(h.id) })}
-                    onKeyDown={async (e) => e.key === "Enter" && setDialog({ kind: "history", view: await api.historyGet(h.id) })}
+                    onClick={() => void openHistory(h.id)}
+                    onKeyDown={(e) => e.key === "Enter" && void openHistory(h.id)}
                   >
                     <div className="hist-line">
                       <span className={`method m-${h.method}`}>{h.method}</span>
@@ -1036,7 +1083,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                     onReload={() => reloadSaved(tab.req.id)}
                     confirmReload={() => confirmReload(tab.req.id)}
                     savedUrl={savedUrl(tab)}
-                    onTreeChanged={() => void loadTree()}
+                    onTreeChanged={() => void loadTree().catch(fail)}
                   />
                 </div>
                 <div
@@ -1132,8 +1179,11 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
               // workspace read still on its way, which would otherwise
               // land after `saved` and overwrite it.
               const refreshed = loadWorkspaces(ws.id);
-              await loadEnvs();
-              await refreshed;
+              try {
+                await Promise.all([loadEnvs(), refreshed]);
+              } catch (e) {
+                fail(e);
+              }
             }}
           />
         )}
@@ -1153,7 +1203,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
           />
         )}
         {typeof dialog === "object" && dialog?.kind === "folder" && ws && (
-          <ScopeSettingsDialog target={{ kind: "folder", id: dialog.id }} workspaceId={ws.id} profiles={profiles} profilesLoaded={profilesLoaded} onClose={() => setDialog(null)} onSaved={() => void loadTree()} />
+          <ScopeSettingsDialog target={{ kind: "folder", id: dialog.id }} workspaceId={ws.id} profiles={profiles} profilesLoaded={profilesLoaded} onClose={() => setDialog(null)} onSaved={() => void loadTree().catch(fail)} />
         )}
         {dialog === "profiles" && ws && <ProfilesDialog workspaceId={ws.id} onClose={() => setDialog(null)} onChanged={loadProfiles} />}
         {dialog === "export" && <ExportDialog workspace={ws} onClose={() => setDialog(null)} notify={notify} />}
@@ -1164,17 +1214,22 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             onSpecImported={async (r) => {
               setDialog(null);
               const missing = r.report.required_variables.length;
-              const refreshed = await refreshAfterImport([r.workspace_id]);
               const variables = missing ? ` Fill in ${missing} variable(s) before sending.` : "";
-              importNotice(
-                `Imported ${r.requests} request(s). Nothing was sent.${variables}`,
-                refreshed,
-              );
+              const done = `Imported ${r.requests} request(s). Nothing was sent.${variables}`;
+              try {
+                importNotice(done, await refreshAfterImport([r.workspace_id]));
+              } catch (e) {
+                notify(`${done} The workspace could not be refreshed: ${String((e as Error).message ?? e)}`);
+              }
             }}
             onClose={() => setDialog(null)}
             onImported={async (ids) => {
-              const refreshed = await refreshAfterImport(ids);
-              importNotice(`Imported ${ids.length} workspace(s). Nothing was run.`, refreshed);
+              const done = `Imported ${ids.length} workspace(s). Nothing was run.`;
+              try {
+                importNotice(done, await refreshAfterImport(ids));
+              } catch (e) {
+                notify(`${done} The workspaces could not be refreshed: ${String((e as Error).message ?? e)}`);
+              }
             }}
           />
         )}

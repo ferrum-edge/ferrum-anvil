@@ -337,11 +337,17 @@ export function BodyEditor({
 }) {
   const b = (spec.body ?? { type: "none" }) as Body;
   const setBody = (body: Body) => set({ body });
+  const [fileErr, setFileErr] = useState<string | null>(null);
   const pickBinary = async () => {
-    const file = await api.chooseFile("attachment");
-    if (!file) return;
-    const attachment = await api.attachmentAdd(file.token, null);
-    setBody({ type: "binary", attachment, content_type: "application/octet-stream" });
+    setFileErr(null);
+    try {
+      const file = await api.chooseFile("attachment");
+      if (!file) return;
+      const attachment = await api.attachmentAdd(file.token, null);
+      setBody({ type: "binary", attachment, content_type: "application/octet-stream" });
+    } catch (e) {
+      setFileErr(`The file was not added: ${String((e as Error).message)}`);
+    }
   };
   return (
     <div className="col body-editor">
@@ -373,6 +379,11 @@ export function BodyEditor({
           </label>
         )}
       </div>
+      {fileErr && (
+        <div className="bad-box" role="alert">
+          {fileErr}
+        </div>
+      )}
       {b.type === "none" && <p className="hint">This request has no body. Choose a type above to add one.</p>}
       {(b.type === "json" || b.type === "xml") && <LintedText kind={b.type} text={b.text} onChange={(text) => setBody({ ...b, text })} />}
       {b.type === "raw" && (
@@ -541,6 +552,7 @@ function MultipartEditor({
   confirmRelocate?: () => Promise<boolean>;
 }) {
   const set = (i: number, p: MultipartPart) => onChange(parts.map((x, j) => (j === i ? p : x)));
+  const [fileErr, setFileErr] = useState<string | null>(null);
   return (
     <div className="col">
       {parts.map((p, i) => (
@@ -578,17 +590,27 @@ function MultipartEditor({
         <button
           className="btn small"
           onClick={async () => {
-            const file = await api.chooseFile("attachment");
-            if (!file) return;
-            const attachment = await api.attachmentAdd(file.token, null);
-            const name = attachment.kind === "stored" ? attachment.file_name : "file";
-            onChange([...parts, { name: "file", part_kind: "file", attachment, file_name: name, enabled: true }]);
+            setFileErr(null);
+            try {
+              const file = await api.chooseFile("attachment");
+              if (!file) return;
+              const attachment = await api.attachmentAdd(file.token, null);
+              const name = attachment.kind === "stored" ? attachment.file_name : "file";
+              onChange([...parts, { name: "file", part_kind: "file", attachment, file_name: name, enabled: true }]);
+            } catch (e) {
+              setFileErr(`The file was not added: ${String((e as Error).message)}`);
+            }
           }}
         >
           <Icon name="file" size={14} />
           File…
         </button>
       </div>
+      {fileErr && (
+        <div className="bad-box" role="alert">
+          {fileErr}
+        </div>
+      )}
       <p className="hint">Files are copied into the encrypted workspace so exports stay portable.</p>
     </div>
   );
@@ -794,7 +816,7 @@ function McpEditor(props: {
       </p>
       <div className="row">
         {discovering ? (
-          <button type="button" className="btn" onClick={() => void api.cancel(discovering)}>
+          <button type="button" className="btn" onClick={() => void api.cancel(discovering).catch((e) => setDiscovered(`Cancel failed: ${String((e as Error).message)}`))}>
             <Icon name="stop" size={13} />
             Cancel discovery
           </button>
@@ -854,6 +876,7 @@ export function ProtocolEditor({
   useEffect(() => {
     latest.current = spec;
   });
+  const [schemaErr, setSchemaErr] = useState<string | null>(null);
   if (p === "mcp") {
     return (
       <McpEditor
@@ -988,9 +1011,16 @@ export function ProtocolEditor({
                 set({ grpc: { ...(latest.current.grpc ?? defaultGrpc()), schema: { kind: "reflection" } } });
                 return;
               }
-              const files = await api.chooseFiles("attachment", { multiple: kind === "proto_files" });
-              if (files.length === 0) return;
-              const refs = await Promise.all(files.map((f) => api.attachmentAdd(f.token, null)));
+              setSchemaErr(null);
+              let refs: AttachmentRef[];
+              try {
+                const files = await api.chooseFiles("attachment", { multiple: kind === "proto_files" });
+                if (files.length === 0) return;
+                refs = await Promise.all(files.map((f) => api.attachmentAdd(f.token, null)));
+              } catch (e) {
+                setSchemaErr(`The schema was not added: ${String((e as Error).message)}`);
+                return;
+              }
               // Merge into the latest spec so edits made while the dialog was open are kept.
               const current = latest.current.grpc ?? defaultGrpc();
               set({ grpc: { ...current, schema: kind === "proto_files" ? { kind: "proto_files", files: refs } : { kind: "descriptor_set", attachment: refs[0] } } });
@@ -1003,6 +1033,11 @@ export function ProtocolEditor({
             <option value="descriptor_set">Descriptor set (.pb)…</option>
           </select>
         </label>
+        {schemaErr && (
+          <div className="bad-box" role="alert">
+            {schemaErr}
+          </div>
+        )}
         {linkedSchemaFiles(g.schema).length > 0 && (
           <div className="col" data-testid="grpc-linked-schema">
             <span className="lbl">Linked schema files (read from this device)</span>

@@ -74,10 +74,16 @@ export function RunnerView(props: {
 
   const wsRef = useRef(props.workspaceId);
   wsRef.current = props.workspaceId;
-  /** The workspace's reports, or null when the workspace changed meanwhile. */
+  /** The workspace's reports, or null when the workspace changed meanwhile or the lists could not be read (said). */
   const reload = async () => {
     const w = props.workspaceId;
-    const [s, r] = await Promise.all([api.scenarios(w), api.runReports(w)]);
+    let s: Scenario[], r: RunReport[];
+    try {
+      [s, r] = await Promise.all([api.scenarios(w), api.runReports(w)]);
+    } catch (e) {
+      if (w === wsRef.current) props.notify(`Could not read the scenarios and reports: ${String((e as Error).message)}`);
+      return null;
+    }
     if (w !== wsRef.current) return null;
     setScenarios(s);
     setReports(r);
@@ -272,7 +278,13 @@ export function RunnerView(props: {
             <ScenarioEditor
               requests={requests}
               onCreate={async (name, ids) => {
-                const s = await api.createScenario(props.workspaceId, name, ids);
+                let s: Scenario;
+                try {
+                  s = await api.createScenario(props.workspaceId, name, ids);
+                } catch (e) {
+                  props.notify(String((e as Error).message));
+                  return;
+                }
                 // Switched workspace meanwhile: do not select it in another workspace's view.
                 if ((await reload()) === null) return;
                 setSel({ kind: "scenario", id: s.id });
@@ -601,17 +613,37 @@ const NON_FILE_NAME_CHARS = /[^\w.-]+/g;
 
 function ReportView(props: { runId: string; notify: (m: string) => void; onDeleted: () => void }) {
   const [r, setR] = useState<RunReport | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
-    api.runReport(props.runId).then(setR);
+    let alive = true;
+    setErr(null);
+    api.runReport(props.runId).then(
+      (x) => alive && setR(x),
+      (e) => alive && setErr(String((e as Error).message)),
+    );
+    return () => {
+      alive = false;
+    };
   }, [props.runId]);
-  if (!r) return <div className="faint">Loading report…</div>;
+  if (!r)
+    return err ? (
+      <div className="bad-box" role="alert">
+        The report could not be read: {err}
+      </div>
+    ) : (
+      <div className="faint">Loading report…</div>
+    );
   const t = r.totals;
   const exportAs = async (format: "json" | "junit" | "html") => {
     const ext = format === "junit" ? "xml" : format;
-    const file = await api.chooseFile("run_report_export", { file_name: `anvil-run-${r.name.replace(NON_FILE_NAME_CHARS, "_")}-${r.started_at.slice(0, 10)}.${ext}` });
-    if (!file) return;
-    await api.exportRunReport(r.run_id, format, file.token);
-    props.notify(`Exported to ${file.file_name}`);
+    try {
+      const file = await api.chooseFile("run_report_export", { file_name: `anvil-run-${r.name.replace(NON_FILE_NAME_CHARS, "_")}-${r.started_at.slice(0, 10)}.${ext}` });
+      if (!file) return;
+      await api.exportRunReport(r.run_id, format, file.token);
+      props.notify(`Exported to ${file.file_name}`);
+    } catch (e) {
+      props.notify(`Export failed: ${String((e as Error).message)}`);
+    }
   };
   return (
     <div className="page">
@@ -642,7 +674,12 @@ function ReportView(props: { runId: string; notify: (m: string) => void; onDelet
           <button
             className="btn small ghost danger"
             onClick={async () => {
-              await api.deleteRunReport(r.run_id);
+              try {
+                await api.deleteRunReport(r.run_id);
+              } catch (e) {
+                props.notify(String((e as Error).message));
+                return;
+              }
               props.onDeleted();
             }}
           >

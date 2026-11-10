@@ -27,8 +27,10 @@ export function ScopeSettingsDialog(props: {
   const [err, setErr] = useState<string | null>(null);
   // Set by a bundle import or backup restore on this device; only the user lifts it.
   const [sealed, setSealed] = useState(false);
+  // Why the folder could not be read: the dialog says so instead of not opening.
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   useEffect(() => {
-    if (props.target.kind === "folder") api.getFolder(props.target.id).then(setFolder);
+    if (props.target.kind === "folder") api.getFolder(props.target.id).then(setFolder, (e) => setLoadErr(String((e as Error).message)));
     else api.deviceIdentitySealed(props.target.workspace.id).then(setSealed, () => setSealed(false));
   }, []);
   // The backend asks the user in its own native dialog before it lifts the
@@ -64,6 +66,22 @@ export function ScopeSettingsDialog(props: {
     }
   };
   const obj = props.target.kind === "folder" ? folder : ws;
+  if (!obj && loadErr)
+    return (
+      <Modal
+        title="Folder settings"
+        onClose={props.onClose}
+        footer={
+          <button className="btn" onClick={props.onClose}>
+            Close
+          </button>
+        }
+      >
+        <div className="bad-box" role="alert">
+          The folder could not be read: {loadErr}
+        </div>
+      </Modal>
+    );
   if (!obj) return null;
   const importRoot = props.target.kind === "folder" && folder?.import_root === true ? folder : null;
   const auth = (obj.auth as AuthConfig | undefined) ?? { type: "inherit" };

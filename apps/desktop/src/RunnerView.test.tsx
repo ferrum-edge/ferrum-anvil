@@ -204,6 +204,32 @@ describe("starting a run", () => {
   });
 });
 
+describe("failures", () => {
+  it("says why the lists could not be read", async () => {
+    backend({
+      run_reports: () => {
+        throw "LOCKED";
+      },
+    });
+    render(view("A"));
+    await waitFor(() => expect(notify).toHaveBeenCalledWith("Could not read the scenarios and reports: LOCKED"));
+  });
+
+  it("says why a report could not be read instead of loading forever", async () => {
+    const report = { run_id: "run-1", name: "Nightly", started_at: now, completion: "completed", totals: { steps_passed: 1, steps_executed: 1, steps_failed: 0, steps_errored: 0 } };
+    backend({
+      run_reports: () => [report],
+      run_report: () => {
+        throw "the report no longer decodes";
+      },
+    });
+    render(view("A"));
+    fireEvent.click(await screen.findByText("Nightly"));
+    expect((await screen.findByRole("alert")).textContent).toBe("The report could not be read: the report no longer decodes");
+    expect(screen.queryByText("Loading report…")).toBeNull();
+  });
+});
+
 describe("switching workspaces", () => {
   it("drops workspace A's scenario and its Run action, and restores nothing stale on return", async () => {
     backend({ run_start: () => "run-1" });

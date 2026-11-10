@@ -1958,6 +1958,18 @@ describe("the request tree", () => {
     expect(calls("request_get")).toHaveLength(1);
   });
 
+  it("says why a request could not be opened, and opens no tab", async () => {
+    backend({
+      request_get: () => {
+        throw "the stored request no longer decodes";
+      },
+    });
+    await boot();
+    fireEvent.click(screen.getByRole("treeitem", { name: /Alpha/ }));
+    expect(await screen.findByText("the stored request no longer decodes")).toBeTruthy();
+    expect(openTabs().queryByRole("tab", { name: /Alpha/ })).toBeNull();
+  });
+
   it("opens one tab when a request is opened twice while it is read", async () => {
     const read = deferred<RequestDefinition>();
     backend({ request_get: () => read.promise });

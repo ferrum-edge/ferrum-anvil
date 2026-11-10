@@ -217,11 +217,17 @@ export function LoadView(props: {
   // reload is still running when the next save starts its own), and an
   // earlier one that answers late holds older plans than a later one.
   const reloadSeq = useRef(0);
-  /** The workspace's reports, or null when superseded or the workspace changed. */
+  /** The workspace's reports, or null when superseded, the workspace changed or the lists could not be read (said). */
   const reload = async () => {
     const w = props.workspaceId;
     const seq = ++reloadSeq.current;
-    const [p, r, d] = await Promise.all([api.loadPlans(w), api.loadReports(w), api.datasets(w)]);
+    let p: LoadPlan[], r: LoadReportSummary[], d: Dataset[];
+    try {
+      [p, r, d] = await Promise.all([api.loadPlans(w), api.loadReports(w), api.datasets(w)]);
+    } catch (e) {
+      if (w === wsRef.current && seq === reloadSeq.current) props.notify(`Could not read the load plans and reports: ${String((e as Error).message)}`);
+      return null;
+    }
     if (w !== wsRef.current || seq !== reloadSeq.current) return null;
     setPlans(p);
     setReports(r);
@@ -363,7 +369,7 @@ export function LoadView(props: {
       <section className="work single">
         <div className="pane">
           {lives.map((l) => (
-            <LivePanel key={l.runKey} live={l} onCancel={() => void api.loadRunCancel(l.runKey)} />
+            <LivePanel key={l.runKey} live={l} onCancel={() => void api.loadRunCancel(l.runKey).catch((e) => props.notify(`Could not stop the run: ${String((e as Error).message)}`))} />
           ))}
           {!live && selPlan && (
             <PlanEditor
@@ -1164,21 +1170,41 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
   const [r, setR] = useState<LoadReport | null>(null);
   const [cmpWith, setCmpWith] = useState("");
   const [cmp, setCmp] = useState<LoadComparison | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
-    api.loadReport(props.runId).then(setR);
+    let alive = true;
+    setErr(null);
+    api.loadReport(props.runId).then(
+      (x) => alive && setR(x),
+      (e) => alive && setErr(String((e as Error).message)),
+    );
+    return () => {
+      alive = false;
+    };
   }, [props.runId]);
-  if (!r) return <div className="faint">Loading report…</div>;
+  if (!r)
+    return err ? (
+      <div className="bad-box" role="alert">
+        The report could not be read: {err}
+      </div>
+    ) : (
+      <div className="faint">Loading report…</div>
+    );
   const c = r.counts;
   const u = r.requests ?? NO_UNITS;
   const [, many] = unitWords(r.protocol_metrics);
   const exportAs = async (format: "json" | "csv" | "timeline_csv" | "html") => {
     const ext = format === "html" ? "html" : format === "json" ? "json" : "csv";
-    const file = await api.chooseFile("load_report_export", {
-      file_name: `anvil-load-${r.plan.name.replace(NON_FILE_NAME_CHARS, "_")}-${r.started_at.slice(0, 10)}.${format === "timeline_csv" ? "timeline.csv" : ext}`,
-    });
-    if (!file) return;
-    const n = await api.exportLoadReport(r.run_id, format, file.token);
-    props.notify(`Exported ${fmtBytes(n)} to ${file.file_name}`);
+    try {
+      const file = await api.chooseFile("load_report_export", {
+        file_name: `anvil-load-${r.plan.name.replace(NON_FILE_NAME_CHARS, "_")}-${r.started_at.slice(0, 10)}.${format === "timeline_csv" ? "timeline.csv" : ext}`,
+      });
+      if (!file) return;
+      const n = await api.exportLoadReport(r.run_id, format, file.token);
+      props.notify(`Exported ${fmtBytes(n)} to ${file.file_name}`);
+    } catch (e) {
+      props.notify(`Export failed: ${String((e as Error).message)}`);
+    }
   };
   return (
     <div className="page">
@@ -1216,7 +1242,12 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
           <button
             className="btn small ghost danger"
             onClick={async () => {
-              await api.deleteLoadReport(r.run_id);
+              try {
+                await api.deleteLoadReport(r.run_id);
+              } catch (e) {
+                props.notify(String((e as Error).message));
+                return;
+              }
               props.onDeleted();
             }}
           >
@@ -1366,7 +1397,17 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
               </option>
             ))}
         </select>
-        <button className="btn" disabled={!cmpWith} onClick={async () => setCmp(await api.compareLoadReports(r.run_id, cmpWith))}>
+        <button
+          className="btn"
+          disabled={!cmpWith}
+          onClick={async () => {
+            try {
+              setCmp(await api.compareLoadReports(r.run_id, cmpWith));
+            } catch (e) {
+              props.notify(`Could not compare the runs: ${String((e as Error).message)}`);
+            }
+          }}
+        >
           Compare
         </button>
       </div>

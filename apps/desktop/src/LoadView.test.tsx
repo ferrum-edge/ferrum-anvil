@@ -872,6 +872,16 @@ describe("PlanEditor dataset linked file", () => {
 });
 
 describe("ReportView", () => {
+  it("says why a report could not be read instead of loading forever", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "load_report") throw "LOCKED";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    render(<ReportView runId="run-1" reports={[]} notify={() => {}} onDeleted={() => {}} />);
+    expect((await screen.findByRole("alert")).textContent).toBe("The report could not be read: LOCKED");
+    expect(screen.queryByText("Loading report…")).toBeNull();
+  });
+
   it("counts exchanges, not requests, and shows the protocol panel", async () => {
     const report = sampleReport();
     invoke.mockImplementation(async (cmd: string) => {
