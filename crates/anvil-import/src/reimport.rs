@@ -582,16 +582,19 @@ fn unit_hash(v: &Value) -> String {
 fn merge_variables(prefix: &str, current: &[Variable], fresh: &[Variable], take: &HashSet<&str>) -> Vec<Variable> {
     let current = variable_keys(prefix, current);
     let fresh = variable_keys(prefix, fresh);
+    // Reversed so that the first of equal keys wins.
+    let fresh_by_key: HashMap<&str, &Variable> = fresh.iter().rev().map(|(k, v)| (k.as_str(), *v)).collect();
+    let current_keys: HashSet<&str> = current.iter().map(|(k, _)| k.as_str()).collect();
     let mut out = vec![];
     for (k, v) in &current {
         if !take.contains(k.as_str()) {
             out.push((*v).clone());
-        } else if let Some((_, f)) = fresh.iter().find(|(f, _)| f == k) {
+        } else if let Some(f) = fresh_by_key.get(k.as_str()) {
             out.push((*f).clone());
         }
     }
     for (k, f) in &fresh {
-        if take.contains(k.as_str()) && !current.iter().any(|(c, _)| c == k) {
+        if take.contains(k.as_str()) && !current_keys.contains(k.as_str()) {
             out.push((*f).clone());
         }
     }
@@ -688,11 +691,15 @@ impl ReimportPlan {
             out.auth = fresh.auth.clone();
         }
         out.variables = merge_variables("variables", &current.variables, &fresh.variables, &take);
+        // By id; reversed so that the first of equal ids wins.
+        let fresh_environments: HashMap<Id, &Environment> = fresh.environments.iter().rev().map(|f| (f.meta.id, f)).collect();
+        let fresh_folders: HashMap<Id, &Folder> = fresh.folders.iter().rev().map(|f| (f.meta.id, f)).collect();
+        let current_environments: HashSet<Id> = current.environments.iter().map(|e| e.meta.id).collect();
         out.environments = vec![];
         for e in &current.environments {
             let at = environment_key(e.meta.id);
             let taken = take.contains(at.as_str());
-            match fresh.environments.iter().find(|f| f.meta.id == e.meta.id) {
+            match fresh_environments.get(&e.meta.id) {
                 // Approved for deletion.
                 None if taken => {}
                 None => out.environments.push(e.clone()),
@@ -706,10 +713,10 @@ impl ReimportPlan {
                 }
             }
         }
-        let added = fresh.environments.iter().filter(|f| !current.environments.iter().any(|e| e.meta.id == f.meta.id));
+        let added = fresh.environments.iter().filter(|f| !current_environments.contains(&f.meta.id));
         out.environments.extend(added.filter(|f| take.contains(environment_key(f.meta.id).as_str())).cloned());
         for c in &mut out.folders {
-            let Some(f) = fresh.folders.iter().find(|f| f.meta.id == c.meta.id) else { continue };
+            let Some(f) = fresh_folders.get(&c.meta.id) else { continue };
             let at = folder_key(c.meta.id);
             let taken = |unit: &str| take.contains(format!("{at}{unit}").as_str());
             if taken("") {
