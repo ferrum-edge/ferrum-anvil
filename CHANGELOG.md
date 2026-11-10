@@ -217,6 +217,11 @@
   have been read, the id is shown as it is (#471).
 - Escape and Cmd/Ctrl+Enter in a dialog a view opened itself (for example the JWT inspector) no
   longer also cancel or send the request in the active tab; Cmd/Ctrl+L still locks (#471).
+- A bundle import lists every vault secret the bundle leaves behind, as a full backup's restore
+  does: a proxy profile's password, an integration's credentials and the secrets of datasets,
+  scenarios and load plans were missing from the list (#535).
+- An export with history that has more than 1,000 records for a workspace lists the older ones
+  among its excluded items instead of leaving them out silently (#535).
 
 ## [0.1.7] - 2026-11-03
 

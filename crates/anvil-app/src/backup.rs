@@ -1076,7 +1076,7 @@ fn decode(c: &BackupContents) -> std::result::Result<Decoded, BackupError> {
 }
 
 /// Secret references (`{"kind":"secret","secret":{"id":..,"label":..}}`) in `v`.
-fn secret_refs(v: &Value, out: &mut Vec<(String, String)>) {
+pub(crate) fn secret_refs(v: &Value, out: &mut Vec<(String, String)>) {
     match v {
         Value::Object(m) => {
             if m.get("kind").and_then(Value::as_str) == Some("secret")

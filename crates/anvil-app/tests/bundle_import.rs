@@ -3,7 +3,7 @@
 //! build cannot read change nothing.
 
 use anvil_app::exec::SendOptions;
-use anvil_app::port::ImportApproval;
+use anvil_app::port::{EXPORT_HISTORY_LIMIT, ImportApproval};
 use anvil_app::profiles::ProfileManager;
 use anvil_app::runner::RunSettings;
 use anvil_app::{App, AppError};
@@ -12,6 +12,7 @@ use anvil_domain::auth::AuthConfig;
 use anvil_domain::load::{LoadPlan, Workload};
 use anvil_domain::request::{AttachmentRef, Body, MultipartContent, MultipartPart, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
+use anvil_domain::tls::{ProxyKind, ProxyProfile};
 use anvil_domain::workspace::{
     Dataset, DatasetFormat, Meta, RequestDefinition, RequestRevision, Scenario, ScenarioStep, Variable, Workspace,
 };
@@ -913,6 +914,78 @@ async fn an_imported_history_record_is_never_dated_after_its_import() {
     assert!(before.timestamp_millis() <= at && at <= after.timestamp_millis(), "stored at {at}");
     let (record, _) = b.store.get_history::<anvil_domain::execution::ExecutionRecord>(&stored[0].id).unwrap().unwrap();
     assert_eq!(record.started_at.timestamp_millis(), at);
+}
+
+/// An export with history carries a workspace's newest records up to
+/// [`EXPORT_HISTORY_LIMIT`] and lists the older ones among its excluded
+/// items instead of dropping them silently (#535).
+#[tokio::test]
+async fn an_export_with_history_lists_the_records_it_leaves_out() {
+    anvil_fixtures::init();
+    let fx = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let request = a.create_request(&ws.meta.id, None, "Echo", RequestSpec::http("GET", &fx.url("/echo"))).unwrap();
+    let opts = SendOptions { record_history: true, ..Default::default() };
+    a.send(Some(request.meta.id), &ws.meta.id, None, opts, EventCtx::none(), CancellationToken::new()).await.unwrap();
+    let preview = a.export_preview(Some(&ws.meta.id), ExportMode::ShareSafely, true).unwrap();
+    assert_eq!(preview.manifest.counts["history"] as usize, 1);
+    assert!(preview.manifest.excluded.is_empty(), "{:?}", preview.manifest.excluded);
+
+    // As many older copies of the record again, in one transaction.
+    let first = a.store.list_history(Some(&ws.meta.id), None, 1).unwrap().remove(0);
+    let (rec, _) = a.store.get_history::<anvil_domain::execution::ExecutionRecord>(&first.id).unwrap().unwrap();
+    a.store
+        .atomically(|tx| {
+            for i in 1..=EXPORT_HISTORY_LIMIT as i64 {
+                let mut r = rec.clone();
+                r.id = Id::new();
+                r.started_at = chrono::DateTime::from_timestamp_millis(rec.started_at.timestamp_millis() - i).unwrap();
+                let (ws_id, req_id, at) = (r.workspace_id, r.request_id, r.started_at.timestamp_millis());
+                tx.add_history(&r.id, ws_id.as_ref(), req_id.as_ref(), at, &r, None)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (_, written) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, true).unwrap();
+    assert_eq!(written.manifest.counts["history"] as usize, EXPORT_HISTORY_LIMIT);
+    let excluded = &written.manifest.excluded;
+    let note = format!("history records of workspace 'Payments' older than its newest {EXPORT_HISTORY_LIMIT}");
+    assert!(excluded.iter().any(|x| x.starts_with(&note)), "{excluded:?}");
+    let planned = a.export_preview(Some(&ws.meta.id), ExportMode::ShareSafely, true).unwrap();
+    assert_eq!(planned.manifest.excluded, written.manifest.excluded);
+}
+
+/// A share-safe bundle leaves every vault secret behind, and its import
+/// lists each one the recipient must enter, a proxy profile's password
+/// included (#535).
+#[test]
+fn a_share_safe_import_lists_a_missing_proxy_password() {
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "a");
+    let ws = a.create_workspace("Payments").unwrap();
+    let password = a.set_secret(&ws.meta.id, "proxy password", TOKEN).unwrap();
+    a.save_proxy_profile(ProxyProfile {
+        id: Id::new(),
+        workspace_id: ws.meta.id,
+        name: "corporate proxy".into(),
+        kind: ProxyKind::Http,
+        address: "127.0.0.1:3128".into(),
+        username: Some("svc".into()),
+        password: Some(SensitiveValue::Secret { secret: password }),
+        no_proxy: String::new(),
+        tls_profile_id: None,
+        hbone: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    })
+    .unwrap();
+    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
+    let b = new_app(root.path(), "b");
+    let rep = b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    assert_eq!(rep.missing_secrets.len(), 1, "{:?}", rep.missing_secrets);
+    assert!(rep.missing_secrets[0].starts_with("proxy password ("), "{:?}", rep.missing_secrets);
 }
 
 #[test]
