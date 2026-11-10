@@ -8,8 +8,10 @@
   (`docs/audit/gateway-source-audit.md`). The lab runs the unmodified
   published release binary.
 - Dependencies must be permissively licensed (MIT, Apache-2.0, BSD, ISC,
-  Zlib, Unicode-3.0, CDLA-Permissive-2.0 and similar). `cargo deny` enforces
-  this, together with advisories and sources, in CI.
+  Zlib, Unicode-3.0, BSL-1.0, CC0-1.0, Unlicense, 0BSD; the exact list is the
+  `[licenses]` allow list in `deny.toml`). MPL-2.0 is allowed only for the
+  unmodified crates named as exceptions there. `cargo deny` enforces this,
+  together with advisories and sources, in CI.
 - Crypto comes from audited libraries only: rustls (ring provider) for TLS,
   RustCrypto AEADs/hashes, argon2 and p256 (DPoP keys) for local primitives,
   AWS-LC (`aws-lc-rs`) for JWT signing/verification (jsonwebtoken's
