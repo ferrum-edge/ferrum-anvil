@@ -1042,7 +1042,11 @@ and id (never its content), so the damaged row can be found and repaired or
 deleted. Pins are re-applied to existing attachments, in one write
 transaction, whenever a profile opens.
 
-Deleting a workspace deletes its items and, in the same write transaction,
+A workspace is deleted in the desktop app from the workspace picker
+(**Delete this workspace…**, confirmed by typing its name; open sessions and
+requests in flight in it are stopped first), or with
+`anvil workspace delete <workspace> --confirm-delete` (its id, or an exact
+name no other workspace has). Deleting a workspace deletes its items and, in the same write transaction,
 releases every stored file they referenced that no item of another
 workspace still references, except a file a user attached within the grace
 period (below; a mark without a time counts as recent until the cleanup at

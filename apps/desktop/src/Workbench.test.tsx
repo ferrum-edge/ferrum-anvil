@@ -1971,3 +1971,65 @@ describe("the request tree", () => {
     expect(openTabs().getAllByRole("tab", { name: /Alpha/ })).toHaveLength(1);
   });
 });
+
+describe("deleting a workspace", () => {
+  const confirmDelete = async () => {
+    fireEvent.change(screen.getByLabelText("Workspace"), { target: { value: "__delete" } });
+    const dialog = await screen.findByRole("dialog", { name: "Delete workspace" });
+    const button = within(dialog).getByRole("button", { name: "Delete workspace" }) as HTMLButtonElement;
+    const name = within(dialog).getByLabelText("Type the workspace name to confirm");
+    return { dialog, button, name };
+  };
+
+  it("deletes the workspace only once its name is typed, then selects another", async () => {
+    let deleted = false;
+    backend({
+      workspaces_list: () => (deleted ? [workspace("B", "Two")] : [workspace("A", "One"), workspace("B", "Two")]),
+      workspace_delete: () => {
+        deleted = true;
+        return null;
+      },
+    });
+    await boot();
+    await openTab("Alpha");
+
+    const { button, name } = await confirmDelete();
+    expect(button.disabled).toBe(true);
+    fireEvent.change(name, { target: { value: "one" } });
+    expect(button.disabled).toBe(true);
+    fireEvent.change(name, { target: { value: "One" } });
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+
+    await waitFor(() => expect(calls("workspace_delete")).toEqual([{ workspaceId: "A" }]));
+    await waitFor(() => expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("B"));
+    expect(screen.queryByRole("tab", { name: /Alpha/ })).toBeNull();
+    await screen.findByRole("treeitem", { name: /Gamma/ });
+  });
+
+  it("stops a live session of the workspace before deleting it", async () => {
+    backend({ workspace_delete: () => null });
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+
+    const { dialog, button, name } = await confirmDelete();
+    expect(dialog.textContent).toContain("will be stopped");
+    fireEvent.change(name, { target: { value: "One" } });
+    fireEvent.click(button);
+    await waitFor(() => expect(calls("session_cancel")).toEqual([cancelArgs()]));
+    await waitFor(() => expect(calls("workspace_delete")).toEqual([{ workspaceId: "A" }]));
+  });
+
+  it("deletes nothing when canceled", async () => {
+    backend();
+    await boot();
+    const { dialog, name } = await confirmDelete();
+    fireEvent.change(name, { target: { value: "One" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Delete workspace" })).toBeNull());
+    expect(calls("workspace_delete")).toHaveLength(0);
+    expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("A");
+  });
+});
