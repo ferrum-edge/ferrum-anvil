@@ -29,6 +29,9 @@ pub struct LabPki {
     pub rogue_ca: Pem,
     /// localhost / 127.0.0.1 / ::1 / *.anvil.test, valid, signed by `ca`.
     pub server: Pem,
+    /// As `server`, with 120 more DNS names, so its DER is over 3 KiB
+    /// (a leaf that needs a large poll buffer and several handshake records).
+    pub server_large: Pem,
     pub server_expired: Pem,
     pub server_not_yet_valid: Pem,
     /// Valid chain but SAN = wrong.anvil.invalid only.
@@ -105,8 +108,11 @@ impl LabPki {
         let client_ca = make_ca("Anvil Lab Client CA");
         let valid_from = now - Duration::days(1);
         let valid_to = now + Duration::days(90);
+        let extra: Vec<String> = (0..120).map(|i| format!("large-{i:03}.anvil.test")).collect();
+        let large_names: Vec<&str> = SERVER_NAMES.iter().copied().chain(extra.iter().map(String::as_str)).collect();
         LabPki {
             server: leaf("anvil-lab-server", SERVER_NAMES, &ca.issuer, valid_from, valid_to, false),
+            server_large: leaf("anvil-lab-server-large", &large_names, &ca.issuer, valid_from, valid_to, false),
             server_expired: leaf("anvil-lab-expired", SERVER_NAMES, &ca.issuer, now - Duration::days(30), now - Duration::days(1), false),
             server_not_yet_valid: leaf(
                 "anvil-lab-future",

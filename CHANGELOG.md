@@ -108,6 +108,14 @@
   anything answering on its UDP port before the handshake completed, could end `anvil send` or
   `anvil run` with exit status 101 and no execution record, or end a load worker, for HTTP/3,
   WebSocket, SSE and gRPC over HTTP/3, and MASQUE CONNECT-UDP (GHSA-c825-hqr8-8gj8).
+- A DTLS server whose leaf certificate is over 2 KiB (a long SAN list, or any blob the server or
+  something answering on its UDP port sends in the unauthenticated DTLS 1.2 Certificate flight) no
+  longer panics Anvil inside the DTLS library before the certificate is verified, which ended
+  `anvil send` or `anvil run` with exit status 101 and no record, or a load worker. The handshake
+  now offers the library a buffer that holds any certificate it can assemble. After the handshake,
+  a datagram over 2 KiB is sent and received: one to send was silently never sent, and a larger
+  answer was never read and blocked every later one, so the exchange recorded "no response
+  observed" (`datagrams_received: 0`) although the answer had arrived (GHSA-62g8-g8px-5xm3).
 
 ### Changed
 
