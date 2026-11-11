@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Sign in to the API a saved request calls the way the desktop does: build
 /// the request's context, then sign in with exactly that context.
-async fn sign_in(
+async fn api_sign_in(
     app: &App,
     request_id: Option<anvil_domain::Id>,
     ws: &anvil_domain::Id,
@@ -333,7 +333,7 @@ async fn target_api_sign_in_through_the_app_is_session_only() {
 
     assert_eq!(kind(&send(&app, &ws.meta.id, rid).await), Some(FailureKind::OAuthInteractionRequired));
     assert!(app.oauth_token_status(rid, &ws.meta.id, None, &opts).unwrap().is_none());
-    let auth = sign_in(&app, rid, &ws.meta.id, &opts, &browser, &NoEvents).await.unwrap();
+    let auth = api_sign_in(&app, rid, &ws.meta.id, &opts, &browser, &NoEvents).await.unwrap();
     assert_eq!(auth.profile_scope, "request");
     assert!(app.oauth_token_status(rid, &ws.meta.id, None, &opts).unwrap().is_some());
     let o = send(&app, &ws.meta.id, rid).await;
@@ -341,7 +341,7 @@ async fn target_api_sign_in_through_the_app_is_session_only() {
 
     // Tokens live in memory only and are dropped on lock.
     app.lock();
-    assert!(matches!(sign_in(&app, rid, &ws.meta.id, &opts, &browser, &NoEvents).await, Err(AppError::Locked)));
+    assert!(matches!(api_sign_in(&app, rid, &ws.meta.id, &opts, &browser, &NoEvents).await, Err(AppError::Locked)));
     let (_, key) = ProfileManager::unlock(&dir, Unlock::Passphrase(PASS)).unwrap();
     app.unlock(key).unwrap();
     assert_eq!(kind(&send(&app, &ws.meta.id, rid).await), Some(FailureKind::OAuthInteractionRequired));
@@ -393,7 +393,7 @@ async fn ineligible_token_urls_surface_the_same_failure_to_status_and_browser_ob
         assert_eq!(app.oauth_token_status(rid, &ws.meta.id, None, &opts).unwrap_err().to_string(), expected);
         let events = Mutex::new(Vec::new());
         let observer = |event| events.lock().unwrap().push(event);
-        let error = sign_in(&app, rid, &ws.meta.id, &opts, &opener, &observer).await.unwrap_err();
+        let error = api_sign_in(&app, rid, &ws.meta.id, &opts, &opener, &observer).await.unwrap_err();
         assert_eq!(error.to_string(), expected);
         assert_eq!(*events.lock().unwrap(), vec![FlowEvent::Failed { kind: FlowErrorKind::Configuration, message: expected.into() }]);
     }
@@ -431,7 +431,7 @@ async fn mapped_loopback_token_endpoint_can_complete_app_browser_sign_in() {
     let rid = Some(req.meta.id);
     let opts = SendOptions::default();
     assert!(app.oauth_token_status(rid, &ws.meta.id, None, &opts).unwrap().is_none());
-    sign_in(&app, rid, &ws.meta.id, &opts, &browser, &NoEvents).await.unwrap();
+    api_sign_in(&app, rid, &ws.meta.id, &opts, &browser, &NoEvents).await.unwrap();
     assert!(app.oauth_token_status(rid, &ws.meta.id, None, &opts).unwrap().is_some());
     assert_eq!(send(&app, &ws.meta.id, rid).await.record.response.unwrap().status, 200);
     assert_eq!(idp.api_requests(), (1, 1));
@@ -485,7 +485,7 @@ async fn vault_expansion_failures_are_sanitized_before_status_browser_events_and
         assert_eq!(app.oauth_token_status(rid, &ws.meta.id, None, &opts).unwrap_err().to_string(), expected);
         let events = Mutex::new(Vec::new());
         let observer = |event| events.lock().unwrap().push(event);
-        let error = sign_in(&app, rid, &ws.meta.id, &opts, &opener, &observer).await.unwrap_err();
+        let error = api_sign_in(&app, rid, &ws.meta.id, &opts, &opener, &observer).await.unwrap_err();
         assert_eq!(error.to_string(), expected);
         assert_eq!(*events.lock().unwrap(), vec![FlowEvent::Failed { kind: FlowErrorKind::Configuration, message: expected.into() }]);
         assert!(!serde_json::to_string(&*events.lock().unwrap()).unwrap().contains("vault-canary"));
@@ -563,7 +563,7 @@ async fn credential_variable_failures_keep_endpoint_policy_and_never_disclose_va
             assert_eq!(app.oauth_token_status(rid, &ws.meta.id, None, &opts).unwrap_err().to_string(), expected);
             let events = Mutex::new(Vec::new());
             let observer = |event| events.lock().unwrap().push(event);
-            let error = sign_in(&app, rid, &ws.meta.id, &opts, &opener, &observer).await.unwrap_err();
+            let error = api_sign_in(&app, rid, &ws.meta.id, &opts, &opener, &observer).await.unwrap_err();
             assert_eq!(error.to_string(), expected);
             assert_eq!(*events.lock().unwrap(), vec![FlowEvent::Failed { kind: FlowErrorKind::Configuration, message: expected.into() }]);
             assert!(!serde_json::to_string(&*events.lock().unwrap()).unwrap().contains("canary"));
