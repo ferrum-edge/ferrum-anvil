@@ -1009,7 +1009,8 @@ async fn grpc_h3_status_in_trailers_before_a_missing_end_of_stream_is_recorded()
     let mut plan =
         echo_plan(o.addr.port(), true, "Unary", GrpcMode::Unary, r#"{"message":"h"}"#, GrpcWire::Grpc, HttpVersionPolicy::Http3Only);
     plan.deadline_ms = Some(1_000);
-    let run = grpc::run(&plan, &EventCtx::none(), &CancellationToken::new(), None);
+    let (events, cancel) = (EventCtx::none(), CancellationToken::new());
+    let run = grpc::run(&plan, &events, &cancel, None);
     let out = tokio::time::timeout(std::time::Duration::from_secs(10), run).await.expect("the call did not end");
     assert_eq!(status_of(&out), (Some(0), GrpcStatusSource::Trailers), "{:?}", failure_of(&out));
     let f = failure_of(&out).expect("the stream never ended");
