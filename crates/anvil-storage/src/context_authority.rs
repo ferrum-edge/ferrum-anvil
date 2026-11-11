@@ -18,6 +18,9 @@ use zeroize::Zeroizing;
 /// The objects of one kind a query reads: every owner's for `None`.
 type Scope = (String, Option<Id>);
 
+/// A scope's objects with their ids, in query order, decrypted once.
+type Listing = Arc<Vec<(Id, Value)>>;
+
 /// This capability is produced only by a verified read transaction. It is
 /// deliberately neither serializable nor constructible from IPC data.
 #[derive(Clone)]
@@ -47,7 +50,7 @@ pub struct ContextRead<'a, 'b> {
     authority: RefCell<ContextAuthority>,
     /// Each scope's objects, decrypted once per read: a folder walk queries
     /// the same scope once per folder, and a check replays every query.
-    listed: RefCell<BTreeMap<Scope, Arc<Vec<(Id, Value)>>>>,
+    listed: RefCell<BTreeMap<Scope, Listing>>,
 }
 fn name(table: &str, kind: &str, id: &Id) -> String {
     serde_json::to_string(&[table, kind, &id.to_string()]).expect("strings serialize")
@@ -129,7 +132,7 @@ impl<'a, 'b> ContextRead<'a, 'b> {
     /// Every object of `kind` that `owner` owns, with its id, in query order.
     /// Read with the same integrity checks as [`StoreRead::list`], once per
     /// read.
-    fn listing(&self, kind: &str, owner: Option<&Id>) -> Result<Arc<Vec<(Id, Value)>>> {
+    fn listing(&self, kind: &str, owner: Option<&Id>) -> Result<Listing> {
         let scope = (kind.to_string(), owner.copied());
         if let Some(rows) = self.listed.borrow().get(&scope) {
             return Ok(rows.clone());
