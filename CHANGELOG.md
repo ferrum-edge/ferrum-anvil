@@ -226,11 +226,12 @@
   Stored settings that carry the fields still open (#529).
 - `App::run_dataset`, `App::export`, `App::export_preview`, `App::import`,
   `App::create_environment`, `App::save_folder`, `App::release_attachment`, `App::worker_job`,
-  `App::oauth_sign_in`, `LoadRunGuard::is_stopped` and `anvil_portability::bundle::{prepare,
-  preview, write}`, which only tests called; use `export_with_standards`,
+  `App::oauth_sign_in`, `LoadRunGuard::is_stopped`, `anvil_portability::bundle::prepare` and
+  `anvil_portability::bundle::preview`, which only tests called; use `export_with_standards`,
   `export_preview_with_standards`, `import_approved`, `save_environment`, `save_folder_in_place`,
   `worker_job_with_authority`, `build_context_off_runtime` + `oauth_sign_in_with` and the
-  `*_redacting` bundle functions (#534).
+  `*_redacting` bundle functions. `bundle::write` stays: the bundle resource qualification also
+  builds its harness against released snapshots that have only that entry point (#534).
 - Lab: the scenario branches, helpers (`release_at_least`, `release_from_through_pin`) and
   early-data relay settle time for retired Ferrum Edge releases (v0.9.5–v0.9.15); the lab expects
   v0.9.20's signals only (#540).
