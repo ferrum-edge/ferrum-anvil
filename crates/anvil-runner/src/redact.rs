@@ -120,7 +120,7 @@ impl BodyMatcher {
 
 impl RunSecrets {
     pub fn new(names: Vec<String>) -> Self {
-        let mut s = RunSecrets { values: VecDeque::new(), names, redactor: Redactor::default() };
+        let mut s = RunSecrets { values: VecDeque::new(), names, redactor: Redactor::default(), body: BodyMatcher::Empty };
         s.rebuild();
         s
     }
