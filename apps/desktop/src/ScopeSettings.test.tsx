@@ -50,6 +50,16 @@ function renderWorkspace() {
 
 const calls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd).map((c) => c[1] as Record<string, unknown>);
 
+test("a folder that cannot be read opens the dialog to say why", async () => {
+  invoke.mockImplementation(async (cmd: string) => {
+    if (cmd === "folder_get") throw "LOCKED";
+    return new Promise(() => {});
+  });
+  const profiles = { tls: [], proxy: [], integrations: [] };
+  render(<ScopeSettingsDialog target={{ kind: "folder", id: "f1" }} workspaceId={ws.id} profiles={profiles} onClose={() => {}} onSaved={() => {}} />);
+  expect((await screen.findByRole("alert")).textContent).toBe("The folder could not be read: LOCKED");
+});
+
 test("a sealed workspace says so and is allowed only once the user confirms in the backend's dialog", async () => {
   const answers = [false, true];
   backend(true, () => answers.shift() ?? false);

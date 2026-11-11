@@ -5,7 +5,7 @@
 // Having a dev-dependency on h3_quinn would work as far as cargo is
 // concerned, but quic traits wouldn't match between the "h3" crate that
 // comes before h3_quinn and the one that comes after and runs the tests
-#[path = "../../../h3-quinn/src/lib.rs"]
+#[path = "../../../h3-quinn-0.0.10-stop-sending/src/lib.rs"]
 mod h3_quinn;
 
 mod connection;

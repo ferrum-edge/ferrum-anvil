@@ -1,9 +1,10 @@
-//! The admission profile's second gateway instance: Ferrum Edge (0.9.5 / 0.9.7) in
-//! **mesh mode** (egress-gateway topology, localized file config), used for
-//! UP-018. In 0.9.5 and 0.9.7 the per-destination physical-connection ceiling
-//! (DestinationRule `connectionPool.tcp.maxConnections`) exists only as a
-//! mesh-projected `Upstream.port_overrides[].max_connections`; file mode
-//! rejects that field, so the live ceiling needs this instance.
+//! The admission profile's second gateway instance: Ferrum Edge in **mesh
+//! mode** (egress-gateway topology, localized file config), used for UP-018.
+//! The per-destination physical-connection ceiling (DestinationRule
+//! `connectionPool.tcp.maxConnections`) is set as a mesh-projected
+//! `Upstream.port_overrides[].max_connections`, a field file mode rejected
+//! when this instance was added (0.9.5 and 0.9.7), so the live ceiling uses
+//! this instance.
 //!
 //! Anvil drives the egress gateway's SVID-mTLS listener (127.0.0.1:18589)
 //! with an ordinary verified TLS client identity (the lab client SVID) and
@@ -27,15 +28,16 @@ use std::path::PathBuf;
 pub const EGRESS_PORT: u16 = 18589;
 pub const MESH_ADMIN_PORT: u16 = 18592;
 /// The capped destination's lane: `Host: localhost:18589` selects the
-/// ServiceEntry `localhost:19503` (reqwest HTTP/1.1 dispatch).
+/// ServiceEntry `localhost:19503` (direct HTTP/1.1 pool dispatch, from
+/// v0.9.11).
 pub const H1_LANE: Target = Target {
     base: "https://localhost:18589",
     port: EGRESS_PORT,
     profile_name: "lab admission mesh gateway",
     isolation: "lab-admission-mesh",
 };
-/// Operator id of the materialized egress proxy (0.9.5 and 0.9.7 escape `-` in the
-/// ServiceEntry name as `_dash_`).
+/// Operator id of the materialized egress proxy (the gateway escapes `-` in
+/// the ServiceEntry name as `_dash_`).
 pub const H1_PROXY_ID: &str = "mesh-egress-ferrum-anvil_dash_lab_dash_h1_dash_capped-localhost-19503";
 
 pub struct MeshInstance {

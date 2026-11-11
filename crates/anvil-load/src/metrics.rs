@@ -35,6 +35,15 @@ pub const MAX_EXAMPLE_CHARS: usize = 400;
 pub const MAX_DESTINATIONS: usize = 16;
 pub const MAX_PROTOCOLS: usize = 8;
 pub const OTHER_CATEGORY: &str = "other (category limit reached)";
+/// Distinct WebSocket close codes a run counts on their own; any other code
+/// is counted under [`WS_CLOSE_OTHER`], so a peer cannot grow the close
+/// table with a new code per session.
+pub const MAX_CLOSE_CODES: usize = 16;
+/// The single bucket every WebSocket close code outside 1000..=4999 (RFC
+/// 6455 leaves 0-999 unused and nothing above 4999 defined), or past the
+/// first [`MAX_CLOSE_CODES`] distinct ones, is counted under. It is itself
+/// outside the valid range. The raw code stays in the execution record.
+pub const WS_CLOSE_OTHER: u16 = 0;
 /// Highest `grpc-status` the protocol defines (UNAUTHENTICATED); 0..=16 are
 /// the valid codes.
 pub const GRPC_STATUS_MAX: i32 = 16;
@@ -714,8 +723,12 @@ pub struct ProtoAccum {
     pub messages_received: u64,
     pub with_messages: u64,
     pub first_message: LatencyStat,
-    /// (closed-by key, close code) → units: SSE stream ends, WebSocket closes.
-    pub ends: BTreeMap<(u8, Option<u16>), u64>,
+    /// (closed-by key, close code) → units: SSE stream ends, WebSocket
+    /// closes. Close codes are bounded ([`ProtoAccum::add_end`]): written by
+    /// `record` and `merge` alone.
+    ends: BTreeMap<(u8, Option<u16>), u64>,
+    /// The close codes counted on their own (at most [`MAX_CLOSE_CODES`]).
+    close_codes: BTreeSet<u16>,
     pub ws_opened: u64,
     pub ws_rejected: u64,
     pub ws_not_opened: u64,
@@ -775,6 +788,7 @@ impl ProtoAccum {
             with_messages: 0,
             first_message: LatencyStat::new(SECONDARY_SIGFIG),
             ends: BTreeMap::new(),
+            close_codes: BTreeSet::new(),
             ws_opened: 0,
             ws_rejected: 0,
             ws_not_opened: 0,
@@ -836,14 +850,14 @@ impl ProtoAccum {
             }
         }
         if let Some(by) = p.stream_end {
-            *self.ends.entry((closed_key(by), None)).or_default() += 1;
+            self.add_end(closed_key(by), None, 1);
         }
         if let Some(w) = &p.ws {
             if w.opened {
                 self.ws_opened += 1;
                 self.ws_clean += completed as u64;
                 if let Some((by, code)) = w.close {
-                    *self.ends.entry((closed_key(by), code)).or_default() += 1;
+                    self.add_end(closed_key(by), code, 1);
                 }
             } else if w.rejected {
                 self.ws_rejected += 1;
@@ -929,8 +943,8 @@ impl ProtoAccum {
         self.messages_received += o.messages_received;
         self.with_messages += o.with_messages;
         self.first_message.merge(&o.first_message);
-        for (k, n) in &o.ends {
-            *self.ends.entry(*k).or_default() += n;
+        for ((by, code), n) in &o.ends {
+            self.add_end(*by, *code, *n);
         }
         self.ws_opened += o.ws_opened;
         self.ws_rejected += o.ws_rejected;
@@ -970,6 +984,23 @@ impl ProtoAccum {
         self.tn_timed_out += o.tn_timed_out;
         self.tn_canceled += o.tn_canceled;
         self.tn_setup.merge(&o.tn_setup);
+    }
+
+    /// Count `n` units that ended `by`, with WebSocket close `code`: a valid
+    /// code already counted, or a new one while fewer than
+    /// [`MAX_CLOSE_CODES`] are, counts on its own; any other under
+    /// [`WS_CLOSE_OTHER`].
+    fn add_end(&mut self, by: u8, code: Option<u16>, n: u64) {
+        let code = code.map(|c| {
+            let own = (1000..=4999).contains(&c) && (self.close_codes.contains(&c) || self.close_codes.len() < MAX_CLOSE_CODES);
+            if own {
+                self.close_codes.insert(c);
+                c
+            } else {
+                WS_CLOSE_OTHER
+            }
+        });
+        *self.ends.entry((by, code)).or_default() += n;
     }
 
     fn ends(&self) -> Vec<ClosedCount> {
@@ -1445,5 +1476,39 @@ mod tests {
         expected.extend((0..=GRPC_STATUS_MAX).map(|c| (c, 1)));
         assert_eq!(g.status_codes, expected);
         assert_eq!((g.ok, g.non_ok), (1, 20_018), "an invalid status is never OK");
+    }
+
+    /// A peer closing each session with a new code adds one bucket to the
+    /// close table, never one row per code, and every opened session is
+    /// still counted once.
+    #[test]
+    fn websocket_close_codes_are_bounded_and_keep_every_session() {
+        let closed = |by: ClosedBy, code: Option<u16>| SendObservation {
+            terminal: Terminal::Completed,
+            proto: ProtoObs { ws: Some(WsObs { opened: true, close: Some((by, code)), ..Default::default() }), ..Default::default() },
+            ..Default::default()
+        };
+        let (mut a, mut b) = (ProtoAccum::new(), ProtoAccum::new());
+        a.record(&closed(ClosedBy::Client, Some(1000)));
+        a.record(&closed(ClosedBy::Peer, None));
+        // Outside 1000..=4999: never a row of its own.
+        for code in [0, 999, 5000, u16::MAX] {
+            a.record(&closed(ClosedBy::Peer, Some(code)));
+        }
+        for i in 0..1_000 {
+            b.record(&closed(ClosedBy::Peer, Some(4000 + i)));
+        }
+        a.merge(&b);
+        a.record(&closed(ClosedBy::Client, Some(1000)));
+        let w = a.summary(LoadUnitKind::WebsocketSession, ConnectionMode::Fresh, &[]).websocket.expect("WebSocket metrics");
+        let total: u64 = w.close_codes.iter().map(|c| c.count).sum();
+        assert_eq!(total, 1_007, "every closed session is counted once: {:?}", w.close_codes);
+        let codes: BTreeSet<u16> = w.close_codes.iter().filter_map(|c| c.code).filter(|c| *c != WS_CLOSE_OTHER).collect();
+        assert_eq!(codes.len(), MAX_CLOSE_CODES, "{:?}", w.close_codes);
+        assert!(codes.contains(&1000), "a code counted first keeps its row");
+        let other = |by| w.close_codes.iter().find(|c| c.closed_by == by && c.code == Some(WS_CLOSE_OTHER)).map(|c| c.count);
+        assert_eq!(other(ClosedBy::Peer), Some(4 + 1_000 - (MAX_CLOSE_CODES as u64 - 1)));
+        assert_eq!(w.close_codes.iter().find(|c| c.code == Some(1000)).map(|c| c.count), Some(2));
+        assert!(w.close_codes.iter().any(|c| c.code.is_none() && c.count == 1), "a close without a code keeps its row");
     }
 }

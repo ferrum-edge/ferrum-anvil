@@ -80,6 +80,42 @@ fn filtered_queries_cover_empty_membership_duplicates_and_repointing() {
     assert!(matches!(store.check_context(&positive), Err(StoreError::StaleAuthority)));
 }
 #[test]
+fn repeated_queries_over_one_scope_keep_each_membership_across_checks() {
+    let (_dir, store) = store();
+    let a = Id::new();
+    let b = Id::new();
+    put(&store, &a, "a", 0.0);
+    put(&store, &b, "b", 1.0);
+    let by_path = |path: &str| vec![("/path".to_string(), json!(path))];
+    let proof = store
+        .read_context(|read| {
+            // A folder walk asks the same scope again and again.
+            for _ in 0..3 {
+                let found: Vec<serde_json::Value> = read.query(anvil_storage::kind::TOKEN_FILE, None, &by_path("a"))?;
+                assert_eq!(found.len(), 1);
+            }
+            let none: Vec<serde_json::Value> = read.query(anvil_storage::kind::TOKEN_FILE, None, &by_path("c"))?;
+            assert!(none.is_empty());
+            Ok(read.finish())
+        })
+        .unwrap();
+    store.check_context(&proof).unwrap();
+    store.check_context(&proof).unwrap();
+    // The scope changed, but no query's membership did.
+    put(&store, &b, "b", 1.0);
+    store.check_context(&proof).unwrap();
+    store.check_context(&proof).unwrap();
+    // A new object the second query selects.
+    let c = Id::new();
+    put(&store, &c, "c", 2.0);
+    assert!(matches!(store.check_context(&proof), Err(StoreError::StaleAuthority)));
+    store.delete(anvil_storage::kind::TOKEN_FILE, &c).unwrap();
+    store.check_context(&proof).unwrap();
+    // The first query's object no longer matches.
+    put(&store, &a, "moved", 0.0);
+    assert!(matches!(store.check_context(&proof), Err(StoreError::StaleAuthority)));
+}
+#[test]
 fn ordered_candidate_query_covers_shadowing_reordering_and_removal() {
     let (_dir, store) = store();
     let first = Id::new();

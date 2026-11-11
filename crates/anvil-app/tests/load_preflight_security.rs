@@ -11,7 +11,7 @@ use anvil_domain::request::{KeyValue, Protocol, RequestSpec};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::settings::{DnsOverride, ProxySelection};
 use anvil_domain::tls::{ProxyKind, ProxyProfile};
-use anvil_domain::workspace::{DatasetFormat, Variable};
+use anvil_domain::workspace::{DatasetFormat, Environment, Meta, Variable};
 use anvil_engine::context::SecretResolver;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
@@ -465,8 +465,11 @@ async fn literal_loopback_cleartext_issuers_through_a_proxy_are_refused_before_c
     assert!(recorder.requests().is_empty());
 }
 
+/// Which of these credentials a context looks up when it is built is checked
+/// in `anvil-app/src/exec.rs` (`prefetch_tests`): any protected edit stales the
+/// whole context, so the deletions here prove revocation, not prefetch order.
 #[test]
-fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_scope() {
+fn oauth_credential_contexts_resolve_and_are_revoked_for_every_grant_and_endpoint() {
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path());
     let mut ws = app.create_workspace("Credential ordering").unwrap();
@@ -521,7 +524,7 @@ fn oauth_vault_prefetch_requires_a_fixed_validated_endpoint_for_every_grant_and_
     }
     let ctx = context(&app, &plan(&app, ws.meta.id, spec));
     app.store.delete_secret(&secret.id).unwrap();
-    assert!(ctx.secrets.resolve(&secret).is_err(), "a proxied cleartext credential was prefetched");
+    assert!(ctx.secrets.resolve(&secret).is_err(), "a revoked proxied cleartext credential still resolved");
 }
 
 #[tokio::test]
@@ -625,10 +628,10 @@ async fn app_and_worker_producer_check_ineligible_issuers_before_nested_vault_va
                 let mut job = app.load_job(&p).expect("context defers unvalidated credential variables");
                 let ctx = job.requests.get_mut(&p.chain[0]).unwrap();
                 assert!(ctx.secrets.variable_secret(0, 0).is_some(), "the credential reference is retained");
-                // Deletion exposes any eager prefetch, including a duplicate
-                // direct reference through the spec or mixed effective auth.
+                // Deletion stales the context, so any later resolve fails
+                // (prefetch order is checked in exec.rs `prefetch_tests`).
                 app.store.delete_secret(&credential.id).unwrap();
-                assert!(ctx.secrets.resolve(&credential).is_err(), "credential was prefetched before eligibility");
+                assert!(ctx.secrets.resolve(&credential).is_err(), "a revoked credential still resolved");
                 // Rebuild after the edit to exercise endpoint eligibility
                 // independently of the newly tested stale-context refusal.
                 job = app.load_job(&p).unwrap();
@@ -644,7 +647,10 @@ async fn app_and_worker_producer_check_ineligible_issuers_before_nested_vault_va
                 assert!(!error.to_string().contains("canary"), "no wire job or credential-bearing error is produced");
                 assert!(!reads.lock().unwrap().contains(&credential.id), "neither production sink read the credential");
                 assert_eq!(app.load_preflight(&p).unwrap_err().to_string(), expected);
-                assert_eq!(app.worker_job(&p, true).unwrap_err().to_string(), format!("invalid load plan: {expected}"));
+                assert_eq!(
+                    app.worker_job_with_authority(&p, true).map(|(job, _)| job).unwrap_err().to_string(),
+                    format!("invalid load plan: {expected}")
+                );
                 assert_eq!(
                     app.oauth_token_status(Some(p.chain[0]), &ws.meta.id, None, &anvil_app::exec::SendOptions::default())
                         .unwrap_err()
@@ -712,7 +718,7 @@ async fn app_worker_round_trip_preserves_eligible_vault_issuers_and_credential_v
             let preflight = app.load_preflight(&p).unwrap();
             assert_eq!(preflight.destinations.len(), 2);
             assert_eq!(send(&context(&app, &p)).await.record.response.unwrap().status, 200);
-            let wire = app.worker_job(&p, true).unwrap();
+            let wire = app.worker_job_with_authority(&p, true).unwrap().0;
             let json = serde_json::to_string(&wire).unwrap();
             let wire: anvil_load::WorkerJob = serde_json::from_str(&json).unwrap();
             assert!(!format!("{wire:?}").contains("anvil-secret"));
@@ -757,7 +763,7 @@ async fn app_worker_round_trip_preserves_eligible_vault_issuers_and_credential_v
         let mut p = plan(&app, ws.meta.id, spec);
         p.dataset_id = Some(dataset.meta.id);
         assert!(app.load_preflight(&p).is_ok());
-        let wire = app.worker_job(&p, true).unwrap();
+        let wire = app.worker_job_with_authority(&p, true).unwrap().0;
         let (plan, job, options) = wire.into_load_job().unwrap();
         let report = tokio::time::timeout(
             Duration::from_secs(10),
@@ -812,7 +818,7 @@ fn worker_producer_masks_helpers_inside_vault_issuers_and_sanitizes_missing_cred
         }
         let p = plan(&app, ws.meta.id, spec);
         assert!(app.load_preflight(&p).is_ok(), "preflight validates eligibility without consuming credentials");
-        let error = app.worker_job(&p, true).unwrap_err().to_string();
+        let error = app.worker_job_with_authority(&p, true).map(|(job, _)| job).unwrap_err().to_string();
         assert_eq!(
             error,
             if direct {
@@ -877,7 +883,7 @@ fn worker_refuses_an_issuer_context_changed_during_eligibility() {
     assert!(!error.to_string().contains("canary"));
     assert!(!app.is_locked());
     assert_eq!(
-        app.worker_job(&p, true).unwrap_err().to_string(),
+        app.worker_job_with_authority(&p, true).map(|(job, _)| job).unwrap_err().to_string(),
         "invalid load plan: the OAuth token endpoint requires HTTPS or literal-loopback HTTP",
     );
 }
@@ -913,7 +919,12 @@ async fn effective_host_controls_forward_proxy_consent_and_wire_authority() {
     let recorder = Recorder::start(false).await;
     let profile = proxy(&app, ws, ProxyKind::Http, &recorder.address.to_string(), "");
     let environment = app
-        .create_environment(&ws, "fixed Host", vec![anvil_domain::workspace::Variable::plain("fixed_host", "remote.example.test")])
+        .save_environment(Environment {
+            meta: Meta::new(),
+            workspace_id: ws,
+            name: "fixed Host".into(),
+            variables: vec![anvil_domain::workspace::Variable::plain("fixed_host", "remote.example.test")],
+        })
         .unwrap();
     let dataset = app.create_dataset(&ws, "hosts", DatasetFormat::Csv, b"host,header\nremote.example.test,Host\n", vec![]).unwrap();
     for (name, value, auth) in [
@@ -994,8 +1005,14 @@ async fn cleartext_forward_proxy_receives_the_authority_preflight_checks() {
     // This HTTP/1.1 and h2c peer records requests and never forwards them.
     let recorder = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
     let profile = proxy(&app, ws, ProxyKind::Http, &recorder.addr.to_string(), "");
-    let environment =
-        app.create_environment(&ws, "fixed", vec![anvil_domain::workspace::Variable::plain("fixed_host", "remote.example.test")]).unwrap();
+    let environment = app
+        .save_environment(Environment {
+            meta: Meta::new(),
+            workspace_id: ws,
+            name: "fixed".into(),
+            variables: vec![anvil_domain::workspace::Variable::plain("fixed_host", "remote.example.test")],
+        })
+        .unwrap();
     let dataset = app.create_dataset(&ws, "hosts", DatasetFormat::Csv, b"host,header\nremote.example.test,Host\n", vec![]).unwrap();
     // The proxy receives names unchanged, despite client overrides.
     pin(&app, ws, "remote.example.test", &["127.0.0.1"]);
@@ -1156,7 +1173,12 @@ async fn masque_locality_checks_the_template_and_records_the_actual_connect_udp_
         })
         .unwrap();
     let environment = app
-        .create_environment(&ws, "canonical", vec![anvil_domain::workspace::Variable::plain("canonical", MASQUE_DEFAULT_TEMPLATE)])
+        .save_environment(Environment {
+            meta: Meta::new(),
+            workspace_id: ws,
+            name: "canonical".into(),
+            variables: vec![anvil_domain::workspace::Variable::plain("canonical", MASQUE_DEFAULT_TEMPLATE)],
+        })
         .unwrap();
     let dataset =
         app.create_dataset(&ws, "route", DatasetFormat::Csv, b"relay_host,template\nremote.example.test,unused\n", vec![]).unwrap();

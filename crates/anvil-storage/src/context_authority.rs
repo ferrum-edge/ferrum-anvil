@@ -8,8 +8,18 @@ use crate::{
 use anvil_domain::Id;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::{cell::RefCell, collections::BTreeMap};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use zeroize::Zeroizing;
+
+/// The objects of one kind a query reads: every owner's for `None`.
+type Scope = (String, Option<Id>);
+
+/// A scope's objects with their ids, in query order, decrypted once.
+type Listing = Arc<Vec<(Id, Value)>>;
 
 /// This capability is produced only by a verified read transaction. It is
 /// deliberately neither serializable nor constructible from IPC data.
@@ -19,6 +29,11 @@ pub struct ContextAuthority {
     restore_epoch: u64,
     points: BTreeMap<String, Option<Entry>>,
     queries: Vec<Query>,
+    /// The catalogue entries of every object in each scope a query read, as
+    /// they were then. An entry carries its row's payload digest and order,
+    /// so while a scope's entries are unchanged so is every query over it,
+    /// and the check need not decrypt the scope again.
+    scopes: BTreeMap<Scope, Arc<Vec<Entry>>>,
 }
 #[derive(Clone)]
 struct Query {
@@ -33,6 +48,9 @@ struct Query {
 pub struct ContextRead<'a, 'b> {
     read: &'a StoreRead<'b>,
     authority: RefCell<ContextAuthority>,
+    /// Each scope's objects, decrypted once per read: a folder walk queries
+    /// the same scope once per folder, and a check replays every query.
+    listed: RefCell<BTreeMap<Scope, Listing>>,
 }
 fn name(table: &str, kind: &str, id: &Id) -> String {
     serde_json::to_string(&[table, kind, &id.to_string()]).expect("strings serialize")
@@ -60,7 +78,9 @@ impl<'a, 'b> ContextRead<'a, 'b> {
                 restore_epoch: read.context_restore_epoch(),
                 points: BTreeMap::new(),
                 queries: vec![],
+                scopes: BTreeMap::new(),
             }),
+            listed: RefCell::new(BTreeMap::new()),
         })
     }
     fn entry(&self, name: &str) -> Option<Entry> {
@@ -99,30 +119,48 @@ impl<'a, 'b> ContextRead<'a, 'b> {
     /// Missing optional fields normalize to JSON null.
     pub fn query<T: DeserializeOwned>(&self, kind: &str, owner: Option<&Id>, fields: &[(String, Value)]) -> Result<Vec<T>> {
         let (values, entries) = self.select(kind, owner, fields)?;
-        self.authority.borrow_mut().queries.push(Query { kind: kind.into(), owner: owner.copied(), fields: fields.to_vec(), entries });
+        let mut authority = self.authority.borrow_mut();
+        authority.scopes.entry((kind.into(), owner.copied())).or_insert_with(|| Arc::new(self.scope_entries(kind, owner)));
+        // The same query in the same snapshot has the same membership: one
+        // record of it is enough.
+        if !authority.queries.iter().any(|q| q.kind == kind && q.owner.as_ref() == owner && q.fields.as_slice() == fields) {
+            authority.queries.push(Query { kind: kind.into(), owner: owner.copied(), fields: fields.to_vec(), entries });
+        }
+        drop(authority);
         values.into_iter().map(|v| serde_json::from_value(v).map_err(StoreError::from)).collect()
     }
-    fn select(&self, kind: &str, owner: Option<&Id>, fields: &[(String, Value)]) -> Result<(Vec<Value>, Vec<Entry>)> {
-        let values: Vec<Value> = self.read.list(kind, owner)?;
-        let mut st = self
-            .read
-            .conn
-            .prepare("SELECT id FROM objects WHERE kind=?1 AND (?2 IS NULL OR workspace_id=?2) ORDER BY sort_key, updated_at")?;
-        let ids = st
-            .query_map(rusqlite::params![kind, owner.map(|id| id.to_string())], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        if ids.len() != values.len() {
-            return Err(StoreError::Integrity);
+    /// Every object of `kind` that `owner` owns, with its id, in query order.
+    /// Read with the same integrity checks as [`StoreRead::list`], once per
+    /// read.
+    fn listing(&self, kind: &str, owner: Option<&Id>) -> Result<Listing> {
+        let scope = (kind.to_string(), owner.copied());
+        if let Some(rows) = self.listed.borrow().get(&scope) {
+            return Ok(rows.clone());
         }
+        let rows = self
+            .read
+            .list_with_ids::<Value>(kind, owner)?
+            .into_iter()
+            .map(|(id, value)| Ok::<_, StoreError>((id.parse::<Id>().map_err(|_| StoreError::Integrity)?, value)))
+            .collect::<Result<Vec<_>>>()?;
+        let rows = Arc::new(rows);
+        self.listed.borrow_mut().insert(scope, rows.clone());
+        Ok(rows)
+    }
+    /// The catalogue entries of every object in a scope, as this read sees them.
+    fn scope_entries(&self, kind: &str, owner: Option<&Id>) -> Vec<Entry> {
+        let owner = owner.map(|id| id.to_string());
+        self.read.manifest.borrow().as_ref().map(|m| m.owned("objects", kind, owner.as_deref())).unwrap_or_default()
+    }
+    fn select(&self, kind: &str, owner: Option<&Id>, fields: &[(String, Value)]) -> Result<(Vec<Value>, Vec<Entry>)> {
+        let rows = self.listing(kind, owner)?;
         let mut selected = vec![];
         let mut entries = vec![];
-        for id in ids {
-            let id: Id = id.parse().map_err(|_| StoreError::Integrity)?;
-            let value: Value = self.read.get(kind, &id)?.ok_or(StoreError::Integrity)?;
+        for (id, value) in rows.iter() {
             if fields.iter().all(|(pointer, expected)| value.pointer(pointer).unwrap_or(&Value::Null) == expected) {
-                let entry = self.entry(&name("objects", kind, &id)).ok_or(StoreError::Integrity)?;
+                let entry = self.entry(&name("objects", kind, id)).ok_or(StoreError::Integrity)?;
                 entries.push(entry);
-                selected.push(value);
+                selected.push(value.clone());
             }
         }
         Ok((selected, entries))
@@ -136,7 +174,18 @@ impl<'a, 'b> ContextRead<'a, 'b> {
                 return Err(StoreError::StaleAuthority);
             }
         }
+        // A scope whose objects all keep their payload and order answers
+        // every query as before: only a changed scope is read again.
+        let unchanged: BTreeSet<&Scope> = expected
+            .scopes
+            .iter()
+            .filter(|((kind, owner), was)| was.as_slice() == self.scope_entries(kind, owner.as_ref()).as_slice())
+            .map(|(scope, _)| scope)
+            .collect();
         for query in &expected.queries {
+            if unchanged.contains(&(query.kind.clone(), query.owner)) {
+                continue;
+            }
             if self.select(&query.kind, query.owner.as_ref(), &query.fields)?.1 != query.entries {
                 return Err(StoreError::StaleAuthority);
             }

@@ -421,12 +421,18 @@ fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>) {
         .map(|f| folder_key(f.meta.id))
         .filter(|k| !(current.contains_key(k) && fresh.contains_key(k)))
         .collect();
+    // Looked up by key; reversed so that the first of equal keys wins.
+    let fresh_values: HashMap<&str, &Value> = fresh_units.iter().rev().map(|(k, v)| (k.as_str(), v)).collect();
+    let fresh_environments: HashMap<String, &Environment> =
+        scope.fresh.environments.iter().rev().map(|e| (environment_key(e.meta.id), e)).collect();
     let current_only = current_units.iter().map(|(k, _)| k).filter(|k| !fresh.contains_key(*k));
     for key in fresh_units.iter().map(|(k, _)| k).chain(current_only) {
-        if one_sided.iter().any(|e| key.starts_with(&format!("{e}/"))) {
+        let owner = unit_owner(key);
+        // A variable of a one-sided environment goes with it.
+        if owner.is_some_and(|o| o.len() < key.len() && one_sided.contains(o)) {
             continue;
         }
-        if lone_folders.iter().any(|lone| key == lone || key.starts_with(&format!("{lone}/"))) {
+        if owner.is_some_and(|o| lone_folders.contains(o)) {
             continue;
         }
         let whole = one_sided.contains(key);
@@ -441,9 +447,9 @@ fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>) {
             plan.scope_preserved_edits.push(key.clone());
             continue;
         }
-        let fresh_value = match scope.fresh.environments.iter().find(|e| environment_key(e.meta.id) == *key) {
+        let fresh_value = match fresh_environments.get(key.as_str()) {
             Some(e) => Some(to_json(e)),
-            None => fresh_units.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()),
+            None => fresh_values.get(key.as_str()).copied().cloned(),
         };
         let label = scope_label(key, scope);
         let change = ScopeChange { key: key.clone(), label, user_edited, whole_environment: whole, fresh: fresh_value };
@@ -518,6 +524,14 @@ fn variable_keys<'v>(prefix: &str, variables: &'v [Variable]) -> Vec<(String, &'
         .collect()
 }
 
+/// The environment or folder unit `key` is or belongs to: its first two
+/// segments (`environments/<id>`, `folders/<id>`). `None` for a key with one
+/// segment (`description`, `settings`, `auth`).
+fn unit_owner(key: &str) -> Option<&str> {
+    let first = key.find('/')?;
+    Some(key[first + 1..].find('/').map_or(key, |second| &key[..first + 1 + second]))
+}
+
 fn environment_key(id: Id) -> String {
     format!("environments/{id}")
 }
@@ -568,16 +582,19 @@ fn unit_hash(v: &Value) -> String {
 fn merge_variables(prefix: &str, current: &[Variable], fresh: &[Variable], take: &HashSet<&str>) -> Vec<Variable> {
     let current = variable_keys(prefix, current);
     let fresh = variable_keys(prefix, fresh);
+    // Reversed so that the first of equal keys wins.
+    let fresh_by_key: HashMap<&str, &Variable> = fresh.iter().rev().map(|(k, v)| (k.as_str(), *v)).collect();
+    let current_keys: HashSet<&str> = current.iter().map(|(k, _)| k.as_str()).collect();
     let mut out = vec![];
     for (k, v) in &current {
         if !take.contains(k.as_str()) {
             out.push((*v).clone());
-        } else if let Some((_, f)) = fresh.iter().find(|(f, _)| f == k) {
+        } else if let Some(f) = fresh_by_key.get(k.as_str()) {
             out.push((*f).clone());
         }
     }
     for (k, f) in &fresh {
-        if take.contains(k.as_str()) && !current.iter().any(|(c, _)| c == k) {
+        if take.contains(k.as_str()) && !current_keys.contains(k.as_str()) {
             out.push((*f).clone());
         }
     }
@@ -674,11 +691,15 @@ impl ReimportPlan {
             out.auth = fresh.auth.clone();
         }
         out.variables = merge_variables("variables", &current.variables, &fresh.variables, &take);
+        // By id; reversed so that the first of equal ids wins.
+        let fresh_environments: HashMap<Id, &Environment> = fresh.environments.iter().rev().map(|f| (f.meta.id, f)).collect();
+        let fresh_folders: HashMap<Id, &Folder> = fresh.folders.iter().rev().map(|f| (f.meta.id, f)).collect();
+        let current_environments: HashSet<Id> = current.environments.iter().map(|e| e.meta.id).collect();
         out.environments = vec![];
         for e in &current.environments {
             let at = environment_key(e.meta.id);
             let taken = take.contains(at.as_str());
-            match fresh.environments.iter().find(|f| f.meta.id == e.meta.id) {
+            match fresh_environments.get(&e.meta.id) {
                 // Approved for deletion.
                 None if taken => {}
                 None => out.environments.push(e.clone()),
@@ -692,10 +713,10 @@ impl ReimportPlan {
                 }
             }
         }
-        let added = fresh.environments.iter().filter(|f| !current.environments.iter().any(|e| e.meta.id == f.meta.id));
+        let added = fresh.environments.iter().filter(|f| !current_environments.contains(&f.meta.id));
         out.environments.extend(added.filter(|f| take.contains(environment_key(f.meta.id).as_str())).cloned());
         for c in &mut out.folders {
-            let Some(f) = fresh.folders.iter().find(|f| f.meta.id == c.meta.id) else { continue };
+            let Some(f) = fresh_folders.get(&c.meta.id) else { continue };
             let at = folder_key(c.meta.id);
             let taken = |unit: &str| take.contains(format!("{at}{unit}").as_str());
             if taken("") {
@@ -769,5 +790,20 @@ impl ReimportPlan {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unit_owner;
+
+    #[test]
+    fn a_units_owner_is_its_environment_or_folder() {
+        let id = "0190f1c2-0000-7000-8000-000000000001";
+        assert_eq!(unit_owner(&format!("environments/{id}")), Some(format!("environments/{id}").as_str()));
+        assert_eq!(unit_owner(&format!("environments/{id}/variables/a/b")), Some(format!("environments/{id}").as_str()));
+        assert_eq!(unit_owner(&format!("folders/{id}/auth")), Some(format!("folders/{id}").as_str()));
+        assert_eq!(unit_owner("variables/token"), Some("variables/token"));
+        assert_eq!(unit_owner("description"), None);
     }
 }

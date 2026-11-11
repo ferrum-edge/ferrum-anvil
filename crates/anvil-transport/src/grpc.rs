@@ -1064,23 +1064,52 @@ async fn h3_downlink(mut recv: H3Recv, tx: mpsc::Sender<Result<Frame<Bytes>, Tra
             }
         }
     }
-    // h3 returns the trailers only once the stream ends, so an abort stops
-    // this stream alone rather than waiting for the peer.
-    let trailers = tokio::select! {
-        t = recv.recv_trailers() => t,
-        _ = ctl.abort.cancelled() => {
-            recv.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
-            return;
-        }
-    };
-    match trailers {
-        Ok(Some(t)) => {
-            let _ = tx.send(Ok(Frame::trailers(t))).await;
-        }
-        Ok(None) => {}
-        Err(e) => {
-            let what = "the HTTP/3 response trailers could not be read";
-            let _ = tx.send(Err(crate::h3::stream_failure(&e, Phase::ResponseBody, FailureKind::BodyReset, what))).await;
+    // h3 returns the trailers only once the stream ends (FIN). Trailers it
+    // already holds are passed on at once, so a deadline before a delayed FIN
+    // still finds the server's status; the wait for FIN goes on, and an abort
+    // stops this stream alone rather than waiting for the peer.
+    enum Tail {
+        End(Result<Option<HeaderMap>, h3::error::StreamError>),
+        Buffered(HeaderMap),
+        Abort,
+    }
+    let mut forwarded = false;
+    loop {
+        let tail = tokio::select! {
+            t = std::future::poll_fn(|cx| match recv.poll_recv_trailers(cx) {
+                Poll::Ready(r) => Poll::Ready(Tail::End(r)),
+                Poll::Pending if !forwarded => match recv.peek_recv_trailers() {
+                    Ok(Some(t)) => Poll::Ready(Tail::Buffered(t)),
+                    _ => Poll::Pending,
+                },
+                Poll::Pending => Poll::Pending,
+            }) => t,
+            _ = ctl.abort.cancelled() => Tail::Abort,
+        };
+        match tail {
+            Tail::Buffered(t) => {
+                forwarded = true;
+                if tx.send(Ok(Frame::trailers(t))).await.is_err() {
+                    recv.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+                    return;
+                }
+            }
+            Tail::End(Ok(Some(t))) => {
+                if !forwarded {
+                    let _ = tx.send(Ok(Frame::trailers(t))).await;
+                }
+                return;
+            }
+            Tail::End(Ok(None)) => return,
+            Tail::End(Err(e)) => {
+                let what = "the HTTP/3 response trailers could not be read";
+                let _ = tx.send(Err(crate::h3::stream_failure(&e, Phase::ResponseBody, FailureKind::BodyReset, what))).await;
+                return;
+            }
+            Tail::Abort => {
+                recv.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+                return;
+            }
         }
     }
 }
@@ -2289,17 +2318,18 @@ async fn exchange(
                 break;
             }
             Ev::GrpcDeadline => {
-                failure = Some(
-                    TransportFailure::new(
-                        Phase::Session,
-                        FailureKind::TotalTimeout,
-                        format!(
-                            "the gRPC deadline ({} ms, sent as grpc-timeout) elapsed before the server returned a status; Anvil canceled the stream. The status is unknown, not DEADLINE_EXCEEDED from the server",
-                            plan.deadline_ms.unwrap_or(0)
-                        ),
-                    )
-                    .with_deadline(plan.deadline_ms),
-                );
+                let ms = plan.deadline_ms.unwrap_or(0);
+                // A status can arrive before the end of the stream (an HTTP/3
+                // stream whose FIN is late, a gRPC-Web trailer frame).
+                let message = match term.code {
+                    Some(code) => format!(
+                        "the gRPC deadline ({ms} ms, sent as grpc-timeout) elapsed after the server returned status {code} but before the response stream ended; Anvil canceled the stream"
+                    ),
+                    None => format!(
+                        "the gRPC deadline ({ms} ms, sent as grpc-timeout) elapsed before the server returned a status; Anvil canceled the stream. The status is unknown, not DEADLINE_EXCEEDED from the server"
+                    ),
+                };
+                failure = Some(TransportFailure::new(Phase::Session, FailureKind::TotalTimeout, message).with_deadline(plan.deadline_ms));
                 break;
             }
             Ev::Deadline => {

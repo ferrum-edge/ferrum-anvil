@@ -74,11 +74,6 @@ impl LoadRunGuard {
     pub fn workspace_deleted(&self) -> &CancellationToken {
         &self.stops.workspace_deleted
     }
-
-    /// Whether the run must stop, for either reason.
-    pub fn is_stopped(&self) -> bool {
-        self.stops.locked.is_cancelled() || self.stops.workspace_deleted.is_cancelled()
-    }
 }
 
 impl Drop for LoadRunGuard {
@@ -463,13 +458,9 @@ impl App {
     }
 
     /// The job handed to the worker process over stdin (secrets scoped to the
-    /// referenced requests only). `acknowledged` must come from an explicit
-    /// user confirmation of the preflight.
-    pub fn worker_job(&self, p: &LoadPlan, acknowledged: bool) -> Result<WorkerJob> {
-        self.worker_job_with_authority(p, acknowledged).map(|(worker, _)| worker)
-    }
-
-    /// Producer proof remains local; it is never serialized into a detached worker.
+    /// referenced requests only), with the producer proof, which stays local:
+    /// it is never serialized into a detached worker. `acknowledged` must
+    /// come from an explicit user confirmation of the preflight.
     pub fn worker_job_with_authority(&self, p: &LoadPlan, acknowledged: bool) -> Result<(WorkerJob, crate::exec::AppContextAuthority)> {
         if !acknowledged {
             return Err(AppError::Invalid("a load run needs explicit confirmation of its destination and planned load".into()));

@@ -124,7 +124,7 @@ fn shared_bundle(root: &Path, bundle: &Path) -> Id {
     let app = App::open(s.dir, h, dek).unwrap();
     let ws = app.create_workspace("Shared").unwrap();
     app.create_request(&ws.meta.id, None, "Probe", RequestSpec::http("GET", "https://probe.example.invalid/")).unwrap();
-    let (bytes, _) = app.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
+    let (bytes, _) = app.export_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, None, false, false).unwrap();
     std::fs::write(bundle, bytes).unwrap();
     app.delete_workspace(&ws.meta.id).unwrap();
     ws.meta.id

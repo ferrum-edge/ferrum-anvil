@@ -613,10 +613,9 @@ impl App {
         if !proceed() {
             return Err(AppError::Canceled);
         }
-        let checkpoint = self.store.checkpoint("before-restore")?;
         // A refusal returns before anything is written; the transaction then
-        // commits no change.
-        let (plan, notes, withheld) = self.store.atomically(|s| {
+        // commits no change, and the checkpoint is removed.
+        let (checkpoint, (plan, notes, withheld)) = self.checkpointed("before-restore", |s| {
             // Read inside the transaction, so every check sees exactly what
             // the writes below land on.
             let local = local(&s.as_read(), &d)?;
@@ -684,7 +683,7 @@ impl App {
             // written here until the user allows it on this device.
             crate::device_identity::seal_in(s, d.graph.workspaces.iter().map(|w| &w.meta.id))?;
             Ok(Ok((plan, notes, withheld)))
-        })??;
+        })?;
         let mut out = report(plan, &manifest, &d, notes, Some(checkpoint.display().to_string()), port::file_sha256(bytes));
         out.withheld_lock = withheld;
         Ok(out)

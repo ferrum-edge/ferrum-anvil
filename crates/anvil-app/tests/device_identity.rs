@@ -128,7 +128,7 @@ fn a_bundle_import_seals_the_workspace_it_writes_until_the_user_allows_it() {
     let a = new_app(root.path(), "source");
     let ws = source_workspace(&a);
     assert_open(&a, &ws);
-    let (bytes, _) = a.export(Some(&ws), ExportMode::ShareSafely, None, false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, false, false).unwrap();
 
     let policies = [("merge", ConflictPolicy::Merge), ("replace", ConflictPolicy::Replace), ("duplicate", ConflictPolicy::Duplicate)];
     for (label, policy) in policies {
@@ -136,7 +136,7 @@ fn a_bundle_import_seals_the_workspace_it_writes_until_the_user_allows_it() {
         // The preview and the report say so.
         let preview = b.import_preview(&bytes, None, policy).unwrap();
         assert!(preview.warnings.iter().any(|w| w.contains("allow-device-identity")), "{label}: {:?}", preview.warnings);
-        let report = b.import(&bytes, None, policy).unwrap();
+        let report = b.import_approved(&bytes, None, policy, &ImportApproval::default()).unwrap();
         assert!(report.warnings.iter().any(|w| w.contains("allow-device-identity")), "{label}: {:?}", report.warnings);
         let imported: Id = report.workspace_ids[0].parse().unwrap();
         assert_eq!(imported == ws, policy != ConflictPolicy::Duplicate, "{label}");
@@ -154,10 +154,10 @@ fn an_import_seals_each_existing_workspace_it_writes_into_and_nothing_else() {
     let root = tempfile::tempdir().unwrap();
     let app = new_app(root.path(), "own");
     let ws = source_workspace(&app);
-    let (bytes, _) = app.export(Some(&ws), ExportMode::ShareSafely, None, false).unwrap();
+    let (bytes, _) = app.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, false, false).unwrap();
 
     // A copy next to the source: only the copy is sealed.
-    let report = app.import(&bytes, None, ConflictPolicy::Duplicate).unwrap();
+    let report = app.import_approved(&bytes, None, ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
     let copy: Id = report.workspace_ids[0].parse().unwrap();
     assert_ne!(copy, ws);
     assert_sealed(&app, &copy);
@@ -165,7 +165,7 @@ fn an_import_seals_each_existing_workspace_it_writes_into_and_nothing_else() {
 
     // A refused import seals nothing.
     for policy in [ConflictPolicy::Merge, ConflictPolicy::Replace] {
-        assert!(app.import(&bytes, None, policy).is_err());
+        assert!(app.import_approved(&bytes, None, policy, &ImportApproval::default()).is_err());
         assert_open(&app, &ws);
     }
 
@@ -184,9 +184,9 @@ fn a_seal_stays_on_this_device_and_goes_with_its_workspace() {
     let root = tempfile::tempdir().unwrap();
     let a = new_app(root.path(), "a");
     let ws = source_workspace(&a);
-    let (bytes, _) = a.export(Some(&ws), ExportMode::ShareSafely, None, false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, false, false).unwrap();
     let b = new_app(root.path(), "b");
-    b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    b.import_approved(&bytes, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert_sealed(&b, &ws);
 
     // A full backup does not carry it.
@@ -198,7 +198,7 @@ fn a_seal_stays_on_this_device_and_goes_with_its_workspace() {
     assert!(matches!(b.allow_device_identity(&ws), Err(AppError::NotFound(_))));
 
     // Imported again, it is sealed again. Locked, nothing is read or lifted.
-    b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    b.import_approved(&bytes, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert_sealed(&b, &ws);
     b.lock();
     assert!(matches!(b.device_identity_sealed(&ws), Err(AppError::Locked)));
@@ -274,11 +274,11 @@ fn a_load_plan_in_a_sealed_workspace_is_refused_this_devices_workload_identity()
     };
     let plan = a.save_load_plan(plan).unwrap();
     a.load_job(&plan).unwrap_or_else(|e| panic!("unsealed: {e}"));
-    let (bundle, _) = a.export(Some(&ws), ExportMode::ShareSafely, None, false).unwrap();
+    let (bundle, _) = a.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, false, false).unwrap();
     let (backup, _) = a.export_backup_with(BACKUP_PASS, KdfParams::testing()).unwrap();
 
     let imported = new_app(root.path(), "imported");
-    imported.import(&bundle, None, ConflictPolicy::Merge).unwrap();
+    imported.import_approved(&bundle, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     let restored = new_app(root.path(), "restored");
     restored.restore(&backup, Some(BACKUP_PASS), ConflictPolicy::Merge).unwrap();
     for (label, app) in [("import", &imported), ("restore", &restored)] {
@@ -348,9 +348,9 @@ fn a_sealed_workspace_refuses_tls_profiles_that_present_this_devices_x509_svid()
     let root = tempfile::tempdir().unwrap();
     let a = new_app(root.path(), "source");
     let ws = source_workspace(&a);
-    let (bytes, _) = a.export(Some(&ws), ExportMode::ShareSafely, None, false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, false, false).unwrap();
     let b = new_app(root.path(), "target");
-    b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    b.import_approved(&bytes, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert!(b.device_identity_sealed(&ws).unwrap());
 
     let svid = ClientIdentity::WorkloadApi { endpoint: String::new(), spiffe_id: None, trust_bundle: false };

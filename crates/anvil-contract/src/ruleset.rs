@@ -413,8 +413,7 @@ fn formats_of(name: &str) -> Option<Vec<Dialect>> {
     })
 }
 
-const RULE_KEYS: &[&str] =
-    &["description", "message", "severity", "given", "where", "then", "formats", "how_to_fix", "docs_url", "recommended"];
+const RULE_KEYS: &[&str] = &["description", "message", "severity", "given", "where", "then", "formats", "how_to_fix", "docs_url"];
 
 fn compile_rule(source: &str, ruleset: &str, id: &str, o: &Map<String, Value>) -> Result<Option<Rule>, RulesetError> {
     let err = |m: String| RulesetError::new(source, Some(id), m);
@@ -477,11 +476,6 @@ fn compile_rule(source: &str, ruleset: &str, id: &str, o: &Map<String, Value>) -
             }
         }
         Some(_) => return Err(err("`formats` is a list".into())),
-    }
-    if let Some(v) = o.get("recommended")
-        && !v.is_boolean()
-    {
-        return Err(err("`recommended` is true or false".into()));
     }
     // Checked for a rule turned off too, like every other key.
     let description = text("description")?;
@@ -633,6 +627,12 @@ mod tests {
             (
                 "anvil_ruleset: 1\nrules:\n  x:\n    given: operation\n    severity: 'off'\n    message: [a]\n    then: {function: truthy, field: a}\n",
                 "`message` must be text",
+            ),
+            // Spectral's `recommended` has no meaning here, so it is refused
+            // rather than accepted and ignored.
+            (
+                "anvil_ruleset: 1\nrules:\n  x:\n    given: operation\n    recommended: false\n    then: {function: truthy, field: a}\n",
+                "unknown key 'recommended'",
             ),
         ];
         for (text, needle) in cases {

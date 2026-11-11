@@ -115,6 +115,13 @@ function closedText(c: ClosedCount["closed_by"]): string {
   }
 }
 
+/** The report counts close codes outside 1000–4999, and any past the first
+ * 16 distinct ones, under code 0 (anvil-load `WS_CLOSE_OTHER`). */
+function closeCodeText(code: ClosedCount["code"]): string {
+  if (code == null) return "";
+  return code === 0 ? ", other codes" : `, code ${code}`;
+}
+
 function flatten(nodes: TreeNode[], path: string[] = []): { id: string; label: string; method: string; url?: string | null }[] {
   return nodes.flatMap((n) =>
     n.kind === "folder" ? flatten(n.children, [...path, n.name]) : [{ id: n.id, label: [...path, n.name].join(" / "), method: n.method ?? "GET", url: n.url }],
@@ -217,11 +224,17 @@ export function LoadView(props: {
   // reload is still running when the next save starts its own), and an
   // earlier one that answers late holds older plans than a later one.
   const reloadSeq = useRef(0);
-  /** The workspace's reports, or null when superseded or the workspace changed. */
+  /** The workspace's reports, or null when superseded, the workspace changed or the lists could not be read (said). */
   const reload = async () => {
     const w = props.workspaceId;
     const seq = ++reloadSeq.current;
-    const [p, r, d] = await Promise.all([api.loadPlans(w), api.loadReports(w), api.datasets(w)]);
+    let p: LoadPlan[], r: LoadReportSummary[], d: Dataset[];
+    try {
+      [p, r, d] = await Promise.all([api.loadPlans(w), api.loadReports(w), api.datasets(w)]);
+    } catch (e) {
+      if (w === wsRef.current && seq === reloadSeq.current) props.notify(`Could not read the load plans and reports: ${String((e as Error).message)}`);
+      return null;
+    }
     if (w !== wsRef.current || seq !== reloadSeq.current) return null;
     setPlans(p);
     setReports(r);
@@ -363,7 +376,7 @@ export function LoadView(props: {
       <section className="work single">
         <div className="pane">
           {lives.map((l) => (
-            <LivePanel key={l.runKey} live={l} onCancel={() => void api.loadRunCancel(l.runKey)} />
+            <LivePanel key={l.runKey} live={l} onCancel={() => void api.loadRunCancel(l.runKey).catch((e) => props.notify(`Could not stop the run: ${String((e as Error).message)}`))} />
           ))}
           {!live && selPlan && (
             <PlanEditor
@@ -490,6 +503,7 @@ export function PlanEditor(props: {
   const [preflight, setPreflight] = useState<LoadPreflight | null>(null);
   const [ack, setAck] = useState(false);
   const [datasetDlg, setDatasetDlg] = useState(false);
+  const [deletingDataset, setDeletingDataset] = useState<Dataset | null>(null);
   const [check, setCheck] = useState<LoadPlanCheck | null>(null);
   // A save, or a Run… (its save and preflight), is on its way: a new plan cannot be discarded meanwhile.
   const [saving, setSaving] = useState(false);
@@ -773,6 +787,12 @@ export function PlanEditor(props: {
             <Icon name="file" size={14} />
             Add dataset…
           </button>
+          {dataset && (
+            <button className="btn ghost danger" disabled={otherWorkspace} onClick={() => setDeletingDataset(dataset)}>
+              <Icon name="trash" size={14} />
+              Delete dataset…
+            </button>
+          )}
         </div>
         {dataset?.attachment.kind === "linked_file" && (
           <LinkedFileBinding
@@ -800,6 +820,43 @@ export function PlanEditor(props: {
           </div>
         )}
       </fieldset>
+
+      {deletingDataset && (
+        <Modal
+          title="Delete dataset"
+          onClose={() => setDeletingDataset(null)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setDeletingDataset(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn danger"
+                onClick={async () => {
+                  const d = deletingDataset;
+                  setDeletingDataset(null);
+                  setErr(null);
+                  try {
+                    await api.deleteDataset(d.id);
+                  } catch (e) {
+                    setErr(String((e as Error).message));
+                    return;
+                  }
+                  if (p.dataset_id === d.id) setP({ ...p, dataset_id: null });
+                  await props.onDatasetsChanged();
+                }}
+              >
+                Delete
+              </button>
+            </>
+          }
+        >
+          <p>
+            Delete the dataset “{deletingDataset.name}” from this workspace? Its stored data is removed; a linked file stays where it is. Other load plans and
+            scenarios that use it cannot run until they name another dataset.
+          </p>
+        </Modal>
+      )}
 
       {datasetDlg && (
         <DatasetDialog
@@ -1164,21 +1221,41 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
   const [r, setR] = useState<LoadReport | null>(null);
   const [cmpWith, setCmpWith] = useState("");
   const [cmp, setCmp] = useState<LoadComparison | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
-    api.loadReport(props.runId).then(setR);
+    let alive = true;
+    setErr(null);
+    api.loadReport(props.runId).then(
+      (x) => alive && setR(x),
+      (e) => alive && setErr(String((e as Error).message)),
+    );
+    return () => {
+      alive = false;
+    };
   }, [props.runId]);
-  if (!r) return <div className="faint">Loading report…</div>;
+  if (!r)
+    return err ? (
+      <div className="bad-box" role="alert">
+        The report could not be read: {err}
+      </div>
+    ) : (
+      <div className="faint">Loading report…</div>
+    );
   const c = r.counts;
   const u = r.requests ?? NO_UNITS;
   const [, many] = unitWords(r.protocol_metrics);
   const exportAs = async (format: "json" | "csv" | "timeline_csv" | "html") => {
     const ext = format === "html" ? "html" : format === "json" ? "json" : "csv";
-    const file = await api.chooseFile("load_report_export", {
-      file_name: `anvil-load-${r.plan.name.replace(NON_FILE_NAME_CHARS, "_")}-${r.started_at.slice(0, 10)}.${format === "timeline_csv" ? "timeline.csv" : ext}`,
-    });
-    if (!file) return;
-    const n = await api.exportLoadReport(r.run_id, format, file.token);
-    props.notify(`Exported ${fmtBytes(n)} to ${file.file_name}`);
+    try {
+      const file = await api.chooseFile("load_report_export", {
+        file_name: `anvil-load-${r.plan.name.replace(NON_FILE_NAME_CHARS, "_")}-${r.started_at.slice(0, 10)}.${format === "timeline_csv" ? "timeline.csv" : ext}`,
+      });
+      if (!file) return;
+      const n = await api.exportLoadReport(r.run_id, format, file.token);
+      props.notify(`Exported ${fmtBytes(n)} to ${file.file_name}`);
+    } catch (e) {
+      props.notify(`Export failed: ${String((e as Error).message)}`);
+    }
   };
   return (
     <div className="page">
@@ -1216,7 +1293,12 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
           <button
             className="btn small ghost danger"
             onClick={async () => {
-              await api.deleteLoadReport(r.run_id);
+              try {
+                await api.deleteLoadReport(r.run_id);
+              } catch (e) {
+                props.notify(String((e as Error).message));
+                return;
+              }
               props.onDeleted();
             }}
           >
@@ -1366,7 +1448,17 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
               </option>
             ))}
         </select>
-        <button className="btn" disabled={!cmpWith} onClick={async () => setCmp(await api.compareLoadReports(r.run_id, cmpWith))}>
+        <button
+          className="btn"
+          disabled={!cmpWith}
+          onClick={async () => {
+            try {
+              setCmp(await api.compareLoadReports(r.run_id, cmpWith));
+            } catch (e) {
+              props.notify(`Could not compare the runs: ${String((e as Error).message)}`);
+            }
+          }}
+        >
           Compare
         </button>
       </div>
@@ -1557,7 +1649,7 @@ export function ProtocolPanel({ p, requests }: { p: ProtocolLoadMetrics; request
               ["Not opened (connect, TLS, invalid handshake, timeout, cancel)", String(p.websocket.not_opened)],
               ["Opened and closed cleanly", String(p.websocket.closed_cleanly)],
               ["Messages sent / received", `${p.websocket.messages_sent} / ${p.websocket.messages_received}`],
-              ...p.websocket.close_codes.map((c) => [`Closed by ${closedText(c.closed_by)}${c.code != null ? `, code ${c.code}` : ""}`, String(c.count)] as [string, string]),
+              ...p.websocket.close_codes.map((c) => [`Closed by ${closedText(c.closed_by)}${closeCodeText(c.code)}`, String(c.count)] as [string, string]),
             ]}
           />
           {p.websocket.rtt_defined ? (

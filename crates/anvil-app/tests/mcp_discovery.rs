@@ -93,7 +93,7 @@ async fn a_secret_the_server_echoes_is_redacted_in_history_and_exports() {
     }
     assert!(history.contains("rejected credential") && !history.contains(secret), "{history}");
 
-    let (zip, _) = app.export(Some(&ws), ExportMode::ShareSafely, None, true).unwrap();
+    let (zip, _) = app.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, true, false).unwrap();
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
     let mut records = String::new();
     std::io::Read::read_to_string(&mut z.by_name("history/records.jsonl").unwrap(), &mut records).unwrap();

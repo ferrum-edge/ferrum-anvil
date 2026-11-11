@@ -209,7 +209,7 @@ async fn supervise(
     let mut last: Option<Progress> = None;
     let mut timeline: Vec<TimeBucket> = Vec::new();
     let mut final_report: Option<LoadReport> = None;
-    let mut refused: Option<String> = None;
+    let mut refused: Option<LoadError> = None;
     let mut killed = false;
     let mut buf = Vec::new();
     loop {
@@ -244,7 +244,7 @@ async fn supervise(
                 last = Some(*progress);
             }
             Ok(WorkerMessage::Report { report }) => final_report = Some(*report),
-            Ok(WorkerMessage::Error { message }) => refused = Some(message),
+            Ok(WorkerMessage::Error { error }) => refused = Some(LoadError::from(error)),
             Err(_) => {}
         }
     }
@@ -255,7 +255,7 @@ async fn supervise(
     drop(ptx);
     let result = match (final_report, refused, meta.is_some()) {
         (Some(r), _, _) => Ok(r),
-        (None, Some(msg), false) => Err(LoadError::Invalid(msg)),
+        (None, Some(e), false) => Err(e),
         _ => Ok(crash_report(&plan, unit, meta, last, timeline, status, killed)),
     };
     let _ = rtx.send(result);

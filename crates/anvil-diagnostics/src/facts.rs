@@ -85,10 +85,14 @@ pub struct BodyFacts {
     pub graphql: Option<GraphQlResult>,
     pub is_html: bool,
     /// Why a SOAP envelope (an XML body whose root element is `Envelope`)
-    /// was not inspected for a fault: it is over the pre-parse limits
-    /// (`SOAP_FAULT_XML_LIMITS`) or the node limit. A fault in it would go
-    /// unseen, so the application outcome is not evaluated.
+    /// was not inspected for a fault: it is over [`MAX_PARSE`], the
+    /// pre-parse limits (`SOAP_FAULT_XML_LIMITS`) or the node limit. A fault
+    /// in it would go unseen, so the application outcome is not evaluated.
     pub xml_not_inspected: Option<String>,
+    /// The body is over [`MAX_PARSE`] bytes and was not parsed: none of the
+    /// facts above was looked for. A request judged from its response body
+    /// (SOAP, GraphQL, MCP) then has no application outcome.
+    pub over_parse_limit: bool,
     /// The body is a JSON-RPC 2.0 error response (MCP, A2A, any JSON-RPC API).
     pub jsonrpc_error: Option<JsonRpcError>,
     /// The body is a JSON-RPC result of an MCP tool call that reports a
@@ -158,7 +162,11 @@ pub struct GraphQlResult {
     pub first_message: String,
 }
 
-const MAX_PARSE: usize = 256 * 1024;
+/// Largest response body parsed for these facts (256 KiB).
+pub const MAX_PARSE: usize = 256 * 1024;
+/// How much of a body over [`MAX_PARSE`] is read to see whether its root
+/// element is a SOAP `Envelope`.
+const ROOT_PEEK_BYTES: usize = 4096;
 /// XML nodes parsed to find a SOAP fault.
 const SOAP_FAULT_MAX_NODES: u32 = 50_000;
 /// What an XML response body may contain before it is parsed for a SOAP
@@ -204,12 +212,22 @@ pub fn body_facts(content_type: Option<&str>, body: &[u8]) -> BodyFacts {
 /// matching is kept as received.
 pub fn body_facts_redacted(content_type: Option<&str>, body: &[u8], redact: Redact<'_>) -> BodyFacts {
     let mut f = BodyFacts::default();
-    if body.is_empty() || body.len() > MAX_PARSE {
+    if body.is_empty() {
         return f;
     }
     let ct = content_type.unwrap_or("").to_ascii_lowercase();
-    f.is_html = ct.contains("text/html");
     let trimmed = trim_ascii(body);
+    let xml_like = trimmed.first() == Some(&b'<') && (ct.contains("xml") || ct.is_empty() || ct.contains("soap"));
+    if body.len() > MAX_PARSE {
+        f.over_parse_limit = true;
+        // Not parsed, so a fault in a SOAP envelope this large goes unseen.
+        let head = String::from_utf8_lossy(&trimmed[..trimmed.len().min(ROOT_PEEK_BYTES)]);
+        if xml_like && root_is_envelope(&head) {
+            f.xml_not_inspected = Some(format!("it is over {} KiB", MAX_PARSE / 1024));
+        }
+        return f;
+    }
+    f.is_html = ct.contains("text/html");
     if trimmed.first() == Some(&b'{') || trimmed.first() == Some(&b'[') {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(trimmed) {
             if let Some(obj) = v.as_object() {
@@ -234,7 +252,7 @@ pub fn body_facts_redacted(content_type: Option<&str>, body: &[u8], redact: Reda
             }
             f.json_canonical = Some(v);
         }
-    } else if (trimmed.first() == Some(&b'<')) && (ct.contains("xml") || ct.is_empty() || ct.contains("soap")) {
+    } else if xml_like {
         match soap_fault(trimmed, redact) {
             Ok(fault) => f.soap_fault = fault,
             Err(why) => f.xml_not_inspected = Some(why),

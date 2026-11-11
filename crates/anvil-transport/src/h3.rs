@@ -24,6 +24,7 @@ use crate::errors::display_chain;
 use crate::fence::Generations;
 use crate::http::{AttemptOutput, CacheGenerations, EarlyDataIntent, HttpPlan, sleep_until_opt};
 use crate::recorder::{EventCtx, Recorder};
+use crate::session::header_entries;
 use crate::tickets::{HandshakeGuard, ResumptionContext, TicketCache, TicketTransport};
 use crate::tls;
 use anvil_domain::events::ExecutionEvent;
@@ -2102,7 +2103,7 @@ impl H3Transport {
                 r = stream.recv_trailers() => match r {
                     Ok(Some(t)) => {
                         trailers_received = true;
-                        trailers = t.iter().map(|(n, v)| HeaderEntry { name: n.as_str().to_string(), value: String::from_utf8_lossy(v.as_bytes()).into_owned() }).collect();
+                        trailers = header_entries(&t);
                     }
                     Ok(None) => {}
                     Err(h3::error::StreamError::HeaderTooBig { .. }) => {
@@ -2126,6 +2127,18 @@ impl H3Transport {
                     completeness = BodyCompleteness::Canceled;
                     failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled while waiting for the end of the response"));
                 }
+            }
+            // A deadline or a cancel ended the wait for the end of the
+            // stream: trailers h3 already received are still the server's,
+            // so they are recorded rather than dropped.
+            if !trailers_received
+                && failure
+                    .as_ref()
+                    .is_some_and(|f| matches!(f.kind, FailureKind::BodyIdleTimeout | FailureKind::TotalTimeout | FailureKind::Canceled))
+                && let Ok(Some(t)) = stream.peek_recv_trailers()
+            {
+                trailers_received = true;
+                trailers = header_entries(&t);
             }
         }
         if failure.as_ref().is_some_and(|f| f.kind != FailureKind::BodyReset) {

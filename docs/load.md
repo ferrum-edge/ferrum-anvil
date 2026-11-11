@@ -70,8 +70,9 @@ on the request's protocol (`anvil_load::protocol`):
 `errors` array arrives with an HTTP 2xx, so the application outcome of a
 request with a SOAP or GraphQL body is judged from the response body. When
 only a prefix of that body is available (it exceeded the capture, which a load
-run lowers to at most 1 MiB, or it did not decode completely), a fault past
-the prefix would go unseen: the engine records the application status
+run lowers to at most 1 MiB, or it did not decode completely), or the complete
+body is over the 256 KiB the diagnosis inspects, a fault in it would go
+unseen: the engine records the application status
 `not_evaluated` with a `partial_visibility` warning, never `success`. A load
 run counts such a completed request as an **application failure** in the
 category `application_failure: application.not_determined_from_body`, so it
@@ -80,8 +81,9 @@ the successes. The same holds for any other `not_evaluated` outcome of a
 SOAP or GraphQL request (a login redirect, say). Other HTTP requests are
 judged by their status, which a prefix does not hide: a 2xx with a
 display-truncated body still counts as a success unless an assertion fails.
-A SOAP or GraphQL endpoint whose responses exceed the load capture therefore
-cannot show successes in a load run; its units read as "not determined".
+A SOAP or GraphQL endpoint whose responses exceed the load capture or 256 KiB
+therefore cannot show successes in a load run; its units read as "not
+determined".
 
 A plan has **exactly one unit kind**, so every count, rate and percentile in
 its report has one denominator. The editor (`load_plan_check`), the preflight
@@ -201,6 +203,10 @@ whole document. At the maximum bounds, stored dataset data is about 350 MiB
 or less before allocator and parser overhead: up to 64 MiB each for the source
 bytes and compact cell text, 4 Mi slots (about 192 MiB at the worst vector
 capacity), and up to 24 MiB for one million row-vector headers.
+In the desktop, **Delete dataset…** beside the plan's dataset deletes it, its
+linked-file binding and its stored copy unless something else uses that file.
+A load plan or scenario that still names a deleted dataset is refused when it
+runs, as one that names a deleted request is.
 
 **Warmup**: iterations that start (closed/iterations) or are scheduled (open)
 in the first `warmup_secs` are excluded from every summary metric. They stay
@@ -346,7 +352,10 @@ and the HTML report says "WARNING: counts do not balance" otherwise. With
 * Streams: `opened ≤ settled`, `with_messages ≤ opened`; SSE `Σ ended_by = opened`.
 * WebSocket: `opened + handshake_rejected + not_opened = settled`,
   `closed_cleanly ≤ opened`, `Σ close_codes = opened`, and no RTT pairs
-  unless a pairing is defined.
+  unless a pairing is defined. `close_codes` has a row per closing side and
+  code for at most 16 distinct codes in 1000–4999, the first ones seen; every
+  other code (outside that range, or past the 16th) is counted under code `0`
+  ("other"), so a peer cannot grow it with a new code per session.
 * TCP: `connected ≤ settled`; `expectation_met + expectation_short = completed`
   when the request expects frames; short exchanges are application failures.
 * UDP/DTLS: `exchanges_with_response + exchanges_silent = completed`;
@@ -452,7 +461,11 @@ arguments** (it exits with 64 if given any).
   (≤ 4/s; lossy under backpressure; carries a balanced snapshot plus only the
   timeline buckets finalized since the last delivered progress) and exactly one
   `report`. A refused job yields `error` and exit code 2, and the error text
-  never quotes job content (serde messages can echo values).
+  never quotes job content (serde messages can echo values). The `error`
+  carries the refusal's kind (`invalid`, `not_acknowledged`, `unsupported`,
+  `refused` with the typed LOAD-013 refusal, `io`, `protocol`, `report`) and
+  its own message, and the controller returns the same `LoadError` the worker
+  raised, so the host names the cause once and keeps a typed refusal typed.
 
 **Secret handling.** `WorkerJob::from_load_job` resolves only the secrets the
 plan's requests actually reference — the effective auth profile, the client
@@ -507,7 +520,9 @@ reader cannot keep a finished worker alive.
   `grpc_status`, `stream` (with `messages_sent` for client and bidirectional
   gRPC), `websocket`, `websocket_close`, `tcp`, `datagram`, `dtls_handshake`,
   `tunnel`); `datagram,observed_received_per_sent` is labelled an
-  observation, and empty distributions have empty values, not zeros.
+  observation, and empty distributions have empty values, not zeros. In
+  `timeline_csv`, a second with no successful unit has empty
+  `success_p50_us` and `success_p99_us`.
 * **HTML** (`html::to_html`): one self-contained file — inline CSS and inline
   SVG only, no JavaScript, no external fonts/images/stylesheets, and an
   embedded CSP (`default-src 'none'`). Every dynamic string is escaped,
@@ -577,6 +592,16 @@ a hold stage (`[{0 s → N}, {D s → N}]`). `--iterations` runs a fixed count o
 `--concurrency` lanes (default 10). `--abort-failure-pct` sets the abort rule
 over a 10 s window. `--fresh` selects the fresh connection mode; the default is
 persistent. `--csv` writes the summary CSV.
+
+`anvil load run` exit codes follow the CLI convention (as `anvil send` and
+`anvil run`):
+
+| Code | When |
+|---|---|
+| 0 | the run completed and every unit passed |
+| 2 | a unit failed an assertion, whatever else failed |
+| 1 | otherwise, a unit failed (transport failure, timeout, application failure), or the run was partial or did not complete (canceled, aborted by its rule, worker crash, profile locked) |
+| 3 | the run could not start: refused plan, missing `--i-am-authorized`, locked profile, usage error |
 
 ## Measured on this hardware (not product claims)
 

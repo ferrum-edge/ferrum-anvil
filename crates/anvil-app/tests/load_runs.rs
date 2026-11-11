@@ -82,7 +82,7 @@ async fn deleting_a_workspace_stops_its_running_load_run() {
     let other = app.register_load_run(&b).unwrap();
 
     let guard = app.register_load_run(&a).unwrap();
-    assert!(!guard.is_stopped());
+    assert!(!guard.workspace_deleted().is_cancelled() && !guard.locked().is_cancelled());
     let report = run_until_stopped(&app, &fx, &p, &guard, || app.delete_workspace(&a).unwrap()).await;
     assert!(guard.workspace_deleted().is_cancelled(), "the delete reaches the run");
     assert!(!guard.locked().is_cancelled());
@@ -94,7 +94,7 @@ async fn deleting_a_workspace_stops_its_running_load_run() {
     assert!(app.load_reports(&a).unwrap().is_empty());
 
     // Another workspace's run goes on.
-    assert!(!other.is_stopped(), "a run of another workspace was stopped");
+    assert!(!other.workspace_deleted().is_cancelled() && !other.locked().is_cancelled(), "a run of another workspace was stopped");
     // A run registered after the delete is stopped already: its job is never
     // handed to a worker.
     assert!(app.register_load_run(&a).unwrap().workspace_deleted().is_cancelled());

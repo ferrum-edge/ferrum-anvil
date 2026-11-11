@@ -61,14 +61,10 @@ pub(crate) fn channel(o: &ExecutionOutput) -> Option<&HboneDatagramChannel> {
     tunnel_of(o).and_then(|t| t.datagrams.as_ref())
 }
 
-/// From v0.9.9 the endpoint resets the CONNECT stream of a datagram relay
-/// that ended on a socket error with `RST_STREAM(CONNECT_ERROR)` instead of a
-/// clean `END_STREAM` (ferrum-edge#5781, #5856); earlier releases end it
-/// cleanly, so the check applies to v0.9.9 and later only.
+/// The endpoint resets the CONNECT stream of a datagram relay that ended on a
+/// socket error with `RST_STREAM(CONNECT_ERROR)` instead of a clean
+/// `END_STREAM` (from v0.9.9, ferrum-edge#5781, #5856).
 fn relay_error_reset(c: &mut Checks, o: &ExecutionOutput) {
-    if !crate::gateway::release_at_least("v0.9.9") {
-        return;
-    }
     c.add(
         CheckKind::Diagnosis,
         "the endpoint reset the CONNECT stream with CONNECT_ERROR (its relay ended on a socket error)",

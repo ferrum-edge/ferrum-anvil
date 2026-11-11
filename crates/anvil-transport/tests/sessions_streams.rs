@@ -986,6 +986,41 @@ async fn grpc_h3_adapter_uses_quic_and_reads_status_from_h3_trailers() {
     assert!(!out.attempts[0].response.as_ref().unwrap().trailers_received);
 }
 
+/// Native gRPC over HTTP/3 from a raw origin whose trailers arrive but whose
+/// stream never ends (no FIN). h3 hands trailers over only at FIN; the
+/// status they carry is still recorded, and the call ends at its deadline.
+#[tokio::test]
+async fn grpc_h3_status_in_trailers_before_a_missing_end_of_stream_is_recorded() {
+    use anvil_fixtures::h3raw::{self, Answer, DATA, End, HEADERS, STATUS_200};
+    init();
+    let mut head = vec![h3raw::indexed(STATUS_200)];
+    h3raw::literal_name(&mut head, b"content-type", b"application/grpc");
+    let mut status = vec![];
+    h3raw::literal_name(&mut status, b"grpc-status", b"0");
+    let bytes = [
+        h3raw::frame(HEADERS, &h3raw::field_section(&head)),
+        // One empty message: not compressed, length 0.
+        h3raw::frame(DATA, &[0, 0, 0, 0, 0]),
+        h3raw::frame(HEADERS, &h3raw::field_section(&status)),
+    ]
+    .concat();
+    let tls = TlsServerOptions::new(pki().server.chain_with(&pki().ca), pki().server.key.clone());
+    let o = h3raw::serve(tls, vec![Answer { bytes, end: End::Hold }]).await.unwrap();
+    let mut plan =
+        echo_plan(o.addr.port(), true, "Unary", GrpcMode::Unary, r#"{"message":"h"}"#, GrpcWire::Grpc, HttpVersionPolicy::Http3Only);
+    plan.deadline_ms = Some(1_000);
+    let (events, cancel) = (EventCtx::none(), CancellationToken::new());
+    let run = grpc::run(&plan, &events, &cancel, None);
+    let out = tokio::time::timeout(std::time::Duration::from_secs(10), run).await.expect("the call did not end");
+    assert_eq!(status_of(&out), (Some(0), GrpcStatusSource::Trailers), "{:?}", failure_of(&out));
+    let f = failure_of(&out).expect("the stream never ended");
+    assert_eq!(f.kind, FailureKind::TotalTimeout);
+    assert!(f.message.contains("after the server returned status 0"), "{}", f.message);
+    let r = out.attempts[0].response.as_ref().unwrap();
+    assert_eq!(r.http_version, "HTTP/3");
+    assert!(r.trailers_received && r.trailers.iter().any(|h| h.name == "grpc-status" && h.value == "0"));
+}
+
 #[tokio::test]
 async fn grpc_over_h3_leaves_out_connection_specific_metadata_and_sends_te_trailers() {
     init();

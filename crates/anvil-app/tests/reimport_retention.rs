@@ -256,7 +256,7 @@ fn old_orphan_metadata_cannot_route_revision_data_and_backup_retains_its_importe
         let graph = app.graph(Some(&other), false, false).unwrap();
         assert!(graph.revisions.iter().all(|r| r.id != revision_id));
         assert!(graph.attachments.is_empty(), "an orphan's file cannot enter a workspace export");
-        app.export_preview(Some(&other), ExportMode::ShareSafely, false).unwrap();
+        app.export_preview_with_standards(Some(&other), ExportMode::ShareSafely, false, false).unwrap();
         assert!(app.build_context(Some(request_id), &other, None, &SendOptions::default(),).is_err());
         let refs = app.store.read_consistently(|s| s.orphan_revision_attachment_refs_for_retention(&revision_id)).unwrap().unwrap();
         assert_eq!(refs, HashSet::from([sha(&attachment).to_string()]));
@@ -272,7 +272,6 @@ fn old_orphan_metadata_cannot_route_revision_data_and_backup_retains_its_importe
     }
 
     let blob = index(&app, &attachment)["blob"].as_str().unwrap().to_string();
-    assert!(!app.release_attachment(sha(&attachment)).unwrap(), "the orphan keeps its reference");
     app.store.prune_history(0, 0).unwrap();
     assert_eq!(app.get_attachment(sha(&attachment)).unwrap(), Some(bytes.clone()));
     assert!(app.store.get_blob(&blob).unwrap().is_some(), "the import's blob pin remains");
@@ -305,7 +304,6 @@ fn deleting_a_workspace_cannot_drop_an_orphans_references_using_a_forged_owner_i
     assert!(app.store.object_meta(kind::REVISION).unwrap().iter().any(|m| m.id == revision_id.to_string()));
     assert!(app.revision(&revision_id).is_err());
     assert_eq!(app.get_attachment(sha(&attachment)).unwrap(), Some(bytes));
-    assert!(!app.release_attachment(sha(&attachment)).unwrap());
     let done = app.clean_up_storage().unwrap();
     assert_eq!((done.orphaned_revisions, done.released_attachments), (1, 1));
     assert!(app.get_attachment(sha(&attachment)).unwrap().is_none());
@@ -327,7 +325,6 @@ fn blocked_cleanup_keeps_orphan_references_until_a_safe_pass_and_keeps_corrupt_o
     assert!(app.store.object_meta(kind::REVISION).unwrap().iter().any(|m| m.id == revision_id.to_string()));
     app.store.prune_history(0, 0).unwrap();
     assert_eq!(app.get_attachment(sha(&attachment)).unwrap(), Some(bytes.clone()));
-    assert!(!app.release_attachment(sha(&attachment)).unwrap());
     // Cleanup writes only its result note; all object rows, blobs and pins survive.
     let without_note = |rows: Vec<String>| rows.into_iter().filter(|r| !r.starts_with("meta:'note:storage_cleanup'")).collect::<Vec<_>>();
     assert_eq!(without_note(inventory(&app)), without_note(before));

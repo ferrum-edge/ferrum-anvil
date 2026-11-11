@@ -155,7 +155,7 @@ fn free_text_credential_warning_matches_what_each_mode_encrypts() {
     let mut g = sample();
     g.requests[0].spec.body = Body::Json { text: r#"{"password":"audit-dummy-password"}"#.into() };
     for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some("transfer pass"))] {
-        let (bytes, preview) = bundle::write(&g, &opts(mode, pass)).unwrap();
+        let (bytes, preview) = bundle::write_redacting(&g, &opts(mode, pass), &[]).unwrap();
         let warning = preview
             .manifest
             .content_warnings
@@ -175,7 +175,7 @@ fn free_text_credential_warning_matches_what_each_mode_encrypts() {
 #[test]
 fn data_001_share_safely_roundtrip_preserves_structure_and_excludes_secrets() {
     let g = sample();
-    let (bytes, preview) = bundle::write(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
+    let (bytes, preview) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
     let all = text_of(&bytes);
     for leaked in ["LITERAL-KEY-12345", "basic-password-xyz", "env-secret-token", "VAULT-SECRET-999"] {
         assert!(!all.contains(leaked), "{leaked} leaked into a share-safely bundle");
@@ -200,7 +200,7 @@ fn data_001_share_safely_roundtrip_preserves_structure_and_excludes_secrets() {
 #[test]
 fn data_003_encrypted_transfer_restores_exact_values() {
     let g = sample();
-    let (bytes, _) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some("correct horse battery"))).unwrap();
+    let (bytes, _) = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, Some("correct horse battery")), &[]).unwrap();
     let all = text_of(&bytes);
     for leaked in ["LITERAL-KEY-12345", "basic-password-xyz", "env-secret-token", "VAULT-SECRET-999"] {
         assert!(!all.contains(leaked), "{leaked} visible in an encrypted bundle");
@@ -279,7 +279,7 @@ fn credential_named_literals_never_reach_the_readable_objects() {
 #[test]
 fn data_004_wrong_passphrase_fails_safely() {
     let g = sample();
-    let (bytes, _) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some("correct horse battery"))).unwrap();
+    let (bytes, _) = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, Some("correct horse battery")), &[]).unwrap();
     assert!(matches!(bundle::open(&bytes, Some("wrong passphrase!")), Err(BundleError::WrongPassphrase)));
     assert!(matches!(bundle::open(&bytes, None), Err(BundleError::PassphraseRequired)));
 }
@@ -289,14 +289,14 @@ fn data_004_wrong_passphrase_fails_safely() {
 #[test]
 fn encrypted_exports_count_passphrase_characters() {
     let g = sample();
-    let short = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some("éééé")));
+    let short = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, Some("éééé")), &[]);
     assert!(matches!(&short, Err(BundleError::Invalid(m)) if m.contains("at least 8 characters")), "four characters, eight bytes");
-    assert!(bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some("éééééééé"))).is_ok());
+    assert!(bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, Some("éééééééé")), &[]).is_ok());
 }
 
 #[test]
 fn data_005_corrupt_or_truncated_bundles_are_rejected() {
-    let (bytes, _) = bundle::write(&sample(), &opts(ExportMode::ShareSafely, None)).unwrap();
+    let (bytes, _) = bundle::write_redacting(&sample(), &opts(ExportMode::ShareSafely, None), &[]).unwrap();
     assert!(bundle::open(&bytes[..bytes.len() / 2], None).is_err(), "truncated");
     // Modify one entry but keep a valid zip: rewrite objects.json.
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(&bytes[..])).unwrap();
@@ -379,7 +379,7 @@ fn data_008_imports_never_activate_bypass_or_trust() {
         Some(anvil_domain::settings::RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
     g.workspaces[0].settings.early_data =
         Some(anvil_domain::settings::EarlyDataPolicy { enabled: true, extra_methods: vec!["PUT".into()] });
-    let (bytes, _) = bundle::write(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
+    let (bytes, _) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
     let opened = bundle::open(&bytes, None).unwrap();
     assert!(opened.graph.tls_profiles.iter().all(|t| t.verify), "verification bypass is not imported as active");
     assert!(opened.graph.scenarios.iter().all(|s| !s.trusted));
@@ -446,7 +446,7 @@ fn data_008_workload_api_sources_are_flagged_and_send_anyway_is_not_imported() {
     };
     g.tls_profiles[0].client_identity =
         Some(anvil_domain::tls::ClientIdentity::WorkloadApi { endpoint: String::new(), spiffe_id: None, trust_bundle: true });
-    let (bytes, _) = bundle::write(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
+    let (bytes, _) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
     assert!(!text_of(&bytes).contains("eyJ.LITERAL.jwtsvid"), "a JWT-SVID value is not shared");
     let opened = bundle::open(&bytes, None).unwrap();
     for r in &opened.graph.requests {
@@ -483,7 +483,7 @@ fn imports_never_open_an_import_root_and_list_every_linked_file() {
         attachment: AttachmentRef::LinkedFile { path: "/home/user/rows.csv".into() },
         sensitive_columns: vec![],
     });
-    let (bytes, preview) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some("correct horse battery"))).unwrap();
+    let (bytes, preview) = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, Some("correct horse battery")), &[]).unwrap();
     assert!(preview.manifest.device_bindings.iter().any(|d| d.contains("datasets")), "{:?}", preview.manifest.device_bindings);
 
     let opened = bundle::open(&bytes, Some("correct horse battery")).unwrap();
@@ -508,7 +508,7 @@ fn imports_never_open_an_import_root_and_list_every_linked_file() {
 fn export_previews_list_the_linked_file_paths_they_carry() {
     let mut g = sample();
     // Nothing linked: no paths, no warning.
-    let preview = bundle::preview(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
+    let preview = bundle::preview_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
     assert!(preview.linked_files.is_empty());
     assert!(!preview.manifest.device_bindings.iter().any(|d| d.contains("linked local files")), "{:?}", preview.manifest.device_bindings);
 
@@ -541,11 +541,11 @@ fn export_previews_list_the_linked_file_paths_they_carry() {
     // Every mode carries the paths, so every preview lists them, beside the
     // warning that they need choosing again on the target machine.
     for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some("correct horse battery"))] {
-        let preview = bundle::preview(&g, &opts(mode, pass)).unwrap();
+        let preview = bundle::preview_redacting(&g, &opts(mode, pass), &[]).unwrap();
         assert_eq!(preview.linked_files, expected, "{mode:?}");
         let warned = &preview.manifest.device_bindings;
         assert!(warned.iter().any(|d| d.contains("linked local files")), "{warned:?}");
-        let (bytes, written) = bundle::write(&g, &opts(mode, pass)).unwrap();
+        let (bytes, written) = bundle::write_redacting(&g, &opts(mode, pass), &[]).unwrap();
         assert_eq!(written.linked_files, expected, "{mode:?}");
         // The listing is for the user exporting; the bundle's manifest does
         // not repeat the paths.
@@ -635,7 +635,7 @@ fn edit_json(bytes: &[u8], entry: &str, edit: impl Fn(&mut serde_json::Value)) -
 
 #[test]
 fn future_format_is_refused() {
-    let (bytes, _) = bundle::write(&sample(), &opts(ExportMode::ShareSafely, None)).unwrap();
+    let (bytes, _) = bundle::write_redacting(&sample(), &opts(ExportMode::ShareSafely, None), &[]).unwrap();
     let fut = edit_json(&bytes, "manifest.json", |m| m["format_version"] = 99.into());
     assert!(matches!(bundle::open(&fut, None), Err(BundleError::FutureFormat { found: 99, .. })));
 }
@@ -644,7 +644,7 @@ fn future_format_is_refused() {
 fn bundles_written_at_a_newer_schema_are_refused() {
     let supported = anvil_domain::SCHEMA_VERSION;
     let future = supported + 100;
-    let (bytes, preview) = bundle::write(&sample(), &opts(ExportMode::ShareSafely, None)).unwrap();
+    let (bytes, preview) = bundle::write_redacting(&sample(), &opts(ExportMode::ShareSafely, None), &[]).unwrap();
     assert_eq!(preview.manifest.schema_version, supported);
     bundle::open(&bytes, None).expect("the current schema opens");
 
@@ -664,7 +664,7 @@ fn bundles_written_at_a_newer_schema_are_refused() {
     assert!(matches!(e, BundleError::FutureSchema { found, .. } if found == future), "{e}");
 
     // Encrypted bundles are refused before a passphrase is asked for.
-    let (enc, _) = bundle::write(&sample(), &opts(ExportMode::EncryptedTransfer, Some("correct horse battery"))).unwrap();
+    let (enc, _) = bundle::write_redacting(&sample(), &opts(ExportMode::EncryptedTransfer, Some("correct horse battery")), &[]).unwrap();
     let fut = edit_json(&enc, "manifest.json", |m| m["schema_version"] = future.into());
     assert!(matches!(bundle::open(&fut, None), Err(BundleError::FutureSchema { .. })));
     assert!(matches!(bundle::open(&fut, Some("correct horse battery")), Err(BundleError::FutureSchema { .. })));
@@ -674,7 +674,7 @@ fn bundles_written_at_a_newer_schema_are_refused() {
 fn out_of_range_kdf_costs_are_refused_before_deriving() {
     use bundle::{MAX_KDF_ITERATIONS, MAX_KDF_MEMORY_KIB, MAX_KDF_PARALLELISM};
     let pass = "correct horse battery";
-    let (bytes, preview) = bundle::write(&sample(), &opts(ExportMode::EncryptedTransfer, Some(pass))).unwrap();
+    let (bytes, preview) = bundle::write_redacting(&sample(), &opts(ExportMode::EncryptedTransfer, Some(pass)), &[]).unwrap();
     assert!(preview.secrets_included > 0);
     let with_costs = |m: u32, t: u32, p: u32| {
         edit_json(&bytes, "manifest.json", move |v| {
@@ -729,7 +729,8 @@ fn out_of_range_kdf_costs_are_refused_before_deriving() {
     assert!(matches!(bundle::open(&b, Some(pass)), Err(BundleError::WrongPassphrase)));
     // Exports refuse costs they could not open again.
     let too_costly = KdfParams { m_cost: MAX_KDF_MEMORY_KIB + 1, ..KdfParams::interactive() };
-    let e = bundle::write(&sample(), &ExportOptions { kdf: too_costly, ..opts(ExportMode::EncryptedTransfer, Some(pass)) }).unwrap_err();
+    let e = bundle::write_redacting(&sample(), &ExportOptions { kdf: too_costly, ..opts(ExportMode::EncryptedTransfer, Some(pass)) }, &[])
+        .unwrap_err();
     assert!(matches!(e, BundleError::UnsupportedKdf(_)), "{e}");
 }
 
@@ -795,7 +796,7 @@ fn duplicate_remap_gives_revisions_and_secrets_fresh_identities() {
 fn encrypted_bundle_keeps_revisions_and_secret_owners_through_a_round_trip() {
     let mut g = sample();
     let rev = with_revision(&mut g);
-    let (bytes, _) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some("correct horse battery"))).unwrap();
+    let (bytes, _) = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, Some("correct horse battery")), &[]).unwrap();
     let opened = bundle::open(&bytes, Some("correct horse battery")).unwrap();
     assert_eq!(opened.graph.revisions.len(), 1);
     assert_eq!(opened.graph.revisions[0].id, rev.id);
@@ -1187,7 +1188,7 @@ fn stored_specs(carried: &str, sha256: &str) -> Vec<(&'static str, RequestSpec)>
 fn a_stored_attachment_without_its_bytes_is_listed_with_the_item_that_names_it() {
     let carried = hex_sha(b"attachment bytes");
     let elsewhere = hex_sha(b"bytes the bundle does not carry");
-    let reopen = |g: &PortableGraph| bundle::open(&bundle::write(g, &opts(ExportMode::ShareSafely, None)).unwrap().0, None);
+    let reopen = |g: &PortableGraph| bundle::open(&bundle::write_redacting(g, &opts(ExportMode::ShareSafely, None), &[]).unwrap().0, None);
     let uncarried = |g: &PortableGraph| validate::uncarried_attachments(&reopen(g).unwrap().graph).unwrap();
     // A request or dataset naming stored bytes the bundle does not carry
     // opens; the importer checks each listed hash against its own device.
@@ -1197,7 +1198,7 @@ fn a_stored_attachment_without_its_bytes_is_listed_with_the_item_that_names_it()
         let expected = vec![UncarriedAttachment { item: "request 'Create order'".into(), sha256: elsewhere.clone() }];
         assert_eq!(uncarried(&g), expected, "{label}");
         // The export lists it among its excluded items.
-        let excluded = bundle::preview(&g, &opts(ExportMode::ShareSafely, None)).unwrap().manifest.excluded;
+        let excluded = bundle::preview_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap().manifest.excluded;
         assert!(excluded.iter().any(|x| x.contains("a stored file of request 'Create order'")), "{label}: {excluded:?}");
     }
     let mut g = sample();
@@ -1214,7 +1215,7 @@ fn a_stored_attachment_without_its_bytes_is_listed_with_the_item_that_names_it()
     }
     g.datasets.push(dataset(g.workspaces[0].meta.id));
     assert!(uncarried(&g).is_empty());
-    let excluded = bundle::preview(&g, &opts(ExportMode::ShareSafely, None)).unwrap().manifest.excluded;
+    let excluded = bundle::preview_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap().manifest.excluded;
     assert!(excluded.iter().all(|x| !x.contains("stored file")), "{excluded:?}");
     let opened = reopen(&g).expect("every stored attachment travels with its bytes");
     assert_eq!(opened.graph.requests.len(), 2 + stored_specs(&carried, &carried).len());
@@ -1228,17 +1229,17 @@ fn a_stored_attachment_without_its_bytes_is_listed_with_the_item_that_names_it()
 #[test]
 fn full_backups_are_never_written_or_opened_as_bundles() {
     let pass = "correct horse battery";
-    let e = bundle::write(&sample(), &opts(ExportMode::FullBackup, Some(pass))).unwrap_err();
+    let e = bundle::write_redacting(&sample(), &opts(ExportMode::FullBackup, Some(pass)), &[]).unwrap_err();
     assert!(matches!(e, BundleError::FullBackupNotABundle), "{e}");
     let backup_kind = ExportOptions { kind: BundleKind::Backup, ..opts(ExportMode::EncryptedTransfer, Some(pass)) };
-    assert!(matches!(bundle::write(&sample(), &backup_kind), Err(BundleError::FullBackupNotABundle)));
-    assert!(matches!(bundle::preview(&sample(), &backup_kind), Err(BundleError::FullBackupNotABundle)));
+    assert!(matches!(bundle::write_redacting(&sample(), &backup_kind, &[]), Err(BundleError::FullBackupNotABundle)));
+    assert!(matches!(bundle::preview_redacting(&sample(), &backup_kind, &[]), Err(BundleError::FullBackupNotABundle)));
 
     // Manifest and directory metadata that describes a full backup is
     // refused with or without its passphrase, before objects or the vault
     // are read. The objects-only marker below is discovered only after the
     // passphrase check and objects read.
-    let (bytes, _) = bundle::write(&sample(), &opts(ExportMode::EncryptedTransfer, Some(pass))).unwrap();
+    let (bytes, _) = bundle::write_redacting(&sample(), &opts(ExportMode::EncryptedTransfer, Some(pass)), &[]).unwrap();
     let legacy = [
         edit_json(&bytes, "manifest.json", |m| m["mode"] = "full_backup".into()),
         edit_json(&bytes, "manifest.json", |m| m["kind"] = "backup".into()),
@@ -1303,7 +1304,7 @@ fn an_encrypted_bundle_changed_in_any_entry_restores_nothing() {
     let mut g = sample();
     g.history.push(serde_json::to_value(execution_record(Some(g.workspaces[0].meta.id))).unwrap());
     let with_history = ExportOptions { include_history: true, ..opts(ExportMode::EncryptedTransfer, Some(pass)) };
-    let (bytes, preview) = bundle::write(&g, &with_history).unwrap();
+    let (bytes, preview) = bundle::write_redacting(&g, &with_history, &[]).unwrap();
     assert_eq!(preview.manifest.format_version, bundle::FORMAT_VERSION);
     let opened = bundle::open(&bytes, Some(pass)).expect("the untouched bundle opens");
     assert!(opened.secrets_restored);
@@ -1352,7 +1353,7 @@ fn an_encrypted_bundle_changed_in_any_entry_restores_nothing() {
 fn a_passphrase_is_refused_for_a_bundle_without_a_vault() {
     let pass = "correct horse battery";
     let g = sample();
-    let (bytes, _) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some(pass))).unwrap();
+    let (bytes, _) = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, Some(pass)), &[]).unwrap();
     // Without its vault, and relabelled, an encrypted bundle is a share-safe
     // one: the passphrase would verify nothing about it.
     let stripped = edit_json(&without_entry(&bytes, "secrets/portable-vault.enc"), "manifest.json", |m| {
@@ -1367,7 +1368,7 @@ fn a_passphrase_is_refused_for_a_bundle_without_a_vault() {
     assert!(!opened.secrets_restored && opened.graph.secrets.is_empty());
 
     // A bundle exported to share safely is refused a passphrase as well.
-    let (safe, _) = bundle::write(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
+    let (safe, _) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
     assert!(matches!(bundle::open(&safe, Some(pass)), Err(BundleError::NotEncrypted)));
     assert!(!bundle::open(&safe, None).unwrap().secrets_restored);
 }
@@ -1400,7 +1401,7 @@ fn with_format_1_vault(bytes: &[u8], g: &PortableGraph, pass: &str) -> Vec<u8> {
 fn format_1_vaults_are_refused_and_nothing_of_them_is_restored() {
     let pass = "correct horse battery";
     let g = sample();
-    let (bytes, _) = bundle::write(&g, &opts(ExportMode::EncryptedTransfer, Some(pass))).unwrap();
+    let (bytes, _) = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, Some(pass)), &[]).unwrap();
     let v1 = with_format_1_vault(&bytes, &g, pass);
     // Early full backups relabelled as a workspace bundle (kind, mode, no
     // settings or app settings) are such bundles; their objects could then
@@ -1427,7 +1428,7 @@ fn format_1_vaults_are_refused_and_nothing_of_them_is_restored() {
     assert!(matches!(bundle::open(&backup, Some(pass)), Err(BundleError::LegacyFullBackup)));
 
     // Bundles without a vault (share safely) of format 1 still open.
-    let (safe, _) = bundle::write(&g, &opts(ExportMode::ShareSafely, None)).unwrap();
+    let (safe, _) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
     let safe_v1 = edit_json(&safe, "manifest.json", |m| m["format_version"] = 1.into());
     for b in [&safe, &safe_v1] {
         let opened = bundle::open(b, None).unwrap();
@@ -1618,7 +1619,7 @@ fn an_imported_oauth_profile_never_keeps_a_token_cache_id() {
     g.requests[1].spec.auth = oauth(Some(Id::new()));
     let pass = "correct horse battery";
     for (mode, p) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some(pass))] {
-        let (bytes, _) = bundle::write(&g, &opts(mode, p)).unwrap();
+        let (bytes, _) = bundle::write_redacting(&g, &opts(mode, p), &[]).unwrap();
         assert!(text_of(&bytes).contains("token_cache_id"), "{mode:?}: the bundle names cache ids");
         let opened = bundle::open(&bytes, p).unwrap();
         let text = serde_json::to_string(&opened.graph).unwrap();
@@ -1656,7 +1657,7 @@ fn g01_bundles_never_import_a_gateway_lookup() {
         updated_at: chrono::Utc::now(),
     });
     for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some("correct horse battery"))] {
-        let (bytes, _) = bundle::write(&g, &opts(mode, pass)).unwrap();
+        let (bytes, _) = bundle::write_redacting(&g, &opts(mode, pass), &[]).unwrap();
         let opened = bundle::open(&bytes, pass).unwrap();
         let anvil_domain::integration::IntegrationKind::FerrumGateway { detail, .. } = &opened.graph.integrations[0].kind;
         assert!(detail.is_none(), "{mode:?}: the lookup was imported");

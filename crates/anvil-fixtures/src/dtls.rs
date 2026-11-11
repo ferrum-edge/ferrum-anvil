@@ -120,20 +120,6 @@ fn fatal_alert(description: u8) -> Vec<u8> {
     r
 }
 
-/// Common name of a DER certificate (fixture helper, no full X.509 parser).
-pub fn cn_from_der(der: &[u8]) -> Option<String> {
-    let mut last = None;
-    for i in 0..der.len().saturating_sub(5) {
-        if der[i] == 0x55 && der[i + 1] == 0x04 && der[i + 2] == 0x03 {
-            let len = der[i + 4] as usize;
-            if i + 5 + len <= der.len() {
-                last = String::from_utf8(der[i + 5..i + 5 + len].to_vec()).ok();
-            }
-        }
-    }
-    last
-}
-
 pub async fn serve(bind: &str, opts: DtlsServerOptions) -> anyhow::Result<DtlsFixture> {
     let cert_der = crate::tlsserver::certs(&opts.cert_pem).into_iter().next().ok_or_else(|| anyhow::anyhow!("no server certificate"))?;
     let key_der = crate::tlsserver::key(&opts.key_pem).secret_der().to_vec();
@@ -218,7 +204,7 @@ pub async fn serve(bind: &str, opts: DtlsServerOptions) -> anyhow::Result<DtlsFi
                     let mut client_cn = None;
                     for o in &outs {
                         if let Out::PeerCert(der) = o {
-                            client_cn = cn_from_der(der);
+                            client_cn = crate::tlsserver::cn_from_der(der);
                             if let Some(v) = &verifier {
                                 let leaf = CertificateDer::from(der.clone());
                                 if let Err(e) = v.verify_client_cert(&leaf, &[], UnixTime::now()) {

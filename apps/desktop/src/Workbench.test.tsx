@@ -154,7 +154,7 @@ function deferred<T>() {
 }
 const environment = (id: string, wsId: string, name: string) => ({ id, workspace_id: wsId, name, schema_version: 1, created_at: now, updated_at: now }) as Environment;
 const tlsProfile = (id: string, wsId: string, name: string) => ({ id, workspace_id: wsId, name }) as TlsProfile;
-const historyItem = (id: string, url: string) => ({ id, started_at: 0, method: "GET", url, summary: "200 OK", status: 200 });
+const historyItem = (id: string, url: string) => ({ id, started_at: 0, method: "GET", url, summary: "200 OK", status: 200, failed: false });
 
 function sessionView(text: string): ExecutionView {
   return {
@@ -1958,6 +1958,18 @@ describe("the request tree", () => {
     expect(calls("request_get")).toHaveLength(1);
   });
 
+  it("says why a request could not be opened, and opens no tab", async () => {
+    backend({
+      request_get: () => {
+        throw "the stored request no longer decodes";
+      },
+    });
+    await boot();
+    fireEvent.click(screen.getByRole("treeitem", { name: /Alpha/ }));
+    expect(await screen.findByText("the stored request no longer decodes")).toBeTruthy();
+    expect(openTabs().queryByRole("tab", { name: /Alpha/ })).toBeNull();
+  });
+
   it("opens one tab when a request is opened twice while it is read", async () => {
     const read = deferred<RequestDefinition>();
     backend({ request_get: () => read.promise });
@@ -1969,5 +1981,108 @@ describe("the request tree", () => {
     await act(async () => read.resolve(requests.r1));
     await openTabs().findByRole("tab", { name: /Alpha/ });
     expect(openTabs().getAllByRole("tab", { name: /Alpha/ })).toHaveLength(1);
+  });
+
+  it("files a node dropped on a request row in that request's folder", async () => {
+    const crate = (children: TreeNode[]): TreeNode => ({ id: "f1", kind: "folder", name: "Crate", favorite: false, children });
+    const dragged = (id: string, kind = "request") => ({ dataTransfer: { getData: () => JSON.stringify({ id, kind }) } });
+    backend({
+      tree_get: () => [crate([node(requests.r1), node(requests.r2)]), node(requests.s1)],
+      request_move: (a) => requests[a.requestId as string],
+    });
+    render(<Workbench onLock={() => {}} profileName="test" />);
+    fireEvent.click(await screen.findByRole("treeitem", { name: /Crate/ }));
+    const alpha = await screen.findByRole("treeitem", { name: /Alpha/ });
+
+    fireEvent.drop(alpha, dragged("s1"));
+    await waitFor(() => expect(calls("request_move")).toHaveLength(1));
+    expect(calls("request_move")[0]).toMatchObject({ requestId: "s1", folderId: "f1" });
+
+    // Already in that folder (a sibling, the row itself): it stays put, and
+    // the drop does not reach the sidebar, which would move it to the root.
+    fireEvent.drop(alpha, dragged("r2"));
+    fireEvent.drop(alpha, dragged("r1"));
+    // A request at the root files the node at the root.
+    fireEvent.drop(screen.getByRole("treeitem", { name: /Socket/ }), dragged("r1"));
+    await waitFor(() => expect(calls("request_move")).toHaveLength(2));
+    expect(calls("request_move")[1]).toMatchObject({ requestId: "r1", folderId: null });
+  });
+
+  it("colours a history row without an HTTP status by whether the exchange failed", async () => {
+    backend({
+      history_list: () => [
+        { ...historyItem("h1", "tcp://ok.test:7"), status: null, summary: "TCP completed" },
+        { ...historyItem("h2", "tcp://down.test:7"), status: null, failed: true, summary: "connect refused" },
+        { ...historyItem("h3", "https://missing.test/"), status: 404, failed: true, summary: "404" },
+      ],
+    });
+    await boot();
+    fireEvent.click(screen.getByRole("tab", { name: "History" }));
+    const pill = async (url: string) => (await screen.findByText(url)).closest(".hist-row")!.querySelector(".status-pill")!.className;
+    expect(await pill("tcp://ok.test:7")).toBe("status-pill");
+    expect(await pill("tcp://down.test:7")).toBe("status-pill s5");
+    expect(await pill("https://missing.test/")).toBe("status-pill s4");
+  });
+});
+
+describe("deleting a workspace", () => {
+  const confirmDelete = async () => {
+    fireEvent.change(screen.getByLabelText("Workspace"), { target: { value: "__delete" } });
+    const dialog = await screen.findByRole("dialog", { name: "Delete workspace" });
+    const button = within(dialog).getByRole("button", { name: "Delete workspace" }) as HTMLButtonElement;
+    const name = within(dialog).getByLabelText("Type the workspace name to confirm");
+    return { dialog, button, name };
+  };
+
+  it("deletes the workspace only once its name is typed, then selects another", async () => {
+    let deleted = false;
+    backend({
+      workspaces_list: () => (deleted ? [workspace("B", "Two")] : [workspace("A", "One"), workspace("B", "Two")]),
+      workspace_delete: () => {
+        deleted = true;
+        return null;
+      },
+    });
+    await boot();
+    await openTab("Alpha");
+
+    const { button, name } = await confirmDelete();
+    expect(button.disabled).toBe(true);
+    fireEvent.change(name, { target: { value: "one" } });
+    expect(button.disabled).toBe(true);
+    fireEvent.change(name, { target: { value: "One" } });
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+
+    await waitFor(() => expect(calls("workspace_delete")).toEqual([{ workspaceId: "A" }]));
+    await waitFor(() => expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("B"));
+    expect(screen.queryByRole("tab", { name: /Alpha/ })).toBeNull();
+    await screen.findByRole("treeitem", { name: /Gamma/ });
+  });
+
+  it("stops a live session of the workspace before deleting it", async () => {
+    backend({ workspace_delete: () => null });
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+
+    const { dialog, button, name } = await confirmDelete();
+    expect(dialog.textContent).toContain("will be stopped");
+    fireEvent.change(name, { target: { value: "One" } });
+    fireEvent.click(button);
+    await waitFor(() => expect(calls("session_cancel")).toEqual([cancelArgs()]));
+    await waitFor(() => expect(calls("workspace_delete")).toEqual([{ workspaceId: "A" }]));
+  });
+
+  it("deletes nothing when canceled", async () => {
+    backend();
+    await boot();
+    const { dialog, name } = await confirmDelete();
+    fireEvent.change(name, { target: { value: "One" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Delete workspace" })).toBeNull());
+    expect(calls("workspace_delete")).toHaveLength(0);
+    expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("A");
   });
 });

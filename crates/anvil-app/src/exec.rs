@@ -118,16 +118,10 @@ impl ResolvedSecrets {
     fn lookup(
         workspace: Id,
         read: &ContextRead<'_, '_>,
-        parts: &[serde_json::Value],
+        refs: HashSet<SecretRef>,
         variables: HashMap<(usize, usize), SecretRef>,
-        prefetch_variables: bool,
         authority: AppContextAuthority,
     ) -> ResolvedSecrets {
-        let mut refs = HashSet::new();
-        parts.iter().for_each(|p| collect_secret_refs(p, &mut refs));
-        if prefetch_variables {
-            refs.extend(variables.values().cloned());
-        }
         let resolved = refs
             .into_iter()
             .map(|r| {
@@ -165,6 +159,18 @@ impl SecretResolver for ResolvedSecrets {
             }
         }
     }
+}
+
+/// The vault references a context for `ctx` looks up when it is built: those
+/// in [`secret_parts`], and its retained `variables` unless an OAuth endpoint
+/// must pass its policy check first. Any other reference resolves when used.
+fn prefetch_refs(ctx: &ExecutionContext, variables: &HashMap<(usize, usize), SecretRef>) -> Result<HashSet<SecretRef>> {
+    let mut refs = HashSet::new();
+    secret_parts(ctx)?.iter().for_each(|p| collect_secret_refs(p, &mut refs));
+    if !oauth_needs_deferral(ctx, &ctx.effective_auth().1) {
+        refs.extend(variables.values().cloned());
+    }
+    Ok(refs)
 }
 
 /// Where the engine reads the secrets of `ctx` from when it executes it: the
@@ -600,15 +606,14 @@ impl App {
         for r in dependency_refs {
             read.depend_secret(&r.id);
         }
-        let parts = secret_parts(&ctx)?;
-        let prefetch_variables = !oauth_needs_deferral(&ctx, &ctx.effective_auth().1);
+        let refs = prefetch_refs(&ctx, &deferred_variables)?;
         let authority = AppContextAuthority {
             store: self.store.clone(),
             scope: read.finish(),
             confinement: self.confined_token_files.clone(),
             confined,
         };
-        ctx.secrets = Arc::new(ResolvedSecrets::lookup(*ws_id, read, &parts, deferred_variables, prefetch_variables, authority.clone()));
+        ctx.secrets = Arc::new(ResolvedSecrets::lookup(*ws_id, read, refs, deferred_variables, authority.clone()));
         ctx.attachments = Arc::new(StoreAttachments { index, linked, authority });
         Ok(ctx)
     }
@@ -862,5 +867,103 @@ impl AttachmentResolver for GuardedAttachments {
     fn load(&self, attachment: &AttachmentRef) -> std::result::Result<Bytes, String> {
         crate::blocking_in_place(|| self.authority.check()).map_err(|e| e.to_string())?;
         self.inner.load(attachment)
+    }
+}
+
+#[cfg(test)]
+mod prefetch_tests {
+    //! Which vault secrets a context looks up when it is built. Any protected
+    //! edit stales the whole context, so deleting a secret no longer tells a
+    //! prefetched reference from one resolved on use: the set is read here.
+    use super::*;
+    use crate::profiles::ProfileManager;
+    use anvil_domain::auth::{OAuth2Config, OAuthClientAuth, OAuthGrant};
+    use anvil_domain::settings::ProxySelection;
+    use anvil_domain::tls::{ProxyKind, ProxyProfile};
+    use anvil_storage::KdfParams;
+
+    fn open_app(root: &std::path::Path) -> App {
+        let pm = ProfileManager::new(root);
+        let (s, dek, _recovery) = pm.create_passphrase("t", "correct horse battery", KdfParams::testing()).unwrap();
+        let h = anvil_storage::vault::read_header(&s.dir).unwrap();
+        App::open(s.dir, h, dek).unwrap()
+    }
+
+    /// An HTTP proxy profile whose password is `password`.
+    fn proxy(app: &App, ws: &Id, password: &SecretRef) -> Id {
+        let now = chrono::Utc::now();
+        let p = ProxyProfile {
+            id: Id::new(),
+            workspace_id: *ws,
+            name: password.label.clone(),
+            kind: ProxyKind::Http,
+            address: "proxy.example.invalid:3128".into(),
+            username: Some("user".into()),
+            password: Some(SensitiveValue::Secret { secret: password.clone() }),
+            no_proxy: String::new(),
+            tls_profile_id: None,
+            hbone: None,
+            created_at: now,
+            updated_at: now,
+        };
+        app.save_proxy_profile(p).unwrap().id
+    }
+
+    /// The secrets a context for `spec` looks up when it is built, with
+    /// `variables` as its retained vault variables.
+    fn prefetched(app: &App, ws: &Id, spec: RequestSpec, variables: &HashMap<(usize, usize), SecretRef>) -> HashSet<Id> {
+        let ctx = app.build_context(None, ws, Some(spec), &SendOptions::default()).unwrap();
+        prefetch_refs(&ctx, variables).unwrap().into_iter().map(|r| r.id).collect()
+    }
+
+    #[test]
+    fn only_the_selected_proxy_profiles_password_is_looked_up_when_the_context_is_built() {
+        let root = tempfile::tempdir().unwrap();
+        let app = open_app(root.path());
+        let ws = app.create_workspace("w").unwrap();
+        let used = app.set_secret(&ws.meta.id, "used", "tok-SENSITIVE-used").unwrap();
+        let unused = app.set_secret(&ws.meta.id, "unused", "tok-SENSITIVE-unused").unwrap();
+        let selected = proxy(&app, &ws.meta.id, &used);
+        proxy(&app, &ws.meta.id, &unused);
+        let mut spec = RequestSpec::http("GET", "http://127.0.0.1:9/");
+        spec.settings.proxy_profile_id = Some(ProxySelection::Profile { id: selected });
+        assert_eq!(prefetched(&app, &ws.meta.id, spec, &HashMap::new()), HashSet::from([used.id]));
+    }
+
+    #[test]
+    fn an_oauth_credential_is_looked_up_early_only_for_a_fixed_endpoint_that_passes_its_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let app = open_app(root.path());
+        let mut ws = app.create_workspace("w").unwrap();
+        ws.variables.push(Variable::plain("issuer", "http://127.0.0.1:8080/token"));
+        let ws = app.save_workspace(ws).unwrap();
+        for (endpoint, early) in [
+            ("https://issuer.example.test/token", true),
+            ("http://127.0.0.1:8080/token", true),
+            // Cleartext to a name, and a templated endpoint checked only once expanded.
+            ("http://issuer.example.test/token", false),
+            ("{{issuer}}", false),
+        ] {
+            let client_secret = app.set_secret(&ws.meta.id, "client secret", "tok-SENSITIVE-client").unwrap();
+            let variable = app.set_secret(&ws.meta.id, "vault variable", "tok-SENSITIVE-variable").unwrap();
+            let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/api");
+            spec.auth = AuthConfig::OAuth2 {
+                config: OAuth2Config {
+                    grant: OAuthGrant::ClientCredentials,
+                    token_url: endpoint.into(),
+                    authorization_url: String::new(),
+                    client_id: "client".into(),
+                    client_secret: SensitiveValue::Secret { secret: client_secret.clone() },
+                    scope: String::new(),
+                    audience: String::new(),
+                    client_auth: OAuthClientAuth::RequestBody,
+                    token_cache_id: None,
+                    refresh_skew_secs: 30,
+                },
+            };
+            let got = prefetched(&app, &ws.meta.id, spec, &HashMap::from([((0, 0), variable.clone())]));
+            assert_eq!(got.contains(&client_secret.id), early, "client secret, {endpoint}");
+            assert_eq!(got.contains(&variable.id), early, "vault variable, {endpoint}");
+        }
     }
 }

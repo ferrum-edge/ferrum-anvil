@@ -181,25 +181,16 @@ impl App {
         Ok(f)
     }
 
-    /// Save a folder. Whether it is an import root, and whether that root is
-    /// open to the workspace, are kept as stored: only a spec import makes
-    /// an import root, and only [`App::set_import_root_workspace_scope`]
-    /// opens one.
-    pub fn save_folder(&self, f: Folder) -> Result<Folder> {
-        self.save_folder_with(f, false)
-    }
-
-    /// [`App::save_folder`] that keeps a stored folder under its stored
-    /// parent: it moves only through [`App::move_folder_keeping_isolation`],
-    /// which checks what the move takes out of an import root.
-    pub fn save_folder_in_place(&self, f: Folder) -> Result<Folder> {
-        self.save_folder_with(f, true)
-    }
-
-    fn save_folder_with(&self, mut f: Folder, in_place: bool) -> Result<Folder> {
+    /// Save a folder. A stored folder stays under its stored parent: it
+    /// moves only through [`App::move_folder_keeping_isolation`], which
+    /// checks what the move takes out of an import root. Whether it is an
+    /// import root, and whether that root is open to the workspace, are kept
+    /// as stored: only a spec import makes an import root, and only
+    /// [`App::set_import_root_workspace_scope`] opens one.
+    pub fn save_folder_in_place(&self, mut f: Folder) -> Result<Folder> {
         self.store.atomically(|s| {
             let stored: Option<Folder> = s.get(kind::FOLDER, &f.meta.id)?;
-            if in_place && let Some(stored) = &stored {
+            if let Some(stored) = &stored {
                 f.parent_id = stored.parent_id;
             }
             validate_folder_parent_in(s, &f.workspace_id, f.parent_id)?;
@@ -599,19 +590,6 @@ impl App {
         }
     }
 
-    pub fn search(&self, ws: &Id, query: &str) -> Result<Vec<RequestDefinition>> {
-        let q = query.to_lowercase();
-        Ok(self
-            .requests(ws)?
-            .into_iter()
-            .filter(|r| {
-                r.name.to_lowercase().contains(&q)
-                    || r.spec.url.to_lowercase().contains(&q)
-                    || r.tags.iter().any(|t| t.to_lowercase().contains(&q))
-            })
-            .collect())
-    }
-
     pub fn tree(&self, ws: &Id) -> Result<Vec<TreeNode>> {
         let folders = self.folders(ws)?;
         let reqs = self.requests(ws)?;
@@ -661,10 +639,6 @@ impl App {
         e.meta.updated_at = chrono::Utc::now();
         self.store.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, &e)?;
         Ok(e)
-    }
-
-    pub fn create_environment(&self, ws: &Id, name: &str, vars: Vec<Variable>) -> Result<Environment> {
-        self.save_environment(Environment { meta: Meta::new(), workspace_id: *ws, name: name.into(), variables: vars })
     }
 
     pub fn delete_environment(&self, id: &Id) -> Result<()> {
@@ -807,6 +781,14 @@ impl App {
         Ok(SecretRef { id, label: label.into() })
     }
 
+    /// [`App::set_secret`], written only while `gate` allows it: the gate is
+    /// checked inside the vault transaction, so a lock or profile switch it
+    /// detects before the commit stores nothing (`Locked`), and a secret
+    /// committed before one stays stored and is returned.
+    pub fn set_secret_fenced(&self, ws: &Id, label: &str, value: &str, gate: impl FnOnce() -> bool) -> Result<SecretRef> {
+        self.set_secret_guarded(ws, label, value, || gate().then_some(()))
+    }
+
     /// Validate ownership and write in one transaction. Acquire the caller's
     /// lifecycle guard only once the store transaction has begun, and retain
     /// it through commit/rollback so revocation cannot cross the write.
@@ -945,11 +927,15 @@ impl App {
         Ok(self.store.atomically(|s| store_attachment_in(s, file_name, bytes, media_type, true))?)
     }
 
-    /// Pin the blob of every stored attachment (idempotent). Profiles created
-    /// before blobs were pinned could lose attachments to history retention;
-    /// this protects whatever is still there. The index is read and every pin
-    /// written in one write transaction, so retention on any connection runs
-    /// before or after all of it, never between the read and a pin.
+    /// Pin the blob of every stored attachment (idempotent), then release
+    /// the history response bodies no record uses. Profiles created before
+    /// blobs were pinned could lose attachments to history retention; this
+    /// protects whatever is still there. Retention sweeps bodies only when it
+    /// removes a record, so a body left by an earlier build (whose clear did
+    /// not release them) is collected here. The index is read, every pin
+    /// written and the bodies swept in one write transaction, so retention on
+    /// any connection runs before or after all of it, never between the read
+    /// and a pin.
     pub(crate) fn pin_attachment_blobs(&self) -> Result<()> {
         Ok(self.store.atomically(|s| {
             let idx: Vec<serde_json::Value> = s.list(kind::IMPORT_SOURCE, None)?;
@@ -958,19 +944,9 @@ impl App {
                     s.pin_blob(blob)?;
                 }
             }
+            s.sweep_history_bodies()?;
             Ok(())
         })?)
-    }
-
-    /// Delete a stored attachment once nothing references it any more.
-    /// Content addressing means several requests, revisions, datasets or spec
-    /// sources can share one attachment, so every object that can hold one is
-    /// checked first. The check and the release run in one write transaction,
-    /// so nothing can reference the attachment between them. One a user added
-    /// ([`App::put_attachment`]) is kept: an item not saved yet may hold it.
-    /// Returns whether it was deleted.
-    pub fn release_attachment(&self, sha256: &str) -> Result<bool> {
-        Ok(self.store.atomically(|s| release_attachment_in(s, sha256))?)
     }
 
     /// The index entry and the blob it names are read in one read
@@ -1153,10 +1129,14 @@ fn user_added(index: &serde_json::Value) -> bool {
     index.get("user").and_then(|u| u.as_bool()).unwrap_or(false)
 }
 
-/// [`App::release_attachment`] inside the caller's transaction: what the
-/// caller wrote before it is checked as a reference too, and the release is
-/// rolled back with everything else the caller writes. An attachment a user
-/// added is kept.
+/// Delete stored attachment `sha256`, in the caller's transaction, once
+/// nothing references it any more. Content addressing means several
+/// requests, revisions, datasets or spec sources can share one attachment,
+/// so every object that can hold one is checked first; what the caller wrote
+/// before is checked as a reference too, and the release is rolled back with
+/// everything else the caller writes. An attachment a user added
+/// ([`App::put_attachment`]) is kept: an item not saved yet may hold it.
+/// Returns whether it was deleted.
 pub(crate) fn release_attachment_in(s: &StoreTx<'_>, sha256: &str) -> anvil_storage::store::Result<bool> {
     release_in(s, sha256, false)
 }

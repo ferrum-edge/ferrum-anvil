@@ -337,7 +337,7 @@ function OAuthSignIn({ input }: { input: SendInput | null }) {
         )}
         <span className="spacer" />
         {attempt ? (
-          <button className="btn small" onClick={() => void api.oauthCancel(attempt)}>
+          <button className="btn small" onClick={() => void api.oauthCancel(attempt).catch((e) => setErr(String((e as Error).message)))}>
             Cancel sign-in
           </button>
         ) : (
@@ -365,7 +365,12 @@ function OAuthSignIn({ input }: { input: SendInput | null }) {
           <button
             className="btn small"
             onClick={async () => {
-              await api.oauthSignOut(input);
+              setErr(null);
+              try {
+                await api.oauthSignOut(input);
+              } catch (e) {
+                setErr(String((e as Error).message));
+              }
               refresh();
             }}
           >
@@ -456,6 +461,7 @@ function HmacFields({ c, onChange, workspaceId }: { c: HmacConfig; onChange: (c:
 
 function DpopFields({ c, onChange, workspaceId }: { c: DpopConfig; onChange: (c: DpopConfig) => void; workspaceId: string | null }) {
   const [jkt, setJkt] = useState<string | null>(null);
+  const [keyErr, setKeyErr] = useState<string | null>(null);
   return (
     <>
       <SecretField label="Access token" value={c.access_token} onChange={(access_token) => onChange({ ...c, access_token: access_token as DpopConfig["access_token"] })} workspaceId={workspaceId} />
@@ -466,9 +472,14 @@ function DpopFields({ c, onChange, workspaceId }: { c: DpopConfig; onChange: (c:
           disabled={!workspaceId}
           onClick={async () => {
             if (!workspaceId) return;
-            const g = await api.generateDpopKey(workspaceId, "DPoP proof key");
-            setJkt(g.jkt);
-            onChange({ ...c, private_key_pem: { kind: "secret", secret: g.secret } });
+            setKeyErr(null);
+            try {
+              const g = await api.generateDpopKey(workspaceId, "DPoP proof key");
+              setJkt(g.jkt);
+              onChange({ ...c, private_key_pem: { kind: "secret", secret: g.secret } });
+            } catch (e) {
+              setKeyErr(`No key was generated: ${String((e as Error).message)}`);
+            }
           }}
         >
           <Icon name="key" size={13} />
@@ -480,6 +491,11 @@ function DpopFields({ c, onChange, workspaceId }: { c: DpopConfig; onChange: (c:
           </span>
         )}
       </div>
+      {keyErr && (
+        <div className="bad-box" role="alert">
+          {keyErr}
+        </div>
+      )}
       <label className="check">
         <input type="checkbox" checked={c.dpop_scheme !== false} onChange={(e) => onChange({ ...c, dpop_scheme: e.target.checked })} />
         Present the token as <code>DPoP</code> (otherwise legacy <code>Bearer</code>)

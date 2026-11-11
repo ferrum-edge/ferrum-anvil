@@ -1,5 +1,5 @@
 //! Timed scale harness for the protected-record catalogue: how open/unlock,
-//! reads, writes, secret resolution and a collection run cost on a large
+//! reads, writes, secret resolution, a collection run and a folder run cost on a large
 //! profile. Ignored by default; run it in release mode and read the printed
 //! table:
 //!
@@ -18,7 +18,7 @@ use anvil_app::runner::RunSettings;
 use anvil_domain::Id;
 use anvil_domain::request::{KeyValue, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::workspace::{Meta, RequestDefinition, RequestRevision, ScenarioStep, Variable};
+use anvil_domain::workspace::{Environment, Meta, RequestDefinition, RequestRevision, ScenarioStep, Variable};
 use anvil_storage::{KdfParams, kind};
 use anvil_transport::recorder::EventCtx;
 use sha2::{Digest, Sha256};
@@ -91,7 +91,9 @@ async fn protected_catalogue_cost_scales_with_touched_records() {
         let mut active = None;
         for e in 0..ENVIRONMENTS_PER_WORKSPACE {
             let vars = (0..SECRETS_PER_REQUEST).map(|i| vault(&format!("s{i}"), &refs[(e + i) % refs.len()])).collect();
-            let env = app.create_environment(&ws.meta.id, &format!("env {e}"), vars).unwrap();
+            let env = app
+                .save_environment(Environment { meta: Meta::new(), workspace_id: ws.meta.id, name: format!("env {e}"), variables: vars })
+                .unwrap();
             active.get_or_insert(env.meta.id);
         }
         ws.active_environment_id = active;
@@ -229,4 +231,23 @@ async fn protected_catalogue_cost_scales_with_touched_records() {
         assert!(report.passed(), "{:?}", report.totals);
     });
     row(&format!("{run_steps}-step collection run (history on)"), run);
+
+    // A folder run builds its plan from one query per folder level and
+    // checks it before every secret lookup and attachment load.
+    let folder = app.request(&hot_requests[0]).unwrap().folder_id;
+    let folder_steps = hot_requests.len().div_ceil(FOLDERS_PER_WORKSPACE);
+    let folder_run = median(3, || {
+        let report = tokio::task::block_in_place(|| {
+            runtime.block_on(app.run_folder(
+                &hot_ws,
+                folder,
+                RunSettings { record_history: true, ..Default::default() },
+                CancellationToken::new(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(report.totals.steps_executed, folder_steps as u64);
+        assert!(report.passed(), "{:?}", report.totals);
+    });
+    row(&format!("{folder_steps}-request folder run (history on)"), folder_run);
 }

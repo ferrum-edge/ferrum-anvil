@@ -937,7 +937,6 @@ mod tests {
         assert_eq!(base.weakening(&with(|p| p.idle_minutes = 0)).len(), 1);
         assert_eq!(base.weakening(&with(|p| p.idle_minutes = 60)).len(), 1);
         assert_eq!(base.weakening(&with(|p| p.lock_on_os_lock = false)).len(), 1);
-        assert_eq!(base.weakening(&with(|p| p.clear_clipboard_on_lock = false)).len(), 1);
         // From "never", any timeout is stronger.
         let never = with(|p| p.idle_minutes = 0);
         assert!(never.weakening(&with(|p| p.idle_minutes = 600)).is_empty());
@@ -966,12 +965,12 @@ mod tests {
         let app = st.app().unwrap();
         let mut stronger = app.settings().unwrap();
         stronger.lock.idle_minutes = 5;
-        stronger.autosave = !stronger.autosave;
+        stronger.check_for_updates = !stronger.check_for_updates;
         let unasked = Answer::no();
         save_settings(&st, &unasked, stronger.clone()).await.unwrap();
         assert_eq!(unasked.times(), 0);
         let saved = app.settings().unwrap();
-        assert_eq!((saved.lock, saved.autosave), (stronger.lock, stronger.autosave));
+        assert_eq!((saved.lock, saved.check_for_updates), (stronger.lock, stronger.check_for_updates));
     }
 
     #[tokio::test]

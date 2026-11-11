@@ -8,7 +8,9 @@
 //! failed an assertion (and assertions count as failures), otherwise 1 when
 //! any step failed or could not be sent, or the run was canceled/aborted;
 //! 3 when the run could not start (untrusted scenario, invalid scenario or
-//! dataset, locked profile, usage error).
+//! dataset, locked profile, usage error). `anvil load run` does the same: 2
+//! when any unit failed an assertion, otherwise 1 when any unit failed or
+//! timed out, or the run was partial, aborted or canceled.
 //!
 //! Unlocking a passphrase profile: `--passphrase-stdin` (preferred) or the
 //! `ANVIL_PASSPHRASE` environment variable (visible to other processes of the
@@ -259,6 +261,15 @@ enum WorkspaceCmd {
     /// unshared name. Only for workspaces you trust.
     AllowDeviceIdentity {
         workspace: String,
+    },
+    /// Delete a workspace and everything in it: requests, folders,
+    /// environments, profiles, secrets, load plans and history. Name the
+    /// workspace by its id or its exact, unshared name. It cannot be undone.
+    Delete {
+        workspace: String,
+        /// Confirm deleting the workspace and everything in it.
+        #[arg(long)]
+        confirm_delete: bool,
     },
 }
 
@@ -625,7 +636,8 @@ fn kv(h: &str) -> Result<KeyValue> {
 }
 
 /// The workspace `id_or_name` names exactly: its id, or a name (case
-/// included) that no other workspace has. A seal is never lifted on a guess.
+/// included) that no other workspace has. A seal is never lifted, nor a
+/// workspace deleted, on a guess.
 fn exact_workspace(app: &App, id_or_name: &str) -> Result<Workspace> {
     let all = app.workspaces()?;
     if let Some(w) = all.iter().find(|w| w.meta.id.to_string() == id_or_name) {
@@ -1223,6 +1235,18 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 } else {
                     println!("'{}' was not sealed from this device's workload identity", terminal_safe(&w.name));
                 }
+                Ok(0)
+            }
+            WorkspaceCmd::Delete { workspace, confirm_delete } => {
+                let w = exact_workspace(&app, workspace)?;
+                if !confirm_delete {
+                    bail!(
+                        "deleting '{}' deletes everything in it and cannot be undone; add --confirm-delete to delete it",
+                        terminal_safe(&w.name)
+                    );
+                }
+                app.delete_workspace(&w.meta.id)?;
+                println!("deleted workspace '{}'", terminal_safe(&w.name));
                 Ok(0)
             }
         },

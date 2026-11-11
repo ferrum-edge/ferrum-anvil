@@ -201,6 +201,14 @@ fn ferrum_catalogs_are_embedded_and_internally_consistent() {
                     problems.push(format!("{oid}: empty {field}"));
                 }
             }
+            // The rules map an owner they do not know to Owner::Unknown,
+            // which addresses the finding and its remediation to nobody;
+            // require the contract's spelling.
+            if let Some(owner) = o["owner"].as_str()
+                && serde_json::from_value::<Owner>(serde_json::Value::String(owner.into())).is_err()
+            {
+                problems.push(format!("{oid}: owner {owner:?} is not a contract Owner value"));
+            }
             let sources = o["source"].as_array().map(Vec::as_slice).unwrap_or_default();
             if sources.is_empty() {
                 problems.push(format!("{oid}: no source citation"));

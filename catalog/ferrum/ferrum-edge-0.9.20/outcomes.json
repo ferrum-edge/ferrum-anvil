@@ -26231,7 +26231,7 @@
       "minimum_truthful_diagnosis": "The gateway refused the request because its query contains a raw ';' and a plugin trigger on this route evaluates the query; no plugin or backend ran.",
       "must_not_claim": "That the backend or a specific plugin rejected the request, or that the query is otherwise malformed.",
       "remediation": "Percent-encode ';' as %3B in query values, or remove the query predicate from the plugin trigger.",
-      "owner": "client",
+      "owner": "caller",
       "fixture_ids": [],
       "notes": "New in v0.9.19 (#6690, issue #6655; tagged v0.9.18, published in v0.9.19). Logged with rejection_phase query_trigger_admission (src/diagnostic_ref.rs:204). mesh_route_dispatch has a different 400 body for the same ambiguity (src/plugins/mesh_route_dispatch.rs:2784)."
     },

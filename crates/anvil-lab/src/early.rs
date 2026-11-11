@@ -207,35 +207,11 @@ fn backend_requests(env: &Env, from: usize) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
-/// Before v0.9.8 the gateway could classify an HTTP/3 stream accepted before
-/// its handshake-complete signal as early data (ferrum-edge#5761, fixed in
-/// v0.9.8 by #5775): a request the client sent as 1-RTT on the early-data
-/// listener then reaches the backend with `Early-Data: 1`, or draws 425 for a
-/// method outside the gateway's list. Timing-dependent; seen on macOS runners.
-fn misclassifies_1rtt() -> bool {
-    !crate::gateway::release_at_least("v0.9.8")
-}
-
-/// Before v0.9.8 the relay also waits this long after the first gateway
-/// datagram relayed to the Finished's client after the release before it
-/// lets the client's queued 1-RTT data (EARLY-002's retry) through, so the
-/// retry does not reach the gateway in the turn its handshake completes (see
-/// [`misclassifies_1rtt`]).
-const PRE_098_SETTLE: Duration = Duration::from_millis(20);
-
-fn misclassified_note() -> String {
-    let release = crate::gateway::release_label();
-    format!("{release} marked a 1-RTT stream as early data (fixed in v0.9.8, ferrum-edge#5775)")
-}
-
-/// Whether the backend saw exactly `method`s sent as 1-RTT through the
-/// early-data listener: without `Early-Data`, or with `Early-Data: 1` on
-/// releases before v0.9.8. The detail names the gateway misclassification.
+/// Whether the backend saw exactly `method`s, each sent as 1-RTT through the
+/// early-data listener (without `Early-Data`).
 fn one_rtt_seen(seen: &[(String, Option<String>)], methods: &[&str]) -> (bool, String) {
-    let mark_ok = |e: &Option<String>| e.is_none() || (misclassifies_1rtt() && e.as_deref() == Some("1"));
-    let ok = seen.len() == methods.len() && seen.iter().zip(methods).all(|((m, e), want)| m == want && mark_ok(e));
-    let marked = seen.iter().any(|(_, e)| e.is_some());
-    (ok, if ok && marked { format!("{seen:?}; {}", misclassified_note()) } else { format!("{seen:?}") })
+    let ok = seen.len() == methods.len() && seen.iter().zip(methods).all(|((m, e), want)| m == want && e.is_none());
+    (ok, format!("{seen:?}"))
 }
 
 fn backend_count(env: &Env) -> usize {
@@ -932,66 +908,26 @@ fn early005(env: &Env) -> Fut<'_> {
         fresh(env);
         fetch_ticket(env, &mut c, HTTPS, HttpVersionPolicy::Http3Only, true).await;
         let from = backend_count(env);
-        let log_from = gw_from(&env.gateway);
         let o = send(env, &ctx(env, "POST", HTTPS, HttpVersionPolicy::Http3Only, Some(&[]))).await;
         let a = &o.record.attempts;
-        // Before v0.9.8 the gateway may classify the 1-RTT POST as early data
-        // and refuse it 425 as a method outside its early-data list, logging
-        // that refusal. Anvil retries a 425 only for a method its early-data
-        // opt-in allows, and POST never is, so that is one 425 attempt, not
-        // retried, and nothing reaches the backend.
-        let refusals = if misclassifies_1rtt() && status(&o) == Some(425) {
-            crate::fixtures_policy::wait_for_op_log(|| {
-                gw_lines(&env.gateway, log_from, H3_REFUSAL).into_iter().filter(|l| l.contains("POST")).collect()
-            })
-            .await
-        } else {
-            vec![]
-        };
-        // The exchange itself must have completed: a 425 whose body was reset or
-        // timed out is a transport failure, not the known misclassification.
-        let misclassified = !refusals.is_empty() && a.len() == 1 && a[0].response_status == Some(425) && a[0].failure.is_none();
-        if misclassified {
-            c.add(
-                CheckKind::GroundTruth,
-                "the gateway logged its HTTP/3 0-RTT refusal of the POST Anvil sent after the handshake",
-                true,
-                format!("{} line(s); {}", refusals.len(), misclassified_note()),
-            );
-        } else {
-            c.success(CheckKind::Diagnosis, &o);
-        }
+        c.success(CheckKind::Diagnosis, &o);
         c.add(
             CheckKind::Diagnosis,
             "POST is never early data: resumed, sent after the handshake, reason recorded",
             early(&o, 0).is_some_and(|e| {
                 !e.method_eligible && !e.offered && e.resumption_attempted && e.not_used == Some(EarlyDataNotUsed::MethodNotEligible)
             }) && a.len() == 1,
-            if misclassified { format!("{}; {}", line(&o), misclassified_note()) } else { line(&o) },
+            line(&o),
         );
         c.add(
             CheckKind::Diagnosis,
             "no 425 and no early-data claim",
-            !codes(&o).iter().any(|x| x.starts_with("early_data.accepted") || (x == "request.too_early" && !misclassified)),
+            !codes(&o).iter().any(|x| x.starts_with("early_data.accepted") || x == "request.too_early"),
             format!("{:?}", codes(&o)),
         );
-        if misclassified {
-            c.add(
-                CheckKind::Diagnosis,
-                "the 425 finding says Anvil did not send the POST as early data",
-                o.record
-                    .findings
-                    .iter()
-                    .any(|f| f.code == "request.too_early" && f.explanation.contains("did not send this request as early data")),
-                format!("{:?}", codes(&o)),
-            );
-            let seen = backend_requests(env, from);
-            c.add(CheckKind::GroundTruth, "the backend received nothing", seen.is_empty(), format!("{seen:?}"));
-        } else {
-            let (ok, detail) = one_rtt_seen(&backend_requests(env, from), &["POST"]);
-            c.add(CheckKind::GroundTruth, "the backend saw the POST without Early-Data", ok, detail);
-        }
-        Outcome { main: Some(o), recovery: None, checks: c, operator_log: refusals }
+        let (ok, detail) = one_rtt_seen(&backend_requests(env, from), &["POST"]);
+        c.add(CheckKind::GroundTruth, "the backend saw the POST without Early-Data", ok, detail);
+        Outcome { main: Some(o), recovery: None, checks: c, operator_log: vec![] }
     })
 }
 
@@ -1133,7 +1069,7 @@ async fn start() -> anyhow::Result<Env> {
     pki.write_to(&certs)?;
     let fx = EarlyFixtures {
         backend: http::serve(BACKEND, None).await?,
-        relay: Relay::start(RELAY, HTTPS, if misclassifies_1rtt() { PRE_098_SETTLE } else { Duration::ZERO }).await?,
+        relay: Relay::start(RELAY, HTTPS).await?,
         certs_dir: certs.clone(),
         pki,
     };

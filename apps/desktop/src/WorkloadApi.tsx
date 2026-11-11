@@ -226,6 +226,7 @@ export function JwtSvidFields({ c, onChange, workspaceId }: { c: JwtSvidConfig; 
   const needsEndpoint = src.kind === "workload_api" || !!c.verify_with_bundles;
   // Bumped when a token file is chosen, so the list of chosen files reloads.
   const [chosen, setChosen] = useState(0);
+  const [pickErr, setPickErr] = useState<string | null>(null);
   return (
     <>
       <label className="lbl">
@@ -249,13 +250,23 @@ export function JwtSvidFields({ c, onChange, workspaceId }: { c: JwtSvidConfig; 
             className="btn"
             onClick={async () => {
               // The backend shows the dialog and binds the chosen file; only a bound file is read at send time.
-              const g = await api.chooseFile("jwt_svid_file");
-              if (g?.path) onChange({ ...c, source: { kind: "file", path: g.path } });
+              setPickErr(null);
+              try {
+                const g = await api.chooseFile("jwt_svid_file");
+                if (g?.path) onChange({ ...c, source: { kind: "file", path: g.path } });
+              } catch (e) {
+                setPickErr(String((e as Error).message));
+              }
               setChosen((n) => n + 1);
             }}
           >
             Choose…
           </button>
+        </div>
+      )}
+      {src.kind === "file" && pickErr && (
+        <div className="bad-box" role="alert">
+          {pickErr}
         </div>
       )}
       {src.kind === "file" && <TokenFileList current={src.path} version={chosen} />}

@@ -357,12 +357,9 @@ pub(crate) async fn wait_op_lines(gw: &Gateway, from: usize, needles: &[&str]) -
     vec![]
 }
 
-/// The v0.9.5 / v0.9.7 relay-synthesis refusal (debug operator line) with its reason.
-const SYNTHESIS_REFUSAL: &str = "not one this proxy terminates for";
-
-/// How the release under test refuses an inbound CONNECT at relay synthesis:
-/// v0.9.5 and v0.9.7 answer a generic `404 {"error":"Not Found"}`; v0.9.8
-/// (#5763) answers the relay destination guard's documented `403`.
+/// How the gateway refuses an inbound CONNECT at relay synthesis: the relay
+/// destination guard's documented `403` (from v0.9.8, #5763; v0.9.5 and
+/// v0.9.7 answered a generic 404).
 pub(crate) struct SynthesisRefusal {
     pub(crate) status: u16,
     /// Public body text of a byte-stream CONNECT refusal.
@@ -372,21 +369,13 @@ pub(crate) struct SynthesisRefusal {
 }
 
 pub(crate) fn synthesis_refusal() -> SynthesisRefusal {
-    if gateway::release_at_least("v0.9.8") {
-        SynthesisRefusal { status: 403, body: "HBONE relay destination not allowed", udp_body: "HBONE UDP relay destination not allowed" }
-    } else {
-        SynthesisRefusal { status: 404, body: "Not Found", udp_body: "Not Found" }
-    }
+    SynthesisRefusal { status: 403, body: "HBONE relay destination not allowed", udp_body: "HBONE UDP relay destination not allowed" }
 }
 
 /// Operator-log ground truth of a relay-synthesis refusal naming `detail`
-/// (the denial reason or the refused host): the debug line on v0.9.5 and
-/// v0.9.7; from v0.9.8 the transaction line (deny policy and `mesh.relay.*`
-/// metadata), else its debug line.
+/// (the denial reason or the refused host): the transaction line (deny
+/// policy and `mesh.relay.*` metadata), else its debug line.
 pub(crate) async fn synthesis_refusal_log(gw: &Gateway, from: usize, detail: &str) -> Vec<String> {
-    if !gateway::release_at_least("v0.9.8") {
-        return wait_op_lines(gw, from, &[SYNTHESIS_REFUSAL, detail]).await;
-    }
     let log = wait_op_lines(gw, from, &["relay_destination_denied", detail]).await;
     if !log.is_empty() {
         return log;

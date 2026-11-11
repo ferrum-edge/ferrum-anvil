@@ -315,15 +315,6 @@ pub enum Theme {
     Dark,
 }
 
-/// What happens to active runs when the vault locks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum LockRunPolicy {
-    /// Cancel active sends/loads and finalize partial reports (default).
-    #[default]
-    StopRuns,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HistoryPolicy {
     pub enabled: bool,
@@ -343,13 +334,11 @@ pub struct LockPolicy {
     /// Lock after this many minutes of inactivity (0 = never).
     pub idle_minutes: u32,
     pub lock_on_os_lock: bool,
-    pub run_policy: LockRunPolicy,
-    pub clear_clipboard_on_lock: bool,
 }
 
 impl Default for LockPolicy {
     fn default() -> Self {
-        LockPolicy { idle_minutes: 15, lock_on_os_lock: true, run_policy: LockRunPolicy::StopRuns, clear_clipboard_on_lock: true }
+        LockPolicy { idle_minutes: 15, lock_on_os_lock: true }
     }
 }
 
@@ -368,9 +357,6 @@ impl LockPolicy {
         if self.lock_on_os_lock && !new.lock_on_os_lock {
             out.push("no longer lock when the computer sleeps".into());
         }
-        if self.clear_clipboard_on_lock && !new.clear_clipboard_on_lock {
-            out.push("no longer clear the clipboard on lock".into());
-        }
         out
     }
 }
@@ -383,7 +369,6 @@ pub struct AppSettings {
     pub theme: Theme,
     pub history: HistoryPolicy,
     pub lock: LockPolicy,
-    pub autosave: bool,
     /// Extra header/query/cookie/body-field names always treated as secrets
     /// by the redactor (in addition to built-in patterns).
     pub redaction_names: Vec<String>,
@@ -485,7 +470,6 @@ impl Default for AppSettings {
             theme: Theme::System,
             history: HistoryPolicy::default(),
             lock: LockPolicy::default(),
-            autosave: false,
             redaction_names: vec![],
             check_for_updates: false,
             api_standards: ApiStandardsSettings::default(),

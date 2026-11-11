@@ -697,3 +697,42 @@ fn paths_sharing_a_path_item_share_its_budget_findings() {
     assert_eq!(raise[0].ops[0].path, "/components/pathItems/P/get/x-anvil-expectations/max_response_bytes");
     assert_eq!(raise[0].ops[0].value, Some(json!(5000)));
 }
+
+#[test]
+fn paths_sharing_a_path_item_merge_what_they_observed() {
+    // `/a` and `/b` reference one Path Item, so one undeclared 404 of its
+    // `get` gets one suggestion, inferred from the bodies of both paths.
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+        "paths": {"/a": {"$ref": "#/components/pathItems/P"}, "/b": {"$ref": "#/components/pathItems/P"}},
+        "components": {"pathItems": {"P": {"get": {
+            "responses": {"200": {"description": "ok", "content": {"application/json": {"schema": {}}}}}}}}}});
+    let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+    let obs = vec![
+        Obs::new("1", "GET", "/a?x=1").json(404, json!({"code": 1})).0,
+        Obs::new("2", "GET", "/b?y=1").json(404, json!({"message": "gone"})).0,
+        Obs::new("3", "GET", "/a").typed(200, "application/xml", json!({"id": 1})).0,
+        Obs::new("4", "GET", "/b").typed(200, "application/xml", json!({"name": "n"})).0,
+    ];
+    let r = analyze(&spec, &obs, &DriftOptions::default());
+
+    let documents: Vec<_> = r.suggestions.iter().filter(|s| s.title.starts_with("Document the 404 response")).collect();
+    assert_eq!(documents.len(), 1, "{documents:#?}");
+    assert_eq!(documents[0].title, "Document the 404 response of GET /a");
+    assert_eq!(documents[0].ops[0].path, "/components/pathItems/P/get/responses/404");
+    let schema = documents[0].ops[0].value.as_ref().unwrap().pointer("/content/application~1json/schema").unwrap();
+    let names: BTreeSet<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(names, BTreeSet::from(["code", "message"]), "{schema}");
+    assert!(schema.get("required").is_none(), "each property was seen in one of the two bodies: {schema}");
+
+    let media: Vec<_> = r.suggestions.iter().filter(|s| s.title.starts_with("Document application/xml")).collect();
+    assert_eq!(media.len(), 1, "{media:#?}");
+    let schema = media[0].ops[0].value.as_ref().unwrap().pointer("/schema").unwrap();
+    let names: BTreeSet<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(names, BTreeSet::from(["id", "name"]), "{schema}");
+
+    // Query parameters of both paths are suggested on the shared operation.
+    for q in ["x", "y"] {
+        let s = r.suggestions.iter().find(|s| s.title.starts_with(&format!("Document query parameter `{q}`"))).unwrap();
+        assert_eq!(s.ops[0].path, "/components/pathItems/P/get/parameters/-");
+    }
+}

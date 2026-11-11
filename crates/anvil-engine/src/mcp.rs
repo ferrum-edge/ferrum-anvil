@@ -33,6 +33,7 @@ use crate::record::{self, BodyView};
 use crate::redact::Redactor;
 use crate::vars::Resolver;
 use crate::{Engine, ExecutionOutput, http_exec};
+use anvil_diagnostics::facts::MAX_PARSE;
 use anvil_domain::execution::{FailureKind, Phase, ResponseRecord, TransportFailure};
 use anvil_domain::outcome::{ApplicationState, OutcomeWarning, WarningCode};
 use anvil_domain::request::{Body, KeyValue, McpOperation, McpSpec, Protocol};
@@ -99,6 +100,9 @@ struct Seen {
     events: Option<usize>,
     /// Why the event stream was not read to its end.
     stream_error: Option<String>,
+    /// Bytes of what the diagnosis reads: the body, or the JSON-RPC response
+    /// taken out of an event stream.
+    diagnosed_bytes: usize,
 }
 
 /// Why the request cannot be built, and the field to fix.
@@ -264,6 +268,7 @@ fn viewer(seen: &Mutex<Seen>, id: Option<i64>) -> impl Fn(Option<&ResponseRecord
         s.session_id = r.header_values(SESSION_HEADER).first().map(|v| v.to_string());
         if !is_event_stream(r.body.content_type.as_deref()) {
             s.message = id.and_then(|id| serde_json::from_slice::<Value>(body).ok().filter(|v| is_response_to(v, id)));
+            s.diagnosed_bytes = body.len();
             return None;
         }
         let (message, events, error) = read_event_stream(body, id);
@@ -271,6 +276,7 @@ fn viewer(seen: &Mutex<Seen>, id: Option<i64>) -> impl Fn(Option<&ResponseRecord
         s.stream_error = error;
         let view = message.as_ref().and_then(|m| serde_json::to_vec(m).ok()).map(Bytes::from);
         s.message = message;
+        s.diagnosed_bytes = view.as_ref().map_or(body.len(), Bytes::len);
         view
     }
 }
@@ -568,17 +574,24 @@ fn finish(
             message: "The response holds no JSON-RPC response to the MCP request, so the MCP outcome was not evaluated".into(),
         });
         changed = true;
+    } else if expects_response && seen.diagnosed_bytes > MAX_PARSE && r.outcome.application == ApplicationState::Success {
+        // A JSON-RPC error or tool failure in a response this large is not
+        // looked for, so a 2xx says nothing about the call.
+        r.outcome.application = ApplicationState::NotEvaluated;
+        r.outcome.warnings.push(OutcomeWarning {
+            code: WarningCode::PartialVisibility,
+            message: format!(
+                "The JSON-RPC response is over the {} KiB inspected for an error, so the MCP outcome was not evaluated",
+                MAX_PARSE / 1024
+            ),
+        });
+        changed = true;
     }
     if changed {
         r.outcome.summary = record::summary_line(r.outcome.transport, r.outcome.application, &r.outcome.protocol_status, &r.findings);
     }
+    // This pass covers the findings and the inferred notes too.
     redactor.record_metadata(r);
-    for finding in &mut r.findings {
-        redactor.finding(finding);
-    }
-    for note in &mut r.prepared.inferred {
-        *note = redactor.text_any_case(&redactor.inferred(note));
-    }
     out
 }
 

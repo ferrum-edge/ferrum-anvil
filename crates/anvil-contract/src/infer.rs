@@ -121,7 +121,7 @@ impl Shape {
     }
 
     /// Fold `other` into this shape (samples of the same place).
-    fn merge(&mut self, other: &Shape) {
+    pub fn merge(&mut self, other: &Shape) {
         self.samples += other.samples;
         self.nulls += other.nulls;
         self.booleans += other.booleans;

@@ -106,6 +106,8 @@ pub fn file_sha256(file: &[u8]) -> String {
 
 impl App {
     /// Build the portable graph for one workspace (or all when `None`).
+    /// Without `include_secrets`, each vault secret is listed among the
+    /// graph's omitted items by label and id, never by value.
     pub fn graph(&self, ws: Option<&Id>, include_secrets: bool, include_history: bool) -> Result<PortableGraph> {
         let wss = match ws {
             Some(w) => vec![self.workspace(w)?],
@@ -131,12 +133,16 @@ impl App {
             g.integrations.extend(self.integrations(&id)?);
             g.datasets.extend(self.datasets(&id)?);
             g.scenarios.extend(self.scenarios(&id)?);
-            if include_secrets {
-                for sid in self.store.list_secret_ids(Some(&id))? {
-                    if let Ok(parsed) = sid.parse::<Id>()
-                        && let Some((label, value)) = self.store.get_secret(&parsed)?
-                    {
+            for sid in self.store.list_secret_ids(Some(&id))? {
+                if let Ok(parsed) = sid.parse::<Id>()
+                    && let Some((label, value)) = self.store.get_secret(&parsed)?
+                {
+                    if include_secrets {
                         g.secrets.insert(sid, SecretValue { label, value: value.to_string(), workspace_id: Some(id.to_string()) });
+                    } else {
+                        // Left out by label only, so the export lists
+                        // what the receiver has to set up again.
+                        g.omitted.push(format!("secret '{label}' ({sid})"));
                     }
                 }
             }
@@ -195,12 +201,8 @@ impl App {
         Ok(g)
     }
 
-    /// What [`App::export`] would write. A full backup is not a bundle: see
-    /// [`App::backup_preview`].
-    pub fn export_preview(&self, ws: Option<&Id>, mode: ExportMode, include_history: bool) -> Result<ExportPreview> {
-        self.export_preview_with_standards(ws, mode, include_history, false)
-    }
-
+    /// What [`App::export_with_standards`] would write. A full backup is
+    /// not a bundle: see [`App::backup_preview`].
     pub fn export_preview_with_standards(
         &self,
         ws: Option<&Id>,
@@ -227,17 +229,8 @@ impl App {
     }
 
     /// Write a bundle of one workspace, or of every workspace when `ws` is
-    /// `None`. A full backup is not a bundle: see [`App::export_backup`].
-    pub fn export(
-        &self,
-        ws: Option<&Id>,
-        mode: ExportMode,
-        passphrase: Option<&str>,
-        include_history: bool,
-    ) -> Result<(Vec<u8>, ExportPreview)> {
-        self.export_with_standards(ws, mode, passphrase, include_history, false)
-    }
-
+    /// `None`; profile API standards travel only with `include_standards`.
+    /// A full backup is not a bundle: see [`App::export_backup`].
     pub fn export_with_standards(
         &self,
         ws: Option<&Id>,
@@ -336,12 +329,6 @@ impl App {
         })
     }
 
-    /// [`App::import_approved`] with nothing approved: a bundle that claims
-    /// a workspace stored here is refused under Merge and Replace.
-    pub fn import(&self, bytes: &[u8], passphrase: Option<&str>, policy: ConflictPolicy) -> Result<ImportReport> {
-        self.import_approved(bytes, passphrase, policy, &ImportApproval::default())
-    }
-
     /// Apply after taking a restore checkpoint. Objects and secrets are
     /// written in one transaction, which any failure before its commit rolls
     /// back. Attachments are stored after the commit and stay stored if that
@@ -398,12 +385,12 @@ impl App {
         if !proceed() {
             return Err(AppError::Canceled);
         }
-        let checkpoint = self.store.checkpoint("before-import")?;
         let imported_at = chrono::Utc::now();
         // A failure rolls back this import's own transaction and nothing else.
         // The checkpoint is never restored automatically: that would also
-        // erase whatever other callers saved since it was taken.
-        let (plan, notes) = self.store.atomically(|s| {
+        // erase whatever other callers saved since it was taken. A refusal
+        // returns before anything is written, and removes the checkpoint.
+        let (checkpoint, (plan, notes)) = self.checkpointed("before-import", |s| {
             // Read inside the transaction, so merge and naming decisions see
             // exactly what the writes below land on.
             let existing = existing(&s.as_read())?;
@@ -605,7 +592,7 @@ impl App {
             // until the user allows it on this device.
             crate::device_identity::seal_in(s, g.workspaces.iter().map(|w| &w.meta.id))?;
             Ok(Ok((plan, notes)))
-        })??;
+        })?;
         for (sha, bytes) in &g.attachments {
             // The items written above reference it, so it is not marked as
             // added by a user (see `App::put_attachment`).

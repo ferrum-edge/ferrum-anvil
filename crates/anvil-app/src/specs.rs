@@ -283,9 +283,9 @@ impl App {
             }
         };
         let scope_hashes = baseline(&r, root.is_some());
-        // Kept for a manual restore only; see `App::import`.
-        self.store.checkpoint("before-spec-import")?;
-        let workspace_id = self.store.atomically(|s| {
+        // Kept for a manual restore only, unless the import is refused; see
+        // `App::import_approved`.
+        let (_, workspace_id) = self.checkpointed("before-spec-import", |s| {
             if let Some(clash) = existing_object(&s.as_read(), &r, root.as_ref())? {
                 return Ok(Err(AppError::Invalid(format!("the import would overwrite an existing {clash}; nothing was imported"))));
             }
@@ -334,7 +334,7 @@ impl App {
             };
             s.put(kind::SPEC_SOURCE, &r.source.import_id, Some(&workspace_id), None, 0.0, &rec)?;
             Ok(Ok(workspace_id))
-        })??;
+        })?;
         Ok(SpecImported {
             workspace_id,
             root_folder_id: root.map(|f| f.meta.id),
@@ -522,9 +522,9 @@ impl App {
             || scope.settings != current.settings
             || scope.variables != current.variables
             || scope.auth != current.auth;
-        // Kept for a manual restore only; see `App::import`.
-        self.store.checkpoint("before-spec-reimport")?;
-        self.store.atomically(|s| {
+        // Kept for a manual restore only, unless the reimport is refused; see
+        // `App::import_approved`.
+        self.checkpointed("before-spec-reimport", |s| {
             // Everything below is written from copies read before this
             // transaction; a change made since would be overwritten.
             let unchanged = Stored { requests: previous.clone(), scope: current.clone() };
@@ -659,7 +659,7 @@ impl App {
                 release_attachment_in(s, &replaced)?;
             }
             Ok(Ok(()))
-        })??;
+        })?;
         Ok(next.len())
     }
 }
@@ -1017,7 +1017,7 @@ mod tests {
             } else {
                 f.variables.push(Variable::plain("token", "mine"));
             }
-            let f = app.save_folder(f).unwrap();
+            let f = app.save_folder_in_place(f).unwrap();
             let requests = app.requests(&ws).unwrap();
             let err = app.apply_reimport(r, newer.as_bytes(), "admin-v2.json", &ReimportApproval::default()).unwrap_err();
             assert!(err.to_string().contains("re-run the reimport diff"), "{edit}: {err}");

@@ -457,8 +457,32 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                     b.report.unsupported("curl_option", &at, format!("`{opt}` is not imported"));
                 }
             }
+            "-K" | "--config" => {
+                if let Some(f) = value(&mut i) {
+                    b.report.external_ref(&f, &at);
+                    b.report.unsupported("curl_option", &at, format!("options read from a config file (`{opt}`) are not imported"));
+                }
+            }
+            s if IGNORED_LONG_WITH_VALUE.contains(&s) || IGNORED_SHORT_WITH_VALUE.contains(&s) => {
+                value(&mut i);
+                b.report.unsupported("curl_option", &at, format!("`{s}` is not imported"));
+            }
             s if s.starts_with('-') && s.len() > 1 => {
-                b.report.unsupported("curl_option", &at, format!("unknown or unsupported curl option `{s}`; ignored"));
+                // An unknown option that takes a value would leave that value
+                // to be read as the URL. A bare word right after it is taken
+                // as its value when a URL with a scheme follows it.
+                let later_url = args
+                    .iter()
+                    .enumerate()
+                    .skip(i + 2)
+                    .any(|(k, (w, _))| w.contains("://") && !option_takes_value(&args[k - 1].0));
+                let bare_value = args.get(i + 1).is_some_and(|(w, _)| !w.starts_with('-') && !w.contains("://")) && later_url;
+                if bare_value {
+                    i += 1;
+                    b.report.unsupported("curl_option", &at, format!("unknown or unsupported curl option `{s}` and its value; ignored"));
+                } else {
+                    b.report.unsupported("curl_option", &at, format!("unknown or unsupported curl option `{s}`; ignored"));
+                }
             }
             _ => urls.push((a.clone(), at.clone())),
         }
@@ -515,7 +539,106 @@ const LONG_WITH_VALUE: &[&str] = &[
     "--limit-rate",
     "--oauth2-bearer",
     "--aws-sigv4",
+    "--config",
 ];
+
+/// Long options that take a value and are not imported: their value is
+/// skipped, never read as the URL, and the option is reported.
+const IGNORED_LONG_WITH_VALUE: &[&str] = &[
+    "--abstract-unix-socket",
+    "--alt-svc",
+    "--ciphers",
+    "--crlfile",
+    "--curves",
+    "--delegation",
+    "--dns-interface",
+    "--dns-ipv4-addr",
+    "--dns-ipv6-addr",
+    "--doh-url",
+    "--egd-file",
+    "--engine",
+    "--etag-compare",
+    "--etag-save",
+    "--expect100-timeout",
+    "--ftp-account",
+    "--ftp-alternative-to-user",
+    "--ftp-method",
+    "--ftp-port",
+    "--ftp-ssl-ccc-mode",
+    "--happy-eyeballs-timeout-ms",
+    "--haproxy-clientip",
+    "--hostpubmd5",
+    "--hostpubsha256",
+    "--hsts",
+    "--keepalive-time",
+    "--krb",
+    "--local-port",
+    "--login-options",
+    "--mail-auth",
+    "--mail-from",
+    "--mail-rcpt",
+    "--max-filesize",
+    "--netrc-file",
+    "--noproxy",
+    "--output-dir",
+    "--pinnedpubkey",
+    "--preproxy",
+    "--proto",
+    "--proto-default",
+    "--proto-redir",
+    "--proxy-cacert",
+    "--proxy-capath",
+    "--proxy-cert",
+    "--proxy-cert-type",
+    "--proxy-ciphers",
+    "--proxy-crlfile",
+    "--proxy-header",
+    "--proxy-key",
+    "--proxy-key-type",
+    "--proxy-pass",
+    "--proxy-pinnedpubkey",
+    "--proxy-service-name",
+    "--proxy-tls13-ciphers",
+    "--proxy-tlsauthtype",
+    "--proxy-tlspassword",
+    "--proxy-tlsuser",
+    "--pubkey",
+    "--quote",
+    "--random-file",
+    "--rate",
+    "--request-target",
+    "--retry-max-time",
+    "--sasl-authzid",
+    "--service-name",
+    "--socks4",
+    "--socks4a",
+    "--socks5",
+    "--socks5-gssapi-service",
+    "--socks5-hostname",
+    "--speed-limit",
+    "--speed-time",
+    "--stderr",
+    "--telnet-option",
+    "--tftp-blksize",
+    "--tls-max",
+    "--tls13-ciphers",
+    "--tlsauthtype",
+    "--tlspassword",
+    "--tlsuser",
+    "--unix-socket",
+];
+
+/// Short options of the same kind (`-K`/`--config` is reported on its own).
+const IGNORED_SHORT_WITH_VALUE: &[&str] = &["-P", "-Q", "-t", "-Y", "-y"];
+
+/// Whether `flag` is an option this importer knows to consume the next
+/// argument.
+fn option_takes_value(flag: &str) -> bool {
+    LONG_WITH_VALUE.contains(&flag)
+        || IGNORED_LONG_WITH_VALUE.contains(&flag)
+        || IGNORED_SHORT_WITH_VALUE.contains(&flag)
+        || takes_value(flag)
+}
 
 /// Expand short-option clusters (`-sSL`, `-XPOST`, `-H'x: y'`) into
 /// separate arguments, keeping each argument's original index for report
@@ -536,7 +659,7 @@ fn expand_clusters(args: Vec<String>) -> Result<Vec<(String, usize)>, String> {
             out.push((a.clone(), i));
         } else if a.starts_with("--") {
             out.push((a.clone(), i));
-            if LONG_WITH_VALUE.contains(&a.as_str()) && i + 1 < args.len() {
+            if option_takes_value(a) && i + 1 < args.len() {
                 out.push((args[i + 1].clone(), i + 1));
                 i += 1;
             }
@@ -591,6 +714,12 @@ fn takes_value(flag: &str) -> bool {
             | "-C"
             | "-U"
             | "-c"
+            | "-K"
+            | "-P"
+            | "-Q"
+            | "-t"
+            | "-Y"
+            | "-y"
     )
 }
 

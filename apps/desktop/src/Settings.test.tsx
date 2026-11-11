@@ -18,7 +18,6 @@ const settings = {
   theme: "system",
   history: { enabled: true, keep_response_bodies: false, max_age_days: 30, max_total_bytes: 64 * 1024 * 1024 },
   lock: { idle_minutes: 15, lock_on_os_lock: true },
-  autosave: true,
   redaction_names: [],
   check_for_updates: false,
 } as unknown as AppSettings;
@@ -41,6 +40,30 @@ const status = (protection: "passphrase" | "os_keychain") => ({ state: "unlocked
 afterEach(() => {
   cleanup();
   invoke.mockReset();
+});
+
+describe("failures", () => {
+  it("opens to say why the settings could not be read", async () => {
+    backend({
+      settings_get: () => {
+        throw "LOCKED";
+      },
+    });
+    render(<SettingsDialog onClose={() => {}} onSaved={() => {}} />);
+    expect((await screen.findByRole("alert")).textContent).toBe("The settings could not be read: LOCKED");
+  });
+
+  it("says history was not cleared when the backend refuses", async () => {
+    backend({
+      history_clear: () => {
+        throw "storage error";
+      },
+    });
+    render(<SettingsDialog onClose={() => {}} onSaved={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Clear all history" }));
+    expect(await screen.findByText("History was not cleared: storage error")).toBeTruthy();
+    expect(screen.queryByText("History cleared.")).toBeNull();
+  });
 });
 
 async function fillPassphrase() {

@@ -129,10 +129,46 @@ fn envelopes_too_complex_to_inspect_are_not_evaluated_with_a_warning() {
         assert!(!d.findings.iter().any(|f| f.code == "app.soap_fault"), "{why}");
         assert_eq!(application(&d), ApplicationState::NotEvaluated, "{why}: a 200 is not a success when a fault could be unseen");
         let w = d.warnings.iter().find(|w| w.code == WarningCode::PartialVisibility).expect("a partial_visibility warning");
-        assert!(w.message.starts_with("The SOAP envelope is too complex to inspect safely ("), "{}", w.message);
+        assert!(w.message.starts_with("The SOAP envelope was not inspected for a fault ("), "{}", w.message);
         assert!(w.message.contains(why), "{}", w.message);
     }
     assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+}
+
+/// A complete body over the 256 KiB the diagnostics parse is not read at all.
+/// A SOAP envelope that large could hide a fault, so its 200 is not a
+/// success; other bodies are judged by their status here (the engine also
+/// withholds the outcome of a GraphQL or MCP request, see `over_parse_limit`).
+#[test]
+fn a_body_over_the_parse_limit_is_not_read_and_an_envelope_is_not_judged() {
+    let padding = format!("<pad>{}</pad>", "x".repeat(300 * 1024));
+    let large = format!("<?xml version=\"1.0\"?>\n<s:Envelope xmlns:s=\"urn:s\"><s:Body>{padding}{FAULT}</s:Body></s:Envelope>");
+    assert!(large.len() > anvil_diagnostics::facts::MAX_PARSE);
+    let d = diagnose_xml(&large);
+    assert!(d.body.over_parse_limit);
+    assert_eq!(d.body.soap_fault, None);
+    assert_eq!(d.body.xml_not_inspected.as_deref(), Some("it is over 256 KiB"));
+    assert_eq!(application(&d), ApplicationState::NotEvaluated, "the fault past the limit could be unseen");
+    let w = d.warnings.iter().find(|w| w.code == WarningCode::PartialVisibility).expect("a partial_visibility warning");
+    assert_eq!(
+        w.message,
+        "The SOAP envelope was not inspected for a fault (it is over 256 KiB); the application outcome was not evaluated."
+    );
+
+    // Other XML cannot carry a fault, and JSON is judged by its status here.
+    let other = format!("<r>{padding}</r>");
+    let d = diagnose_xml(&other);
+    assert!(d.body.over_parse_limit);
+    assert_eq!(d.body.xml_not_inspected, None);
+    assert_eq!(application(&d), ApplicationState::Success);
+    assert!(!d.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility), "{:?}", d.warnings);
+    let json = format!(r#"{{"data":{{"pad":"{}"}},"errors":[{{"message":"denied"}}]}}"#, "x".repeat(300 * 1024));
+    let facts = anvil_diagnostics::facts::body_facts(Some("application/json"), json.as_bytes());
+    assert!(facts.over_parse_limit && facts.graphql.is_none() && facts.xml_not_inspected.is_none(), "{facts:?}");
+
+    // At the limit, the body is still read.
+    let small = envelope(16, "");
+    assert!(!diagnose_xml(&small).body.over_parse_limit);
 }
 
 #[test]

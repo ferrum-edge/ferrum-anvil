@@ -239,8 +239,8 @@ method admission and before any plugin phase. The answer is `400
 It is logged `query_trigger_admission`. Edge: `src/proxy/mod.rs:298`, `:314`, `:36778`;
 `src/http3/server.rs:4446`; `src/diagnostic_ref.rs:204`.
 
-Catalog impact: new outcome `plugin.trigger.query_semicolon_refused`. The phase is added to
-`rejection_phases_operator_only`.
+Catalog impact: new outcome `plugin.trigger.query_semicolon_refused` (owner `caller`: the
+request's query is what changes). The phase is added to `rejection_phases_operator_only`.
 
 ### Route protocol admission now also refuses plain HTTP on gRPC-intended routes
 

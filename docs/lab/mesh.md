@@ -159,10 +159,9 @@ The relay-synthesis refusal reason is only logged at debug level, so the lab sta
   among the alternatives; it never claims the guard as the cause. 0.9.8 fixes this (#5763): the same
   refusal is the documented 403 with a transaction line, and a terminator without its first mesh
   slice answers `503 {"error":"HBONE relay not ready"}`. The lab expects the running release's signal
-  (`mesh::synthesis_refusal`). The nightly lab runs only the v0.9.20 pin, which takes the 403 branch
-  (from 0.9.8). The 404 branch for 0.9.5 and 0.9.7, observed live on those releases, is retained but no
-  longer run, and v0.9.8 itself has no lock, so the nightly never runs it: the 403 expectation on 0.9.8
-  stays source-derived.
+  (`mesh::synthesis_refusal`): the 403 (from 0.9.8). The 404 expectation for 0.9.5 and 0.9.7,
+  observed live on those releases, was removed with them; v0.9.8 itself never had a lock, so the 403
+  on 0.9.8 stays source-derived.
 - **The unauthenticated-peer gate runs after relay synthesis.** On Ambient over loopback every CONNECT is
   refused at synthesis first, so `hbone_unauthenticated_peer` is reachable only where synthesis admits
   the authority: MESH-015 uses a PERMISSIVE **sidecar** (same `handle_hbone_request` gate).

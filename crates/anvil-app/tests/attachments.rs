@@ -13,6 +13,8 @@ use anvil_storage::{KdfParams, StoreError, kind};
 use anvil_transport::recorder::EventCtx;
 use tokio_util::sync::CancellationToken;
 
+mod dataset_runs;
+
 fn new_app(root: &std::path::Path) -> App {
     let pm = ProfileManager::new(root);
     let (s, dek, _recovery) = pm.create_passphrase("att", "correct horse battery", KdfParams::testing()).unwrap();
@@ -45,7 +47,7 @@ async fn attachments_and_datasets_survive_sends_and_history_retention() {
     }
     app.store.prune_history(0, 0).unwrap();
     assert_eq!(app.get_attachment(&sha(&att)).unwrap().as_deref(), Some(&b"\x00\x01binary payload"[..]));
-    assert_eq!(app.run_dataset(&app.dataset(&ds.meta.id).unwrap()).unwrap().rows.len(), 2);
+    assert_eq!(dataset_runs::dataset_rows(&app, &app.dataset(&ds.meta.id).unwrap()).await.unwrap(), 2);
 }
 
 #[tokio::test]
@@ -93,8 +95,6 @@ fn deleting_the_request_that_holds_an_attached_file_removes_the_content() {
     let app = new_app(root.path());
     let ws = app.create_workspace("W").unwrap().meta.id;
     let att = app.put_attachment("payload.bin", b"attached payload", None).unwrap();
-    // An attached file is kept by an automatic release, even with no owner yet.
-    assert!(!app.release_attachment(&sha(&att)).unwrap(), "attached, not saved yet: kept");
     let a = app.create_request(&ws, None, "a", upload(&att)).unwrap();
     // Edited since: an earlier revision still names the file.
     app.save_request(RequestDefinition { spec: RequestSpec::http("GET", "http://127.0.0.1:9/"), ..a.clone() }).unwrap();
@@ -297,4 +297,23 @@ fn a_stored_file_that_does_not_open_fails_the_context_and_locks() {
     };
     assert!(matches!(e, AppError::Store(StoreError::Integrity)), "{e}");
     assert!(matches!(app.workspaces(), Err(AppError::Locked)), "an integrity failure locks the profile");
+}
+
+#[test]
+fn opening_a_profile_releases_history_bodies_no_record_uses() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let att = app.put_attachment("kept.bin", b"a pinned attachment", None).unwrap();
+    // A body an earlier build's clear left behind: no record uses it.
+    let left_over = app.store.put_blob(b"a left-over response body").unwrap();
+    // Retention removes no record here, so it sweeps nothing.
+    assert_eq!(app.store.prune_history(u32::MAX, u64::MAX).unwrap(), 0);
+    assert!(app.store.get_blob(&left_over).unwrap().is_some());
+
+    let path = app.dir.clone();
+    drop(app);
+    let (header, key) = ProfileManager::unlock(&path, anvil_app::profiles::Unlock::Passphrase("correct horse battery")).unwrap();
+    let app = App::open(path, header, key).unwrap();
+    assert!(app.store.get_blob(&left_over).unwrap().is_none(), "opening the profile released it");
+    assert_eq!(app.get_attachment(&sha(&att)).unwrap().as_deref(), Some(&b"a pinned attachment"[..]));
 }

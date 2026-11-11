@@ -87,6 +87,15 @@ async fn the_history_listing_matches_the_full_records_without_reading_their_bodi
     assert_eq!(before.len(), 3);
     assert!(before.iter().any(|r| r.6.is_none()), "the draft has no request");
     assert_eq!(listing(&app, &ws), before, "the same rows, fields and order as reading each record");
+    // The outcome a History row is coloured by is the record's own.
+    let mut outcomes = vec![];
+    for (h, rec) in app.store.list_history_with::<ExecutionListing>(Some(&ws), None, 500).unwrap() {
+        let listed = rec.unwrap().outcome;
+        let (full, _) = app.store.get_history::<ExecutionRecord>(&h.id).unwrap().unwrap();
+        assert_eq!((listed.transport, listed.application), (full.outcome.transport, full.outcome.application));
+        outcomes.push(listed.application);
+    }
+    assert!(outcomes.contains(&anvil_domain::outcome::ApplicationState::Failure), "the 404: {outcomes:?}");
 
     // Every stored response body no longer opens: reading a record with its
     // body fails, the listing shows the same as before.

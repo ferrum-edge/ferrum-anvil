@@ -137,6 +137,8 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>) {
     if let Some(p) = &h.problem {
         d = d.ev_at(E::LocalValidation, "proxy_header.problem", p.clone(), idx);
     }
+    // Version 2: also on new HTTP-family connections, not only raw TCP.
+    d.rule_version = 2;
     out.push(d);
 }
 
@@ -374,6 +376,7 @@ mod tests {
         let f = diagnose(Protocol::Http, attempt(Some(header(ProxyHeaderFormat::V1, true)), Some(closed.clone())), ProtocolStatus::None);
         let d = find(&f, "tcp.proxy_header_maybe_rejected").expect("maybe rejected");
         assert_eq!(d.confidence, Confidence::Unknown);
+        assert_eq!((d.rule_id.as_str(), d.rule_version), ("protocol.proxy_header", 2));
         assert!(d.alternatives.iter().any(|a| a.contains("does not expect a PROXY header")), "{:?}", d.alternatives);
         let close = find(&f, "exchange.closed_before_response").unwrap();
         assert!(close.alternatives.iter().all(|a| !a.contains(MAY_REQUIRE)), "a header was sent");
@@ -421,6 +424,7 @@ mod tests {
             let f = diagnose(Protocol::Tcp, attempt(Some(header(ProxyHeaderFormat::V2, true)), None), tcp(0, by));
             let d = find(&f, "tcp.proxy_header_maybe_rejected").expect("maybe rejected");
             assert_eq!(d.confidence, Confidence::Unknown);
+            assert_eq!(d.rule_version, 2, "the same rule version on raw TCP");
             assert!(d.does_not_prove.iter().any(|x| x.contains("rejected")), "{:?}", d.does_not_prove);
             assert!(d.alternatives.iter().any(|a| a.contains("trusted")));
             let close = find(&f, "tcp.closed_without_data").unwrap();

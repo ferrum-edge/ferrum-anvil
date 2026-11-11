@@ -2,12 +2,13 @@
 //! profile (different data key, no shared keychain), then a successful send.
 
 use anvil_app::exec::SendOptions;
+use anvil_app::port::ImportApproval;
 use anvil_app::profiles::ProfileManager;
 use anvil_app::{App, AppError};
 use anvil_domain::auth::{AuthConfig, KeyLocation};
 use anvil_domain::request::{AttachmentRef, Body, KeyValue, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::workspace::{RequestDefinition, RequestRevision, Variable};
+use anvil_domain::workspace::{Environment, Meta, RequestDefinition, RequestRevision, Variable};
 use anvil_portability::ExportMode;
 use anvil_portability::plan::ConflictPolicy;
 use anvil_storage::{KdfParams, StoreError, kind};
@@ -41,7 +42,8 @@ async fn data_002_full_backup_restores_into_clean_profile_and_sends() {
         enabled: true,
         description: String::new(),
     });
-    let env = a.create_environment(&ws.meta.id, "lab", env_vars).unwrap();
+    let env =
+        a.save_environment(Environment { meta: Meta::new(), workspace_id: ws.meta.id, name: "lab".into(), variables: env_vars }).unwrap();
     let mut spec = RequestSpec::http("GET", "{{base}}/auth/apikey?name=x-api-key&value=k-SECRET-4242");
     spec.headers.push(KeyValue::new("X-Env-Token", "{{tok}}"));
     spec.auth = AuthConfig::ApiKey {
@@ -112,10 +114,10 @@ async fn data_001_share_safely_import_reports_missing_secrets_and_fails_locally(
     let mut spec = RequestSpec::http("GET", &fx.url("/echo"));
     spec.auth = AuthConfig::Bearer { token: SensitiveValue::Secret { secret: key_ref }, prefix: "Bearer".into() };
     a.create_request(&ws.meta.id, None, "Echo", spec).unwrap();
-    let (bytes, _) = a.export(Some(&ws.meta.id), ExportMode::ShareSafely, None, false).unwrap();
+    let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, None, false, false).unwrap();
     let b_root = tempfile::tempdir().unwrap();
     let b = new_app(b_root.path(), "b");
-    let rep = b.import(&bytes, None, ConflictPolicy::Merge).unwrap();
+    let rep = b.import_approved(&bytes, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
     assert_eq!(rep.missing_secrets.len(), 1);
     let wsb = b.find_workspace("Shared").unwrap();
     let r = b.find_request(&wsb.meta.id, "Echo").unwrap();

@@ -234,6 +234,43 @@ async fn soap_and_graphql_outcomes_are_not_judged_from_a_partial_capture() {
     assert_eq!(o.record.outcome.application, ApplicationState::Success);
 }
 
+/// A complete body over the 256 KiB the diagnostics inspect: the fault or
+/// error after the payload is not read, so a SOAP or GraphQL request's
+/// outcome is not determined (never "success"). A plain request is still
+/// judged by its status, unless the body is a SOAP envelope.
+#[tokio::test]
+async fn soap_and_graphql_outcomes_are_not_judged_from_a_body_too_large_to_inspect() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let e = Engine::new();
+    let soap = Body::Soap {
+        version: anvil_domain::request::SoapVersion::Soap11,
+        envelope: r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#.into(),
+        action: None,
+    };
+    let graphql = Body::GraphQl { query: "{ user { id email bio } }".into(), variables: String::new(), operation_name: None };
+    let pad = 300 * 1024;
+    for (path, body, warning) in [
+        ("/soap-fault", soap, "The SOAP envelope was not inspected for a fault (it is over 256 KiB)"),
+        ("/graphql-errors", graphql, "the complete body was not inspected (it is over the 256 KiB inspected for one)"),
+    ] {
+        let url = f.url(&format!("{path}?pad={pad}"));
+        let o = run(&e, &ExecutionContext::standalone(RequestSpec { body, ..RequestSpec::http("POST", &url) })).await;
+        let r = o.record.response.as_ref().unwrap();
+        assert!(r.body.completeness == BodyCompleteness::Complete && r.body.captured_bytes > pad as u64, "{path}: {:?}", r.body);
+        assert_eq!(o.record.outcome.transport, TransportState::Completed, "{path}");
+        assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "{path}");
+        let found: Vec<_> = o.record.outcome.warnings.iter().filter(|w| w.code == WarningCode::PartialVisibility).collect();
+        assert_eq!(found.len(), 1, "{path}: one warning says why: {found:?}");
+        assert!(found[0].message.contains(warning), "{path}: {}", found[0].message);
+    }
+
+    // A plain request is judged by its status: a large JSON body does not hide it.
+    let o = run(&e, &ctx_for(&f.url(&format!("/graphql-errors?pad={pad}")))).await;
+    assert_eq!(o.record.outcome.application, ApplicationState::Success);
+    assert!(!o.record.outcome.warnings.iter().any(|w| w.code == WarningCode::PartialVisibility), "{:?}", o.record.outcome.warnings);
+}
+
 #[tokio::test]
 async fn local_002_unresolved_variable_never_sends() {
     init();
@@ -290,9 +327,18 @@ async fn auth_002_query_key_and_data_020_secrets_redacted_everywhere() {
     let o = run(&e, &ctx).await;
     assert_eq!(o.record.response.as_ref().unwrap().status, 200);
     let json = serde_json::to_string(&o.record).unwrap();
-    for secret in ["PLANTED-SECRET-9f8e7d", "QUERY-KEY-777777"] {
-        assert!(!json.contains(secret), "{secret} leaked into the execution record");
+    for secret in ["PLANTED-SECRET-9f8e7d", "QUERY-KEY-777777", "hunter2-literal"] {
+        assert!(!json.contains(secret), "a planted secret leaked into the execution record");
     }
+    // The preview shows the body: the password field is redacted by name,
+    // the planted variable and the query key by value.
+    let preview = e.preview(&ctx).unwrap();
+    let shown = serde_json::to_string(&preview).unwrap();
+    for secret in ["PLANTED-SECRET-9f8e7d", "QUERY-KEY-777777", "hunter2-literal"] {
+        assert!(!shown.contains(secret), "a planted secret leaked into the request preview");
+    }
+    let body: serde_json::Value = serde_json::from_str(&preview.body_preview).expect("the body preview is JSON");
+    assert!(body["password"] == REDACTED, "the password field is not redacted by name");
     // Ground truth: the server really received the values.
     let hdrs = f.log.last_request_headers().unwrap();
     assert!(hdrs.iter().any(|(n, v)| n == "x-trace" && v == "t-PLANTED-SECRET-9f8e7d"));
@@ -300,6 +346,8 @@ async fn auth_002_query_key_and_data_020_secrets_redacted_everywhere() {
     let (_, target) = requests.last().unwrap();
     assert!(target.contains("note=PLANTED-SECRET-9f8e7d"), "the fixture did not receive the planted variable in the query");
     assert!(target.contains("api_key=QUERY-KEY-777777"), "the fixture did not receive the query key");
+    // The echo answers with the body it received: the literal password went out.
+    assert!(String::from_utf8_lossy(&o.body).contains("hunter2-literal"), "the fixture did not receive the literal password");
 }
 
 #[tokio::test]
