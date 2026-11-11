@@ -61,7 +61,7 @@ fn base_files() -> BTreeMap<String, Vec<u8>> {
         kdf: KdfParams::testing(),
         app_version: "synthetic-resource-qualification",
     };
-    let (bytes, _) = bundle::write_redacting(&PortableGraph::default(), &opts, &[]).unwrap();
+    let (bytes, _) = bundle::write(&PortableGraph::default(), &opts).unwrap();
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
     let mut files = BTreeMap::new();
     for index in 0..archive.len() {

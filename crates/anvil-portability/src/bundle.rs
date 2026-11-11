@@ -525,6 +525,15 @@ fn preview_prepared(
     })
 }
 
+/// Write a bundle to bytes, with no extra redaction names. The bundle
+/// resource qualification harness (`tests/bundle_resources.rs`) calls this:
+/// `.github/workflows/bundle-resources.yml` compiles that one harness against
+/// this tree and against the released anvil-v0.1.1 and preflight snapshots,
+/// which have no [`write_redacting`].
+pub fn write(graph: &PortableGraph, opts: &ExportOptions<'_>) -> Result<(Vec<u8>, ExportPreview), BundleError> {
+    write_redacting(graph, opts, &[])
+}
+
 /// Write a bundle to bytes, with the user's extra redaction names
 /// ([`prepare_redacting`]).
 pub fn write_redacting(
