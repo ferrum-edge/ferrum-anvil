@@ -40,8 +40,9 @@
   **Reimport a changed spec…** in the workspace picker: pick the import and its new version (a
   file, or pasted text), review what changes, and apply. Requests and configuration you edited
   that changed in the source too, and what the source no longer has, are kept unless you tick
-  them, and ticking asks once more before applying. On the CLI, `anvil reimport-spec <workspace>
-  --file <new version>`: `--dry-run` prints the plan and its `plan_sha256` (`--json` for JSON), an
+  them, and ticking asks once more before applying. The Contract view then checks the new version.
+  On the CLI, `anvil reimport-spec <workspace> --file <new version>`: `--dry-run` prints the plan and
+  its `plan_sha256` (`--json` for JSON; with `--plan-sha256` it checks the plan is unchanged), an
   apply needs `--plan-sha256` (refused unless the reimport still plans exactly that) or `--yes`,
   and `--overwrite`/`--delete` (with their `-scope` and `-all` forms) choose what to replace or
   delete. `--import` names the import when the workspace has several. Both use the same reviewed
