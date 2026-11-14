@@ -50,7 +50,7 @@ fn open(root: &Path) -> App {
     App::open(s.dir, h, key).unwrap()
 }
 
-/// A profile with the workspace `Shop` imported from `V1`, whose `Get order`
+/// A profile with the workspace `Shop 1` imported from `V1`, whose `Get order`
 /// the user renamed to `My order`. Returns the workspace and import ids.
 fn setup(root: &Path) -> (Id, Id) {
     let app = create(root);
@@ -95,18 +95,21 @@ fn a_reviewed_reimport_applies_only_its_plan_and_keeps_edits_unless_named() {
     let v2 = dir.path().join("shop-v2.json");
     std::fs::write(&v2, V2).unwrap();
     let file = v2.to_str().unwrap();
+    // OpenAPI names the workspace after its title and version ("Shop 1").
+    let shop_id = ws.to_string();
+    let shop = shop_id.as_str();
     let before = ["Delete order", "List orders", "My order"];
     let mine = request_id(&data, &ws, "My order");
     let gone = request_id(&data, &ws, "Delete order");
 
     // Neither reviewed nor confirmed: nothing is written.
-    let o = anvil(&data, &["reimport-spec", "Shop", "--file", file]);
+    let o = anvil(&data, &["reimport-spec", shop, "--file", file]);
     assert_eq!(o.status.code(), Some(3), "{}", text(&o));
     assert!(text(&o).contains("--dry-run") && text(&o).contains("--plan-sha256"), "{}", text(&o));
     assert_eq!(names(&data, &ws), before);
 
     // The dry run: what changes, by id and stored name, and the digest.
-    let o = anvil(&data, &["reimport-spec", "Shop", "--file", file, "--dry-run", "--json"]);
+    let o = anvil(&data, &["reimport-spec", shop, "--file", file, "--dry-run", "--json"]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     let plan: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(plan["import_id"], serde_json::json!(first_import.to_string()), "{plan}");
@@ -122,7 +125,7 @@ fn a_reviewed_reimport_applies_only_its_plan_and_keeps_edits_unless_named() {
     let digest = plan["plan_sha256"].as_str().unwrap().to_string();
     assert_eq!(digest.len(), 64, "{plan}");
 
-    let o = anvil(&data, &["reimport-spec", "Shop", "--file", file, "--dry-run", "--delete", &gone]);
+    let o = anvil(&data, &["reimport-spec", shop, "--file", file, "--dry-run", "--delete", &gone]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     let out = text(&o);
     assert!(out.contains("edited here and in the source: 1"), "{out}");
@@ -134,22 +137,22 @@ fn a_reviewed_reimport_applies_only_its_plan_and_keeps_edits_unless_named() {
 
     // A request the plan does not offer for a decision is refused.
     for args in [["--overwrite", gone.as_str()], ["--delete", mine.as_str()], ["--delete-scope", "variables/nope"]] {
-        let o = anvil(&data, &[&["reimport-spec", "Shop", "--file", file, "--yes"][..], &args[..]].concat());
+        let o = anvil(&data, &[&["reimport-spec", shop, "--file", file, "--yes"][..], &args[..]].concat());
         assert_eq!(o.status.code(), Some(3), "{args:?}: {}", text(&o));
         assert!(text(&o).contains("the plan does not list that"), "{args:?}: {}", text(&o));
     }
     // A digest of another plan is refused.
     let other = "0".repeat(64);
-    let o = anvil(&data, &["reimport-spec", "Shop", "--file", file, "--plan-sha256", &other]);
+    let o = anvil(&data, &["reimport-spec", shop, "--file", file, "--plan-sha256", &other]);
     assert_eq!(o.status.code(), Some(3), "{}", text(&o));
     assert!(text(&o).contains("no longer plans what was reviewed"), "{}", text(&o));
     assert_eq!(names(&data, &ws), before);
 
     // The reviewed plan, deleting the request the source no longer has: the
     // user's rename is kept, the upstream rename applied, the new one added.
-    let o = anvil(&data, &["reimport-spec", "Shop", "--file", file, "--plan-sha256", &digest.to_uppercase(), "--delete", &gone]);
+    let o = anvil(&data, &["reimport-spec", shop, "--file", file, "--plan-sha256", &digest.to_uppercase(), "--delete", &gone]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
-    assert!(text(&o).contains("reimported shop-v2.json into workspace 'Shop'"), "{}", text(&o));
+    assert!(text(&o).contains("reimported shop-v2.json into workspace 'Shop 1'"), "{}", text(&o));
     assert!(text(&o).contains("nothing was sent"), "{}", text(&o));
     assert_eq!(names(&data, &ws), ["Create order", "List all orders", "My order"]);
     let rec = open(&data).spec_sources(&ws).unwrap().pop().unwrap();
@@ -157,7 +160,7 @@ fn a_reviewed_reimport_applies_only_its_plan_and_keeps_edits_unless_named() {
     assert_eq!(rec.previous_import_ids, vec![first_import]);
 
     // The stored import changed: the old review no longer applies.
-    let o = anvil(&data, &["reimport-spec", "Shop", "--file", file, "--plan-sha256", &digest]);
+    let o = anvil(&data, &["reimport-spec", shop, "--file", file, "--plan-sha256", &digest]);
     assert_eq!(o.status.code(), Some(3), "{}", text(&o));
     assert_eq!(names(&data, &ws), ["Create order", "List all orders", "My order"]);
 
@@ -167,10 +170,8 @@ fn a_reviewed_reimport_applies_only_its_plan_and_keeps_edits_unless_named() {
     let v3 = dir.path().join("shop-v3.json");
     std::fs::write(&v3, format!("{V2}\n")).unwrap();
     let file = v3.to_str().unwrap();
-    let o = anvil(
-        &data,
-        &["reimport-spec", "Shop", "--file", file, "--import", &first_import.to_string(), "--yes", "--overwrite-all", "--json"],
-    );
+    let o =
+        anvil(&data, &["reimport-spec", shop, "--file", file, "--import", &first_import.to_string(), "--yes", "--overwrite-all", "--json"]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     let done: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(done["requests"], serde_json::json!(3), "{done}");
