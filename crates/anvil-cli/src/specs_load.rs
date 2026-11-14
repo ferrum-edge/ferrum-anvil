@@ -62,7 +62,7 @@ const MAX_SPEC_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// The source `file` names (`-` is stdin) and its name. Bounded while it is
 /// read, so a pipe or a file that grows is not buffered past the limit.
-fn read_spec_source(file: &Path) -> Result<(Vec<u8>, String)> {
+pub(crate) fn read_spec_source(file: &Path) -> Result<(Vec<u8>, String)> {
     let too_large = || anyhow!("the source is larger than 32 MiB");
     if file.as_os_str() == "-" {
         let mut v = Vec::new();

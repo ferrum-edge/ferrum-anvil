@@ -22,6 +22,7 @@ mod env;
 mod gateway;
 mod input;
 mod lint;
+mod reimport;
 mod specs_load;
 
 use anvil_app::exec::SendOptions;
@@ -101,6 +102,12 @@ enum Cmd {
     Run(RunArgs),
     /// Import an API spec or collection (OpenAPI, WSDL, Postman, Insomnia, cURL, HAR).
     ImportSpec(specs_load::ImportSpecArgs),
+    /// Reimport a changed spec or collection file into the import it came
+    /// from. What changed only in the source is updated; your edits that
+    /// changed in the source too, and what the source no longer has, are kept
+    /// unless named with --overwrite or --delete. Review with --dry-run,
+    /// then apply with --plan-sha256 (or --yes). Nothing is sent.
+    ReimportSpec(reimport::ReimportSpecArgs),
     /// Check an OpenAPI/Swagger description against API standards (rulesets).
     /// Needs no profile. Exit 2 when a finding reaches `--fail-on`.
     LintSpec(lint::LintSpecArgs),
@@ -1406,6 +1413,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
         Cmd::McpDiscover(a) => mcp_discover(&app, a).await,
         Cmd::Run(a) => collection::run_collection(&app, a).await,
         Cmd::ImportSpec(a) => specs_load::import_spec(&app, a),
+        Cmd::ReimportSpec(a) => reimport::reimport_spec(&app, a),
         Cmd::SpecDrift(a) => drift::spec_drift_import(&app, a),
         Cmd::Load { cmd } => specs_load::load_cmd(&app, cmd).await,
         Cmd::Scenario { cmd } => collection::scenario_cmd(&app, cmd),
