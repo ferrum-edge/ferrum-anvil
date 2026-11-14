@@ -17,6 +17,15 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 type Decision = keyof ReimportDecisions;
 const NO_DECISIONS: ReimportDecisions = { overwrite: [], delete: [], overwrite_scope: [], delete_scope: [] };
 
+/**
+ * The current id of the import `id` names: a reimport gives the import a new
+ * id and keeps the earlier ones in `previous_import_ids`. Null when none has it.
+ */
+export function currentImportId(list: SpecSourceRecord[], id: string): string | null {
+  const found = list.find((s) => s.source.import_id === id) ?? list.find((s) => (s.previous_import_ids ?? []).includes(id));
+  return found ? found.source.import_id : null;
+}
+
 /** Whether applying the plan writes anything at all. */
 export function planChanges(p: ReimportPlan): boolean {
   return (
@@ -52,18 +61,26 @@ export function SpecReimportDialog(props: {
     setConfirming(false);
   };
 
+  // Reads read since the dialog closed, or from an earlier read, are dropped.
+  const sourceReads = useRef(0);
+  const loadSources = async (refresh: boolean) => {
+    const n = ++sourceReads.current;
+    try {
+      const list = await api.specSources(props.workspaceId);
+      if (n !== sourceReads.current) return;
+      setSources(list);
+      // A reimport made elsewhere (the CLI on the same profile) gives the
+      // selected import a new id: follow it. On the first read, an unknown
+      // id selects the first import; on a refresh it stays, and is refused.
+      setImportId((id) => currentImportId(list, id) ?? (refresh && id ? id : (list[0]?.source.import_id ?? "")));
+    } catch (e) {
+      if (n === sourceReads.current) setErr(String((e as Error).message));
+    }
+  };
   useEffect(() => {
-    let current = true;
-    api.specSources(props.workspaceId).then(
-      (list) => {
-        if (!current) return;
-        setSources(list);
-        setImportId((id) => (list.some((s) => s.source.import_id === id) ? id : (list[0]?.source.import_id ?? "")));
-      },
-      (e) => current && setErr(String((e as Error).message)),
-    );
+    void loadSources(false);
     return () => {
-      current = false;
+      sourceReads.current += 1;
     };
   }, [props.workspaceId]);
 
@@ -104,6 +121,8 @@ export function SpecReimportDialog(props: {
     } catch (e) {
       if (revision.current === seen) setReviewed(null);
       setErr(String((e as Error).message));
+      // The import may have been reimported meanwhile under a new id.
+      void loadSources(true);
     } finally {
       setBusy(null);
     }
@@ -123,6 +142,9 @@ export function SpecReimportDialog(props: {
       // A refused apply wrote nothing; its approval is spent either way.
       invalidate();
       setErr(`${String((e as Error).message)} Review the changes again before applying.`);
+      // A refusal can mean the import was reimported meanwhile: read the
+      // imports again so the next review names its current id.
+      void loadSources(true);
     } finally {
       setBusy(null);
     }

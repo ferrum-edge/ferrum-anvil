@@ -238,3 +238,25 @@ it("says when a new version changes nothing", async () => {
   await within(dialog).findByText(/changes nothing here/);
   expect(applyButton(dialog).textContent).toContain("Apply");
 });
+
+it("follows the import to its new id after a refused apply, when it was reimported elsewhere", async () => {
+  let reimported = false;
+  backend({
+    spec_sources: () =>
+      reimported
+        ? [{ ...record("i7", "Orders", "orders-cli.yaml"), previous_import_ids: ["i1"] }, record("i2", "Billing", "billing.json")]
+        : [record("i1", "Orders", "orders.yaml"), record("i2", "Billing", "billing.json")],
+    spec_reimport_apply: () => {
+      // The CLI reimported the same import meanwhile.
+      reimported = true;
+      throw "the source or plan changed since review; preview it again";
+    },
+  });
+  const dialog = await open();
+  await chooseAndReview(dialog);
+  fireEvent.click(applyButton(dialog));
+  await within(dialog).findByRole("alert");
+  await waitFor(() => expect((within(dialog).getByLabelText("Import to update") as HTMLSelectElement).value).toBe("i7"));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Review changes" }));
+  await waitFor(() => expect(calls("spec_reimport_plan").at(-1)).toEqual({ importId: "i7", input: { kind: "file", grant: "grant-v2" } }));
+});
