@@ -2089,19 +2089,19 @@ describe("deleting a workspace", () => {
 
 describe("reimporting a changed spec", () => {
   const approval = { binding: { source_sha256: "source-digest", plan_sha256: "plan-digest" }, scope: "native-scope" };
-  const reimportBackend = (apply: () => unknown) =>
+  // The import's source record: `i2` after a reimport, which keeps `i1` as an earlier id.
+  let current = "i1";
+  const record = () => ({
+    source: { import_id: current, kind: "open_api", dialect: "open_api31", title: "Orders", sha256: "s", size_bytes: 1, imported_at: now },
+    workspace_id: "A",
+    original_sha256: "o",
+    file_name: "orders.yaml",
+    previous_import_ids: current === "i1" ? [] : ["i1"],
+  });
+  const reimportBackend = (apply: () => unknown) => {
+    current = "i1";
     backend({
-      spec_sources: (a) =>
-        a.workspaceId === "A"
-          ? [
-              {
-                source: { import_id: "i1", kind: "open_api", dialect: "open_api31", title: "Orders", sha256: "s", size_bytes: 1, imported_at: now },
-                workspace_id: "A",
-                original_sha256: "o",
-                file_name: "orders.yaml",
-              },
-            ]
-          : [],
+      spec_sources: (a) => (a.workspaceId === "A" ? [record()] : []),
       file_choose: () => [{ token: "grant-v2", file_name: "orders-v2.yaml" }],
       spec_reimport_plan: () => ({
         plan: {
@@ -2123,6 +2123,7 @@ describe("reimporting a changed spec", () => {
       }),
       spec_reimport_apply: apply,
     });
+  };
   const review = async () => {
     fireEvent.change(screen.getByLabelText("Workspace"), { target: { value: "__reimport" } });
     const dialog = await screen.findByRole("dialog", { name: "Reimport a changed spec" });
@@ -2156,6 +2157,22 @@ describe("reimporting a changed spec", () => {
     await screen.findByRole("treeitem", { name: /Alpha v2/ });
     // The clean open tab shows the request as stored now.
     await openTabs().findByRole("tab", { name: /Alpha v2/ });
+  });
+
+  it("reruns the Contract view's check on the import's new id when it is shown", async () => {
+    reimportBackend(() => {
+      current = "i2";
+      return 2;
+    });
+    await boot();
+    fireEvent.click(screen.getByRole("button", { name: "API contract" }));
+    fireEvent.click(await screen.findByText("Orders"));
+    await waitFor(() => expect(calls("standards_lint")).toEqual([{ target: { kind: "import", import_id: "i1" } }]));
+    const dialog = await review();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Reimport a changed spec" })).toBeNull());
+    // The view read the imports again and checks the replacement original.
+    await waitFor(() => expect(calls("standards_lint").at(-1)).toEqual({ target: { kind: "import", import_id: "i2" } }));
   });
 
   it("changes nothing when closed", async () => {

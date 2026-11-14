@@ -101,6 +101,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   // Runner and Load tests stay mounted once opened, so a run that continues in
   // the backend keeps its live progress and Stop control while another view is shown.
   const [mounted, setMounted] = useState(new Set<View>(["requests"]));
+  // Bumped when a spec reimport replaced an import's stored original (ContractView reads it).
+  const [specReimports, setSpecReimports] = useState(0);
   const [liveRuns, setLiveRuns] = useState({ runner: false, load: false });
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [profiles, setProfiles] = useState<Profiles>({ tls: [], proxy: [], integrations: [] });
@@ -922,7 +924,9 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             onLiveChange={(load) => setLiveRuns((l) => ({ ...l, load }))}
           />
         )}
-        {mounted.has("contract") && viewWs && <ContractView workspaceId={viewWs.id} notify={notify} hidden={view !== "contract"} />}
+        {mounted.has("contract") && viewWs && (
+          <ContractView workspaceId={viewWs.id} notify={notify} hidden={view !== "contract"} sourcesRevision={specReimports} />
+        )}
         {mounted.has("runner") && viewWs && (
           <RunnerView
             workspaceId={viewWs.id}
@@ -1328,6 +1332,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             onReimported={async (r) => {
               const wsId = dialog.id;
               setDialog(null);
+              // The Contract view shows the import's stored original: read it again.
+              setSpecReimports((n) => n + 1);
               const done = `Reimported ${r.fileName}: the import has ${r.requests} request(s) now. Nothing was sent.`;
               try {
                 importNotice(done, await refreshAfterImport([wsId]));

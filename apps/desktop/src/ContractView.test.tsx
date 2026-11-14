@@ -300,3 +300,24 @@ test("an incomplete check without errors is not reported as meeting the standard
   expect(await screen.findByText("meets the standards")).toBeTruthy();
   expect(screen.getByText(meetsEveryRule)).toBeTruthy();
 });
+
+test("a reimport made elsewhere re-reads the imports and checks the selected one again on its new id", async () => {
+  let reimported = false;
+  backend({
+    spec_sources: () =>
+      reimported
+        ? [{ ...source("i9", "open_api", "Orders"), previous_import_ids: ["i1"] }]
+        : [source("i1", "open_api", "Orders")],
+  });
+  const r = render(<ContractView workspaceId="A" notify={notify} />);
+  fireEvent.click(await screen.findByText("Orders"));
+  await screen.findByText(/uses path parameter/);
+  expect(calls("standards_lint")).toEqual([{ target: { kind: "import", import_id: "i1" } }]);
+
+  // Nothing changed for the view itself: no workspace switch, still shown.
+  reimported = true;
+  r.rerender(<ContractView workspaceId="A" notify={notify} sourcesRevision={1} />);
+  await waitFor(() => expect(calls("standards_lint").at(-1)).toEqual({ target: { kind: "import", import_id: "i9" } }));
+  // The selection followed the import: its page is still shown.
+  expect(await screen.findByText(/uses path parameter/)).toBeTruthy();
+});
