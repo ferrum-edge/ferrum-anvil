@@ -36,9 +36,23 @@
 - Delete a workspace: **Delete this workspace…** in the workspace picker (confirmed by typing the
   workspace's name; its open sessions and requests in flight are stopped first) and `anvil workspace
   delete <workspace> --confirm-delete` (an id, or an exact name no other workspace has) (#544).
+- Reimport a changed spec or collection file into the import it came from. In the desktop,
+  **Reimport a changed spec…** in the workspace picker: pick the import and its new version (a
+  file, or pasted text), review what changes, and apply. Requests and configuration you edited
+  that changed in the source too, and what the source no longer has, are kept unless you tick
+  them, and ticking asks once more before applying. On the CLI, `anvil reimport-spec <workspace>
+  --file <new version>`: `--dry-run` prints the plan and its `plan_sha256` (`--json` for JSON), an
+  apply needs `--plan-sha256` (refused unless the reimport still plans exactly that) or `--yes`,
+  and `--overwrite`/`--delete` (with their `-scope` and `-all` forms) choose what to replace or
+  delete. `--import` names the import when the workspace has several. Both use the same reviewed
+  plan/apply path, and nothing is sent (#544).
 
 ### Security
 
+- quinn-udp is updated from 0.5.15 to 0.5.16 for RUSTSEC-2026-0538 (GHSA-6pp4-4cxf-xf88): on
+  targets that read one datagram per `recvmsg` (Apple platforms without `fast-apple-datapath`,
+  the BSDs, Solaris and illumos), the receive loop could spin after a truncated datagram instead
+  of returning `WouldBlock`. Anvil's HTTP/3 and QUIC client sockets on macOS took that path.
 - Share-safely and encrypted-transfer exports no longer keep a literal credential in the readable
   `workspace/objects.json` when it sits under a header, query parameter or form field name that
   the engine, the importer or the OAuth token request treats as a credential but the export
