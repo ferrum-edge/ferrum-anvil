@@ -45,6 +45,8 @@ pub struct ReimportSpecArgs {
     dry_run: bool,
     /// Apply only if the reimport still plans exactly what the dry run with
     /// this `plan_sha256` showed (the file and the stored import unchanged).
+    /// With `--dry-run`, the dry run is refused unless it still plans that,
+    /// as `anvil import --dry-run --bundle-sha256` checks a bundle.
     #[arg(long = "plan-sha256", value_name = "SHA256")]
     plan_sha256: Option<String>,
     /// Apply the plan this run computes, without a reviewed `plan_sha256`.
@@ -88,8 +90,9 @@ pub fn reimport_spec(app: &App, a: &ReimportSpecArgs) -> Result<i32> {
     if let Some(want) = &a.plan_sha256
         && !want.trim().eq_ignore_ascii_case(&review.binding.plan_sha256)
     {
+        let next = if a.dry_run { "run the dry run without --plan-sha256 to see the new plan" } else { "run --dry-run again" };
         bail!(
-            "the reimport no longer plans what was reviewed (its plan_sha256 is {}): the file or the stored import changed since; nothing was changed, run --dry-run again",
+            "the reimport no longer plans what was reviewed (its plan_sha256 is {}): the file or the stored import changed since; nothing was changed, {next}",
             review.binding.plan_sha256
         );
     }

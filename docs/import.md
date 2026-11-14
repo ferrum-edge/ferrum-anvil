@@ -570,7 +570,9 @@ anvil reimport-spec Shop --file openapi-v2.yaml --plan-sha256 5f0c… --delete 0
   name, without the generated request contents or configuration values.
 - Applying needs `--plan-sha256` with the digest of a dry run (the reimport is
   refused, writing nothing, unless it still plans exactly that: same file,
-  same stored import), or `--yes` to apply the plan this run computes.
+  same stored import), or `--yes` to apply the plan this run computes. A dry
+  run with `--plan-sha256` checks the plan the same way, and fails, naming
+  the new digest, when it changed.
 - `--overwrite <request id>` and `--overwrite-scope <key>` take the source's
   version of a conflict; `--delete <request id>` and `--delete-scope <key>`
   delete what the source no longer has. Each is repeatable, and an id or key

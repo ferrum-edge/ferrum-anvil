@@ -141,8 +141,18 @@ fn a_reviewed_reimport_applies_only_its_plan_and_keeps_edits_unless_named() {
         assert_eq!(o.status.code(), Some(3), "{args:?}: {}", text(&o));
         assert!(text(&o).contains("the plan does not list that"), "{args:?}: {}", text(&o));
     }
-    // A digest of another plan is refused.
+    // A digest of another plan is refused. A dry run with it is refused too
+    // (it checks the plan, as `import --dry-run --bundle-sha256` checks a
+    // bundle) and says how to see the new plan; with the reviewed one it runs.
     let other = "0".repeat(64);
+    let o = anvil(&data, &["reimport-spec", shop, "--file", file, "--dry-run", "--plan-sha256", &other]);
+    assert_eq!(o.status.code(), Some(3), "{}", text(&o));
+    assert!(text(&o).contains(&format!("its plan_sha256 is {digest}")), "{}", text(&o));
+    assert!(text(&o).contains("run the dry run without --plan-sha256 to see the new plan"), "{}", text(&o));
+    assert!(!text(&o).contains("run --dry-run again"), "{}", text(&o));
+    let o = anvil(&data, &["reimport-spec", shop, "--file", file, "--dry-run", "--plan-sha256", &digest]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains(&format!("plan_sha256: {digest}")), "{}", text(&o));
     let o = anvil(&data, &["reimport-spec", shop, "--file", file, "--plan-sha256", &other]);
     assert_eq!(o.status.code(), Some(3), "{}", text(&o));
     assert!(text(&o).contains("no longer plans what was reviewed"), "{}", text(&o));
