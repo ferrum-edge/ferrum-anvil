@@ -469,7 +469,7 @@ the modified file under MPL-2.0.
 | quick-xml | 0.42.0 | MIT | https://github.com/tafia/quick-xml |
 | quinn | 0.11.12 | MIT OR Apache-2.0 | https://github.com/quinn-rs/quinn |
 | quinn-proto | 0.11.19 | MIT OR Apache-2.0 | https://github.com/quinn-rs/quinn |
-| quinn-udp | 0.5.15 | MIT OR Apache-2.0 | https://github.com/quinn-rs/quinn |
+| quinn-udp | 0.5.16 | MIT OR Apache-2.0 | https://github.com/quinn-rs/quinn |
 | quote | 1.0.47 | MIT OR Apache-2.0 | https://github.com/dtolnay/quote |
 | rand | 0.10.3 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
 | rand_core | 0.6.4 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |

@@ -19,8 +19,8 @@ use crate::{
     qpack,
     quic::ConnectionErrorIncoming,
     server,
+    shared_state::ConnectionState,
     tests::get_stream_blocking,
-    ConnectionState,
 };
 
 use super::h3_quinn;

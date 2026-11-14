@@ -13,7 +13,8 @@ use crate::client::SendRequest;
 use crate::error::{Code, ConnectionError, LocalError, StreamError};
 use crate::quic::ConnectionErrorIncoming;
 use crate::tests::get_stream_blocking;
-use crate::{client, server, ConnectionState};
+use crate::shared_state::ConnectionState;
+use crate::{client, server};
 use crate::{
     proto::{
         coding::Encode as _,

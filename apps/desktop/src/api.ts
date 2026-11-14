@@ -554,6 +554,71 @@ export interface SpecSourceRecord {
   previous_import_ids?: string[];
 }
 
+// ----------------------------------------------------------- spec reimport
+/** A request changed upstream (`anvil_import::ReimportChange`). */
+export interface ReimportChange {
+  /** The stored request the change applies to. */
+  existing_id: string;
+  operation_key: string;
+  user_edited: boolean;
+  /** Spec fields that differ (`url`, `headers`, …), then `name`, `description`, `tags`. */
+  changed_fields: string[];
+  /** What changed upstream, so what applying writes: `spec`, `name`, `description`, `tags`. */
+  upstream_fields?: string[];
+  /** The parts of `upstream_fields` the user edited too (what makes it a conflict). */
+  conflicting_fields?: string[];
+  /** The freshly generated request. */
+  fresh: RequestDefinition;
+}
+/** A request whose operation is gone from the source (`anvil_import::ReimportRemoval`). */
+export interface ReimportRemoval {
+  existing_id: string;
+  operation_key: string;
+  user_edited: boolean;
+}
+/** A unit of imported configuration that differs (`anvil_import::ScopeChange`). */
+export interface ScopeChange {
+  /** `description`, `auth`, `variables/<name>`, `environments/<id>`, `folders/<id>/…`. */
+  key: string;
+  /** What the unit is, for a preview (`environment "Production": variable baseUrl`). */
+  label: string;
+  user_edited: boolean;
+  whole_environment?: boolean;
+}
+/** What reimporting a newer version of a source would do (`anvil_import::ReimportPlan`). */
+export interface ReimportPlan {
+  import_id: string;
+  added: RequestDefinition[];
+  added_folders: Folder[];
+  /** Changed upstream, not edited here: applied. */
+  updated: ReimportChange[];
+  /** Changed upstream and edited here: kept unless their id is in `overwrite`. */
+  conflicts: ReimportChange[];
+  preserved_edits: string[];
+  unchanged: string[];
+  /** Gone from the source: kept unless their id is in `delete`. */
+  removed: ReimportRemoval[];
+  unlinked: string[];
+  scope_updated: ScopeChange[];
+  /** Kept unless their key is in `overwrite_scope`. */
+  scope_conflicts: ScopeChange[];
+  scope_preserved_edits: string[];
+  /** Kept unless their key is in `delete_scope`. */
+  scope_removed: ScopeChange[];
+}
+/** The user's choices for a reimport (`anvil_import::ReimportApproval`). */
+export interface ReimportDecisions {
+  overwrite: string[];
+  delete: string[];
+  overwrite_scope: string[];
+  delete_scope: string[];
+}
+/** A reimport plan bound to the exact source and stored baseline it was computed from. */
+export interface ReviewedReimport {
+  plan: ReimportPlan;
+  approval: SpecApproval;
+}
+
 // ----------------------------------------------------------- API standards
 export type { ApiStandards, LintReport, RuleInfo, RulesetSummary, StoredRulesetSummary };
 /** The layered rules in effect (`anvil_app::standards::StandardsView`). */
@@ -853,6 +918,14 @@ export const api = {
   specImport: (input: SpecInput, options: ImportOptions, target: SpecTarget, approval: SpecApproval) =>
     call<SpecImported>("spec_import", { input, options, target, approval }),
   specSources: (workspaceId: string) => call<SpecSourceRecord[]>("spec_sources", { workspaceId }),
+  /** Compare a newer version of an import's source with what is stored; nothing is written. */
+  specReimportPlan: (importId: string, input: SpecInput) => call<ReviewedReimport>("spec_reimport_plan", { importId, input }),
+  /**
+   * Apply exactly the reviewed plan with the user's decisions; refused, with nothing written, when the
+   * source or the stored import changed since. Returns how many requests the import has afterwards.
+   */
+  specReimportApply: (importId: string, input: SpecInput, decisions: ReimportDecisions, approval: SpecApproval) =>
+    call<number>("spec_reimport_apply", { importId, input, decisions, approval }),
 
   standards: () => call<StandardsView>("standards_view"),
   standardsRulesetText: (rulesetId: string) => call<string>("standards_ruleset_text", { rulesetId }),

@@ -12,6 +12,7 @@ import {
 import type { LintFinding, LintSeverity } from "./generated/contracts";
 import { SidebarResizer, Tabs, fmtAgo, humanize } from "./ui";
 import { DriftPage } from "./DriftView";
+import { currentImportId } from "./SpecReimport";
 import { Icon, type IconName } from "./icons";
 
 type Sel = { kind: "import"; id: string } | { kind: "file"; grant: string; name: string } | { kind: "rules" } | { kind: "ruleset"; id: string } | null;
@@ -28,7 +29,12 @@ const PAGE = 200;
 const isOpenApi = (s: SpecSourceRecord) => s.source.kind === "open_api";
 const specName = (s: SpecSourceRecord) => s.source.title || s.file_name;
 
-export function ContractView(props: { workspaceId: string; notify: (m: string) => void; hidden?: boolean }) {
+/**
+ * `sourcesRevision` changes when an import of the workspace was reimported
+ * elsewhere (the workspace picker): the sources are read again and the shown
+ * check runs again, on the import's new id.
+ */
+export function ContractView(props: { workspaceId: string; notify: (m: string) => void; hidden?: boolean; sourcesRevision?: number }) {
   const [sources, setSources] = useState<SpecSourceRecord[]>([]);
   const [standards, setStandards] = useState<StandardsView | null>(null);
   const [sel, setSel] = useState<Sel>(null);
@@ -48,7 +54,15 @@ export function ContractView(props: { workspaceId: string; notify: (m: string) =
     const w = props.workspaceId;
     try {
       const list = await api.specSources(w);
-      if (w === wsRef.current) setSources(list.filter(isOpenApi));
+      if (w !== wsRef.current) return;
+      const shown = list.filter(isOpenApi);
+      setSources(shown);
+      // A selected import that was reimported since follows it to its new id.
+      setSel((s) => {
+        if (s?.kind !== "import") return s;
+        const id = currentImportId(shown, s.id);
+        return id && id !== s.id ? { kind: "import", id } : s;
+      });
     } catch (e) {
       props.notify(String((e as Error).message));
     }
@@ -70,6 +84,10 @@ export function ContractView(props: { workspaceId: string; notify: (m: string) =
   useEffect(() => {
     void loadStandards();
   }, []);
+  useEffect(() => {
+    if (!props.sourcesRevision) return;
+    void loadSources().then(() => setRevision((n) => n + 1));
+  }, [props.sourcesRevision]);
 
   const change = async (op: () => Promise<unknown>) => {
     try {

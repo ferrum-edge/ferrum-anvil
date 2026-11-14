@@ -77,6 +77,7 @@ anvil gateway list Demo                                    # Ferrum gateway prof
 anvil import-spec Demo --file openapi.yaml
 anvil env list Demo                                        # the environments the import brought
 anvil env set Demo token --env local --secret --value-env API_TOKEN   # fill in {{token}}; import-spec prints the command
+anvil reimport-spec Demo --file openapi.yaml --dry-run      # what a changed spec would update; apply with the --plan-sha256 it prints
 anvil lint-spec openapi.yaml --ruleset api-standards.yaml
 anvil spec-drift openapi.yaml --har traffic.har --revised openapi.revised.yaml
 anvil run Demo --folder Smoke --junit report.xml

@@ -13,6 +13,7 @@ import { ResponsePanel } from "./ResponsePanel";
 import { LoadView } from "./LoadView";
 import { RunnerView } from "./RunnerView";
 import { ContractView } from "./ContractView";
+import { SpecReimportDialog } from "./SpecReimport";
 import { UpdateDialog, UpdatePrompt, useLaunchUpdate } from "./Update";
 import { Icon } from "./icons";
 import { Keys, Modal, SidebarContext, SidebarResizer, Toast, drag, fmtAgo, modalOpen, shortcut, uid } from "./ui";
@@ -42,6 +43,7 @@ type Dialog =
   | "workspace"
   | { kind: "rename"; id: string; isFolder: boolean; name: string }
   | { kind: "deleteWorkspace"; id: string; name: string }
+  | { kind: "reimport"; id: string; name: string }
   | { kind: "history"; view: ExecutionView }
   | { kind: "folder"; id: string };
 
@@ -99,6 +101,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   // Runner and Load tests stay mounted once opened, so a run that continues in
   // the backend keeps its live progress and Stop control while another view is shown.
   const [mounted, setMounted] = useState(new Set<View>(["requests"]));
+  // Bumped when a spec reimport replaced an import's stored original (ContractView reads it).
+  const [specReimports, setSpecReimports] = useState(0);
   const [liveRuns, setLiveRuns] = useState({ runner: false, load: false });
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [profiles, setProfiles] = useState<Profiles>({ tls: [], proxy: [], integrations: [] });
@@ -811,6 +815,8 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                     } catch (err) {
                       fail(err);
                     }
+                  } else if (e.target.value === "__reimport") {
+                    if (ws) setDialog({ kind: "reimport", id: ws.id, name: ws.name });
                   } else if (e.target.value === "__delete") {
                     if (ws) setDialog({ kind: "deleteWorkspace", id: ws.id, name: ws.name });
                   } else {
@@ -825,6 +831,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                   </option>
                 ))}
                 <option value="__new">+ New workspace…</option>
+                {ws && <option value="__reimport">Reimport a changed spec…</option>}
                 {ws && <option value="__delete">Delete this workspace…</option>}
               </select>
             </div>
@@ -917,7 +924,9 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
             onLiveChange={(load) => setLiveRuns((l) => ({ ...l, load }))}
           />
         )}
-        {mounted.has("contract") && viewWs && <ContractView workspaceId={viewWs.id} notify={notify} hidden={view !== "contract"} />}
+        {mounted.has("contract") && viewWs && (
+          <ContractView workspaceId={viewWs.id} notify={notify} hidden={view !== "contract"} sourcesRevision={specReimports} />
+        )}
         {mounted.has("runner") && viewWs && (
           <RunnerView
             workspaceId={viewWs.id}
@@ -1311,6 +1320,26 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
                 fail(e);
               }
               setDialog(null);
+            }}
+          />
+        )}
+        {typeof dialog === "object" && dialog?.kind === "reimport" && (
+          <SpecReimportDialog
+            workspaceId={dialog.id}
+            workspaceName={dialog.name}
+            requestName={(id) => findNode(tree, id)?.name}
+            onClose={() => setDialog(null)}
+            onReimported={async (r) => {
+              const wsId = dialog.id;
+              setDialog(null);
+              // The Contract view shows the import's stored original: read it again.
+              setSpecReimports((n) => n + 1);
+              const done = `Reimported ${r.fileName}: the import has ${r.requests} request(s) now. Nothing was sent.`;
+              try {
+                importNotice(done, await refreshAfterImport([wsId]));
+              } catch (e) {
+                notify(`${done} The workspace could not be refreshed: ${String((e as Error).message ?? e)}`);
+              }
             }}
           />
         )}
