@@ -2086,3 +2086,85 @@ describe("deleting a workspace", () => {
     expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("A");
   });
 });
+
+describe("reimporting a changed spec", () => {
+  const approval = { binding: { source_sha256: "source-digest", plan_sha256: "plan-digest" }, scope: "native-scope" };
+  const reimportBackend = (apply: () => unknown) =>
+    backend({
+      spec_sources: (a) =>
+        a.workspaceId === "A"
+          ? [
+              {
+                source: { import_id: "i1", kind: "open_api", dialect: "open_api31", title: "Orders", sha256: "s", size_bytes: 1, imported_at: now },
+                workspace_id: "A",
+                original_sha256: "o",
+                file_name: "orders.yaml",
+              },
+            ]
+          : [],
+      file_choose: () => [{ token: "grant-v2", file_name: "orders-v2.yaml" }],
+      spec_reimport_plan: () => ({
+        plan: {
+          import_id: "i2",
+          added: [],
+          added_folders: [],
+          updated: [{ existing_id: "r1", operation_key: "alpha", user_edited: false, changed_fields: ["name"], upstream_fields: ["name"], fresh: request("f1", "A", "Alpha v2") }],
+          conflicts: [],
+          preserved_edits: [],
+          unchanged: ["r2"],
+          removed: [],
+          unlinked: [],
+          scope_updated: [],
+          scope_conflicts: [],
+          scope_preserved_edits: [],
+          scope_removed: [],
+        },
+        approval,
+      }),
+      spec_reimport_apply: apply,
+    });
+  const review = async () => {
+    fireEvent.change(screen.getByLabelText("Workspace"), { target: { value: "__reimport" } });
+    const dialog = await screen.findByRole("dialog", { name: "Reimport a changed spec" });
+    fireEvent.click(await within(dialog).findByRole("button", { name: /Choose the new version/ }));
+    await within(dialog).findByText("orders-v2.yaml");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Review changes" }));
+    // The request's stored name, as the tree shows it.
+    await within(dialog).findByText("Alpha");
+    return dialog;
+  };
+
+  it("opens from the workspace picker, applies the reviewed plan and refreshes the workspace and its tabs", async () => {
+    reimportBackend(() => {
+      requests.r1 = { ...requests.r1, name: "Alpha v2" };
+      return 2;
+    });
+    await boot();
+    await openTab("Alpha");
+    const dialog = await review();
+    expect(calls("spec_sources")).toEqual([{ workspaceId: "A" }]);
+    expect(calls("spec_reimport_plan")).toEqual([{ importId: "i1", input: { kind: "file", grant: "grant-v2" } }]);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await waitFor(() =>
+      expect(calls("spec_reimport_apply")).toEqual([
+        { importId: "i1", input: { kind: "file", grant: "grant-v2" }, decisions: { overwrite: [], delete: [], overwrite_scope: [], delete_scope: [] }, approval },
+      ]),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Reimport a changed spec" })).toBeNull());
+    await screen.findByText(/Reimported orders-v2\.yaml: the import has 2 request\(s\) now\. Nothing was sent\./);
+    await screen.findByRole("treeitem", { name: /Alpha v2/ });
+    // The clean open tab shows the request as stored now.
+    await openTabs().findByRole("tab", { name: /Alpha v2/ });
+  });
+
+  it("changes nothing when closed", async () => {
+    reimportBackend(() => 2);
+    await boot();
+    const dialog = await review();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Reimport a changed spec" })).toBeNull());
+    expect(calls("spec_reimport_apply")).toHaveLength(0);
+    expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("A");
+  });
+});
