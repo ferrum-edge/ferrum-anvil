@@ -507,6 +507,78 @@ plan) or a user attached the same file, which a request or dataset not saved
 yet may hold (see `docs/storage-and-recovery.md`). A refused apply leaves the
 record, and the earlier original, as they were.
 
+### Reimporting a changed file
+
+When the spec or collection you imported changes (a new API version, an
+edited Postman export), reimport its new version instead of importing it
+again as a copy. Requests keep their ids, folders, history and favorites.
+Every import kind works: OpenAPI, Swagger, WSDL, Postman, Insomnia, HAR and
+cURL. Nothing is sent or run.
+
+What the reimport does, by the rules above:
+
+| In the new version | Your copy | Result |
+|---|---|---|
+| New operation | — | Added |
+| Changed | Not edited | Updated |
+| Changed | Edited (the same part) | Kept as you left it, unless you choose to overwrite it |
+| Gone | — | Kept, unless you choose to delete it |
+| Unchanged | Edited | Kept |
+
+The same applies to the configuration the import brought (variables, auth,
+settings, description, environments and folder settings). A request you
+created yourself is never touched.
+
+**Desktop.** In the workspace picker, choose **Reimport a changed spec…**.
+Pick the import to update (each one the workspace holds is listed with its
+file name and when it was imported), then **Choose the new version…** in the
+file dialog, or paste the new version. **Review changes** shows the plan: the
+new requests, the updated ones, the requests and configuration you edited
+that changed in the source too, and what the source no longer has. Tick a
+conflict to take the source's version, or a removed item to delete it;
+everything left unticked is kept. **Apply** writes exactly the plan you
+reviewed. When something is ticked, Apply asks once more and names how many
+edits will be replaced and how many items deleted. If the file or the
+workspace changed after the review, the apply is refused and nothing is
+written: review the changes again. Open request tabs are refreshed
+afterwards; a tab with unsaved changes keeps them.
+
+**CLI.** `anvil reimport-spec` runs the same review and apply:
+
+```bash
+anvil reimport-spec Shop --file openapi-v2.yaml --dry-run
+# reimport of 'Shop' (import 0192…, last from openapi.yaml) in workspace 'Shop' from openapi-v2.yaml:
+#   new requests: 1
+#     + POST Create order
+#   updated (not edited here): 1
+#     ~ List orders  (name)
+#   edited here and in the source: 1 (kept as you left them unless --overwrite)
+#     [ ] 0192…  My order  both changed: name
+#   no longer in the source: 1 (kept unless --delete)
+#     [ ] 0192…  Delete order
+#   unchanged: 0 · your edits kept: 0 · not from the import: 0
+# plan_sha256: 5f0c…
+anvil reimport-spec Shop --file openapi-v2.yaml --plan-sha256 5f0c… --delete 0192…
+```
+
+- The workspace is named by its id or name. `--import <id>` names the import
+  to update when the workspace holds more than one (the command lists them);
+  `import-spec` prints the id, and an earlier id of the same import works too.
+  `--file -` reads the new version from stdin.
+- `--dry-run` prints the plan and its `plan_sha256` and writes nothing.
+  `--json` prints it as JSON: what changes, by request id, operation key and
+  name, without the generated request contents or configuration values.
+- Applying needs `--plan-sha256` with the digest of a dry run (the reimport is
+  refused, writing nothing, unless it still plans exactly that: same file,
+  same stored import), or `--yes` to apply the plan this run computes.
+- `--overwrite <request id>` and `--overwrite-scope <key>` take the source's
+  version of a conflict; `--delete <request id>` and `--delete-scope <key>`
+  delete what the source no longer has. Each is repeatable, and an id or key
+  the plan does not list for that choice is refused. `--overwrite-all` and
+  `--delete-all` choose every conflict or every removal.
+- Exit codes: 0 when planned or applied, 3 when refused or on a local error
+  (nothing is written then).
+
 ## OpenAPI and Swagger
 
 Dialects are detected from the `openapi`/`swagger` field and handled
