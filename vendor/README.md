@@ -67,11 +67,13 @@ client, which is Anvil's only role:
   `src/tests/mod.rs` now points at `../h3-quinn-0.0.10-stop-sending` (upstream
   points at the h3 repository's `h3-quinn/`) so the crate's own tests build
   here, and CI runs the frame-stream ones (`ci.yml`, "Vendored h3 frame-stream
-  regressions"). They need the crate's
+  regressions"). `src/tests/connection.rs` and `src/tests/request.rs` import
+  `ConnectionState` from `crate::shared_state` instead of the crate root:
+  the root re-exports it only with the
   `i-implement-a-third-party-backend-and-opt-into-breaking-changes` feature,
   which upstream's workspace turns on through its `h3-datagram`
-  dev-dependency (a path dependency the published manifest drops), so CI
-  names it.
+  dev-dependency (a path dependency the published manifest drops), so the
+  tests did not build here without it.
 * **Peek buffered trailers before FIN** (003). `recv_trailers` returns the
   trailers only at the end of the stream, so it can refuse a known frame
   after them. `RequestStream::peek_recv_trailers` (client side) decodes the
