@@ -28,7 +28,7 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 | Apache-2.0 | 10 |
 | Zlib OR Apache-2.0 OR MIT | 10 |
 | Unlicense OR MIT | 8 |
-| BSD-3-Clause | 7 |
+| BSD-3-Clause | 6 |
 | ISC | 5 |
 | MPL-2.0 | 5 |
 | Unlicense/MIT | 4 |
@@ -48,6 +48,7 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 | Apache-2.0 OR BSL-1.0 | 1 |
 | Apache-2.0 WITH LLVM-exception | 1 |
 | BSD-2-Clause OR Apache-2.0 OR MIT | 1 |
+| BSD-3-Clause AND BSD-2-Clause | 1 |
 | BSD-3-Clause AND MIT | 1 |
 | BSD-3-Clause/MIT | 1 |
 | ISC AND (Apache-2.0 OR ISC) | 1 |
@@ -242,7 +243,7 @@ the modified file under MPL-2.0.
 | filetime | 0.2.29 | MIT/Apache-2.0 | https://github.com/alexcrichton/filetime |
 | find-msvc-tools | 0.1.13 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
 | flagset | 0.4.7 | Apache-2.0 | https://github.com/enarx/flagset |
-| flate2 | 1.1.10 | MIT OR Apache-2.0 | https://github.com/rust-lang/flate2-rs |
+| flate2 | 1.1.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/flate2-rs |
 | fluent-uri | 0.4.1 | MIT | https://github.com/yescallop/fluent-uri-rs |
 | fnv | 1.0.7 | Apache-2.0 / MIT | https://github.com/servo/rust-fnv |
 | foldhash | 0.2.0 | Zlib | https://github.com/orlp/foldhash |
@@ -381,7 +382,7 @@ the modified file under MPL-2.0.
 | moka | 0.12.16 | (MIT OR Apache-2.0) AND Apache-2.0 | https://github.com/moka-rs/moka |
 | muda | 0.20.0 | Apache-2.0 OR MIT | https://github.com/tauri-apps/muda |
 | new_debug_unreachable | 1.0.6 | MIT | https://github.com/mbrubeck/rust-debug-unreachable |
-| nix | 0.31.3 | MIT | https://github.com/nix-rust/nix |
+| nix | 0.32.0 | MIT | https://github.com/nix-rust/nix |
 | nom | 7.1.3 | MIT | https://github.com/Geal/nom |
 | nom | 8.0.0 | MIT | https://github.com/rust-bakery/nom |
 | num | 0.4.3 | MIT OR Apache-2.0 | https://github.com/rust-num/num |
@@ -457,13 +458,13 @@ the modified file under MPL-2.0.
 | proc-macro-error | 1.0.4 | MIT OR Apache-2.0 | https://gitlab.com/CreepySkeleton/proc-macro-error |
 | proc-macro-error-attr | 1.0.4 | MIT OR Apache-2.0 | https://gitlab.com/CreepySkeleton/proc-macro-error |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | https://github.com/dtolnay/proc-macro2 |
-| prost | 0.14.4 | Apache-2.0 | https://github.com/tokio-rs/prost |
-| prost-derive | 0.14.4 | Apache-2.0 | https://github.com/tokio-rs/prost |
+| prost | 0.14.6 | Apache-2.0 | https://github.com/tokio-rs/prost |
+| prost-derive | 0.14.6 | Apache-2.0 | https://github.com/tokio-rs/prost |
 | prost-reflect | 0.16.5 | MIT OR Apache-2.0 | https://github.com/andrewhickman/prost-reflect |
 | prost-types | 0.14.4 | Apache-2.0 | https://github.com/tokio-rs/prost |
 | protox | 0.10.0 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
 | protox-parse | 0.10.0 | MIT OR Apache-2.0 | https://github.com/andrewhickman/protox |
-| psl | 2.1.247 | MIT/Apache-2.0 | https://github.com/addr-rs/psl |
+| psl | 2.1.252 | MIT/Apache-2.0 | https://github.com/addr-rs/psl |
 | psl-types | 2.0.11 | MIT/Apache-2.0 | https://github.com/addr-rs/psl-types |
 | publicsuffix | 2.3.0 | MIT/Apache-2.0 | https://github.com/rushmorem/publicsuffix |
 | quick-xml | 0.42.0 | MIT | https://github.com/tafia/quick-xml |
@@ -497,7 +498,7 @@ the modified file under MPL-2.0.
 | rustix | 1.1.6 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
 | rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls |
 | rustls-native-certs | 0.8.5 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls-native-certs |
-| rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
+| rustls-pki-types | 1.16.0 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
 | rustls-platform-verifier | 0.7.1 | MIT OR Apache-2.0 | https://github.com/rustls/rustls-platform-verifier |
 | rustls-webpki | 0.103.16 | ISC | https://github.com/rustls/webpki |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
@@ -644,7 +645,7 @@ the modified file under MPL-2.0.
 | urlpattern | 0.6.0 | MIT | https://github.com/denoland/rust-urlpattern |
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT | https://github.com/hsivonen/utf8_iter |
 | utf8parse | 0.2.2 | Apache-2.0 OR MIT | https://github.com/alacritty/vte |
-| uuid | 1.29.0 | Apache-2.0 OR MIT | https://github.com/uuid-rs/uuid |
+| uuid | 1.29.2 | Apache-2.0 OR MIT | https://github.com/uuid-rs/uuid |
 | uuid-simd | 0.8.0 | MIT | https://github.com/Nugine/simd |
 | vcpkg | 0.2.15 | MIT/Apache-2.0 | https://github.com/mcgoo/vcpkg-rs |
 | version_check | 0.9.5 | MIT/Apache-2.0 | https://github.com/SergioBenitez/version_check |
@@ -720,13 +721,13 @@ the modified file under MPL-2.0.
 | zerotrie | 0.2.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec | 0.11.8 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerovec-derive | 0.11.6 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
-| zip | 9.5.0 | MIT | https://github.com/zip-rs/zip2 |
+| zip | 9.6.0 | MIT | https://github.com/zip-rs/zip2 |
 | zlib-rs | 0.6.8 | Zlib | https://github.com/trifectatechfoundation/zlib-rs |
 | zmij | 1.0.23 | MIT | https://github.com/dtolnay/zmij |
 | zopfli | 0.8.3 | Apache-2.0 | https://github.com/zopfli-rs/zopfli |
-| zstd | 0.14.3 | BSD-3-Clause | https://github.com/gyscos/zstd-rs |
-| zstd-safe | 8.2.0 | BSD-3-Clause | https://github.com/gyscos/zstd-rs |
-| zstd-sys | 2.1.2+zstd.1.5.7 | BSD-3-Clause | https://github.com/gyscos/zstd-rs |
+| zstd | 0.14.4 | BSD-3-Clause | https://github.com/gyscos/zstd-rs |
+| zstd-safe | 8.3.0 | BSD-3-Clause | https://github.com/gyscos/zstd-rs |
+| zstd-sys | 2.1.3+zstd.1.5.7 | BSD-3-Clause AND BSD-2-Clause | https://github.com/gyscos/zstd-rs |
 | zvariant | 5.15.0 | MIT | https://github.com/z-galaxy/zbus/ |
 | zvariant_derive | 5.15.0 | MIT | https://github.com/z-galaxy/zbus/ |
 | zvariant_utils | 4.2.0 | MIT | https://github.com/z-galaxy/zbus/ |
