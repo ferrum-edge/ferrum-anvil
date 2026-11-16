@@ -234,7 +234,7 @@ the modified file under MPL-2.0.
 | event-listener-strategy | 0.5.4 | Apache-2.0 OR MIT | https://github.com/smol-rs/event-listener-strategy |
 | fallible-iterator | 0.3.0 | MIT/Apache-2.0 | https://github.com/sfackler/rust-fallible-iterator |
 | fallible-streaming-iterator | 0.1.9 | MIT/Apache-2.0 | https://github.com/sfackler/fallible-streaming-iterator |
-| fancy-regex | 0.19.2 | MIT | https://github.com/fancy-regex/fancy-regex |
+| fancy-regex | 0.20.2 | MIT | https://github.com/fancy-regex/fancy-regex |
 | fastrand | 2.5.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/fastrand |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | https://github.com/image-rs/fdeflate |
 | ff | 0.14.0 | MIT/Apache-2.0 | https://github.com/zkcrypto/ff |
@@ -343,9 +343,9 @@ the modified file under MPL-2.0.
 | jobserver | 0.1.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/jobserver-rs |
 | json-patch | 4.2.0 | MIT/Apache-2.0 | https://github.com/idubrov/json-patch |
 | jsonptr | 0.7.1 | MIT OR Apache-2.0 | https://github.com/chanced/jsonptr |
-| jsonschema | 0.60.2 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-regex | 0.60.2 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonschema-value | 0.60.2 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema | 0.61.2 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-regex | 0.61.2 | MIT | https://github.com/Stranger6667/jsonschema |
+| jsonschema-value | 0.61.2 | MIT | https://github.com/Stranger6667/jsonschema |
 | jsonwebtoken | 11.1.0 | MIT | https://github.com/Keats/jsonwebtoken |
 | keyboard-types | 0.8.3 | MIT OR Apache-2.0 | https://github.com/rust-windowing/keyboard-types |
 | keyring | 4.2.0 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-rs |
@@ -480,7 +480,7 @@ the modified file under MPL-2.0.
 | rcgen | 0.14.10 | MIT OR Apache-2.0 | https://github.com/rustls/rcgen |
 | ref-cast | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
 | ref-cast-impl | 1.0.27 | MIT OR Apache-2.0 | https://github.com/dtolnay/ref-cast |
-| referencing | 0.60.2 | MIT | https://github.com/Stranger6667/jsonschema |
+| referencing | 0.61.2 | MIT | https://github.com/Stranger6667/jsonschema |
 | regex | 1.13.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
