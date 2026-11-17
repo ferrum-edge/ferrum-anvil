@@ -10,7 +10,7 @@
 //! `{{VAR}}` placeholders.
 
 use crate::builder::Builder;
-use crate::common::{body_from_text, credential, dedupe_content_type, maybe_redact, parse_form, redact_raw_query, split_query};
+use crate::common::{body_from_text, credential, dedupe_content_type, maybe_redact, parse_form, url_query_params};
 use crate::util::is_json_media;
 use crate::{Dialect, ImportError};
 use anvil_domain::auth::AuthConfig;
@@ -771,18 +771,9 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
         auth = crate::common::userinfo_auth(b, &user, &pass, &url_at);
         url = without;
     }
-    let (base, pairs) = split_query(&url);
-    // A query that is not a plain list of pairs stays in the URL verbatim;
-    // its credential-like values are still redacted in place.
-    let base = if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &url_at, "query") } else { base };
-    let mut params: Vec<KeyValue> = pairs
-        .into_iter()
-        .enumerate()
-        .map(|(n, (k, v))| {
-            let (value, sensitive) = maybe_redact(b, &k, &v, &format!("{url_at}#query{n}"), "query");
-            KeyValue { name: k, value, enabled: true, description: String::new(), sensitive }
-        })
-        .collect();
+    // Decoded pairs, or a query kept in the URL verbatim with its
+    // credential-like values redacted in place.
+    let (base, mut params) = url_query_params(b, &url, |n| format!("{url_at}#query{n}"), &url_at, "query");
 
     let has_ct = headers.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
     if json {

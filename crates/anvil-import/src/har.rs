@@ -10,8 +10,8 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    body_from_text, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, redact_raw_query, scrub_json_text,
-    split_query, take_userinfo, userinfo_auth,
+    body_from_text, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, scrub_json_text, take_userinfo,
+    url_query_params, userinfo_auth,
 };
 use crate::util::{is_json_media, media_essence, ptr, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -89,16 +89,8 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
         auth = userinfo_auth(b, &user, &pass, &uptr);
         url = without;
     }
-    let (base, pairs) = split_query(&url);
-    let base = if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &uptr, "query parameter") } else { base };
-    let params: Vec<KeyValue> = pairs
-        .into_iter()
-        .enumerate()
-        .map(|(n, (k, v))| {
-            let (value, sensitive) = maybe_redact(b, &k, &v, &format!("{}/{n}", ptr(rptr, "queryString")), "query parameter");
-            KeyValue { name: k, value, enabled: true, description: String::new(), sensitive }
-        })
-        .collect();
+    let query_ptr = ptr(rptr, "queryString");
+    let (base, params) = url_query_params(b, &url, |n| format!("{query_ptr}/{n}"), &uptr, "query parameter");
 
     let mut headers = vec![];
     let mut has_cookie = false;

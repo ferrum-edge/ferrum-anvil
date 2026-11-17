@@ -578,29 +578,33 @@ fn parameters_are_stored_decoded() {
         assert_eq!(s.url, "https://example.test/cb");
         let values: Vec<&str> = s.params.iter().map(|p| p.value.as_str()).collect();
         assert_eq!(values, ["https://app.example.com/done", "a+b", "50%", "caf\u{e9}"]);
-        assert!(!has(&r, "query_kept_in_url"));
+        assert!(!has(&r, "query_value_converted") && !has(&r, "query_param_not_decoded"));
     }
 }
 
-/// An escape that is not UTF-8 has no decoded form: the enabled parameters
-/// go into the URL as Insomnia sends them, never with U+FFFD (#563).
+/// Every parameter stays a parameter, encoded by the engine after any
+/// `{{reference}}` resolves (review sol F4). An escape that is not UTF-8, or
+/// escaped braces that would decode to a reference (sol F5), are kept as
+/// written and reported, never U+FFFD or a live reference (#563).
 #[test]
-fn parameters_without_a_decoded_form_go_into_the_url_as_sent() {
+fn parameters_without_a_decoded_form_are_kept_as_written() {
     let request = serde_json::json!({ "url": "https://example.test/x?keep=1#frag", "parameters": [
         { "name": "n", "value": "caf%E9" },
         { "name": "api_key", "value": "placeholder-secret" },
         { "name": "sp", "value": "a b&c+d" },
         { "name": "ref", "value": "{{ _.region }}" },
-        { "name": "off", "value": "%FF", "disabled": true },
+        { "name": "t", "value": "%7B%7Bid%7D%7D" },
     ]});
     for r in both(request, serde_json::json!({}), &opts()) {
         let s = &r.requests[0].spec;
-        // Appended to the URL's own query, before its fragment.
-        assert_eq!(s.url, "https://example.test/x?keep=1&n=caf%E9&api_key={{api_key}}&sp=a%20b%26c%2Bd&ref={{region}}#frag");
-        assert!(has(&r, "query_kept_in_url"));
-        assert_eq!(s.params.len(), 1);
-        assert_eq!(param(s, "off").unwrap().value, "%FF");
-        assert!(has(&r, "query_param_not_decoded"));
+        assert_eq!(s.url, "https://example.test/x?keep=1#frag", "nothing moves into the URL");
+        let values: Vec<(&str, &str)> = s.params.iter().map(|p| (p.name.as_str(), p.value.as_str())).collect();
+        assert_eq!(
+            values,
+            [("n", "caf%E9"), ("api_key", "{{api_key}}"), ("sp", "a b&c+d"), ("ref", "{{region}}"), ("t", "%7B%7Bid%7D%7D")]
+        );
+        assert!(has_at(&r, "query_param_not_decoded", "parameters/0") && has_at(&r, "query_param_not_decoded", "parameters/4"));
+        assert!(!has_at(&r, "query_param_not_decoded", "parameters/2"));
         let text = serde_json::to_string(&r.requests).unwrap();
         assert!(!text.contains("placeholder-secret") && !text.contains('\u{fffd}'), "{text}");
     }

@@ -467,3 +467,30 @@ fn query_values_are_stored_decoded_or_kept_verbatim() {
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
     assert_eq!(r.report.redactions.len(), 1);
 }
+
+/// A verbatim query is plain text, so a credential `include_credentials`
+/// keeps would lose its `sensitive` mark there. Such a query of plain pairs
+/// stays parameters instead, its `+` read as a space and reported (review
+/// sol F2). Escaped braces never become a live `{{reference}}` (sol F5).
+#[test]
+fn a_kept_credential_in_an_undecodable_query_stays_a_sensitive_parameter() {
+    let o = ImportOptions { include_credentials: true, ..opts() };
+    let r = import(b"curl 'https://api.example.com/search?q=a+b&pwd=retained-credential-571'", &o).unwrap();
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/search");
+    assert_eq!(param(s, "q").unwrap().value, "a b");
+    let pwd = param(s, "pwd").unwrap();
+    assert!(pwd.value == "retained-credential-571" && pwd.sensitive);
+    assert!(has(&r, "query_value_converted"));
+    // Without a kept credential the query stays verbatim, exactly as sent.
+    let r = import(b"curl 'https://api.example.com/search?q=a+b&page=2'", &o).unwrap();
+    assert_eq!(r.requests[0].spec.url, "https://api.example.com/search?q=a+b&page=2");
+
+    // Escaped braces: kept in the URL as written, not decoded to `{{id}}`.
+    let r = curl("curl 'https://api.example.com/search?q=%7B%7Bid%7D%7D'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/search?q=%7B%7Bid%7D%7D");
+    assert!(s.params.is_empty());
+    let r = curl("curl 'https://api.example.com/search?q=%7Bid%7D'");
+    assert_eq!(param(&r.requests[0].spec, "q").unwrap().value, "{id}", "single braces are no reference");
+}

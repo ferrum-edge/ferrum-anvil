@@ -5,7 +5,7 @@ use anvil_domain::request::RequestSpec;
 use anvil_domain::settings::EffectiveSettings;
 use anvil_engine::context::MemoryAttachments;
 use anvil_engine::prepare::prepare_http;
-use anvil_engine::vars::Resolver;
+use anvil_engine::vars::{Resolver, VarEntry, VarLayer};
 use anvil_import::{ImportOptions, import};
 
 fn imported_request(source: &[u8]) -> RequestSpec {
@@ -96,7 +96,13 @@ fn curl_soap_content_types_reach_preparation() {
 }
 
 fn prepared_query(spec: &RequestSpec) -> String {
-    let resolver = Resolver::new(vec![], None);
+    prepared_query_with(spec, &[])
+}
+
+/// The query `spec` sends with `vars` defined (plain variables).
+fn prepared_query_with(spec: &RequestSpec, vars: &[(&str, &str)]) -> String {
+    let vars = vars.iter().map(|(n, v)| VarEntry { name: n.to_string(), value: v.to_string(), secret: false, literal: false }).collect();
+    let resolver = Resolver::new(vec![VarLayer { label: "environment".into(), vars }], None);
     let attachments = MemoryAttachments::default();
     prepare_http(spec, &resolver, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap().target.query
 }
@@ -130,9 +136,9 @@ fn har_get(url: &str) -> Vec<u8> {
 }
 
 /// An imported request sends the query bytes its source sends: no `%25`
-/// from encoding an escape twice, a `+` sent as curl and Postman send it
-/// (or as `%2B`, as Insomnia sends it), and no U+FFFD for an escape that is
-/// not UTF-8 (#563).
+/// from encoding an escape twice, a `+` sent as curl sends it in a URL (or
+/// as `%2B`, as Insomnia sends it), and no U+FFFD for an escape that is not
+/// UTF-8 (#563).
 #[test]
 fn imported_queries_send_the_source_query_bytes() {
     let redirect = "redirect_uri=https%3A%2F%2Fapp.example.com%2Fdone";
@@ -148,13 +154,15 @@ fn imported_queries_send_the_source_query_bytes() {
         assert_eq!(&prepared_query(&imported_request(&postman(serde_json::json!(url)))), query, "Postman raw URL");
     }
 
-    // Postman sends its query list as written.
+    // Postman sends its query list as written. List entries stay
+    // parameters: a `+` is read as a space, as form-decoding servers read
+    // Postman's bare `+`, and sent as `%20`.
     let list = |entries: serde_json::Value| postman(serde_json::json!({ "raw": "https://api.example.com/search", "query": entries }));
     let redirect_entry = serde_json::json!({ "key": "redirect_uri", "value": "https%3A%2F%2Fapp.example.com%2Fdone" });
     let spec = imported_request(&list(serde_json::json!([redirect_entry.clone()])));
     assert_eq!(prepared_query(&spec), redirect);
     let spec = imported_request(&list(serde_json::json!([redirect_entry, { "key": "q", "value": "a+b" }])));
-    assert_eq!(prepared_query(&spec), format!("{redirect}&q=a+b"));
+    assert_eq!(prepared_query(&spec), format!("{redirect}&q=a%20b"));
 
     // Insomnia keeps a parameter's escapes and encodes the rest, `+` too.
     let spec = imported_request(&insomnia_params(
@@ -165,9 +173,42 @@ fn imported_queries_send_the_source_query_bytes() {
         ]),
     ));
     assert_eq!(prepared_query(&spec), format!("{redirect}&q=a%2Bb"));
-    let spec =
-        imported_request(&insomnia_params("https://api.example.com/search", serde_json::json!([{ "name": "n", "value": "caf%E9" }])));
-    assert_eq!(prepared_query(&spec), "n=caf%E9");
+}
+
+/// A `{{reference}}` in a listed parameter is encoded after it resolves, so
+/// a resolved `&`, `#` or `+` stays data, as Insomnia and Postman send it
+/// (review sol F4).
+#[test]
+fn listed_parameters_encode_resolved_references() {
+    let term = [("term", "a&b#c+d")];
+    let insomnia = imported_request(&insomnia_params(
+        "https://api.example.com/search",
+        serde_json::json!([{ "name": "n", "value": "caf%E9" }, { "name": "q", "value": "{{ _.term }}" }, { "name": "z", "value": "1" }]),
+    ));
+    assert_eq!(prepared_query_with(&insomnia, &term), "n=caf%25E9&q=a%26b%23c%2Bd&z=1");
+    let postman_spec = imported_request(&postman(serde_json::json!({ "raw": "https://api.example.com/search", "query": [
+        { "key": "n", "value": "a+b" }, { "key": "q", "value": "{{term}}" }, { "key": "z", "value": "1" }
+    ] })));
+    assert_eq!(prepared_query_with(&postman_spec, &term), "n=a%20b&q=a%26b%23c%2Bd&z=1");
+}
+
+/// Escaped braces stay literal text, never a variable reference, with or
+/// without a variable of that name (review sol F5).
+#[test]
+fn escaped_braces_never_become_references() {
+    let id = [("id", "42")];
+    let none: &[(&str, &str)] = &[];
+    let curl = imported_request(b"curl 'https://api.example.com/search?q=%7B%7Bid%7D%7D'");
+    for vars in [&id[..], none] {
+        assert_eq!(prepared_query_with(&curl, vars), "q=%7B%7Bid%7D%7D");
+    }
+    let listed = imported_request(&postman(serde_json::json!({ "raw": "https://api.example.com/search", "query": [
+        { "key": "q", "value": "%7B%7Bid%7D%7D" }
+    ] })));
+    for vars in [&id[..], none] {
+        let query = prepared_query_with(&listed, vars);
+        assert!(!query.contains("42") && query.contains("7B"), "{query}");
+    }
 }
 
 /// GHSA-c236-7r9g-c9p2: URL userinfo leaves the URL on import, so the

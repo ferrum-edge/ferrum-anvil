@@ -569,8 +569,9 @@ fn kv_list(b: &mut Builder, v: Option<&Value>, at: &str, what: &str) -> Vec<KeyV
 /// Query `parameters` as decoded text ([`listed_query_params`]). Insomnia
 /// keeps a value's `%XX` escapes and encodes everything else when it sends
 /// it, so `%3A` is stored as `:` and `+` as a plus, and Anvil's one encoding
-/// sends what Insomnia sent.
-fn query_params(b: &mut Builder, url: &mut String, v: Option<&Value>, at: &str) -> Vec<KeyValue> {
+/// sends what Insomnia sent. A `{{reference}}` is encoded after it resolves,
+/// as Insomnia renders before it encodes.
+fn query_params(b: &mut Builder, v: Option<&Value>, at: &str) -> Vec<KeyValue> {
     let mut listed = vec![];
     for (i, h) in v.and_then(Value::as_array).into_iter().flatten().enumerate() {
         let p = format!("{at}/{i}");
@@ -587,7 +588,7 @@ fn query_params(b: &mut Builder, url: &mut String, v: Option<&Value>, at: &str) 
             pointer: p,
         });
     }
-    listed_query_params(b, url, listed, QueryForm::Insomnia, at)
+    listed_query_params(b, listed, QueryForm::Insomnia)
 }
 
 fn request(
@@ -607,8 +608,8 @@ fn request(
     let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
     // A query written into the URL itself is kept verbatim; its
     // credential-like values are redacted in place.
-    let mut url = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { url };
-    let params = query_params(b, &mut url, r.get("parameters"), &ptr(at, "parameters"));
+    let url = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { url };
+    let params = query_params(b, r.get("parameters"), &ptr(at, "parameters"));
     let mut spec = RequestSpec::http(&method, &url);
     spec.params = params;
     spec.headers = kv_list(b, r.get("headers"), &ptr(at, "headers"), "header");
