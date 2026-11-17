@@ -773,9 +773,10 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     crate::common::apply_userinfo(b, &mut auth, userinfo, &url_at);
     let (base, pairs) = split_query(&url);
     crate::common::warn_query_conversions(b, !pairs.is_empty(), &url, &url_at);
-    // A query that is not a plain list of pairs stays in the URL verbatim;
-    // its credential-like values are still redacted in place.
-    let base = if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &url_at, "query") } else { base };
+    // A query that is not a plain list of pairs stays in the URL verbatim,
+    // less its credential-named pairs, which become sensitive parameters.
+    let (base, verbatim_credentials) =
+        if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &url_at, "query") } else { (base, vec![]) };
     let mut params: Vec<KeyValue> = pairs
         .into_iter()
         .enumerate()
@@ -784,6 +785,7 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
             KeyValue { name: k, value, enabled: true, description: String::new(), sensitive }
         })
         .collect();
+    params.extend(verbatim_credentials);
 
     let has_ct = headers.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
     if json {

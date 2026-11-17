@@ -274,12 +274,15 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<(
     if query_list.is_none() {
         warn_query_conversions(b, !raw_pairs.is_empty(), &raw, &ptr(at, "raw"));
     }
+    let mut verbatim_credentials = vec![];
     let base = if raw_pairs.is_empty() && query_list.is_some() {
         base.split('?').next().unwrap_or("").to_string()
     } else if raw_pairs.is_empty() && base.contains('?') {
-        // A raw query that is not a plain list of pairs stays verbatim; its
-        // credential-like values are still redacted in place.
-        redact_raw_query(b, &base, &ptr(at, "raw"), "query")
+        // A raw query that is not a plain list of pairs stays verbatim, less
+        // its credential-named pairs, which become sensitive parameters.
+        let (url, credentials) = redact_raw_query(b, &base, &ptr(at, "raw"), "query");
+        verbatim_credentials = credentials;
+        url
     } else {
         base
     };
@@ -291,12 +294,12 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<(
                 let Some(k) = str_of(q, "key") else { continue };
                 let raw_v = q.get("value").map(scalar_text).unwrap_or_default();
                 let (name, value, sensitive) = listed_query_param(b, k, &raw_v, &p);
-                if raw_v.contains('+') {
+                if k.contains('+') || raw_v.contains('+') {
                     b.report.warn(
                         "query_plus_sent_encoded",
                         &p,
-                        "a '+' in this query value is kept as a plus and sent as %2B, where Postman sends it as is (servers that read \
-                         '+' as a space would see a plus): edit the parameter if a space was meant",
+                        "a '+' in this query name or value is kept as a plus and sent as %2B, where Postman sends it as is (servers \
+                         that read '+' as a space would see a plus): edit the parameter if a space was meant",
                     );
                 }
                 params.push(KeyValue {
@@ -316,6 +319,7 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<(
             }
         }
     }
+    params.extend(verbatim_credentials);
     let url = substitute_path_vars(b, &base, path_vars.as_deref().unwrap_or(&[]), &ptr(at, "variable"));
     (url, params, userinfo)
 }

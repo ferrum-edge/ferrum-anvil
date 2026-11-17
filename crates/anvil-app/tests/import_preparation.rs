@@ -5,7 +5,7 @@ use anvil_domain::request::RequestSpec;
 use anvil_domain::settings::EffectiveSettings;
 use anvil_engine::context::MemoryAttachments;
 use anvil_engine::prepare::prepare_http;
-use anvil_engine::vars::Resolver;
+use anvil_engine::vars::{Resolver, VarEntry, VarLayer};
 use anvil_import::{ImportOptions, import};
 
 fn imported_request(source: &[u8]) -> RequestSpec {
@@ -149,4 +149,18 @@ fn imported_url_userinfo_leaves_the_url() {
         assert_eq!(spec.url, "https://api.example.com/v1/status");
         assert_eq!(prepared_query(&spec), "");
     }
+}
+
+/// Review of #573: a credential in a query kept verbatim (escaped braces) is
+/// a parameter, so the value supplied for its placeholder is percent-encoded
+/// when sent: a `&` in it adds no parameter.
+#[test]
+fn a_supplied_credential_beside_a_verbatim_query_is_encoded() {
+    let spec = imported_request(b"curl 'https://api.example.test/cb?redirect_uri=%7B%7Bcb%7D%7D&client_secret=tok-SENSITIVE-ap2'");
+    assert_eq!(spec.url, "https://api.example.test/cb?redirect_uri=%7B%7Bcb%7D%7D");
+    let vars = vec![VarEntry { name: "client_secret".into(), value: "s3cr&t=x#y".into(), secret: false, literal: false }];
+    let resolver = Resolver::new(vec![VarLayer { label: "environment".into(), vars }], None);
+    let attachments = MemoryAttachments::default();
+    let query = prepare_http(&spec, &resolver, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap().target.query;
+    assert_eq!(query, "redirect_uri=%7B%7Bcb%7D%7D&client_secret=s3cr%26t%3Dx%23y");
 }

@@ -72,15 +72,28 @@ const SHAPES: &[Shape] = &[
         url: "https://api.example.test/v1?api_key=tok-SENSITIVE-c4&page=2",
         headers: &[],
         json_body: None,
-        // Insomnia keeps a query written into its URL as URL text.
-        export: [Export::Extract, Export::Extract, Export::Extract, Export::Skip],
+        export: ALL,
     },
     Shape {
         name: "encoded credential query name",
         url: "https://api.example.test/v1?%70assword=tok-SENSITIVE-c5",
         headers: &[],
         json_body: None,
-        export: [Export::Extract, Export::Extract, Export::Extract, Export::Skip],
+        export: ALL,
+    },
+    Shape {
+        name: "credential beside a bare flag",
+        url: "https://api.example.test/v1?flag&token=tok-SENSITIVE-c14",
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
+    Shape {
+        name: "credential beside escaped braces",
+        url: "https://api.example.test/v1?q=%7B%7Bid%7D%7D&client_secret=tok-SENSITIVE-c15",
+        headers: &[],
+        json_body: None,
+        export: ALL,
     },
     Shape {
         name: "credential header mixing a reference and a literal",

@@ -94,28 +94,35 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
 /// Whether `s` holds a URL (`scheme://user:password@host`) whose userinfo
 /// password has literal material: anything but exactly one whole reference
 /// ([`is_pure_reference`], so a helper with arguments such as
-/// `{{$randomFrom a|b}}` is literal). The authority runs from the `://` to
-/// the first `/`, `?`, `#` or whitespace outside a `{{…}}` (whose spaces,
-/// as in `{{ tenant }}`, the resolver trims), and the userinfo to its last
-/// `@`, so a password holding an `@`, braces or a spaced reference is
-/// judged whole, as written.
+/// `{{$randomFrom a|b}}` is literal). The scheme may end in a reference
+/// (`{{scheme}}://`). The authority runs from the `://` to the first `/`,
+/// `?`, `#` or whitespace outside a `{{…}}` (whose spaces, as in
+/// `{{ tenant }}`, the resolver trims); the userinfo runs to its last `@`,
+/// and the password from the userinfo's first `:`. So a user name or
+/// password holding an `@`, braces or a spaced reference is judged whole,
+/// as written. Linear in `s`: once a `{{` has no closing `}}`, none later
+/// has one either.
 fn has_url_password(s: &str) -> bool {
     let mut from = 0;
+    let mut unterminated = false;
     while let Some(found) = s[from..].find("://") {
         let start = from + found;
         from = start + 3;
-        if !s[..start].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric()) {
+        if !s[..start].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '}') {
             continue;
         }
         let authority = &s[from..];
         let (mut i, mut last_at, mut first_colon) = (0, None, None);
         while i < authority.len() {
             let rest = &authority[i..];
-            if rest.starts_with("{{")
-                && let Some(close) = rest[2..].find("}}")
-            {
-                i += close + 4;
-                continue;
+            if !unterminated && rest.starts_with("{{") {
+                match rest[2..].find("}}") {
+                    Some(close) => {
+                        i += close + 4;
+                        continue;
+                    }
+                    None => unterminated = true,
+                }
             }
             let c = rest.chars().next().unwrap_or(' ');
             if matches!(c, '/' | '?' | '#') || c.is_whitespace() {
@@ -123,7 +130,7 @@ fn has_url_password(s: &str) -> bool {
             }
             if c == '@' {
                 last_at = Some(i);
-            } else if c == ':' && last_at.is_none() && first_colon.is_none() {
+            } else if c == ':' && first_colon.is_none() {
                 first_colon = Some(i);
             }
             i += c.len_utf8();
@@ -648,6 +655,10 @@ mod tests {
             "https://user:{{$randomFrom tok-SENSITIVE-pw4 x}}@host.example/",
             "https://user:p{w-tok-SENSITIVE-pw5@host.example/",
             "https://admin:p@tok-SENSITIVE-pw6@api.example.com/v1",
+            // Review of #573: a user name holding `@` (sol F2) and a
+            // templated scheme (sol F3).
+            "https://alice@example.org:tok-SENSITIVE-pw7@api.example.test/",
+            "{{scheme}}://admin:tok-SENSITIVE-pw8@api.example.test/",
         ] {
             let mut v = spec(loud);
             let s = sanitize(&mut v, &[]);
@@ -665,6 +676,16 @@ mod tests {
             let mut v = spec(quiet);
             assert!(sanitize(&mut v, &[]).warnings.is_empty(), "a URL without a literal password was flagged");
         }
+    }
+
+    /// Review of #573, sol F5: unterminated references do not make the URL
+    /// scan quadratic (this input took minutes before).
+    #[test]
+    fn url_password_scan_is_linear_in_unterminated_references() {
+        let text = format!("https://{}", "{".repeat(4 << 20));
+        assert!(!has_url_password(&text));
+        let text = format!("https://user:{}tok-SENSITIVE-pw9@host.example/", "{{".repeat(1 << 20));
+        assert!(has_url_password(&text));
     }
 
     #[test]

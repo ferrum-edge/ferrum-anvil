@@ -88,8 +88,9 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     apply_userinfo(b, &mut auth, userinfo, &uptr);
     let (base, pairs) = split_query(&url);
     warn_query_conversions(b, !pairs.is_empty(), &url, &uptr);
-    let base = if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &uptr, "query parameter") } else { base };
-    let params: Vec<KeyValue> = pairs
+    let (base, verbatim_credentials) =
+        if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &uptr, "query parameter") } else { (base, vec![]) };
+    let mut params: Vec<KeyValue> = pairs
         .into_iter()
         .enumerate()
         .map(|(n, (k, v))| {
@@ -97,6 +98,7 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
             KeyValue { name: k, value, enabled: true, description: String::new(), sensitive }
         })
         .collect();
+    params.extend(verbatim_credentials);
 
     let mut headers = vec![];
     let mut has_cookie = false;

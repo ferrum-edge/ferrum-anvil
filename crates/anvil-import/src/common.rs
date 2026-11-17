@@ -270,112 +270,122 @@ fn has_literal_material(v: &str) -> bool {
 /// Bytes of the readable part of a placeholder name made from a JSON path.
 const PATH_NAME_BYTES: usize = 48;
 
-/// Placeholder names for credential leaves of one JSON value: readable
-/// (`accounts_0_api_key`, bounded), and distinct for distinct leaves. When
-/// two paths read the same (`a-b` and `a_b`, or a long name cut short), the
-/// later one gets a suffix from a hash of its full path.
-struct PathNames {
+/// Placeholder names for the credential leaves of one environment's JSON
+/// values: readable (`accounts_0_api_key`, bounded to [`PATH_NAME_BYTES`]),
+/// and distinct from each other and from the environment's own variable
+/// names, which are reserved first. A name already taken gets the next free
+/// `_2`, `_3`, … suffix (found in amortized constant time).
+pub struct PlaceholderNames {
     used: std::collections::HashSet<String>,
+    next: std::collections::HashMap<String, usize>,
 }
 
-impl PathNames {
-    fn name(&mut self, readable: &str, identity: &[u8; 32]) -> String {
-        let mut base = sanitize_var(readable);
-        if base.len() > PATH_NAME_BYTES {
-            base.truncate(PATH_NAME_BYTES);
+impl PlaceholderNames {
+    /// Names that already exist in the scope (variable names); a
+    /// placeholder never takes one.
+    pub fn reserving<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut used = std::collections::HashSet::new();
+        for n in names {
+            used.insert(n.to_string());
+            used.insert(sanitize_var(n));
         }
+        PlaceholderNames { used, next: std::collections::HashMap::new() }
+    }
+
+    fn name(&mut self, readable: &str) -> String {
+        let mut base = sanitize_var(readable);
+        base.truncate(PATH_NAME_BYTES);
         if self.used.insert(base.clone()) {
             return base;
         }
-        let hashed = format!("{base}_{}", hex::encode(&identity[..6]));
-        let mut name = hashed.clone();
-        let mut n = 2;
-        while !self.used.insert(name.clone()) {
-            name = format!("{hashed}_{n}");
+        let mut n = self.next.get(&base).copied().unwrap_or(2);
+        loop {
+            let candidate = format!("{base}_{n}");
             n += 1;
+            if self.used.insert(candidate.clone()) {
+                self.next.insert(base, n);
+                return candidate;
+            }
         }
-        name
     }
-}
-
-/// The identity of a child path: a hash of the parent's identity and the
-/// member name or index, so each level costs its own name once.
-fn child_identity(parent: &[u8; 32], segment: &str) -> [u8; 32] {
-    use sha2::Digest;
-    let mut h = sha2::Sha256::new();
-    h.update(parent);
-    h.update([0u8]);
-    h.update(segment.as_bytes());
-    h.finalize().into()
-}
-
-/// The readable part of a child path, bounded so it never grows past what
-/// a name keeps.
-fn child_readable(parent: &str, segment: &str) -> String {
-    let mut out = format!("{parent}_{}", crate::util::clip(segment, PATH_NAME_BYTES));
-    if out.len() > PATH_NAME_BYTES * 2 {
-        let mut end = PATH_NAME_BYTES * 2;
-        while !out.is_char_boundary(end) {
-            end -= 1;
-        }
-        out.truncate(end);
-    }
-    out
 }
 
 /// Apply the credential policy to a JSON value that is stored as text (an
-/// Insomnia environment value that is an array): every scalar under a
-/// credential-named member, whatever it is called and whatever its type
-/// (string, number or boolean), becomes a placeholder named by its path
-/// under `name` ([`PathNames`]). Numbers and booleans keep an unquoted
-/// placeholder ([`render_json`]). Returns whether anything was redacted.
-pub fn scrub_stored_json(b: &mut Builder, v: &mut Value, name: &str, pointer: &str) -> bool {
+/// Insomnia environment value named `name` that is an array): every scalar
+/// under a credential-named member, whatever it is called and whatever its
+/// type (string, number or boolean), becomes a placeholder named by its path
+/// ([`PlaceholderNames`]). Numbers and booleans keep an unquoted placeholder
+/// ([`render_json`]). As in [`scrub_json`], a node's report pointer and name
+/// are built, bounded, only for a leaf that is redacted, so the walk costs no
+/// more than the value. Returns whether anything was redacted.
+pub fn scrub_stored_json(b: &mut Builder, v: &mut Value, name: &str, pointer: &str, names: &mut PlaceholderNames) -> bool {
     let before = b.report.redactions_made();
-    let mut names = PathNames { used: std::collections::HashSet::new() };
-    let root = child_identity(&[0u8; 32], name);
-    scrub_stored_at(b, v, &mut names, &sanitize_var(&crate::util::clip(name, PATH_NAME_BYTES)), &root, pointer, false);
+    scrub_stored_at(b, v, names, name, pointer, &mut Vec::new(), false);
     b.report.redactions_made() > before
 }
 
 fn scrub_stored_at(
     b: &mut Builder,
     v: &mut Value,
-    names: &mut PathNames,
-    readable: &str,
-    identity: &[u8; 32],
+    names: &mut PlaceholderNames,
+    root: &str,
     pointer: &str,
+    path: &mut Vec<String>,
     credential: bool,
 ) {
     match v {
         Value::Object(m) => {
             for (k, child) in m.iter_mut() {
-                let p = crate::util::ptr(pointer, &segment(k));
                 let under = credential || is_credential_name(k);
-                scrub_stored_at(b, child, names, &child_readable(readable, k), &child_identity(identity, k), &p, under);
+                if under || child.is_object() || child.is_array() {
+                    path.push(segment(k));
+                    scrub_stored_at(b, child, names, root, pointer, path, under);
+                    path.pop();
+                }
             }
         }
         Value::Array(a) => {
             for (i, child) in a.iter_mut().enumerate() {
-                let i = i.to_string();
-                let p = crate::util::ptr(pointer, &i);
-                scrub_stored_at(b, child, names, &child_readable(readable, &i), &child_identity(identity, &i), &p, credential);
+                if credential || child.is_object() || child.is_array() {
+                    path.push(i.to_string());
+                    scrub_stored_at(b, child, names, root, pointer, path, credential);
+                    path.pop();
+                }
             }
         }
         Value::String(s) if credential => {
-            let var = names.name(readable, identity);
+            let (var, p) = leaf_names(names, root, pointer, path);
             let literal = has_literal_material(s.trim());
-            *s = credential_text_with(b, s, literal, &var, pointer, &format!("environment value {var}"));
+            *s = credential_text_with(b, s, literal, &var, &p, &format!("environment value {var}"));
         }
         Value::Number(_) | Value::Bool(_) if credential => {
-            let var = names.name(readable, identity);
+            let (var, p) = leaf_names(names, root, pointer, path);
             let literal = v.to_string();
-            let new = credential_text_with(b, &literal, true, &var, pointer, &format!("environment value {var}"));
+            let new = credential_text_with(b, &literal, true, &var, &p, &format!("environment value {var}"));
             if new != literal {
                 *v = Value::String(format!("{NUMERIC_PLACEHOLDER}{new}{NUMERIC_PLACEHOLDER}"));
             }
         }
         _ => {}
     }
+}
+
+/// The placeholder name and report pointer for the leaf at `path` (bounded
+/// segments) under the value named `root`, each built with bounded work.
+fn leaf_names(names: &mut PlaceholderNames, root: &str, pointer: &str, path: &[String]) -> (String, String) {
+    let mut readable = crate::util::clip(root, PATH_NAME_BYTES);
+    for seg in path {
+        if readable.len() > PATH_NAME_BYTES * 2 {
+            break;
+        }
+        readable.push('_');
+        readable.push_str(seg);
+    }
+    let p = match path.split_last() {
+        Some((last, parents)) => pointer_at(pointer, parents, last),
+        None => pointer.to_string(),
+    };
+    (names.name(&readable), p)
 }
 
 /// Parse a JSON document embedded in a string field of the source (a request
@@ -498,27 +508,43 @@ pub fn scrub_graphql_variables(b: &mut Builder, variables: Option<Value>, pointe
     }
 }
 
-/// Redact credential-like values in a query string that [`split_query`]
-/// could not turn into pairs (a bare `flag` segment, for instance). Every
-/// segment keeps its exact syntax; only the value of a `name=value` segment
-/// with a credential-like name is replaced. The fragment is kept.
-pub fn redact_raw_query(b: &mut Builder, url: &str, pointer: &str, what: &str) -> String {
+/// Take the credential-named `name=value` segments out of a query that
+/// [`split_query`] keeps in the URL verbatim (a bare `flag` segment, or
+/// escapes that would decode into a `{{reference}}`), and return them as
+/// sensitive parameters with the credential policy applied. The rest of the
+/// query keeps its exact syntax, and the fragment is kept.
+///
+/// A credential is never left in URL text: there a placeholder would resolve
+/// without percent-encoding (a supplied `a&b` would add a parameter) and a
+/// kept literal would be neither marked sensitive nor extracted on export.
+/// As a parameter the engine encodes its value after resolution. A value
+/// whose decoding would make or change a reference is treated as literal.
+pub fn redact_raw_query(b: &mut Builder, url: &str, pointer: &str, what: &str) -> (String, Vec<KeyValue>) {
     let no_frag = strip_fragment(url);
     let fragment = &url[no_frag.len()..];
-    let Some((base, q)) = no_frag.split_once('?') else { return url.to_string() };
-    let segs: Vec<String> = q
-        .split('&')
-        .map(|seg| match seg.split_once('=') {
-            Some((k, v)) if !v.is_empty() && is_credential_name(&query_decode(k)) => {
-                let decoded = query_decode(v);
-                let (nv, _) = maybe_redact(b, &query_decode(k), &decoded, pointer, what);
-                // A kept value keeps its original encoding.
-                if nv == decoded { seg.to_string() } else { format!("{k}={nv}") }
-            }
-            _ => seg.to_string(),
-        })
-        .collect();
-    format!("{base}?{}{fragment}", segs.join("&"))
+    let Some((base, q)) = no_frag.split_once('?') else { return (url.to_string(), vec![]) };
+    let mut kept = vec![];
+    let mut params = vec![];
+    for seg in q.split('&') {
+        let credential = match seg.split_once('=') {
+            Some((k, v)) if !v.trim().is_empty() && is_credential_name(&query_decode(k)) => Some((k, v)),
+            _ => None,
+        };
+        let Some((k, v)) = credential else {
+            kept.push(seg);
+            continue;
+        };
+        let name = query_decode(k);
+        let decoded = query_decode(v);
+        let value = if same_references(v, &decoded) {
+            credential_text(b, &decoded, &name, pointer, &format!("{what} {name}"))
+        } else {
+            credential_text_with(b, v, true, &name, pointer, &format!("{what} {name}"))
+        };
+        params.push(KeyValue { name, value, enabled: true, description: String::new(), sensitive: true });
+    }
+    let url = if kept.is_empty() { format!("{base}{fragment}") } else { format!("{base}?{}{fragment}", kept.join("&")) };
+    (url, params)
 }
 
 /// Map a text body to the matching [`Body`] variant by media type. Returns

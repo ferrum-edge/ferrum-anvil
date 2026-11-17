@@ -208,7 +208,8 @@ fn raw_json_bodies_and_mixed_raw_queries_are_redacted() {
     let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
     let s = &r.requests[0].spec;
     assert_eq!(json_body(s)["password"], "{{password}}");
-    assert_eq!(s.url, "https://x.example.com/a?flag&api_key={{api_key}}");
+    assert_eq!(s.url, "https://x.example.com/a?flag");
+    assert!(param(s, "api_key").is_some_and(|p| p.value == "{{api_key}}" && p.sensitive));
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
     assert_eq!(r.report.redactions.len(), 2);
 }
@@ -271,7 +272,8 @@ fn query_list_values_are_decoded_only_when_exact() {
             {"key": "lower", "value": "a%3ab"},
             {"key": "braces", "value": "%7B%7Bid%7D%7D"},
             {"key": "plus", "value": "a+b"},
-            {"key": "plain", "value": "v1"}
+            {"key": "plain", "value": "v1"},
+            {"key": "a+b", "value": "1"}
         ])),
         &opts(),
     );
@@ -284,11 +286,14 @@ fn query_list_values_are_decoded_only_when_exact() {
             ("lower", "a%3ab"),
             ("braces", "%7B%7Bid%7D%7D"),
             ("plus", "a+b"),
-            ("plain", "v1")
+            ("plain", "v1"),
+            ("a+b", "1")
         ]
     );
     assert!(has_at(&r, "query_value_not_decoded", "/url/query/1") && has_at(&r, "query_value_not_decoded", "/url/query/2"));
     assert!(has_at(&r, "query_plus_sent_encoded", "/url/query/3"));
+    // A `+` in a name is reported too (review of #573, dsf F3).
+    assert!(has_at(&r, "query_plus_sent_encoded", "/url/query/5"));
     assert!(!has_at(&r, "query_value_not_decoded", "/url/query/0"));
 }
 

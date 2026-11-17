@@ -347,7 +347,8 @@ fn raw_json_bodies_and_url_queries_are_redacted() {
     ] {
         let s = &r.requests[0].spec;
         assert_eq!(json_body(s)["password"], "{{password}}");
-        assert_eq!(s.url, "https://example.test/x?flag&api_key={{api_key}}");
+        assert_eq!(s.url, "https://example.test/x?flag");
+        assert!(param(s, "api_key").is_some_and(|p| p.value == "{{api_key}}" && p.sensitive));
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
         assert_eq!(r.report.redactions.len(), 2);
     }
@@ -656,4 +657,49 @@ fn credential_named_path_parameters_are_redacted() {
     for r in both(request, serde_json::json!({}), &keep()) {
         assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/tok-SENSITIVE-in7/42");
     }
+}
+
+/// Review of #573, sol F4: environment placeholders never take the name of
+/// a variable of the environment (here the 48-byte name of the array
+/// itself) or of a placeholder made for another array whose path reads the
+/// same (`a-b` and `a_b`).
+#[test]
+fn environment_placeholders_never_collide() {
+    let long = "a".repeat(48);
+    let mut env = serde_json::Map::new();
+    env.insert(long.clone(), serde_json::json!([{ "api_key": "tok-SENSITIVE-in8" }]));
+    env.insert("a-b".into(), serde_json::json!([{ "api_key": "tok-SENSITIVE-in9" }]));
+    env.insert("a_b".into(), serde_json::json!([{ "api_key": "tok-SENSITIVE-in10" }]));
+    let request = serde_json::json!({ "url": "https://example.test/x" });
+    for r in both(request.clone(), serde_json::Value::Object(env.clone()), &opts()) {
+        let var = |n: &str| r.workspace.variables.iter().find(|v| v.name == n).map(|v| template_text(&v.value)).unwrap();
+        let own = var(&long);
+        assert!(!own.contains(&format!("{{{{{long}}}}}")), "a placeholder took its own variable's name");
+        let (first, second) = (var("a-b"), var("a_b"));
+        assert_ne!(first, second, "two arrays share a placeholder");
+        for text in [own, first, second] {
+            assert!(!text.contains("tok-SENSITIVE"), "a credential member stayed");
+        }
+    }
+}
+
+/// Review of #573, dsf F2: placeholder names and report pointers for a leaf
+/// deep under long member names stay bounded.
+#[test]
+fn deep_environment_paths_stay_bounded() {
+    let key = "k".repeat(60);
+    let mut node = serde_json::json!({ "api_key": (0..500).map(|i| format!("tok-SENSITIVE-deep-{i}")).collect::<Vec<_>>() });
+    for _ in 0..100 {
+        let mut m = serde_json::Map::new();
+        m.insert(key.clone(), node);
+        node = serde_json::Value::Object(m);
+    }
+    let env = serde_json::json!({ "deep": [node] });
+    let r = v4_with(serde_json::json!({ "url": "https://example.test/x" }), env, &opts());
+    let text = r.workspace.variables.iter().find(|v| v.name == "deep").map(|v| template_text(&v.value)).unwrap();
+    assert!(!text.contains("tok-SENSITIVE-deep"), "a credential member stayed");
+    assert!(r.report.required_variables.iter().all(|v| v.name.len() <= 56), "a placeholder name is unbounded");
+    assert!(r.report.redactions.iter().all(|x| x.pointer.len() < 2048), "a report pointer is unbounded");
+    let distinct: std::collections::HashSet<&str> = r.report.required_variables.iter().map(|v| v.name.as_str()).collect();
+    assert!(distinct.len() >= 500, "each leaf has its own placeholder");
 }

@@ -9,9 +9,9 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type,
-    listed_query_param, maybe_redact, parse_embedded_json, parse_form, redact_raw_query, render_json, scrub_body, scrub_graphql_variables,
-    scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
+    PlaceholderNames, apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type,
+    keep_declared_content_type, listed_query_param, maybe_redact, parse_embedded_json, parse_form, redact_raw_query, render_json,
+    scrub_body, scrub_graphql_variables, scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -98,47 +98,54 @@ fn sort_key(v: &Value) -> f64 {
     v.get("metaSortKey").or_else(|| v.pointer("/meta/sortKey")).and_then(Value::as_f64).unwrap_or(0.0)
 }
 
-/// Flatten nested environment data (`{api: {host: x}}` → `api.host`). An
-/// array (or an object nested too deep) becomes one variable holding its
-/// JSON text; unless credentials are included, every scalar under a
-/// credential-named member in it becomes a placeholder
-/// ([`scrub_stored_json`]), as the same member of a nested object (a
-/// credential-named variable) is redacted.
-fn flatten(b: &mut Builder, at: &str, prefix: &str, v: &Value, out: &mut Vec<(String, String)>, depth: usize) {
+/// One flattened environment value: scalar text, or a JSON array (or an
+/// object nested too deep) stored as its JSON text.
+enum Flat {
+    Text(String),
+    Json(Value),
+}
+
+/// Flatten nested environment data (`{api: {host: x}}` → `api.host`).
+fn flatten(prefix: &str, v: &Value, out: &mut Vec<(String, Flat)>, depth: usize) {
     match v {
         Value::Object(m) if depth < 16 => {
             for (k, x) in m {
                 let name = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
-                flatten(b, at, &name, x, out, depth + 1);
+                flatten(&name, x, out, depth + 1);
             }
         }
-        Value::Array(_) | Value::Object(_) => {
-            let text = v.to_string();
-            let text = if b.opts.include_credentials {
-                text
-            } else {
-                let mut scrubbed = v.clone();
-                if scrub_stored_json(b, &mut scrubbed, prefix, &ptr(at, prefix)) {
-                    render_json(&scrubbed, false, &text).unwrap_or(text)
-                } else {
-                    text
-                }
-            };
-            out.push((prefix.to_string(), text));
-        }
-        other => out.push((prefix.to_string(), scalar_text(other))),
+        Value::Array(_) | Value::Object(_) => out.push((prefix.to_string(), Flat::Json(v.clone()))),
+        other => out.push((prefix.to_string(), Flat::Text(scalar_text(other)))),
     }
 }
 
+/// Environment variables from Insomnia environment data. A JSON-valued
+/// variable holds its JSON text; unless credentials are included, every
+/// scalar under a credential-named member in it becomes a placeholder
+/// ([`scrub_stored_json`]), as the same member of a nested object (a
+/// credential-named variable) is redacted. Placeholder names are shared by
+/// the whole environment and never take one of its variable names.
 fn env_vars(b: &mut Builder, data: Option<&Value>, at: &str) -> Vec<Variable> {
     let mut flat = vec![];
     if let Some(d) = data {
-        flatten(b, at, "", d, &mut flat, 0);
+        flatten("", d, &mut flat, 0);
     }
+    let mut names = PlaceholderNames::reserving(flat.iter().map(|(k, _)| k.as_str()));
     let mut out = vec![];
-    for (k, v) in flat {
+    for (k, item) in flat {
         let p = ptr(at, &k);
-        let v = template(b, &v, &p);
+        let text = match item {
+            Flat::Text(t) => t,
+            Flat::Json(mut v) => {
+                let text = v.to_string();
+                if !b.opts.include_credentials && scrub_stored_json(b, &mut v, &k, &p, &mut names) {
+                    render_json(&v, false, &text).unwrap_or(text)
+                } else {
+                    text
+                }
+            }
+        };
+        let v = template(b, &text, &p);
         if let Some(var) = env_var(b, &k, &v, is_credential_name(&k), true, &p) {
             out.push(var);
         }
@@ -607,11 +614,12 @@ fn request(
     // Userinfo is never kept in the URL (the engine refuses it).
     let (raw_url, userinfo) = take_userinfo(&raw_url);
     let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
-    // A query written into the URL itself is kept verbatim; its
-    // credential-like values are redacted in place.
-    let url = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { url };
+    // A query written into the URL itself is kept verbatim, less its
+    // credential-named pairs, which become sensitive parameters.
+    let (url, mut params) = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { (url, vec![]) };
+    params.extend(query_params(b, r.get("parameters"), &ptr(at, "parameters")));
     let mut spec = RequestSpec::http(&method, &url);
-    spec.params = query_params(b, r.get("parameters"), &ptr(at, "parameters"));
+    spec.params = params;
     spec.headers = kv_list(b, r.get("headers"), &ptr(at, "headers"), "header");
     let ct = header_content_type(&spec.headers);
     let mut declared = None;

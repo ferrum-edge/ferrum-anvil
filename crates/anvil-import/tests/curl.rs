@@ -355,16 +355,32 @@ fn short_option_clusters_count_against_the_argument_limit() {
 }
 
 #[test]
-fn credentials_in_a_query_with_a_bare_flag_are_redacted_in_place() {
+fn credentials_in_a_verbatim_query_become_sensitive_parameters() {
+    // The rest of the query keeps its exact syntax; the credential is never
+    // left in URL text, where its placeholder would resolve unencoded and a
+    // kept literal would not be extracted on export (review of #573).
     let r = curl("curl 'https://example.test/a?flag&api_key=placeholder-secret&page=2#top'");
     let s = &r.requests[0].spec;
-    assert_eq!(s.url, "https://example.test/a?flag&api_key={{api_key}}&page=2");
+    assert_eq!(s.url, "https://example.test/a?flag&page=2");
+    let p = param(s, "api_key").unwrap();
+    assert!(p.value == "{{api_key}}" && p.sensitive);
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
     assert_eq!(r.report.redactions.len(), 1);
-    // Kept verbatim (original encoding) with include_credentials.
+    // Kept with include_credentials, decoded and marked sensitive.
     let o = ImportOptions { include_credentials: true, ..opts() };
     let r = import(b"curl 'https://example.test/a?flag&token=a%26b'", &o).unwrap();
-    assert_eq!(r.requests[0].spec.url, "https://example.test/a?flag&token=a%26b");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://example.test/a?flag");
+    let p = param(s, "token").unwrap();
+    assert!(p.value == "a&b" && p.sensitive);
+    // A query kept verbatim for escaped braces moves its credential out too.
+    for options in [opts(), o] {
+        let r = import(b"curl 'https://api.example.test/v1?q=%7B%7Bid%7D%7D&api_key=tok-SENSITIVE-cu4'", &options).unwrap();
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.test/v1?q=%7B%7Bid%7D%7D");
+        assert!(param(s, "api_key").unwrap().sensitive);
+        assert!(!r.requests[0].name.contains("tok-SENSITIVE-cu4"), "a credential reached the request name");
+    }
 }
 
 #[test]

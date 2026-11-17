@@ -39,8 +39,12 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   is set (kept values are then marked sensitive).
 - A value that is only variable references plus an auth scheme word
   (`Bearer {{token}}`) is not a literal secret and is kept.
-- A query kept in the URL verbatim (one with a bare `flag` segment, or written
-  into an Insomnia URL) has its credential-like values replaced in place.
+- A query kept in the URL verbatim (one with a bare `flag` segment, one whose
+  decoding would make a `{{reference}}`, or one written into an Insomnia URL)
+  keeps its exact syntax, but its credential-named `name=value` segments
+  become sensitive parameters: a credential is never left in URL text, where
+  its placeholder would resolve without percent-encoding and a kept literal
+  would not be extracted on export.
 - URL userinfo (`https://user:password@host/`) becomes Basic auth with a
   `{{password}}` placeholder in every migration importer, and the URL loses it
   (the engine never sends credentials in the URL). The userinfo ends at the
@@ -56,9 +60,10 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia
   environment value that is an array (`{"accounts": [{"api_key": "…"}]}`,
-  `"tokens": ["…"]`), each with its own placeholder named by its path; a
-  dynamic helper with arguments (`{{$randomFrom a|b}}`) counts as literal
-  there.
+  `"tokens": ["…"]`), each with its own placeholder named by its path
+  (bounded, and never the name of another variable or placeholder of the
+  environment); a dynamic helper with arguments (`{{$randomFrom a|b}}`)
+  counts as literal there.
 - JSON bodies and GraphQL variables are scanned recursively: string members
   with credential-like names, and numbers under such names (`pin`, `otp`, …;
   not names recognized only by `token`, such as `max_tokens`), whose
@@ -87,7 +92,7 @@ The engine percent-encodes a stored query parameter once when it sends it
   as its `%` is sent as `%25`.
 - A URL query (cURL, HAR, a Postman raw URL) is decoded into parameters. A
   `+` stays a plus, sent as `%2B` where the source sends `+`
-  (`query_plus_sent_encoded`, also for a Postman list value), and an escape
+  (`query_plus_sent_encoded`, also for a Postman list name or value), and an escape
   that is not UTF-8 becomes U+FFFD (`query_not_utf8`). A query whose decoding
   would make or change a `{{reference}}` stays in the URL as written.
 
