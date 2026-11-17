@@ -18,8 +18,8 @@ mod workload;
 
 use crate::Draft;
 use crate::facts::{BodyFacts, DiagnosticInput};
-use anvil_domain::execution::{AttemptObservation, TransportFailure};
-use anvil_domain::outcome::OutcomeWarning;
+use anvil_domain::execution::{AttemptObservation, Direction, TransportFailure};
+use anvil_domain::outcome::{GrpcStatusSource, OutcomeWarning, ProtocolStatus};
 
 pub struct Ctx<'a> {
     pub input: &'a DiagnosticInput<'a>,
@@ -45,6 +45,25 @@ impl<'a> Ctx<'a> {
     /// it is cut ([`crate::facts::excerpt`]).
     pub fn excerpt(&self, s: &str, max_chars: usize) -> String {
         crate::facts::excerpt(self.input.redact, s, max_chars)
+    }
+
+    /// Whether a gRPC call ended with a status and no message before it: a
+    /// trailers-only response, or trailers (a gRPC-Web trailer frame) after
+    /// no `grpc_message`. A gateway or proxy that refuses the call before it
+    /// reaches the service answers in this shape too (Ferrum Edge does for
+    /// routing, size, deadline and plugin refusals), so it does not show
+    /// that the service answered.
+    pub fn grpc_status_without_message(&self) -> bool {
+        match self.input.protocol_status {
+            ProtocolStatus::Grpc { grpc_status: Some(_), source, .. } => {
+                *source == GrpcStatusSource::TrailersOnly
+                    || !self
+                        .input
+                        .stream
+                        .is_some_and(|s| s.messages.iter().any(|m| m.direction == Direction::Received && m.kind == "grpc_message"))
+            }
+            _ => false,
+        }
     }
 
     pub fn target_host(&self) -> String {

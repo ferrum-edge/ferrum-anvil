@@ -192,8 +192,11 @@ pub enum ResponseRef {
     Invalid(String),
 }
 
+/// The reference in the response's headers or trailers (a gRPC gateway
+/// refusal can carry it in its trailers, as the marker rules read
+/// `X-Gateway-Error` there too).
 pub fn response_ref(r: &ResponseRecord) -> ResponseRef {
-    let mut values: Vec<&str> = r.header_values(REF_HEADER).into_iter().map(str::trim).collect();
+    let mut values: Vec<&str> = r.header_values(REF_HEADER).into_iter().chain(r.trailer_values(REF_HEADER)).map(str::trim).collect();
     values.sort_unstable();
     values.dedup();
     match values.as_slice() {
@@ -236,7 +239,8 @@ impl Binding {
         sent_at: DateTime<Utc>,
         received_by: DateTime<Utc>,
     ) -> Self {
-        let raw = r.header_values("x-gateway-error");
+        // Headers and trailers, as `rules::ferrum_rules` reads the marker.
+        let raw: Vec<&str> = r.header_values("x-gateway-error").into_iter().chain(r.trailer_values("x-gateway-error")).collect();
         let mut tokens: Vec<String> = Vec::new();
         for v in &raw {
             for part in v.split(',') {
@@ -726,6 +730,31 @@ mod tests {
         // A response whose protocol Anvil does not know binds to nothing.
         let unknown = response(502, "HTTP/?", &[("x-gateway-error", "connection_failure")]);
         assert_eq!(field(&unknown, None, &view), "protocol");
+    }
+
+    /// The reference and the marker are read from the trailers too, as the
+    /// marker rules read `X-Gateway-Error` (#570): a gRPC refusal can carry
+    /// them there.
+    #[test]
+    fn the_reference_and_marker_are_read_from_trailers_too() {
+        let mut r = response(502, "HTTP/1.1", &[]);
+        r.trailers = vec![
+            HeaderEntry { name: "X-Gateway-Error".into(), value: "connection_failure".into() },
+            HeaderEntry { name: "X-Ferrum-Diagnostic-Ref".into(), value: REF.into() },
+        ];
+        assert_eq!(response_ref(&r), ResponseRef::Present(parse_ref(REF).unwrap()));
+        let b = binding(&r, None);
+        assert_eq!(
+            (b.gateway_error.as_deref(), b.gateway_error_shown.as_deref()),
+            (Some("connection_failure"), Some("connection_failure"))
+        );
+        let view = parse_view(record(&Utc::now().to_rfc3339()).as_bytes()).expect("valid record");
+        assert_eq!(check_binding(&view, &b), Ok(()));
+        // A header and a trailer that disagree are two references, never either one.
+        let other = "fd1_00000000000000000000000000000000";
+        let mut two = response(502, "HTTP/1.1", &[("x-ferrum-diagnostic-ref", other)]);
+        two.trailers = vec![HeaderEntry { name: "x-ferrum-diagnostic-ref".into(), value: REF.into() }];
+        assert!(matches!(response_ref(&two), ResponseRef::Invalid(_)));
     }
 
     #[test]

@@ -282,19 +282,25 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     }
 
     // Status/marker consistency. The gateway core writes its tokens only on
-    // 5xx HTTP responses (gRPC carries them on HTTP 200 trailers-only
-    // responses); every audited release derives them the same way (0.9.8 adds
-    // request_timeout, also only on a 504), so this holds for all of them. A
-    // known token on a 1xx-4xx HTTP response therefore did not
-    // come from the gateway's error classification: a response-header plugin
-    // on a rejection path, or an intermediary, added it (live: GW-019
-    // reject-path decoration). Report the conflict instead of the token's
-    // meaning, and do not match catalog outcomes against it.
-    let grpc_shaped = matches!(ctx.input.protocol, anvil_domain::request::Protocol::Grpc)
-        || r.body.content_type.as_deref().is_some_and(|ct| ct.trim().to_ascii_lowercase().starts_with("application/grpc"));
+    // 5xx HTTP responses, and on gRPC errors: HTTP 200 with a non-zero
+    // grpc-status (trailers-only); every audited release derives them the same
+    // way (0.9.8 adds request_timeout, also only on a 504), so this holds for
+    // all of them. A known token on any other 1xx-4xx response (a gRPC
+    // request's 401 JSON refusal, or a grpc-status 0 success included)
+    // therefore did not come from the gateway's error classification: a
+    // response-header plugin on a rejection path, or an intermediary, added it
+    // (live: GW-019 reject-path decoration). Report the conflict instead of the
+    // token's meaning, and do not match catalog outcomes against it. The
+    // grpc-status is read from the response itself as well, so a plain HTTP
+    // request answered in gRPC's shape is judged by that shape.
+    let wire_grpc_status = match ctx.input.protocol_status {
+        anvil_domain::outcome::ProtocolStatus::Grpc { grpc_status: Some(g), .. } => Some(*g),
+        _ => r.header_values("grpc-status").into_iter().chain(r.trailer_values("grpc-status")).find_map(|v| v.trim().parse::<i32>().ok()),
+    };
+    let grpc_error_head = r.status == 200 && wire_grpc_status.is_some_and(|g| g != 0);
     if let Some(t) = &token
         && r.status < 500
-        && !grpc_shaped
+        && !grpc_error_head
     {
         out.push(
             Draft::new(
@@ -334,7 +340,9 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             );
         }
         out.push(d);
-    } else if r.status >= 500 && !matches!(ctx.input.protocol, anvil_domain::request::Protocol::Grpc) {
+    } else if r.status >= 500 && wire_grpc_status.is_none() {
+        // A 5xx without a marker is unexplained whatever the request's
+        // protocol; one carrying a grpc-status is explained by that status.
         let mut d = Draft::new(
             "ferrum.marker.absent",
             "ferrum.marker",
@@ -362,10 +370,17 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         anvil_domain::outcome::ProtocolStatus::Grpc { grpc_status, .. } => *grpc_status,
         _ => None,
     };
-    let matches =
-        cat.match_signal(&Signal { status: r.status, token: token.as_deref(), body_text: &body_text, body: ctx.body, grpc_status });
+    let matches = cat.match_signal(&Signal {
+        status: r.status,
+        token: token.as_deref(),
+        body_text: &body_text,
+        body: ctx.body,
+        grpc_status,
+        grpc_no_message: ctx.grpc_status_without_message(),
+    });
     let exact: Vec<_> = matches.iter().filter(|(_, s)| *s == MatchStrength::Exact).map(|(o, _)| *o).collect();
     let passthrough: Vec<_> = matches.iter().filter(|(_, s)| *s == MatchStrength::PassThrough).map(|(o, _)| *o).collect();
+    let status_only: Vec<_> = matches.iter().filter(|(_, s)| *s == MatchStrength::GrpcStatusOnly).map(|(o, _)| *o).collect();
 
     // Body text is weak evidence: a backend can return identical bytes.
     let body_ceiling = Confidence::Likely.min(ceiling);
@@ -414,6 +429,13 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         let signal =
             JsonRpcSignal { status: r.status, token: token.as_deref(), code: e.code, message: &e.message, gateway: e.gateway.as_deref() };
         jsonrpc_outcomes(ctx, cat, &signal, body_ceiling, out);
+        return;
+    }
+    // A gRPC status with no message: the gateway's outcomes that answer so
+    // have no body to compare, and a service behind it can answer alike. They
+    // are candidates, never a match (#570).
+    if exact.is_empty() && passthrough.is_empty() && !status_only.is_empty() {
+        grpc_status_outcomes(ctx, cat, r.status, grpc_status.unwrap_or_default(), &status_only, out);
         return;
     }
     if exact.len() == 1 && exact[0].shared_signal_with.is_empty() {
@@ -541,6 +563,43 @@ fn jsonrpc_outcomes(ctx: &Ctx<'_>, cat: &FerrumCatalog, s: &JsonRpcSignal<'_>, c
         d.var("count", ids.len().to_string()).var("common", candidates[0].minimum_truthful_diagnosis.clone())
     };
     d = evidence(d).ev(E::Configuration, "catalog.candidates", ids.join(", ")).var("release", release);
+    for id in &ids {
+        if let Some(o) = cat.outcome(id) {
+            d.extra_alternatives.push(format!("{} ({})", o.minimum_truthful_diagnosis, o.id));
+        }
+    }
+    out.push(d);
+}
+
+/// The gateway outcomes a gRPC status with no message is consistent with
+/// ([`MatchStrength::GrpcStatusOnly`]): unknown confidence and owner, every
+/// candidate (and the outcomes the catalog says look the same) listed.
+fn grpc_status_outcomes(ctx: &Ctx<'_>, cat: &FerrumCatalog, status: u16, code: i32, candidates: &[&ferrum::Outcome], out: &mut Vec<Draft>) {
+    let idx = ctx.attempt_index();
+    let mut ids: Vec<String> = candidates.iter().map(|o| o.id.clone()).collect();
+    for o in candidates {
+        for s in &o.shared_signal_with {
+            if !ids.contains(s) {
+                ids.push(s.clone());
+            }
+        }
+    }
+    let mut d = Draft::new(
+        "ferrum.grpc_status_outcomes",
+        "ferrum.catalog",
+        Confidence::Unknown,
+        SourceScope::Unknown,
+        Owner::Unknown,
+        Severity::Warning,
+    )
+    .ev_at(E::HttpStatus, "status", status.to_string(), idx)
+    .ev_at(E::GrpcStatus, "grpc-status", code.to_string(), idx)
+    .ev(E::Configuration, "catalog.candidates", ids.join(", "))
+    .ev(E::Configuration, "catalog.compatibility_id", cat.compatibility_id.clone())
+    .var("status", status.to_string())
+    .var("code", code.to_string())
+    .var("outcomes", ids.join(", "))
+    .var("release", cat.release_label());
     for id in &ids {
         if let Some(o) = cat.outcome(id) {
             d.extra_alternatives.push(format!("{} ({})", o.minimum_truthful_diagnosis, o.id));
@@ -883,6 +942,128 @@ mod tests {
         let r = response(200, "application/grpc", &[("x-gateway-error", "circuit_breaker_open"), ("grpc-status", "14")]);
         let f = diagnose(Protocol::Http, &r, b"");
         assert!(find(&f, "ferrum.marker.inconsistent").is_none(), "{:?}", f.iter().map(|x| &x.code).collect::<Vec<_>>());
+    }
+
+    fn diagnose_grpc(
+        r: &ResponseRecord,
+        body: &[u8],
+        ps: ProtocolStatus,
+        stream: Option<&anvil_domain::execution::StreamTranscript>,
+    ) -> Vec<DiagnosticFinding> {
+        let trust = FerrumTrust::Trusted {
+            profile_name: "lab".into(),
+            compatibility_id: "ferrum-edge-0.9.20".into(),
+            channel_authenticated: false,
+        };
+        crate::diagnose(&DiagnosticInput {
+            protocol: Protocol::Grpc,
+            method: "POST",
+            preparation_failure: None,
+            attempts: &[],
+            response: Some(r),
+            body,
+            stream,
+            protocol_status: &ps,
+            trust: &trust,
+            tls_verification_enabled: true,
+            credentials_stripped_on_redirect: false,
+            protocol_fallback_from: None,
+            workload: None,
+            gateway_detail: None,
+            redact: None,
+        })
+        .findings
+    }
+
+    fn grpc(http: u16, grpc_status: Option<i32>, source: anvil_domain::outcome::GrpcStatusSource) -> ProtocolStatus {
+        ProtocolStatus::Grpc { http_status: Some(http), grpc_status, grpc_message: None, source }
+    }
+
+    /// On a gRPC request the marker is judged by the response's shape, not
+    /// the request's protocol (#570): a token is a gateway error class only on
+    /// a 5xx or on HTTP 200 with a non-zero grpc-status, and a 5xx with neither
+    /// a marker nor a grpc-status is reported as unexplained.
+    #[test]
+    fn grpc_marker_rules_follow_the_response_shape() {
+        use anvil_domain::outcome::GrpcStatusSource::{Missing, Trailers, TrailersOnly};
+        let inconsistent = |f: &[DiagnosticFinding]| find(f, "ferrum.marker.inconsistent").is_some();
+        // A 401 JSON refusal of a gRPC request with a token.
+        let r = response(401, "application/json", &[("x-gateway-error", "backend_error")]);
+        let f = diagnose_grpc(&r, br#"{"error":"Unauthorized"}"#, grpc(401, None, Missing), None);
+        assert!(inconsistent(&f), "{:?}", codes(&f));
+        assert!(find(&f, "ferrum.token.backend_error").is_none());
+        // A gRPC success (grpc-status 0) with a token.
+        let r = response(200, "application/grpc", &[("x-gateway-error", "backend_error")]);
+        let f = diagnose_grpc(&r, b"", grpc(200, Some(0), Trailers), None);
+        assert!(inconsistent(&f), "{:?}", codes(&f));
+        // A gRPC error with a token keeps the token's meaning.
+        let r = response(200, "application/grpc", &[("x-gateway-error", "overload"), ("grpc-status", "14")]);
+        let f = diagnose_grpc(&r, b"", grpc(200, Some(14), TrailersOnly), None);
+        assert!(!inconsistent(&f), "{:?}", codes(&f));
+        assert!(find(&f, "ferrum.token.overload").is_some(), "{:?}", codes(&f));
+        // An unmarked 503 to a gRPC request.
+        let r = response(503, "application/json", &[]);
+        let f = diagnose_grpc(&r, br#"{"error":"Service Unavailable"}"#, grpc(503, None, Missing), None);
+        assert!(find(&f, "ferrum.marker.absent").is_some(), "{:?}", codes(&f));
+    }
+
+    /// A gRPC status with no message is matched against the outcomes Ferrum
+    /// Edge answers that way (#570), as candidates only: a service behind the
+    /// gateway sends the same shape, so nothing is attributed and no owner is
+    /// named. After a message, no such outcome applies.
+    #[test]
+    fn a_grpc_status_without_a_message_lists_the_gateway_outcomes_that_send_it() {
+        use anvil_domain::outcome::GrpcStatusSource::{TrailerFrame, Trailers, TrailersOnly};
+        let candidates = |f: &[DiagnosticFinding], code: i32| {
+            let c = find(f, "ferrum.grpc_status_outcomes").unwrap_or_else(|| panic!("no candidates: {:?}", codes(f)));
+            assert_eq!((c.confidence, c.owner, c.scope), (Confidence::Unknown, Owner::Unknown, SourceScope::Unknown));
+            assert!(c.does_not_prove.iter().any(|x| x.contains("That the gateway produced this status")), "{:?}", c.does_not_prove);
+            assert!(
+                c.explanation.contains("Ferrum Edge 0.9.20") && c.explanation.contains(&format!("grpc-status {code} ")),
+                "{}",
+                c.explanation
+            );
+            evidence(c, "catalog.candidates").unwrap_or_default().split(", ").map(String::from).collect::<Vec<_>>()
+        };
+        let r = response(200, "application/grpc", &[("grpc-status", "3")]);
+        let f = diagnose_grpc(&r, b"", grpc(200, Some(3), TrailersOnly), None);
+        let ids = candidates(&f, 3);
+        for id in [
+            "gateway.routing.grpc_requires_post",
+            "plugin.grpc_deadline.missing_deadline",
+            "plugin.body_validator.request_protobuf_invalid",
+        ] {
+            assert!(ids.iter().any(|x| x == id), "{id} in {ids:?}");
+        }
+        assert!(!f.iter().any(|x| x.code.starts_with("ferrum.outcome")), "{:?}", codes(&f));
+        assert_eq!(find(&f, "app.grpc_status").map(|x| x.owner), Some(Owner::Unknown));
+        // gRPC-Web: the body is the trailer frame alone.
+        let r = response(200, "application/grpc-web+proto", &[]);
+        let frame = b"\x80\x00\x00\x00\x10grpc-status: 13\r\n";
+        let f = diagnose_grpc(&r, frame, grpc(200, Some(13), TrailerFrame), None);
+        let ids = candidates(&f, 13);
+        for id in ["plugin.grpc_web.invalid_request", "generic.reject.grpc_web_rendering"] {
+            assert!(ids.iter().any(|x| x == id), "{id} in {ids:?}");
+        }
+        // After a message the service answered: no gateway outcome without one.
+        let replied = anvil_domain::execution::StreamTranscript {
+            messages: vec![anvil_domain::execution::StreamMessage {
+                direction: anvil_domain::execution::Direction::Received,
+                offset_us: 0,
+                kind: "grpc_message".into(),
+                size: 4,
+                preview: String::new(),
+                preview_is_hex: false,
+                preview_truncated: false,
+                event_id: None,
+                event_type: None,
+            }],
+            ..Default::default()
+        };
+        let r = response(200, "application/grpc", &[]);
+        let f = diagnose_grpc(&r, b"\x00\x00\x00\x00\x00", grpc(200, Some(3), Trailers), Some(&replied));
+        assert!(find(&f, "ferrum.grpc_status_outcomes").is_none(), "{:?}", codes(&f));
+        assert_eq!(find(&f, "app.grpc_status").map(|x| x.owner), Some(Owner::ApiOwner));
     }
 
     /// Live GW-013 (policy lab): OPA fail-closed 503 carries no marker. The
