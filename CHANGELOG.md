@@ -50,6 +50,11 @@
 
 ### Security
 
+- RUSTSEC-2026-0543 marks `chrono` unmaintained (all versions, no patched release; not a known
+  vulnerability). `deny.toml` ignores it with an exit condition, because chrono is a direct
+  dependency of 16 workspace crates and also comes in through `schemars` and `serde_with`.
+  Replacing it with `jiff` or `time` without changing any stored or published timestamp format is
+  tracked in #576.
 - quinn-udp is updated from 0.5.15 to 0.5.16 for RUSTSEC-2026-0538 (GHSA-6pp4-4cxf-xf88): on
   targets that read one datagram per `recvmsg` (Apple platforms without `fast-apple-datapath`,
   the BSDs, Solaris and illumos), the receive loop could spin after a truncated datagram instead
