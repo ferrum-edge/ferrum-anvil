@@ -1,5 +1,56 @@
 # Upgrade guide
 
+## Unreleased
+
+### Load runs: exit codes and CSV (#565, #566)
+
+`anvil load run` now decides its exit code from the send ledger. A chained
+plan in which one step failed an assertion exits 2 even if a later step timed
+out or failed at transport; scripts that treated such runs as exit 1 should
+treat 2 as "assertion failure". The summary line now reads `<completion>:
+iterations N started, …` followed by a `sends:` line. In the summary and
+timeline CSVs, values with no measurement behind them are empty instead of
+`0`: the latency rows of a distribution without samples (except `count`),
+`timeouts_censored,elapsed_max_us` without timeouts, and the start-lag cells
+of closed and iteration runs. Spreadsheets should treat an empty cell as "not
+measured".
+
+### Gateway profile console links (#567)
+
+Saving a gateway profile now refuses a `console_url` that is not an absolute
+`https` or `http` URL with a host and no user name or password. Fix or clear
+such a link before saving the profile again. An imported profile keeps its
+link, but the desktop will not open an invalid one, and `anvil gateway list`
+reports it as refused.
+
+### gRPC diagnostics (#570)
+
+`app.grpc_status` names owner `unknown` when no message arrived before the
+status. On a trusted Ferrum profile, such a status may add
+`ferrum.grpc_status_outcomes`. On gRPC requests, `ferrum.marker.inconsistent`
+now fires for a token on a 4xx, beside grpc-status 0, or
+`overload`/`config_stale` on a gRPC error over HTTP/1.1 or HTTP/2.
+`ferrum.marker.absent` now fires for an unmarked 5xx. Tooling that filters
+findings by owner or code should account for these. The findings catalog
+version is `2026.11.17-1`.
+
+### Import behaviour changes (#563, #564, GHSA-c236-7r9g-c9p2)
+
+- Imports from Postman, Insomnia, cURL and HAR can produce different requests
+  than before:
+  - Postman and Insomnia URLs with `user:password@` import with Basic auth and
+    a required `{{password}}` variable.
+  - A cURL `-u`, or a request's own or disabled auth, wins over URL userinfo.
+  - Credential-named path variables and credential members of Insomnia
+    environment arrays become required `{{placeholders}}` unless credentials
+    are included.
+  - Postman and Insomnia query values with exactly re-encodable escapes are
+    stored decoded.
+  - cURL `-d @file` imports as POST.
+- Requests imported by an earlier build are not changed. Re-import a
+  collection to pick these up; **Reimport a changed spec…** / `anvil
+  reimport-spec` shows the differences before applying them.
+
 ## 0.1.7
 
 ### Before you upgrade
