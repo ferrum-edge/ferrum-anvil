@@ -438,16 +438,23 @@ without `X-Gateway-Error`. A service behind it can answer in exactly the same
 shape, so:
 
 - `app.grpc_status` names no owner (`unknown`) when no message arrived before
-  the status; the RPC failure itself is still confirmed. After a message the
-  service answered, and the status stays the API owner's.
+  the status (the transcript's whole-session received count, not only its
+  retained entries, decides); the RPC failure itself is still confirmed. After
+  a message the service answered, and the status stays the API owner's.
 - On a trusted profile, such a status is compared with the catalog outcomes
   that answer that way (HTTP 200, the token if any, and the `grpc-status`; there
   is no body to compare): `ferrum.grpc_status_outcomes` (warning, confidence
   and owner `unknown`) lists them and says the gateway may not have produced
-  the status. It is never a `ferrum.outcome` match.
+  the status. It is never a `ferrum.outcome` match, and it lists only matched
+  outcomes, not the catalog's look-alike siblings (one may answer HTTP 400
+  JSON instead). `plugin.grpc_web.invalid_request` answers `grpc-status 3`
+  (the plugin's HTTP 400 mapped to INVALID_ARGUMENT); the generic gRPC-Web
+  rendering of other plugin rejections has no fixed status and is not listed.
 - The marker is judged by the response's shape, not the request's protocol:
   `X-Gateway-Error` is a gateway error class only on a 5xx or on HTTP 200 with
-  a non-zero `grpc-status`. On a gRPC request's 401 JSON refusal, or beside
+  a non-zero `grpc-status` (and there `overload` and `config_stale` only over
+  HTTP/3: the HTTP/1.1 and HTTP/2 gRPC overload and stale-configuration
+  refusals carry no marker). On a gRPC request's 401 JSON refusal, or beside
   `grpc-status: 0`, it is `ferrum.marker.inconsistent`; an HTTP 5xx with neither
   a marker nor a `grpc-status` gets `ferrum.marker.absent`.
 - `X-Gateway-Error` and `X-Ferrum-Diagnostic-Ref` are read from the trailers as

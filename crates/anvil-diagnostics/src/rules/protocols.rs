@@ -563,8 +563,21 @@ mod tests {
             assert!(d.explanation.contains(sentence), "{source:?}: {}", d.explanation);
             assert!(d.does_not_prove.iter().any(|x| x.contains("Which component")), "{:?}", d.does_not_prove);
         }
-        for source in [GrpcStatusSource::Trailers, GrpcStatusSource::TrailerFrame] {
-            let f = diagnose_with_stream(Protocol::Grpc, status(source), Some(&replied));
+        // A long call's retained entries drop its middle: the whole-session
+        // counter still shows the message arrived.
+        let evicted = StreamTranscript {
+            messages: vec![tcp_message(Direction::Sent, "grpc_message", 12)],
+            dropped_messages: 1,
+            received_count: 1,
+            ..Default::default()
+        };
+        for (source, stream) in [
+            (GrpcStatusSource::Trailers, &replied),
+            (GrpcStatusSource::TrailerFrame, &replied),
+            (GrpcStatusSource::Trailers, &evicted),
+            (GrpcStatusSource::TrailerFrame, &evicted),
+        ] {
+            let f = diagnose_with_stream(Protocol::Grpc, status(source), Some(stream));
             let d = find(&f, "app.grpc_status");
             assert_eq!((d.confidence, d.owner), (Confidence::Confirmed, Owner::ApiOwner), "{source:?}");
             assert!(!d.explanation.contains("does not show which"), "{source:?}: {}", d.explanation);

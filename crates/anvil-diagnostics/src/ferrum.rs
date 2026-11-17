@@ -996,6 +996,11 @@ mod tests {
             let o = c.outcome(id).unwrap_or_else(|| panic!("{id}"));
             assert!(o.grpc_status_only && o.body_patterns.is_empty(), "{id}: {:?}", o.body_patterns);
         }
+        // Edge maps the plugin's HTTP 400 to INVALID_ARGUMENT; the generic
+        // gRPC-Web rendering has no fixed status, so it is no candidate.
+        assert_eq!(c.outcome("plugin.grpc_web.invalid_request").unwrap().grpc_status, Some(3));
+        let generic = c.outcome("generic.reject.grpc_web_rendering").unwrap();
+        assert!(generic.grpc_status.is_none() && !generic.grpc_status_only);
         // A 200 with a body, or without a gRPC wire shape, is not one.
         for id in ["plugin.oidc_relying_party.logout_short_circuit", "plugin.cors.preflight_unmatched_ignore"] {
             assert!(!c.outcome(id).unwrap().grpc_status_only, "{id}");

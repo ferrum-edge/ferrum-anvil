@@ -138,6 +138,16 @@ fn audited_releases() -> String {
     ferrum::compatibility_ids().collect::<Vec<_>>().join(", ")
 }
 
+/// Whether the gateway writes token `t` on a gRPC error (HTTP 200 with a
+/// non-zero grpc-status) arriving over `http_version`. Its overload and
+/// stale-configuration fences carry `overload` / `config_stale` only on the
+/// HTTP/3 frontend (`protocol.grpc.overload_h3`, `protocol.grpc.config_stale_h3`);
+/// the HTTP/1.1 and HTTP/2 gRPC refusals carry no marker on every audited
+/// release, so such a token there was added by a plugin or an intermediary.
+fn grpc_head_carries(t: &str, http_version: &str) -> bool {
+    !matches!(t, "overload" | "config_stale") || http_version == "HTTP/3"
+}
+
 fn has_error_signal(ctx: &Ctx<'_>, status: u16) -> bool {
     status >= 400
         || matches!(ctx.input.protocol_status, anvil_domain::outcome::ProtocolStatus::Grpc { grpc_status: Some(g), .. } if *g != 0)
@@ -300,7 +310,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     let grpc_error_head = r.status == 200 && wire_grpc_status.is_some_and(|g| g != 0);
     if let Some(t) = &token
         && r.status < 500
-        && !grpc_error_head
+        && !(grpc_error_head && grpc_head_carries(t, &r.http_version))
     {
         out.push(
             Draft::new(
@@ -573,17 +583,13 @@ fn jsonrpc_outcomes(ctx: &Ctx<'_>, cat: &FerrumCatalog, s: &JsonRpcSignal<'_>, c
 
 /// The gateway outcomes a gRPC status with no message is consistent with
 /// ([`MatchStrength::GrpcStatusOnly`]): unknown confidence and owner, every
-/// candidate (and the outcomes the catalog says look the same) listed.
+/// matched candidate listed. Unlike body matches, the catalog's
+/// `shared_signal_with` siblings are not added: a sibling that answers in
+/// this shape matched already, and one that does not (an HTTP 400 JSON
+/// refusal beside a trailers-only one) contradicts the observed response.
 fn grpc_status_outcomes(ctx: &Ctx<'_>, cat: &FerrumCatalog, status: u16, code: i32, candidates: &[&ferrum::Outcome], out: &mut Vec<Draft>) {
     let idx = ctx.attempt_index();
-    let mut ids: Vec<String> = candidates.iter().map(|o| o.id.clone()).collect();
-    for o in candidates {
-        for s in &o.shared_signal_with {
-            if !ids.contains(s) {
-                ids.push(s.clone());
-            }
-        }
-    }
+    let ids: Vec<String> = candidates.iter().map(|o| o.id.clone()).collect();
     let mut d = Draft::new(
         "ferrum.grpc_status_outcomes",
         "ferrum.catalog",
@@ -996,11 +1002,24 @@ mod tests {
         let r = response(200, "application/grpc", &[("x-gateway-error", "backend_error")]);
         let f = diagnose_grpc(&r, b"", grpc(200, Some(0), Trailers), None);
         assert!(inconsistent(&f), "{:?}", codes(&f));
-        // A gRPC error with a token keeps the token's meaning.
-        let r = response(200, "application/grpc", &[("x-gateway-error", "overload"), ("grpc-status", "14")]);
+        // A gRPC error with a token the gateway writes there keeps the token's meaning.
+        let mut r = response(200, "application/grpc", &[("x-gateway-error", "circuit_breaker_open"), ("grpc-status", "14")]);
+        r.http_version = "HTTP/2".into();
         let f = diagnose_grpc(&r, b"", grpc(200, Some(14), TrailersOnly), None);
         assert!(!inconsistent(&f), "{:?}", codes(&f));
-        assert!(find(&f, "ferrum.token.overload").is_some(), "{:?}", codes(&f));
+        assert!(find(&f, "ferrum.token.circuit_breaker_open").is_some(), "{:?}", codes(&f));
+        // overload and config_stale ride on a gRPC error only from the HTTP/3
+        // frontend; over HTTP/1.1 or HTTP/2 a plugin or intermediary added them
+        // (review F1, DeepSeek).
+        for token in ["overload", "config_stale"] {
+            for (version, expected_inconsistent) in [("HTTP/3", false), ("HTTP/2", true), ("HTTP/1.1", true)] {
+                let mut r = response(200, "application/grpc", &[("x-gateway-error", token), ("grpc-status", "14")]);
+                r.http_version = version.into();
+                let f = diagnose_grpc(&r, b"", grpc(200, Some(14), TrailersOnly), None);
+                assert_eq!(inconsistent(&f), expected_inconsistent, "{token} over {version}: {:?}", codes(&f));
+                assert_eq!(find(&f, &format!("ferrum.token.{token}")).is_some(), !expected_inconsistent, "{token} over {version}");
+            }
+        }
         // An unmarked 503 to a gRPC request.
         let r = response(503, "application/json", &[]);
         let f = diagnose_grpc(&r, br#"{"error":"Service Unavailable"}"#, grpc(503, None, Missing), None);
@@ -1039,12 +1058,21 @@ mod tests {
         assert_eq!(find(&f, "app.grpc_status").map(|x| x.owner), Some(Owner::Unknown));
         // gRPC-Web: the body is the trailer frame alone.
         let r = response(200, "application/grpc-web+proto", &[]);
+        let frame = b"\x80\x00\x00\x00\x0fgrpc-status: 3\r\n";
+        let f = diagnose_grpc(&r, frame, grpc(200, Some(3), TrailerFrame), None);
+        let ids = candidates(&f, 3);
+        // Edge maps the plugin's HTTP 400 to INVALID_ARGUMENT (review F1,
+        // Sol); the generic rendering has no fixed status, and a sibling that
+        // answers HTTP 400 JSON cannot have produced this response (F3).
+        assert!(ids.iter().any(|x| x == "plugin.grpc_web.invalid_request"), "{ids:?}");
+        for id in ["generic.reject.grpc_web_rendering", "gateway.routing.hbone_connect_grpc_content_type"] {
+            assert!(!ids.iter().any(|x| x == id), "{id} in {ids:?}");
+        }
+        let r = response(200, "application/grpc-web+proto", &[]);
         let frame = b"\x80\x00\x00\x00\x10grpc-status: 13\r\n";
         let f = diagnose_grpc(&r, frame, grpc(200, Some(13), TrailerFrame), None);
-        let ids = candidates(&f, 13);
-        for id in ["plugin.grpc_web.invalid_request", "generic.reject.grpc_web_rendering"] {
-            assert!(ids.iter().any(|x| x == id), "{id} in {ids:?}");
-        }
+        let ids = find(&f, "ferrum.grpc_status_outcomes").and_then(|c| evidence(c, "catalog.candidates")).unwrap_or_default().to_string();
+        assert!(!ids.contains("grpc_web"), "{ids}");
         // After a message the service answered: no gateway outcome without one.
         let replied = anvil_domain::execution::StreamTranscript {
             messages: vec![anvil_domain::execution::StreamMessage {
@@ -1062,6 +1090,12 @@ mod tests {
         };
         let r = response(200, "application/grpc", &[]);
         let f = diagnose_grpc(&r, b"\x00\x00\x00\x00\x00", grpc(200, Some(3), Trailers), Some(&replied));
+        assert!(find(&f, "ferrum.grpc_status_outcomes").is_none(), "{:?}", codes(&f));
+        assert_eq!(find(&f, "app.grpc_status").map(|x| x.owner), Some(Owner::ApiOwner));
+        // The message was dropped from the retained entries of a long call; the
+        // whole-session counter still shows it arrived (review F2, Sol).
+        let counted = anvil_domain::execution::StreamTranscript { received_count: 1, dropped_messages: 1, ..Default::default() };
+        let f = diagnose_grpc(&r, b"", grpc(200, Some(3), Trailers), Some(&counted));
         assert!(find(&f, "ferrum.grpc_status_outcomes").is_none(), "{:?}", codes(&f));
         assert_eq!(find(&f, "app.grpc_status").map(|x| x.owner), Some(Owner::ApiOwner));
     }

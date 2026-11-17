@@ -2003,8 +2003,12 @@
       ],
       "remediation": [
         {
-          "text": "Handle the status per the service's contract; check grpc-status-details if present.",
+          "text": "If the service sent the status, handle it per the service's contract; check grpc-status-details if present.",
           "owner": "api_owner"
+        },
+        {
+          "text": "If no message arrived before the status, the gateway may have refused the call itself: ask the gateway operator for the correlated log entry or diagnostic detail before treating it as the service's answer.",
+          "owner": "gateway_operator"
         }
       ],
       "confirm_with": [

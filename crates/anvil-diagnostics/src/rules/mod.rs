@@ -49,18 +49,20 @@ impl<'a> Ctx<'a> {
 
     /// Whether a gRPC call ended with a status and no message before it: a
     /// trailers-only response, or trailers (a gRPC-Web trailer frame) after
-    /// no `grpc_message`. A gateway or proxy that refuses the call before it
-    /// reaches the service answers in this shape too (Ferrum Edge does for
-    /// routing, size, deadline and plugin refusals), so it does not show
-    /// that the service answered.
+    /// no message. A message is counted by the transcript's whole-session
+    /// `received_count` (a gRPC call counts only its messages there; the
+    /// retained entries are bounded and drop the middle of a long call), or
+    /// by a retained received `grpc_message`. A gateway or proxy that
+    /// refuses the call before it reaches the service answers in this shape
+    /// too (Ferrum Edge does for routing, size, deadline and plugin
+    /// refusals), so it does not show that the service answered.
     pub fn grpc_status_without_message(&self) -> bool {
         match self.input.protocol_status {
             ProtocolStatus::Grpc { grpc_status: Some(_), source, .. } => {
                 *source == GrpcStatusSource::TrailersOnly
-                    || !self
-                        .input
-                        .stream
-                        .is_some_and(|s| s.messages.iter().any(|m| m.direction == Direction::Received && m.kind == "grpc_message"))
+                    || !self.input.stream.is_some_and(|s| {
+                        s.received_count > 0 || s.messages.iter().any(|m| m.direction == Direction::Received && m.kind == "grpc_message")
+                    })
             }
             _ => false,
         }
