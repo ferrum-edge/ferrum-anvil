@@ -765,22 +765,99 @@ pub fn listed_query_param(b: &mut Builder, raw_name: &str, raw_value: &str, poin
     (name, value, true)
 }
 
-/// Split URL userinfo (`user:password@`) off `url`: the URL without it,
-/// and the userinfo as written. A URL without a scheme is read from its
-/// start (Postman and Insomnia accept `user:pw@host/path`). The userinfo
-/// ends where [`userinfo_end`] says; an empty one is dropped.
-pub fn take_userinfo(url: &str) -> (String, Option<Userinfo>) {
+/// What [`take_userinfo`] found in a URL.
+pub enum TakenUrl {
+    /// No userinfo: the URL as it was.
+    Plain(String),
+    /// Userinfo taken off: the URL without it, and the userinfo as written.
+    Userinfo(String, Userinfo),
+    /// The authority holds a `{{…}}` and the URL has an `@`: where the
+    /// userinfo ends cannot be told without parsing the template, so the URL
+    /// is not cut at all ([`move_url_to_variable`]).
+    Ambiguous,
+}
+
+/// Find URL userinfo without parsing templates. The authority runs from
+/// after `scheme://` (or the start, for `user:pw@host/path`) to the first
+/// `/`, `?` or `#` (RFC 3986), and the userinfo is everything before its
+/// last `@`. When a `{{` comes before that end and the URL holds an `@`
+/// anywhere, the URL is ambiguous (a cut could keep part of a credential or
+/// move the request to another host), unless the only templates there are a
+/// userinfo of exactly variable references in `syntax` before a literal
+/// host ([`anvil_domain::secret::is_plain_userinfo`]).
+pub fn take_userinfo(url: &str, syntax: anvil_domain::secret::TemplateSyntax) -> TakenUrl {
     let (prefix, rest) = match url.split_once("://") {
         Some((scheme, rest)) if !scheme.is_empty() && !scheme.contains(['/', '?', '#', '@']) => (&url[..scheme.len() + 3], rest),
         _ => ("", url),
     };
-    let Some(at) = userinfo_end(rest) else { return (url.to_string(), None) };
-    let userinfo = &rest[..at];
-    let without = format!("{prefix}{}", &rest[at + 1..]);
-    if userinfo.trim().is_empty() {
-        return (without, None);
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    if url[..prefix.len() + end].contains("{{") {
+        if !url.contains('@') {
+            return TakenUrl::Plain(url.to_string());
+        }
+        return match rest[..end].rfind('@') {
+            Some(at)
+                if !prefix.contains("{{")
+                    && !rest[at + 1..end].contains("{{")
+                    && anvil_domain::secret::is_plain_userinfo(&rest[..at], syntax) =>
+            {
+                TakenUrl::Userinfo(format!("{prefix}{}", &rest[at + 1..]), rest[..at].to_string())
+            }
+            _ => TakenUrl::Ambiguous,
+        };
     }
-    (without, Some(userinfo.to_string()))
+    match rest[..end].rfind('@') {
+        Some(at) if rest[..at].trim().is_empty() => TakenUrl::Plain(format!("{prefix}{}", &rest[at + 1..])),
+        Some(at) => TakenUrl::Userinfo(format!("{prefix}{}", &rest[at + 1..]), rest[..at].to_string()),
+        None => TakenUrl::Plain(url.to_string()),
+    }
+}
+
+/// [`take_userinfo`] applied to a request whose auth is `auth`: the URL to
+/// store. Userinfo goes through [`apply_userinfo`]; an ambiguous URL is moved
+/// into a variable ([`move_url_to_variable`]).
+pub fn take_url_credentials(b: &mut Builder, url: &str, auth: &mut AuthConfig, pointer: &str) -> String {
+    match take_userinfo(url, b.template_syntax) {
+        TakenUrl::Plain(url) => url,
+        TakenUrl::Userinfo(url, userinfo) => {
+            apply_userinfo(b, auth, Some(userinfo), pointer);
+            url
+        }
+        TakenUrl::Ambiguous => move_url_to_variable(b, url, pointer),
+    }
+}
+
+/// Move a whole ambiguous request URL ([`TakenUrl::Ambiguous`]) out of the
+/// request into a secret workspace variable with a fresh name (from the
+/// import's allocator: `request_url`, `request_url_2`, ...) and return the
+/// reference to put in its place. Unless `include_credentials`, the value is
+/// not imported: the variable is required and the URL is listed as
+/// redacted. Nothing in the URL is parsed or cut, so the request's host
+/// cannot change (`url_moved_to_variable`).
+pub fn move_url_to_variable(b: &mut Builder, url: &str, pointer: &str) -> String {
+    let name = b.env_names.name("request_url");
+    let reference = format!("{{{{{name}}}}}");
+    if b.opts.include_credentials {
+        b.url_variables.push(Variable {
+            name: name.clone(),
+            value: SensitiveValue::template(url),
+            secret: true,
+            enabled: true,
+            description: "Request URL moved out of the request on import: it has a template in its host part and an '@'".into(),
+        });
+    } else {
+        b.report.redacted(pointer, "request URL", &reference);
+        b.report.require_var(&name, true, "the request URL could hold credentials and was not imported", pointer);
+    }
+    b.report.warn(
+        "url_moved_to_variable",
+        pointer,
+        format!(
+            "the URL has a template in its host part and an '@', so where its credentials end cannot be told; the whole URL \
+             was moved into the secret variable '{name}' and the request uses {reference}"
+        ),
+    );
+    reference
 }
 
 /// Basic auth from URL userinfo as written ([`take_userinfo`]); the engine
@@ -845,15 +922,6 @@ pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<U
              which is kept",
         );
     }
-}
-
-/// The byte offset of the `@` that ends the userinfo in `after_scheme` (a
-/// URL with its `scheme://` removed), if it has userinfo
-/// ([`anvil_domain::secret::userinfo_end`]: RFC 3986 unless a `{{` comes
-/// before the first `@`, and then the last `@` before the first unambiguous
-/// delimiter, so an ambiguous userinfo is taken off whole).
-pub fn userinfo_end(after_scheme: &str) -> Option<usize> {
-    anvil_domain::secret::userinfo_end(after_scheme)
 }
 
 /// A URL's userinfo as written (`user:password`).

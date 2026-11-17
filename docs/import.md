@@ -60,26 +60,31 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   A value that decodes to whitespace only stays in the query, and a `+` or
   an escape that is not UTF-8 in a moved pair is reported.
 - URL userinfo (`https://user:password@host/`) is taken off the URL in every
-  migration importer (the engine never sends credentials in the URL) and
-  becomes Basic auth. Where it ends follows RFC 3986 (the last `@` before the
-  first `/`, `?` or `#`) unless a `{{` comes before the first `@`; then it
-  ends at the last `@` before the first unambiguous delimiter (outside every
-  `{{`, and not followed by a stray `}}`), so a delimiter or a quoted `}}`
-  inside an expression never leaves part of it in the URL, and an
-  ambiguous userinfo is taken off whole. Expressions are not parsed.
-  A userinfo that is exactly variable references (`{{user}}`,
-  `{{user}}:`, `{{user}}:{{password}}`) keeps them. Anything else (a literal
-  user name or password, a token, an expression) is credential material and
-  no part of it is kept as a user name or in the URL: the user name becomes
-  a fresh `{{username}}` placeholder and the password a fresh `{{password}}`
-  placeholder (`url_userinfo_replaced`); with `include_credentials` the
-  password keeps the literal (the part after the first `:`, or the whole
-  userinfo when it has an expression or no password), a secret field.
-  Fresh placeholders never take a name the source defines or references
-  (`username_2` then). A request with auth of its own (a cURL `-u` or
-  `--oauth2-bearer`, a Postman or Insomnia auth helper) or with auth
-  explicitly off keeps that, and the userinfo is dropped
-  (`url_credentials_dropped`).
+  migration importer (the engine never sends credentials in the URL).
+  Templates are never parsed to find it:
+  - When no `{{` comes before the end of the authority (the first `/`, `?`
+    or `#` after `://`, RFC 3986), the userinfo is everything before the
+    authority's last `@`, so a password holding `@` is removed whole.
+  - When a `{{` does and the URL holds an `@` anywhere, the URL is ambiguous:
+    it is not cut at all. The whole URL moves into a new secret workspace
+    variable (`{{request_url}}`, `request_url_2`, ...), which is required
+    unless `include_credentials` keeps the URL as its value
+    (`url_moved_to_variable`). The request's host can never change. The one
+    exception is a userinfo of exactly variable references before a literal
+    host (`https://{{user}}:{{password}}@api.example.com/`).
+  - A userinfo that is exactly variable references (`{{user}}`,
+    `{{user}}:`, `{{user}}:{{password}}`) keeps them. Anything else (a
+    literal user name or password, a token) is credential material, and no
+    part of it is kept as a user name or in the URL: the user name becomes a
+    fresh `{{username}}` placeholder and the password a fresh `{{password}}`
+    placeholder (`url_userinfo_replaced`). With `include_credentials`, the
+    password keeps the literal (the part after the first `:`, or the whole
+    userinfo when it has no password), a secret field.
+  - Fresh placeholders and URL variables never take a name the source
+    defines or references (`username_2` then).
+  - A request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a
+    Postman or Insomnia auth helper) or with auth explicitly off keeps
+    that, and the userinfo is dropped (`url_credentials_dropped`).
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia

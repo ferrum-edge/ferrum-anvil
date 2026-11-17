@@ -140,60 +140,6 @@ pub fn classify_template_value(value: &str, syntax: TemplateSyntax) -> TemplateK
     }
 }
 
-/// The byte offset of the `@` that ends the userinfo in `after_scheme` (a
-/// URL with its `scheme://` removed), if it has one. `{{…}}` expressions are
-/// not parsed; the rule fails closed instead:
-///
-/// * When no `{{` comes before the first `@`, RFC 3986 applies: the
-///   authority ends at the first `/`, `?` or `#`, and its last `@` ends the
-///   userinfo.
-/// * Otherwise a delimiter only ends the authority when it is unambiguous:
-///   outside every `{{` seen so far (counting `{{` and `}}`), and not
-///   followed by a stray `}}` that shows it was inside an expression after
-///   all (`{{ 'a}}/b' | f }}`). The userinfo then ends at the last `@` before
-///   the first unambiguous delimiter, or before the end when there is none,
-///   so an ambiguous userinfo is taken off whole rather than left in the URL.
-///
-/// One pass, linear in the input.
-pub fn userinfo_end(after_scheme: &str) -> Option<usize> {
-    let bytes = after_scheme.as_bytes();
-    let first_at = after_scheme.find('@')?;
-    if !after_scheme[..first_at].contains("{{") {
-        let end = after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
-        return after_scheme[..end].rfind('@');
-    }
-    let mut depth = 0usize;
-    let mut boundary = None;
-    let mut ats = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i..].starts_with(b"{{") {
-            depth += 1;
-            i += 2;
-            continue;
-        }
-        if bytes[i..].starts_with(b"}}") {
-            if depth > 0 {
-                depth -= 1;
-            } else {
-                // A stray `}}`: the delimiter taken as the boundary was inside
-                // an expression.
-                boundary = None;
-            }
-            i += 2;
-            continue;
-        }
-        match bytes[i] {
-            b'/' | b'?' | b'#' if depth == 0 && boundary.is_none() => boundary = Some(i),
-            b'@' => ats.push(i),
-            _ => {}
-        }
-        i += 1;
-    }
-    let end = boundary.unwrap_or(bytes.len());
-    ats.into_iter().rev().find(|&at| at < end)
-}
-
 /// Whether a URL userinfo is exactly variable references in `syntax`:
 /// `{{user}}`, `{{user}}:` or `{{user}}:{{password}}`. Anything else (a
 /// literal user name or password, an expression, a token) is credential
@@ -340,33 +286,6 @@ mod tests {
 #[cfg(test)]
 mod template_kind_tests {
     use super::*;
-
-    #[test]
-    fn userinfo_ends_at_the_last_at_before_an_unambiguous_delimiter() {
-        for (after, userinfo) in [
-            ("admin:pw@host/x", Some("admin:pw")),
-            ("admin:p@ss@host/x@y", Some("admin:p@ss")),
-            ("host/x@y", None),
-            ("host?email=a@b", None),
-            ("admin:pw@{{host}}/x", Some("admin:pw")),
-            ("{{host}}/x?e=a@b&k={{key}}&m=c@d", None),
-            ("{{baseUrl}}/users/me@x", None),
-            // A delimiter, or a quoted `}}`, inside an expression.
-            ("admin:{{ 'a/b?c#d' | urlencode }}@host/x", Some("admin:{{ 'a/b?c#d' | urlencode }}")),
-            ("admin:{{ 'tok}}/suffix' | urlencode }}@host/x", Some("admin:{{ 'tok}}/suffix' | urlencode }}")),
-            ("admin:{{ \"q}}?x\" }}@host", Some("admin:{{ \"q}}?x\" }}")),
-            // An expression that closes only in the query.
-            ("user:pa{{ss@host/v1?q={{x}}", Some("user:pa{{ss")),
-            // A credential URL inside an expression is taken off up to its `@`.
-            ("{{ 'https://admin:tok@api.example.test' | replace('https://', '') }}/v1", Some("{{ 'https://admin:tok")),
-        ] {
-            assert_eq!(userinfo_end(after).map(|at| &after[..at]), userinfo, "{after:?}");
-        }
-        let long = format!("admin:{{{{{}'tok/x'|urlencode}}}}@api.example.test/v1", " ".repeat(8192));
-        assert_eq!(userinfo_end(&long), long.find("}}@").map(|i| i + 2));
-        let unterminated = format!("u:{}@host", "{".repeat(1 << 20));
-        assert!(userinfo_end(&unterminated).is_some());
-    }
 
     #[test]
     fn only_references_make_a_plain_userinfo() {

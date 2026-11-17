@@ -53,6 +53,10 @@ pub(crate) struct Builder<'o> {
     /// How the source reads `{{…}}` when a credential value is judged
     /// literal or a reference (Insomnia sets Nunjucks).
     pub template_syntax: anvil_domain::secret::TemplateSyntax,
+    /// Secret workspace variables holding whole request URLs that were moved
+    /// out of the request ([`crate::common::move_url_to_variable`]), added to
+    /// the workspace when the import finishes.
+    pub url_variables: Vec<anvil_domain::workspace::Variable>,
 }
 
 impl<'o> Builder<'o> {
@@ -95,6 +99,7 @@ impl<'o> Builder<'o> {
             limit_warned: false,
             env_names: Default::default(),
             template_syntax: Default::default(),
+            url_variables: vec![],
         }
     }
 
@@ -293,6 +298,8 @@ impl<'o> Builder<'o> {
     }
 
     pub fn finish(mut self, detected: &Detected, sha: String, size: usize) -> ImportResult {
+        let url_variables = std::mem::take(&mut self.url_variables);
+        self.workspace.variables.extend(url_variables);
         if self.workspace.name.trim().is_empty() {
             self.workspace.name = self.title.clone().unwrap_or_else(|| format!("Imported {}", detected.dialect.label()));
         }

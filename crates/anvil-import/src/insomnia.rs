@@ -9,9 +9,9 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type,
-    listed_query_param, maybe_redact, parse_embedded_json, parse_form, redact_raw_query, render_json, scrub_body, scrub_graphql_variables,
-    scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
+    TakenUrl, apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type,
+    listed_query_param, maybe_redact, move_url_to_variable, parse_embedded_json, parse_form, redact_raw_query, render_json, scrub_body,
+    scrub_graphql_variables, scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -675,13 +675,23 @@ fn request(
 ) {
     let name = str_of(r, "name").unwrap_or("").to_string();
     let method = str_of(r, "method").unwrap_or("GET").to_ascii_uppercase();
-    let raw_url = template(b, str_of(r, "url").unwrap_or(""), &ptr(at, "url"));
-    // Userinfo is never kept in the URL (the engine refuses it).
-    let (raw_url, userinfo) = take_userinfo(&raw_url);
-    let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
-    // A query written into the URL itself is kept verbatim, less its
-    // credential-named pairs, which become sensitive parameters.
-    let (url, mut params) = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { (url, vec![]) };
+    let templated = template(b, str_of(r, "url").unwrap_or(""), &ptr(at, "url"));
+    // Userinfo is never kept in the URL (the engine refuses it); an
+    // ambiguous URL moves into a variable whole.
+    let (raw_url, userinfo) = match take_userinfo(&templated, b.template_syntax) {
+        TakenUrl::Plain(url) => (Some(url), None),
+        TakenUrl::Userinfo(url, userinfo) => (Some(url), Some(userinfo)),
+        TakenUrl::Ambiguous => (None, None),
+    };
+    let (url, mut params) = match raw_url {
+        Some(raw_url) => {
+            let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
+            // A query written into the URL itself is kept verbatim, less its
+            // credential-named pairs, which become sensitive parameters.
+            if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { (url, vec![]) }
+        }
+        None => (move_url_to_variable(b, &templated, &ptr(at, "url")), vec![]),
+    };
     params.extend(query_params(b, r.get("parameters"), &ptr(at, "parameters")));
     let mut spec = RequestSpec::http(&method, &url);
     spec.params = params;

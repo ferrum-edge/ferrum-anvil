@@ -757,8 +757,10 @@ fn nunjucks_expressions_and_delimiters_in_passwords_are_redacted() {
     let env = serde_json::json!({ "zero": 0, "accounts": [{ "pin": "{{ _.zero--571571579 }}" }] });
     for r in both(request, env, &opts()) {
         let s = &r.requests[0].spec;
-        assert_eq!(s.url, "https://api.example.test/v1");
-        assert!(matches!(&s.auth, AuthConfig::Basic { password, .. } if password == &SensitiveValue::template("{{password}}")));
+        // A template in the authority beside an `@`: the URL moves into a
+        // secret variable whole (round 3 of #575).
+        assert_eq!(s.url, "{{request_url}}");
+        assert!(has(&r, "url_moved_to_variable"));
         assert_eq!(header(s, "X-Api-Key").unwrap().value, "{{X_Api_Key}}");
         let accounts = r.workspace.variables.iter().find(|v| v.name == "accounts").map(|v| template_text(&v.value)).unwrap();
         let text = serde_json::to_string(&r.requests).unwrap();

@@ -173,6 +173,22 @@ const SHAPES: &[Shape] = &[
         json_body: None,
         export: ALL,
     },
+    // Round 3 of #575: quoted braces on both sides of a delimiter, and an `@`
+    // in the user name before an expression.
+    Shape {
+        name: "quoted brace pairs around a slash in a password expression",
+        url: r#"https://admin:{{"tok-SENSITIVE-c46}}/x{{"|urlencode}}@api.example.test/v1"#,
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
+    Shape {
+        name: "an at sign in the user name before a password expression",
+        url: r#"https://alice@example.test:{{"tok-SENSITIVE-c47/x"|urlencode}}@api.example.test/v1"#,
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
     // An expression opened in the password and closed only in the query does
     // not hide the userinfo (review of #575, dsf F2).
     Shape {
@@ -410,5 +426,25 @@ fn importer_specific_shapes_are_redacted() {
     ];
     for (label, source, export) in rows {
         check(&source, export, label);
+    }
+}
+
+/// Round 3 of #575, dsf F1: a URL with a template in its authority and an
+/// `@` (here in the query, after a JSON `}}`) is never cut, so the request
+/// cannot be retargeted at another host: it moves into a secret variable
+/// whole, kept as written with include_credentials.
+#[test]
+fn an_ambiguous_url_never_changes_host() {
+    let url = r#"https://{{baseUrl}}/items?filter={"a":{"b":1}}&to=user@example.com"#;
+    let shape = Shape { name: "ambiguous URL", url, headers: &[], json_body: None, export: [Export::Skip; 4] };
+    let importers: [(&str, Build); 4] = [("cURL", curl), ("HAR", har), ("Postman", postman), ("Insomnia", insomnia)];
+    for (importer, build) in importers {
+        let r = import(&build(&shape), &ImportOptions::default()).unwrap_or_else(|e| panic!("{importer}: {e}"));
+        let stored = &r.requests[0].spec.url;
+        assert_eq!(stored, "{{request_url}}", "{importer}: the URL was cut");
+        let kept = import(&build(&shape), &ImportOptions { include_credentials: true, ..ImportOptions::default() }).unwrap();
+        let var = kept.workspace.variables.iter().find(|v| v.name == "request_url").expect("request_url variable");
+        assert!(var.secret, "{importer}: the URL variable is not secret");
+        assert!(serde_json::to_string(&var.value).unwrap().contains("{{baseUrl}}/items"), "{importer}: the URL was not kept whole");
     }
 }

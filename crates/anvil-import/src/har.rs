@@ -10,8 +10,8 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    apply_userinfo, body_from_text, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, redact_raw_query,
-    scrub_json_text, split_query, take_userinfo, warn_query_conversions,
+    body_from_text, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, redact_raw_query, scrub_json_text,
+    split_query, take_url_credentials, warn_query_conversions,
 };
 use crate::util::{is_json_media, media_essence, ptr, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -85,9 +85,8 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     let mut auth = AuthConfig::Inherit;
     // Userinfo is never kept in the URL (the engine refuses it).
     // Userinfo first: a `#` inside a password expression is no fragment.
-    let (url, userinfo) = take_userinfo(raw_url);
+    let url = take_url_credentials(b, raw_url, &mut auth, &uptr);
     let url = crate::common::strip_fragment(&url).to_string();
-    apply_userinfo(b, &mut auth, userinfo, &uptr);
     let (base, pairs) = split_query(&url);
     warn_query_conversions(b, !pairs.is_empty(), &url, &uptr);
     let (base, verbatim_credentials) =

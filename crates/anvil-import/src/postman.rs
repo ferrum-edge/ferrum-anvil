@@ -8,8 +8,9 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    apply_userinfo, body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type, listed_query_param,
-    maybe_redact, redact_raw_query, scrub_body, scrub_graphql_variables, split_query, take_userinfo, warn_query_conversions,
+    TakenUrl, apply_userinfo, body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type,
+    listed_query_param, maybe_redact, move_url_to_variable, redact_raw_query, scrub_body, scrub_graphql_variables, split_query,
+    take_userinfo, warn_query_conversions,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -285,7 +286,13 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<c
         _ => (String::new(), None, None),
     };
     check_dynamic_vars(b, &raw, &ptr(at, "raw"));
-    let (raw, userinfo) = take_userinfo(&raw);
+    let (raw, userinfo) = match take_userinfo(&raw, b.template_syntax) {
+        TakenUrl::Plain(raw) => (raw, None),
+        TakenUrl::Userinfo(raw, userinfo) => (raw, Some(userinfo)),
+        // The whole URL, query included, moves into a variable; the `query`
+        // list repeats that query, so it adds no parameters.
+        TakenUrl::Ambiguous => return (move_url_to_variable(b, &raw, &ptr(at, "raw")), vec![], None),
+    };
     let (base, raw_pairs) = split_query(&raw);
     if query_list.is_none() {
         warn_query_conversions(b, !raw_pairs.is_empty(), &raw, &ptr(at, "raw"));
