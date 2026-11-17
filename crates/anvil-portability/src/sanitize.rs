@@ -79,6 +79,9 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
             (regex::Regex::new(r"(?i)bearer\s+[A-Za-z0-9._~+/-]{16,}").unwrap(), "contains a bearer token"),
             (regex::Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(), "looks like an AWS access key id"),
             (regex::Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----").unwrap(), "contains a private key"),
+            // `scheme://user:password@host`: a literal password in URL
+            // userinfo (a `{{reference}}` password is not one).
+            (regex::Regex::new(r"[A-Za-z][A-Za-z0-9+.-]*://[^/?#@\s:]*:[^/?#@\s{]+@").unwrap(), "contains a password in the URL"),
             (
                 regex::Regex::new(r#"(?i)"(password|passwd|secret|token|api_?key)"\s*:\s*"[^"{]{3,}""#).unwrap(),
                 "contains a credential-named JSON field",
@@ -580,6 +583,27 @@ mod tests {
         assert_eq!(s.extracted.len(), 3);
         restore(&mut v, &s.extracted).unwrap();
         assert_eq!(v, original);
+    }
+
+    /// GHSA-c236-7r9g-c9p2: a literal password in a URL's userinfo is
+    /// warned about (free text is never rewritten); a reference, a port and
+    /// an `@` in the query are not.
+    #[test]
+    fn url_userinfo_passwords_are_warned() {
+        let spec = |url: &str| serde_json::json!({"requests": [{"spec": {"url": url}}]});
+        let mut v = spec("https://admin:hunter2-literal@api.example.com/v1");
+        let s = sanitize(&mut v, &[]);
+        assert_eq!(s.warnings.len(), 1);
+        assert!(s.warnings[0].reason.contains("password in the URL"), "{}", s.warnings[0].reason);
+        assert_eq!(s.warnings[0].pointer, "/requests/0/spec/url");
+        for quiet in [
+            "https://admin:{{password}}@api.example.com/v1",
+            "https://api.example.com:8443/v1?email=a:b@c.example",
+            "https://admin@api.example.com/",
+        ] {
+            let mut v = spec(quiet);
+            assert!(sanitize(&mut v, &[]).warnings.is_empty(), "{quiet}");
+        }
     }
 
     #[test]
