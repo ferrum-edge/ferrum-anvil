@@ -416,3 +416,27 @@ fn get_data_with_a_bare_flag_keeps_the_credential_policy() {
     assert!(param(s, "flag").is_some());
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
 }
+
+/// curl sends data by POST whether it is literal or read from a file; the
+/// file is not imported, but the method still is (#564). `-G` and `-I`
+/// keep precedence, and so does an explicit `-X`.
+#[test]
+fn data_read_from_a_file_still_defaults_to_post() {
+    for cmd in [
+        "curl https://api.example.com/orders -H 'Content-Type: application/json' -d @order.json",
+        "curl https://api.example.com/orders --json @order.json",
+        "curl https://api.example.com/orders --data-urlencode comment@notes.txt",
+        "curl https://api.example.com/orders --data-urlencode @notes.txt",
+        "curl https://api.example.com/orders --data @order.json",
+        "curl https://api.example.com/orders --data-ascii @order.json",
+        "curl https://api.example.com/orders --data-binary @order.json",
+    ] {
+        let r = curl(cmd);
+        assert_eq!(r.requests[0].spec.method, "POST", "{cmd}");
+        assert!(has(&r, "curl_data_file"), "{cmd}");
+    }
+    assert_eq!(curl("curl -G -d @query.txt https://api.example.com/orders").requests[0].spec.method, "GET");
+    assert_eq!(curl("curl -I -d @query.txt https://api.example.com/orders").requests[0].spec.method, "HEAD");
+    assert_eq!(curl("curl -X PUT -d @order.json https://api.example.com/orders").requests[0].spec.method, "PUT");
+    assert_eq!(curl("curl https://api.example.com/orders").requests[0].spec.method, "GET");
+}

@@ -787,7 +787,9 @@ only the first command of a pipeline/list is imported. `$VAR`/`${VAR}` become
 `-b`, `-L`, `--max-redirs`, `--compressed`, `--http1.0/1.1/2`,
 `--http2-prior-knowledge`, `--http3`, `--http3-only`, `--connect-timeout`,
 `-m`, `--url`, short-option clusters (`-sSL`, `-XPOST`). Method inference
-follows curl (data → POST, `-G` → GET with data in the query, `-I` → HEAD).
+follows curl (data → POST, `-G` → GET with data in the query, `-I` → HEAD),
+also when the data is read from a file that is not imported (`-d @f`,
+`--json @f`, `--data-urlencode name@f`).
 A missing scheme defaults to `http://` (reported). `--max-redirs -1`
 (unlimited) follows up to 255 redirects (reported). Literal data keeps its
 bytes, line breaks included (curl strips CR/LF only from `@file` data);
