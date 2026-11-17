@@ -37,10 +37,44 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   variables, cached OAuth tokens) are replaced by `{{placeholder}}` variables
   and listed in `report.redactions`, unless `ImportOptions::include_credentials`
   is set (kept values are then marked sensitive).
-- A value that is only variable references plus an auth scheme word
-  (`Bearer {{token}}`) is not a literal secret and is kept.
-- A query kept in the URL verbatim (one with a bare `flag` segment, or written
-  into an Insomnia URL) has its credential-like values replaced in place.
+- A value that is only plain variable references plus an auth scheme word
+  (`Bearer {{token}}`) is not a literal secret and is kept. A plain
+  reference is `{{ name }}` or Insomnia's `{{ _.name }}`, where the name is
+  `[A-Za-z_][A-Za-z0-9_.-]*`. Anything else inside `{{…}}`, such as a
+  quoted string (`{{ 'key' }}`), a number, a filter or a dynamic helper
+  (with or without arguments), is literal, and so is redacted under a
+  credential name. The export sanitizer applies the same rule
+  (`anvil_domain::secret::classify_template_value`).
+- A query kept in the URL verbatim (one with a bare `flag` segment, one whose
+  decoding would make a `{{reference}}`, or one written into an Insomnia URL)
+  keeps its exact syntax, but its credential-named `name=value` segments
+  become sensitive parameters: a credential is never left in URL text, where
+  its placeholder would resolve without percent-encoding and a kept literal
+  would not be extracted on export. A moved name whose decoding would make a
+  `{{reference}}` keeps its encoded spelling (the engine resolves parameter
+  names), and its placeholder is named after the name as written, never a
+  decoded one (so `%7B%7Bapi_key%7D%7D` cannot read a variable `api_key`).
+  A value that decodes to whitespace only stays in the query, and a `+` or
+  an escape that is not UTF-8 in a moved pair is reported.
+- URL userinfo (`https://user:password@host/`) becomes Basic auth with a
+  `{{password}}` placeholder in every migration importer, and the URL loses it
+  (the engine never sends credentials in the URL). The userinfo ends at the
+  last `@` before the path, so a password holding `@` is removed whole. A
+  request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a Postman
+  or Insomnia auth helper) or with auth explicitly off keeps that, and the
+  userinfo is dropped (`url_credentials_dropped`). A user name or password
+  whose decoding would make or change a `{{reference}}` (`%7B%7Bid%7D%7D`), or
+  is not UTF-8, is never decoded: the user name is kept as written
+  (`url_user_not_decoded`) and the password becomes a required `{{password}}`
+  even with `include_credentials` (`url_password_not_decoded`).
+- Credential-named Postman path variables and Insomnia path parameters
+  (`:webhook_token`, `:api_key`) follow the same policy. So does every value
+  (string, number or boolean) under a credential-named member of an Insomnia
+  environment value that is an array (`{"accounts": [{"api_key": "…"}]}`,
+  `"tokens": ["…"]`), each with its own placeholder named by its path
+  (bounded, and never the name of a variable or placeholder of any
+  environment of the import); as everywhere, only a plain reference is
+  kept.
 - JSON bodies and GraphQL variables are scanned recursively: string members
   with credential-like names, and numbers under such names (`pin`, `otp`, …;
   not names recognized only by `token`, such as `max_tokens`), whose
@@ -54,6 +88,24 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 - Detection is name-based and best effort; bodies that cannot be scanned (XML,
   SOAP, arbitrary text, unparsable JSON, JSON beyond the embedded-document
   budget) produce a `body_not_scanned` warning.
+
+### Query values
+
+The engine percent-encodes a stored query parameter once when it sends it
+(every byte outside `A-Za-z0-9-._~`).
+
+- A Postman `query` list entry or Insomnia parameter holds text the source
+  sends with its `%XX` escapes as written. A value with escapes is stored
+  decoded when, and only when, encoding the decoded text gives back exactly
+  the source and decoding makes or changes no `{{reference}}`: then
+  `%3A%2F%2F` is sent as `%3A%2F%2F`, not `%253A%252F%252F`. Any other value
+  with escapes is stored as written and reported (`query_value_not_decoded`),
+  as its `%` is sent as `%25`.
+- A URL query (cURL, HAR, a Postman raw URL) is decoded into parameters. A
+  `+` stays a plus, sent as `%2B` where the source sends `+`
+  (`query_plus_sent_encoded`, also for a Postman list name or value), and an escape
+  that is not UTF-8 becomes U+FFFD (`query_not_utf8`). A query whose decoding
+  would make or change a `{{reference}}` stays in the URL as written.
 
 ### Limits
 
@@ -787,7 +839,9 @@ only the first command of a pipeline/list is imported. `$VAR`/`${VAR}` become
 `-b`, `-L`, `--max-redirs`, `--compressed`, `--http1.0/1.1/2`,
 `--http2-prior-knowledge`, `--http3`, `--http3-only`, `--connect-timeout`,
 `-m`, `--url`, short-option clusters (`-sSL`, `-XPOST`). Method inference
-follows curl (data → POST, `-G` → GET with data in the query, `-I` → HEAD).
+follows curl (data → POST, `-G` → GET with data in the query, `-I` → HEAD),
+also when the data is read from a file that is not imported (`-d @f`,
+`--json @f`, `--data-urlencode name@f`).
 A missing scheme defaults to `http://` (reported). `--max-redirs -1`
 (unlimited) follows up to 255 redirects (reported). Literal data keeps its
 bytes, line breaks included (curl strips CR/LF only from `@file` data);

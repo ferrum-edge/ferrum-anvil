@@ -34,26 +34,14 @@ pub fn sensitive_name(name: &str, extra: &[String]) -> bool {
     anvil_domain::credential_names::is_export_secret_name(name, extra)
 }
 
-/// Whether `s` carries no literal text: empty, or exactly one `{{name}}`
-/// reference spanning the whole (trimmed) value, as the resolver reads it
-/// (the first `}}` closes it). A dynamic helper counts only without
-/// arguments (`{{$guid}}`): an argument such as `{{$randomFrom a|b}}` is
-/// literal text that is sent.
+/// Whether `s` carries no literal text: empty, or exactly one plain
+/// `{{name}}` reference spanning the whole (trimmed) value
+/// ([`anvil_domain::secret::classify_template_value`], the rule the
+/// importers use too). A quoted string, a number, a filter or a dynamic
+/// helper (`{{$guid}}`, `{{$randomFrom a|b}}`) is literal text.
 fn is_pure_reference(s: &str) -> bool {
-    let t = s.trim();
-    if t.is_empty() {
-        return true;
-    }
-    let Some(inner) = t.strip_prefix("{{") else { return false };
-    let Some(close) = inner.find("}}") else { return false };
-    if close + 2 != inner.len() {
-        return false;
-    }
-    let expr = inner[..close].trim();
-    match expr.strip_prefix('$') {
-        Some(helper) => !helper.is_empty() && !helper.contains(char::is_whitespace),
-        None => !expr.is_empty(),
-    }
+    use anvil_domain::secret::{TemplateKind, classify_template_value};
+    matches!(classify_template_value(s), TemplateKind::Empty | TemplateKind::Reference)
 }
 
 fn escape_ptr(s: &str) -> String {
@@ -85,7 +73,66 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
             ),
         ]
     });
+    if has_url_password(s) {
+        return Some("contains a password in the URL");
+    }
     res.iter().find(|(r, _)| r.is_match(s)).map(|(_, why)| *why)
+}
+
+/// Whether `s` holds a URL (`scheme://user:password@host`) whose userinfo
+/// password has literal material: anything but exactly one whole reference
+/// ([`is_pure_reference`], so a helper with arguments such as
+/// `{{$randomFrom a|b}}` is literal). The scheme may end in a reference
+/// (`{{scheme}}://`). The authority runs from the `://` to the first `/`,
+/// `?`, `#` or whitespace outside a `{{…}}` (whose spaces, as in
+/// `{{ tenant }}`, the resolver trims); the userinfo runs to its last `@`,
+/// and the password from the userinfo's first `:`. So a user name or
+/// password holding an `@`, braces or a spaced reference is judged whole,
+/// as written. Linear in `s`: once a `{{` has no closing `}}`, none later
+/// has one either.
+fn has_url_password(s: &str) -> bool {
+    let mut from = 0;
+    let mut unterminated = false;
+    while let Some(found) = s[from..].find("://") {
+        let start = from + found;
+        from = start + 3;
+        if !s[..start].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '}') {
+            continue;
+        }
+        let authority = &s[from..];
+        let (mut i, mut last_at, mut first_colon) = (0, None, None);
+        while i < authority.len() {
+            let rest = &authority[i..];
+            if !unterminated && rest.starts_with("{{") {
+                match rest[2..].find("}}") {
+                    Some(close) => {
+                        i += close + 4;
+                        continue;
+                    }
+                    None => unterminated = true,
+                }
+            }
+            let c = rest.chars().next().unwrap_or(' ');
+            if matches!(c, '/' | '?' | '#') || c.is_whitespace() {
+                break;
+            }
+            if c == '@' {
+                last_at = Some(i);
+            } else if c == ':' && first_colon.is_none() {
+                first_colon = Some(i);
+            }
+            i += c.len_utf8();
+        }
+        if let (Some(at), Some(colon)) = (last_at, first_colon)
+            && colon < at
+        {
+            let password = &authority[colon + 1..at];
+            if !password.is_empty() && !is_pure_reference(password) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub struct Sanitized {
@@ -460,7 +507,7 @@ mod tests {
 
     #[test]
     fn only_a_whole_value_reference_is_left_in_place() {
-        for pure in ["", "  ", "{{token}}", " {{ token }} ", "{{$guid}}", "{{api key}}"] {
+        for pure in ["", "  ", "{{token}}", " {{ token }} "] {
             assert!(is_pure_reference(pure), "{pure:?}");
         }
         for literal in [
@@ -469,6 +516,10 @@ mod tests {
             "live-{{tenant}}",
             "{{a}}{{b}}",
             "{{$randomFrom live-key-a|live-key-b}}",
+            "{{$guid}}",
+            "{{api key}}",
+            "{{ 'quoted-literal' }}",
+            "{{ 571571571 }}",
             "{{}}",
             "{{$}}",
             "{{unterminated",
@@ -580,6 +631,57 @@ mod tests {
         assert_eq!(s.extracted.len(), 3);
         restore(&mut v, &s.extracted).unwrap();
         assert_eq!(v, original);
+    }
+
+    /// GHSA-c236-7r9g-c9p2: a URL password with literal material is warned
+    /// about (free text is never rewritten): a mixed or spaced reference, a
+    /// helper with arguments, a brace or an `@` in it. A password that is
+    /// one whole reference, a port and an `@` in the query are not.
+    #[test]
+    fn url_userinfo_passwords_are_warned() {
+        let spec = |url: &str| serde_json::json!({"requests": [{"spec": {"url": url}}]});
+        for loud in [
+            "https://admin:tok-SENSITIVE-pw1@api.example.com/v1",
+            "https://user:{{tenant}}-tok-SENSITIVE-pw2@host.example/",
+            "https://user:{{ tenant }}-tok-SENSITIVE-pw3@host.example/",
+            "https://user:{{$randomFrom tok-SENSITIVE-pw4 x}}@host.example/",
+            "https://user:p{w-tok-SENSITIVE-pw5@host.example/",
+            "https://admin:p@tok-SENSITIVE-pw6@api.example.com/v1",
+            // Review of #573: a user name holding `@` (sol F2) and a
+            // templated scheme (sol F3).
+            "https://alice@example.org:tok-SENSITIVE-pw7@api.example.test/",
+            "{{scheme}}://admin:tok-SENSITIVE-pw8@api.example.test/",
+            // Review round 3 of #573: quoted, numeric and helper expressions
+            // are literal.
+            "https://admin:{{ 'tok-SENSITIVE-pw10' }}@api.example.test/",
+            "https://admin:{{ 571571571 }}@api.example.test/",
+            "https://admin:{{$guid}}@api.example.test/",
+        ] {
+            let mut v = spec(loud);
+            let s = sanitize(&mut v, &[]);
+            assert_eq!(s.warnings.len(), 1, "a literal URL password was not flagged");
+            assert!(s.warnings[0].reason.contains("password in the URL"));
+            assert_eq!(s.warnings[0].pointer, "/requests/0/spec/url");
+        }
+        for quiet in [
+            "https://admin:{{password}}@api.example.com/v1",
+            "https://admin:{{ password }}@api.example.com/v1",
+            "https://api.example.com:8443/v1?email=a:b@c.example",
+            "https://admin@api.example.com/",
+        ] {
+            let mut v = spec(quiet);
+            assert!(sanitize(&mut v, &[]).warnings.is_empty(), "a URL without a literal password was flagged");
+        }
+    }
+
+    /// Review of #573, sol F5: unterminated references do not make the URL
+    /// scan quadratic (this input took minutes before).
+    #[test]
+    fn url_password_scan_is_linear_in_unterminated_references() {
+        let text = format!("https://{}", "{".repeat(4 << 20));
+        assert!(!has_url_password(&text));
+        let text = format!("https://user:{}tok-SENSITIVE-pw9@host.example/", "{{".repeat(1 << 20));
+        assert!(has_url_password(&text));
     }
 
     #[test]

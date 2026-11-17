@@ -202,26 +202,14 @@ pub fn is_numeric_credential_name(name: &str) -> bool {
         || CREDENTIAL_PARTS.iter().filter(|p| **p != "token").any(|p| n.contains(p))
 }
 
-/// True when `v` contains literal text that could be secret material, i.e.
-/// anything besides `{{variable}}` references and an auth-scheme word
-/// (`Bearer {{token}}` carries no literal secret).
+/// True when `v` contains literal text that could be secret material:
+/// anything besides plain `{{variable}}` references and an auth-scheme word
+/// (`Bearer {{token}}` carries no literal secret). A quoted string, a
+/// number, a filter or a dynamic helper inside `{{…}}` is literal
+/// ([`anvil_domain::secret::classify_template_value`], the rule the export
+/// sanitizer uses too).
 pub fn has_literal_secret(v: &str) -> bool {
-    let mut rest = v;
-    let mut literal = String::new();
-    while let Some(i) = rest.find("{{") {
-        literal.push_str(&rest[..i]);
-        match rest[i..].find("}}") {
-            Some(j) => rest = &rest[i + j + 2..],
-            None => {
-                literal.push_str(&rest[i..]);
-                rest = "";
-            }
-        }
-    }
-    literal.push_str(rest);
-    let t = literal.trim();
-    const SCHEMES: &[&str] = &["bearer", "basic", "token", "digest", "apikey", "dpop", "hmac", "negotiate", "jwt"];
-    !(t.is_empty() || SCHEMES.contains(&t.to_ascii_lowercase().as_str()))
+    anvil_domain::secret::classify_template_value(v) == anvil_domain::secret::TemplateKind::Literal
 }
 
 /// Lower-cased media type without parameters.
@@ -457,6 +445,11 @@ mod tests {
         assert!(!has_literal_secret(""));
         assert!(has_literal_secret("Bearer abc"));
         assert!(has_literal_secret("{{user}}:hunter2"));
+        // Review round 3 of #573: only plain references are references.
+        for literal in ["{{ 'tok-SENSITIVE-u1' }}", "{{ 571571571 }}", "{{$randomFrom a|b}}", "{{$guid}}", "{{ x | upper }}"] {
+            assert!(has_literal_secret(literal), "{literal:?}");
+        }
+        assert!(!has_literal_secret("{{ _.apiToken }}"));
     }
 
     #[test]

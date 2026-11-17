@@ -347,7 +347,8 @@ fn raw_json_bodies_and_url_queries_are_redacted() {
     ] {
         let s = &r.requests[0].spec;
         assert_eq!(json_body(s)["password"], "{{password}}");
-        assert_eq!(s.url, "https://example.test/x?flag&api_key={{api_key}}");
+        assert_eq!(s.url, "https://example.test/x?flag");
+        assert!(param(s, "api_key").is_some_and(|p| p.value == "{{api_key}}" && p.sensitive));
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
         assert_eq!(r.report.redactions.len(), 2);
     }
@@ -518,4 +519,228 @@ fn unscannable_bodies_are_flagged() {
         "body": { "mimeType": "application/x-www-form-urlencoded", "text": "flag&password=placeholder-secret" },
     }));
     assert!(has_at(&r, "body_not_scanned", "/resources/1/body"));
+}
+
+fn v4_with(request: serde_json::Value, env: serde_json::Value, o: &anvil_import::ImportOptions) -> anvil_import::ImportResult {
+    let mut request = request;
+    for (k, v) in [("_id", "req_1"), ("_type", "request"), ("parentId", "wrk_1"), ("name", "R")] {
+        request[k] = v.into();
+    }
+    if request.get("method").is_none() {
+        request["method"] = "GET".into();
+    }
+    let doc = v4_export(serde_json::json!([
+        { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+        { "_id": "env_base", "_type": "environment", "parentId": "wrk_1", "name": "Base", "data": env },
+        request,
+    ]));
+    anvil_import::import(&doc, o).unwrap()
+}
+
+fn v5_with(request: serde_json::Value, env: serde_json::Value, o: &anvil_import::ImportOptions) -> anvil_import::ImportResult {
+    let mut request = request;
+    request["name"] = "R".into();
+    request["meta"] = serde_json::json!({ "id": "req_1" });
+    if request.get("method").is_none() {
+        request["method"] = "GET".into();
+    }
+    let doc = serde_json::json!({
+        "type": "collection.insomnia.rest/5.0", "name": "W",
+        "environments": { "name": "Base", "data": env },
+        "collection": [request],
+    });
+    anvil_import::import(doc.to_string().as_bytes(), o).unwrap()
+}
+
+fn both(request: serde_json::Value, env: serde_json::Value, o: &anvil_import::ImportOptions) -> [anvil_import::ImportResult; 2] {
+    [v4_with(request.clone(), env.clone(), o), v5_with(request, env, o)]
+}
+
+fn keep() -> anvil_import::ImportOptions {
+    anvil_import::ImportOptions { include_credentials: true, ..opts() }
+}
+
+fn template_text(v: &SensitiveValue) -> String {
+    match v {
+        SensitiveValue::Template { value } => value.clone(),
+        SensitiveValue::Secret { .. } => panic!("expected a template value"),
+    }
+}
+
+/// #563: a parameter's escapes are stored decoded only when the engine's
+/// one encoding sends exactly what Insomnia sends; anything else is kept as
+/// written and reported.
+#[test]
+fn parameters_are_decoded_only_when_exact() {
+    let request = serde_json::json!({ "url": "https://example.test/cb", "parameters": [
+        { "name": "redirect_uri", "value": "https%3A%2F%2Fapp.example.com%2Fdone" },
+        { "name": "n", "value": "caf%E9" },
+        { "name": "t", "value": "%7B%7Bid%7D%7D" },
+        { "name": "q", "value": "a+b" },
+    ]});
+    for r in both(request, serde_json::json!({}), &opts()) {
+        let values: Vec<&str> = r.requests[0].spec.params.iter().map(|p| p.value.as_str()).collect();
+        assert_eq!(values, ["https://app.example.com/done", "caf%E9", "%7B%7Bid%7D%7D", "a+b"]);
+        assert!(has_at(&r, "query_value_not_decoded", "parameters/1") && has_at(&r, "query_value_not_decoded", "parameters/2"));
+        assert!(!has_at(&r, "query_value_not_decoded", "parameters/0"));
+    }
+}
+
+/// GHSA-c236-7r9g-c9p2: URL userinfo becomes Basic auth with a
+/// `{{password}}` placeholder; disabled auth wins and drops it.
+#[test]
+fn url_userinfo_becomes_basic_auth_unless_auth_is_disabled() {
+    let request = serde_json::json!({ "url": "https://admin:tok-SENSITIVE-in1@api.example.com/v1/status" });
+    for r in both(request.clone(), serde_json::json!({}), &opts()) {
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.com/v1/status");
+        assert!(
+            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password == &SensitiveValue::template("{{password}}")),
+            "expected Basic auth with a placeholder password"
+        );
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-in1"));
+    }
+    let mut disabled = request;
+    disabled["authentication"] = serde_json::json!({ "type": "basic", "disabled": true });
+    for r in both(disabled, serde_json::json!({}), &opts()) {
+        assert!(!matches!(r.requests[0].spec.auth, AuthConfig::Basic { .. }));
+        assert!(has(&r, "url_credentials_dropped"));
+    }
+}
+
+/// GHSA-c236-7r9g-c9p2: every scalar under a credential-named member of an
+/// environment array is redacted (strings, numbers, booleans, arrays of
+/// them, helper arguments), with distinct placeholders.
+#[test]
+fn credential_members_of_environment_arrays_are_redacted() {
+    let env = serde_json::json!({
+        "accounts": [
+            { "name": "a", "api_key": "tok-SENSITIVE-in2", "pin": 571571571, "mfa": true },
+            { "name": "b", "tokens": ["tok-SENSITIVE-in3", "{{ref}}"], "secret": "{{$randomFrom tok-SENSITIVE-in4 x}}" }
+        ],
+        "keys": [{ "credentials": { "a-b": "tok-SENSITIVE-in5", "a_b": "tok-SENSITIVE-in6" } }],
+        "hosts": ["a.example", "b.example"],
+    });
+    let request = serde_json::json!({ "url": "https://example.test/x" });
+    for r in both(request.clone(), env.clone(), &opts()) {
+        let var = |n: &str| r.workspace.variables.iter().find(|v| v.name == n).map(|v| template_text(&v.value));
+        let accounts = var("accounts").expect("accounts variable");
+        let keys = var("keys").expect("keys variable");
+        for text in [&accounts, &keys] {
+            assert!(!text.contains("tok-SENSITIVE") && !text.contains("571571571"), "a credential member stayed");
+        }
+        assert!(accounts.contains("{{ref}}"), "a reference is kept");
+        assert_eq!(var("hosts").as_deref(), Some(r#"["a.example","b.example"]"#));
+        let names: std::collections::HashSet<&str> = r.report.required_variables.iter().map(|v| v.name.as_str()).collect();
+        assert!(names.len() >= 6, "each credential leaf has its own placeholder");
+        let parsed: serde_json::Value = serde_json::from_str(&keys).unwrap();
+        let creds = &parsed[0]["credentials"];
+        assert_ne!(creds["a-b"], creds["a_b"], "different leaves get different placeholders");
+    }
+    for r in both(request, env, &keep()) {
+        let accounts = r.workspace.variables.iter().find(|v| v.name == "accounts").unwrap();
+        assert!(template_text(&accounts.value).contains("571571571"));
+    }
+}
+
+/// GHSA-c236-7r9g-c9p2: a credential-named path parameter follows the
+/// credential policy.
+#[test]
+fn credential_named_path_parameters_are_redacted() {
+    let request = serde_json::json!({ "url": "https://hooks.example.com/:webhook_token/:id", "pathParameters": [
+        { "name": "webhook_token", "value": "tok-SENSITIVE-in7" }, { "name": "id", "value": "42" },
+    ]});
+    for r in both(request.clone(), serde_json::json!({}), &opts()) {
+        assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/{{webhook_token}}/42");
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-in7"));
+    }
+    for r in both(request, serde_json::json!({}), &keep()) {
+        assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/tok-SENSITIVE-in7/42");
+    }
+}
+
+/// Review of #573, sol F4: environment placeholders never take the name of
+/// a variable of the environment (here the 48-byte name of the array
+/// itself) or of a placeholder made for another array whose path reads the
+/// same (`a-b` and `a_b`).
+#[test]
+fn environment_placeholders_never_collide() {
+    let long = "a".repeat(48);
+    let mut env = serde_json::Map::new();
+    env.insert(long.clone(), serde_json::json!([{ "api_key": "tok-SENSITIVE-in8" }]));
+    env.insert("a-b".into(), serde_json::json!([{ "api_key": "tok-SENSITIVE-in9" }]));
+    env.insert("a_b".into(), serde_json::json!([{ "api_key": "tok-SENSITIVE-in10" }]));
+    let request = serde_json::json!({ "url": "https://example.test/x" });
+    for r in both(request.clone(), serde_json::Value::Object(env.clone()), &opts()) {
+        let var = |n: &str| r.workspace.variables.iter().find(|v| v.name == n).map(|v| template_text(&v.value)).unwrap();
+        let own = var(&long);
+        assert!(!own.contains(&format!("{{{{{long}}}}}")), "a placeholder took its own variable's name");
+        let (first, second) = (var("a-b"), var("a_b"));
+        assert_ne!(first, second, "two arrays share a placeholder");
+        for text in [own, first, second] {
+            assert!(!text.contains("tok-SENSITIVE"), "a credential member stayed");
+        }
+    }
+}
+
+/// Review of #573, dsf F2: placeholder names and report pointers for a leaf
+/// deep under long member names stay bounded.
+#[test]
+fn deep_environment_paths_stay_bounded() {
+    let key = "k".repeat(60);
+    let mut node = serde_json::json!({ "api_key": (0..500).map(|i| format!("tok-SENSITIVE-deep-{i}")).collect::<Vec<_>>() });
+    for _ in 0..100 {
+        let mut m = serde_json::Map::new();
+        m.insert(key.clone(), node);
+        node = serde_json::Value::Object(m);
+    }
+    let env = serde_json::json!({ "deep": [node] });
+    let r = v4_with(serde_json::json!({ "url": "https://example.test/x" }), env, &opts());
+    let text = r.workspace.variables.iter().find(|v| v.name == "deep").map(|v| template_text(&v.value)).unwrap();
+    assert!(!text.contains("tok-SENSITIVE-deep"), "a credential member stayed");
+    assert!(r.report.required_variables.iter().all(|v| v.name.len() <= 56), "a placeholder name is unbounded");
+    assert!(r.report.redactions.iter().all(|x| x.pointer.len() < 2048), "a report pointer is unbounded");
+    let distinct: std::collections::HashSet<&str> = r.report.required_variables.iter().map(|v| v.name.as_str()).collect();
+    assert!(distinct.len() >= 500, "each leaf has its own placeholder");
+}
+
+/// Review round 2 of #573, sol F2: a Nunjucks expression with a quoted
+/// literal (or anything but a plain reference) under a credential name is
+/// literal material and is redacted; a plain `{{ _.name }}` reference stays.
+#[test]
+fn quoted_expressions_in_environment_arrays_are_redacted() {
+    let env = serde_json::json!({ "accounts": [
+        { "api_key": "{{ 'tok-SENSITIVE-in11' }}", "token": "{{ _.shared }}", "secret": "{{ x | upper }}" }
+    ]});
+    for r in both(serde_json::json!({ "url": "https://example.test/x" }), env, &opts()) {
+        let text = r.workspace.variables.iter().find(|v| v.name == "accounts").map(|v| template_text(&v.value)).unwrap();
+        assert!(!text.contains("tok-SENSITIVE-in11"), "a quoted credential stayed");
+        assert!(!text.contains("upper"), "a filtered expression stayed");
+        assert!(text.contains("{{shared}}"), "a plain reference is kept");
+    }
+}
+
+/// Review round 2 of #573, dsf F3: a sub-environment placeholder never takes
+/// a base-environment variable name (which would shadow it), nor the
+/// reverse.
+#[test]
+fn sub_environment_placeholders_never_take_a_base_variable_name() {
+    let doc = serde_json::json!({
+        "type": "collection.insomnia.rest/5.0", "name": "W",
+        "environments": {
+            "name": "Base",
+            "data": { "accounts_0_api_key": "base-value", "keys": [{ "api_key": "tok-SENSITIVE-in12" }] },
+            "subEnvironments": [{ "name": "Sub", "data": {
+                "accounts": [{ "api_key": "tok-SENSITIVE-in13" }],
+                "keys_0_api_key": "sub-value"
+            } }]
+        },
+        "collection": [{ "name": "R", "meta": { "id": "req_1" }, "method": "GET", "url": "https://example.test/x" }],
+    });
+    let r = anvil_import::import(doc.to_string().as_bytes(), &opts()).unwrap();
+    let base = r.workspace.variables.iter().find(|v| v.name == "keys").map(|v| template_text(&v.value)).unwrap();
+    let sub = r.environments[0].variables.iter().find(|v| v.name == "accounts").map(|v| template_text(&v.value)).unwrap();
+    assert!(!sub.contains("{{accounts_0_api_key}}"), "a sub-environment placeholder took a base variable name");
+    assert!(!base.contains("{{keys_0_api_key}}"), "a base placeholder took a sub-environment variable name");
+    assert!(!sub.contains("tok-SENSITIVE") && !base.contains("tok-SENSITIVE"), "a credential member stayed");
 }

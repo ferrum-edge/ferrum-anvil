@@ -5,7 +5,7 @@ use anvil_domain::request::RequestSpec;
 use anvil_domain::settings::EffectiveSettings;
 use anvil_engine::context::MemoryAttachments;
 use anvil_engine::prepare::prepare_http;
-use anvil_engine::vars::Resolver;
+use anvil_engine::vars::{Resolver, VarEntry, VarLayer};
 use anvil_import::{ImportOptions, import};
 
 fn imported_request(source: &[u8]) -> RequestSpec {
@@ -93,4 +93,102 @@ fn curl_soap_content_types_reach_preparation() {
     let soap_11_default_charset =
         imported_request(b"curl -H 'Content-Type: text/xml; charset=utf-8' -H 'SOAPAction: \"urn:lookup\"' -d '<E/>' https://example.test");
     assert_eq!(prepared_content_type(&soap_11_default_charset).as_deref(), Some("text/xml; charset=utf-8"));
+}
+
+fn prepared_query(spec: &RequestSpec) -> String {
+    let resolver = Resolver::new(vec![], None);
+    let attachments = MemoryAttachments::default();
+    prepare_http(spec, &resolver, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap().target.query
+}
+
+fn postman(url: serde_json::Value) -> Vec<u8> {
+    serde_json::json!({
+        "info": { "name": "c", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+        "item": [{ "name": "r", "request": { "method": "GET", "url": url } }]
+    })
+    .to_string()
+    .into_bytes()
+}
+
+fn insomnia_params(url: &str, params: serde_json::Value) -> Vec<u8> {
+    serde_json::json!({
+        "_type": "export",
+        "__export_format": 4,
+        "resources": [
+            { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+            { "_id": "req_1", "_type": "request", "parentId": "wrk_1", "name": "R", "method": "GET", "url": url, "parameters": params }
+        ]
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// #563: a Postman query list or Insomnia parameter with escapes the engine
+/// re-encodes identically is sent with the source's exact bytes, not with
+/// its `%` encoded again (`%253A`).
+#[test]
+fn listed_query_escapes_are_sent_once() {
+    let redirect = "redirect_uri=https%3A%2F%2Fapp.example.com%2Fdone";
+    let entry = serde_json::json!({ "key": "redirect_uri", "value": "https%3A%2F%2Fapp.example.com%2Fdone" });
+    let spec = imported_request(&postman(serde_json::json!({ "raw": "https://api.example.com/cb", "query": [entry] })));
+    assert_eq!(prepared_query(&spec), redirect);
+    let spec = imported_request(&insomnia_params(
+        "https://api.example.com/cb",
+        serde_json::json!([{ "name": "redirect_uri", "value": "https%3A%2F%2Fapp.example.com%2Fdone" }]),
+    ));
+    assert_eq!(prepared_query(&spec), redirect);
+}
+
+/// GHSA-c236-7r9g-c9p2: URL userinfo leaves the URL on import, so the
+/// imported request prepares (the engine refuses credentials in the URL).
+#[test]
+fn imported_url_userinfo_leaves_the_url() {
+    let url = "https://admin:tok-SENSITIVE-ap1@api.example.com/v1/status";
+    for source in [postman(serde_json::json!(url)), insomnia_params(url, serde_json::json!([]))] {
+        let spec = imported_request(&source);
+        assert_eq!(spec.url, "https://api.example.com/v1/status");
+        assert_eq!(prepared_query(&spec), "");
+    }
+}
+
+/// Review of #573: a credential in a query kept verbatim (escaped braces) is
+/// a parameter, so the value supplied for its placeholder is percent-encoded
+/// when sent: a `&` in it adds no parameter.
+#[test]
+fn a_supplied_credential_beside_a_verbatim_query_is_encoded() {
+    let spec = imported_request(b"curl 'https://api.example.test/cb?redirect_uri=%7B%7Bcb%7D%7D&client_secret=tok-SENSITIVE-ap2'");
+    assert_eq!(spec.url, "https://api.example.test/cb?redirect_uri=%7B%7Bcb%7D%7D");
+    let vars = vec![VarEntry { name: "client_secret".into(), value: "s3cr&t=x#y".into(), secret: false, literal: false }];
+    let resolver = Resolver::new(vec![VarLayer { label: "environment".into(), vars }], None);
+    let attachments = MemoryAttachments::default();
+    let query = prepare_http(&spec, &resolver, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap().target.query;
+    assert_eq!(query, "redirect_uri=%7B%7Bcb%7D%7D&client_secret=s3cr%26t%3Dx%23y");
+}
+
+/// Review rounds 2 and 3 of #573 (sol F1, dsf F1): an escaped credential
+/// name taken out of a verbatim query stays data, and so does its
+/// placeholder: a secret variable named inside the escaped braces is never
+/// read or sent, through the parameter's name or its value.
+#[test]
+fn an_escaped_credential_name_never_reads_a_variable() {
+    let vars = vec![
+        VarEntry { name: "vault_token".into(), value: "vault-secret-value".into(), secret: false, literal: false },
+        VarEntry { name: "api_key".into(), value: "workspace-secret-value".into(), secret: false, literal: false },
+        VarEntry { name: "api_key_7B_7Bvault_token_7D_7D".into(), value: "supplied-1".into(), secret: false, literal: false },
+        VarEntry { name: "_7B_7Bapi_key_7D_7D".into(), value: "supplied-2".into(), secret: false, literal: false },
+    ];
+    let resolver = Resolver::new(vec![VarLayer { label: "environment".into(), vars }], None);
+    let attachments = MemoryAttachments::default();
+    for (source, expected) in [
+        (
+            &b"curl 'https://collector.example/?flag&api_key_%7B%7Bvault_token%7D%7D=tok-SENSITIVE-ap3'"[..],
+            "flag&api_key_%257B%257Bvault_token%257D%257D=supplied-1",
+        ),
+        (&b"curl 'https://collector.example/?flag&%7B%7Bapi_key%7D%7D=1'"[..], "flag&%257B%257Bapi_key%257D%257D=supplied-2"),
+    ] {
+        let spec = imported_request(source);
+        let query = prepare_http(&spec, &resolver, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap().target.query;
+        assert!(!query.contains("secret-value"), "a variable named in escaped braces was sent");
+        assert_eq!(query, expected);
+    }
 }

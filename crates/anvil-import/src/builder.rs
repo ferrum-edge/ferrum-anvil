@@ -46,6 +46,10 @@ pub(crate) struct Builder<'o> {
     next_sort: HashMap<Option<Id>, f64>,
     pub title: Option<String>,
     limit_warned: bool,
+    /// Placeholder names for credential leaves of environment values, shared
+    /// by every environment of the import, which reserve their variable
+    /// names first ([`crate::common::PlaceholderNames`]).
+    pub env_names: crate::common::PlaceholderNames,
 }
 
 impl<'o> Builder<'o> {
@@ -86,6 +90,7 @@ impl<'o> Builder<'o> {
             next_sort: HashMap::new(),
             title: None,
             limit_warned: false,
+            env_names: Default::default(),
         }
     }
 

@@ -355,16 +355,32 @@ fn short_option_clusters_count_against_the_argument_limit() {
 }
 
 #[test]
-fn credentials_in_a_query_with_a_bare_flag_are_redacted_in_place() {
+fn credentials_in_a_verbatim_query_become_sensitive_parameters() {
+    // The rest of the query keeps its exact syntax; the credential is never
+    // left in URL text, where its placeholder would resolve unencoded and a
+    // kept literal would not be extracted on export (review of #573).
     let r = curl("curl 'https://example.test/a?flag&api_key=placeholder-secret&page=2#top'");
     let s = &r.requests[0].spec;
-    assert_eq!(s.url, "https://example.test/a?flag&api_key={{api_key}}&page=2");
+    assert_eq!(s.url, "https://example.test/a?flag&page=2");
+    let p = param(s, "api_key").unwrap();
+    assert!(p.value == "{{api_key}}" && p.sensitive);
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
     assert_eq!(r.report.redactions.len(), 1);
-    // Kept verbatim (original encoding) with include_credentials.
+    // Kept with include_credentials, decoded and marked sensitive.
     let o = ImportOptions { include_credentials: true, ..opts() };
     let r = import(b"curl 'https://example.test/a?flag&token=a%26b'", &o).unwrap();
-    assert_eq!(r.requests[0].spec.url, "https://example.test/a?flag&token=a%26b");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://example.test/a?flag");
+    let p = param(s, "token").unwrap();
+    assert!(p.value == "a&b" && p.sensitive);
+    // A query kept verbatim for escaped braces moves its credential out too.
+    for options in [opts(), o] {
+        let r = import(b"curl 'https://api.example.test/v1?q=%7B%7Bid%7D%7D&api_key=tok-SENSITIVE-cu4'", &options).unwrap();
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.test/v1?q=%7B%7Bid%7D%7D");
+        assert!(param(s, "api_key").unwrap().sensitive);
+        assert!(!r.requests[0].name.contains("tok-SENSITIVE-cu4"), "a credential reached the request name");
+    }
 }
 
 #[test]
@@ -415,4 +431,115 @@ fn get_data_with_a_bare_flag_keeps_the_credential_policy() {
     assert_eq!(param(s, "api_key").map(|p| p.value.as_str()), Some("{{api_key}}"));
     assert!(param(s, "flag").is_some());
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+}
+
+/// curl sends data by POST whether it is literal or read from a file; the
+/// file is not imported, but the method still is (#564). `-G` and `-I`
+/// keep precedence, and so does an explicit `-X`.
+#[test]
+fn data_read_from_a_file_still_defaults_to_post() {
+    for cmd in [
+        "curl https://api.example.com/orders -H 'Content-Type: application/json' -d @order.json",
+        "curl https://api.example.com/orders --json @order.json",
+        "curl https://api.example.com/orders --data-urlencode comment@notes.txt",
+        "curl https://api.example.com/orders --data-urlencode @notes.txt",
+        "curl https://api.example.com/orders --data @order.json",
+        "curl https://api.example.com/orders --data-ascii @order.json",
+        "curl https://api.example.com/orders --data-binary @order.json",
+    ] {
+        let r = curl(cmd);
+        assert_eq!(r.requests[0].spec.method, "POST", "{cmd}");
+        assert!(has(&r, "curl_data_file"), "{cmd}");
+    }
+    assert_eq!(curl("curl -G -d @query.txt https://api.example.com/orders").requests[0].spec.method, "GET");
+    assert_eq!(curl("curl -I -d @query.txt https://api.example.com/orders").requests[0].spec.method, "HEAD");
+    assert_eq!(curl("curl -X PUT -d @order.json https://api.example.com/orders").requests[0].spec.method, "PUT");
+    assert_eq!(curl("curl https://api.example.com/orders").requests[0].spec.method, "GET");
+}
+
+/// GHSA-c236-7r9g-c9p2: the userinfo ends at the last `@` of the authority,
+/// so a password holding `@` leaves nothing in the URL; escaped braces in
+/// userinfo never become a `{{reference}}` (such a password becomes a
+/// required `{{password}}` in either credential mode).
+#[test]
+fn userinfo_ends_at_the_last_at_and_escaped_braces_stay_data() {
+    let r = curl("curl 'https://admin:p@tok-SENSITIVE-cu1@api.example.com/v1?next=a@b'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/v1");
+    assert!(matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password.is_pure_reference()));
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu1"));
+    let keep = ImportOptions { include_credentials: true, ..opts() };
+    for options in [opts(), keep] {
+        let r = import(b"curl 'https://%7B%7Bu%7D%7D:%7B%7Bid%7D%7D@example.test/'", &options).unwrap();
+        match &r.requests[0].spec.auth {
+            AuthConfig::Basic { username, password } => {
+                assert_eq!(username, "%7B%7Bu%7D%7D");
+                assert_eq!(password, &SensitiveValue::template("{{password}}"));
+            }
+            _ => panic!("expected Basic auth"),
+        }
+        assert!(has(&r, "url_password_not_decoded") && has(&r, "url_user_not_decoded"));
+    }
+}
+
+/// `-u` wins over URL userinfo, as in curl, and the userinfo is dropped with
+/// a warning.
+#[test]
+fn user_option_wins_over_url_userinfo() {
+    let r = curl("curl -u alice:tok-SENSITIVE-cu2 'https://bob:tok-SENSITIVE-cu3@api.example.com/x'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/x");
+    assert!(matches!(&s.auth, AuthConfig::Basic { username, password } if username == "alice" && password.is_pure_reference()));
+    assert!(has(&r, "url_credentials_dropped"));
+    let text = serde_json::to_string(&r.requests).unwrap();
+    assert!(!text.contains("tok-SENSITIVE-cu2") && !text.contains("tok-SENSITIVE-cu3"));
+}
+
+/// #563: a URL query's parameters keep main's decoding; what they send
+/// differently from curl (a `+`, an escape that is not UTF-8) is reported,
+/// and escaped braces never decode to a reference (the query stays as
+/// written).
+#[test]
+fn url_query_conversions_are_reported_and_braces_stay_data() {
+    let r = curl("curl 'https://api.example.com/search?q=hello+world'");
+    assert_eq!(param(&r.requests[0].spec, "q").unwrap().value, "hello+world");
+    assert!(has(&r, "query_plus_sent_encoded"));
+    let r = curl("curl 'https://api.example.com/search?n=caf%E9'");
+    assert!(has(&r, "query_not_utf8"));
+    let r = curl("curl 'https://api.example.com/search?q=%7B%7Bid%7D%7D'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/search?q=%7B%7Bid%7D%7D");
+    assert!(s.params.is_empty());
+    let r = curl("curl 'https://api.example.com/search?r=https%3A%2F%2Fa.example'");
+    assert_eq!(param(&r.requests[0].spec, "r").unwrap().value, "https://a.example");
+    assert!(!has(&r, "query_plus_sent_encoded") && !has(&r, "query_not_utf8"));
+}
+
+/// Review round 2 of #573, sol F1 = dsf F2: a credential taken out of a
+/// verbatim query keeps an escaped name encoded when decoding it would make
+/// a `{{reference}}` (the engine resolves parameter names too). dsf F4: a
+/// value that decodes to whitespace only stays in the query, as the pair
+/// path keeps it. sol F3 / dsf F1: what the moved credential sends
+/// differently is reported.
+#[test]
+fn credentials_moved_from_a_verbatim_query_keep_escaped_names_and_report_conversions() {
+    let r = curl("curl 'https://collector.example/?flag&api_key_%7B%7Bvault_token%7D%7D=tok-SENSITIVE-cu5'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://collector.example/?flag");
+    let p = &s.params[0];
+    assert_eq!(p.name, "api_key_%7B%7Bvault_token%7D%7D");
+    assert!(p.sensitive && !p.value.contains("tok-SENSITIVE-cu5"));
+    let r = curl("curl 'https://api.example.test/v1?flag&%7B%7Bapi%5Fkey%7D%7D=tok-SENSITIVE-cu6'");
+    assert_eq!(r.requests[0].spec.params[0].name, "%7B%7Bapi%5Fkey%7D%7D");
+
+    let r = curl("curl 'https://api.example.test/v1?flag&api_key=%20'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.test/v1?flag&api_key=%20");
+    assert!(s.params.is_empty() && r.report.required_variables.is_empty());
+
+    let keep = ImportOptions { include_credentials: true, ..opts() };
+    let r = import(b"curl 'https://api.example.test/v1?flag&token=a+b'", &keep).unwrap();
+    assert!(has(&r, "query_plus_sent_encoded"));
+    let r = import(b"curl 'https://api.example.test/v1?flag&api_key=caf%E9'", &keep).unwrap();
+    assert!(has(&r, "query_not_utf8"));
 }

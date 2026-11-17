@@ -224,6 +224,9 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
     let mut urls: Vec<(String, String)> = vec![];
     let mut headers: Vec<KeyValue> = vec![];
     let mut data: Vec<Data> = vec![];
+    // Data read from a file is not imported, but curl still sends it, by
+    // POST unless `-G` or `-I` is given.
+    let mut file_data = false;
     let mut form: Vec<MultipartPart> = vec![];
     let mut get = false;
     let mut head = false;
@@ -272,6 +275,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
             "-d" | "--data" | "--data-ascii" | "--data-binary" => {
                 if let Some(d) = value(&mut i) {
                     if let Some(file) = d.strip_prefix('@') {
+                        file_data = true;
                         b.report.external_ref(file, &at);
                         b.report.unsupported("curl_data_file", &at, "request data read from a file is not imported; paste the content into the body");
                     } else {
@@ -290,6 +294,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                 json = true;
                 if let Some(d) = value(&mut i) {
                     if let Some(file) = d.strip_prefix('@') {
+                        file_data = true;
                         b.report.external_ref(file, &at);
                         b.report.unsupported("curl_data_file", &at, "request data read from a file is not imported");
                     } else {
@@ -300,6 +305,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
             "--data-urlencode" => {
                 if let Some(d) = value(&mut i) {
                     if d.contains('@') && d.split_once('@').is_some_and(|(n, _)| !n.contains('=')) {
+                        file_data = true;
                         b.report.external_ref(d.split_once('@').map(|x| x.1).unwrap_or(""), &at);
                         b.report.unsupported("curl_data_file", &at, "URL-encoded data read from a file is not imported");
                     } else {
@@ -488,7 +494,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
         }
         i += 1;
     }
-    finish(b, Parsed { method, urls, headers, data, form, get, head, json, auth, settings, follow, max_redirs })
+    finish(b, Parsed { method, urls, headers, data, file_data, form, get, head, json, auth, settings, follow, max_redirs })
 }
 
 /// Long options that consume the next argument.
@@ -728,6 +734,9 @@ struct Parsed {
     urls: Vec<(String, String)>,
     headers: Vec<KeyValue>,
     data: Vec<Data>,
+    /// Some `-d`/`--data*`/`--json`/`--data-urlencode` read its data from a
+    /// file, which is not imported.
+    file_data: bool,
     form: Vec<MultipartPart>,
     get: bool,
     head: bool,
@@ -739,7 +748,7 @@ struct Parsed {
 }
 
 fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
-    let Parsed { method, urls, mut headers, data, form, get, head, json, auth, mut settings, follow, max_redirs } = p;
+    let Parsed { method, urls, mut headers, data, file_data, form, get, head, json, auth, mut settings, follow, max_redirs } = p;
     let Some((raw_url, url_at)) = urls.first().cloned() else {
         return Err(ImportError::Invalid { dialect: Dialect::Curl, pointer: "/args".into(), message: "no URL in the cURL command".into() });
     };
@@ -756,22 +765,18 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     if raw_url != url {
         b.report.warn("curl_default_scheme", &url_at, "no scheme in the URL; curl defaults to http://");
     }
-    // Credentials embedded in the URL are moved to Basic auth.
+    // Credentials embedded in the URL become Basic auth, unless `-u` (or
+    // another auth option) gave the request its own, which curl prefers.
     let mut auth = auth;
-    if let Some((scheme, rest)) = url.split_once("://")
-        && let Some(at_pos) = crate::common::userinfo_end(rest)
-    {
-        let userinfo = rest[..at_pos].to_string();
-        let (user, pass) =
-            userinfo.split_once(':').map(|(u, p)| (u.to_string(), p.to_string())).unwrap_or((userinfo.clone(), String::new()));
-        let pw = credential(b, &crate::common::query_decode(&pass), "password", &url_at, "password in the URL");
-        auth = AuthConfig::Basic { username: crate::common::query_decode(&user), password: pw };
-        url = format!("{scheme}://{}", &rest[at_pos + 1..]);
-    }
+    let (without, userinfo) = crate::common::take_userinfo(&url);
+    url = without;
+    crate::common::apply_userinfo(b, &mut auth, userinfo, &url_at);
     let (base, pairs) = split_query(&url);
-    // A query that is not a plain list of pairs stays in the URL verbatim;
-    // its credential-like values are still redacted in place.
-    let base = if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &url_at, "query") } else { base };
+    crate::common::warn_query_conversions(b, !pairs.is_empty(), &url, &url_at);
+    // A query that is not a plain list of pairs stays in the URL verbatim,
+    // less its credential-named pairs, which become sensitive parameters.
+    let (base, verbatim_credentials) =
+        if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &url_at, "query") } else { (base, vec![]) };
     let mut params: Vec<KeyValue> = pairs
         .into_iter()
         .enumerate()
@@ -780,6 +785,7 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
             KeyValue { name: k, value, enabled: true, description: String::new(), sensitive }
         })
         .collect();
+    params.extend(verbatim_credentials);
 
     let has_ct = headers.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
     if json {
@@ -895,10 +901,12 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     if json && is_json_media(ct.as_deref().unwrap_or("")) {
         headers.retain(|h| !(h.name.eq_ignore_ascii_case("content-type") && h.value == "application/json"));
     }
+    // curl sends any request with data (literal or read from a file) by
+    // POST, unless `-I` or `-G` says otherwise.
     let method = method.unwrap_or_else(|| {
         if head {
             "HEAD".into()
-        } else if matches!(body, Body::None) || get {
+        } else if get || (matches!(body, Body::None) && !file_data) {
             "GET".into()
         } else {
             "POST".into()

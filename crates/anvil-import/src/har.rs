@@ -10,8 +10,8 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    body_from_text, credential, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, query_decode, redact_raw_query,
-    scrub_json_text, split_query, userinfo_end,
+    apply_userinfo, body_from_text, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, redact_raw_query,
+    scrub_json_text, split_query, take_userinfo, warn_query_conversions,
 };
 use crate::util::{is_json_media, media_essence, ptr, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -83,22 +83,14 @@ pub(crate) fn import(root: &Value, b: &mut Builder) -> Result<(), ImportError> {
 fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, index: usize, dropped: &mut BTreeSet<String>) {
     let uptr = ptr(rptr, "url");
     let mut auth = AuthConfig::Inherit;
-    let mut url = crate::common::strip_fragment(raw_url).to_string();
     // Userinfo is never kept in the URL (the engine refuses it).
-    if let Some((scheme, rest)) = url.split_once("://").map(|(a, c)| (a.to_string(), c.to_string()))
-        && let Some(p) = userinfo_end(&rest)
-    {
-        let userinfo = &rest[..p];
-        let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
-        auth = AuthConfig::Basic {
-            username: query_decode(user),
-            password: credential(b, &query_decode(pass), "password", &uptr, "password in the URL"),
-        };
-        url = format!("{scheme}://{}", &rest[p + 1..]);
-    }
+    let (url, userinfo) = take_userinfo(crate::common::strip_fragment(raw_url));
+    apply_userinfo(b, &mut auth, userinfo, &uptr);
     let (base, pairs) = split_query(&url);
-    let base = if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &uptr, "query parameter") } else { base };
-    let params: Vec<KeyValue> = pairs
+    warn_query_conversions(b, !pairs.is_empty(), &url, &uptr);
+    let (base, verbatim_credentials) =
+        if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &uptr, "query parameter") } else { (base, vec![]) };
+    let mut params: Vec<KeyValue> = pairs
         .into_iter()
         .enumerate()
         .map(|(n, (k, v))| {
@@ -106,6 +98,7 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
             KeyValue { name: k, value, enabled: true, description: String::new(), sensitive }
         })
         .collect();
+    params.extend(verbatim_credentials);
 
     let mut headers = vec![];
     let mut has_cookie = false;
