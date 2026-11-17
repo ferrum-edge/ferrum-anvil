@@ -118,14 +118,53 @@ const SHAPES: &[Shape] = &[
         json_body: None,
         export: ALL,
     },
+    // A token in the user name, with no password or an empty one: kept with
+    // include_credentials as the Basic user name, which the export extracts.
     Shape {
         name: "token alone in the userinfo",
         url: "https://tok-SENSITIVE-c26@api.example.test/v1",
         headers: &[],
         json_body: None,
-        // Kept with include_credentials as the Basic user name, which is not
-        // a secret field the export extracts.
-        export: [Export::Skip; 4],
+        export: ALL,
+    },
+    Shape {
+        name: "token with an empty password in the userinfo",
+        url: "https://tok-SENSITIVE-c27:@api.example.test/v1",
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
+    // A quoted `}}` and a delimiter inside a password expression do not end
+    // the authority early (review of #575, sol F1).
+    Shape {
+        name: "quoted braces and a slash in a userinfo password expression",
+        url: r#"https://admin:{{ "tok-SENSITIVE-c28}}/s" | urlencode }}@api.example.test/v1"#,
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
+    Shape {
+        name: "quoted braces and a question mark in a userinfo password expression",
+        url: r#"https://admin:{{ "tok-SENSITIVE-c30}}?s" | urlencode }}@api.example.test/v1"#,
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
+    Shape {
+        name: "quoted braces and a hash in a userinfo password expression",
+        url: r#"https://admin:{{ "tok-SENSITIVE-c31}}#s" | urlencode }}@api.example.test/v1"#,
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
+    // An expression opened in the password and closed only in the query does
+    // not hide the userinfo (review of #575, dsf F2).
+    Shape {
+        name: "unclosed expression in a userinfo password",
+        url: "https://user:tok-SENSITIVE-c29{{ss@api.example.test/v1?q={{x}}",
+        headers: &[],
+        json_body: None,
+        export: ALL,
     },
     Shape {
         name: "escaped braces as a credential query name",

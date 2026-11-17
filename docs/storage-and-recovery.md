@@ -288,7 +288,8 @@ filter or a dynamic helper such as `{{$guid}}` inside `{{…}}` is literal) (in
 a field used as written, a TLS or proxy profile's secrets, an HBONE proxy
 profile's extra headers or a header or trailer assertion, reference-shaped text
 is the literal itself), of
-an auth field (a password, token or key), of a secret variable, or of a
+an auth field (a password, token or key, and a Basic user name whose
+password is empty, which carries a URL's `<token>@`), of a secret variable, or of a
 header, query parameter, form field or gRPC metadata entry that is marked
 sensitive, whose name is itself a template (it may resolve to a credential
 name), or whose name Anvil treats as a credential anywhere

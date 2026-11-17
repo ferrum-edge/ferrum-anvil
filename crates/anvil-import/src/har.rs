@@ -84,7 +84,9 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     let uptr = ptr(rptr, "url");
     let mut auth = AuthConfig::Inherit;
     // Userinfo is never kept in the URL (the engine refuses it).
-    let (url, userinfo) = take_userinfo(crate::common::strip_fragment(raw_url));
+    // Userinfo first: a `#` inside a password expression is no fragment.
+    let (url, userinfo) = take_userinfo(raw_url);
+    let url = crate::common::strip_fragment(&url).to_string();
     apply_userinfo(b, &mut auth, userinfo, &uptr);
     let (base, pairs) = split_query(&url);
     warn_query_conversions(b, !pairs.is_empty(), &url, &uptr);

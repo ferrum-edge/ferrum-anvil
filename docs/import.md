@@ -63,10 +63,13 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   `{{password}}` placeholder in every migration importer, and the URL loses it
   (the engine never sends credentials in the URL). The userinfo ends at the
   last `@` before the path, so a password holding `@` is removed whole, and
-  a `/`, `?` or `#` inside a `{{…}}` expression does not end it early. A
-  userinfo without `:` (`https://<token>@host/`) is read as a token in the
-  user name and follows the credential policy (`url_user_token`; the
-  password is empty). A
+  a `/`, `?` or `#` inside a `{{…}}` expression (a quoted `}}` included)
+  does not end it early; the authority is read both as plain text and with
+  expressions skipped, and the later `@` wins, so an ambiguous userinfo is
+  taken off whole. A userinfo without a password (`https://<token>@host/`
+  or `https://<token>:@host/`) is read as a token in the user name and
+  follows the credential policy (`url_user_token`; the password is empty).
+  A
   request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a Postman
   or Insomnia auth helper) or with auth explicitly off keeps that, and the
   userinfo is dropped (`url_credentials_dropped`). A user name or password

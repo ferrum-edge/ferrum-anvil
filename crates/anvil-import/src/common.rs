@@ -758,7 +758,9 @@ pub fn take_userinfo(url: &str) -> (String, Option<Userinfo>) {
     };
     let Some(at) = userinfo_end(rest) else { return (url.to_string(), None) };
     let userinfo = &rest[..at];
-    let parts = match first_outside_references(userinfo, ':') {
+    // The first `:` splits user name and password; a `:` inside an expression
+    // in the user name moves more into the password, which fails closed.
+    let parts = match userinfo.find(':') {
         Some(colon) => (userinfo[..colon].to_string(), Some(userinfo[colon + 1..].to_string())),
         None => (userinfo.to_string(), None),
     };
@@ -777,10 +779,11 @@ pub fn take_userinfo(url: &str) -> (String, Option<Userinfo>) {
 /// becomes a required `{{password}}` in either credential mode
 /// (`url_password_not_decoded`).
 pub fn userinfo_auth(b: &mut Builder, user: &str, pass: Option<&str>, pointer: &str) -> AuthConfig {
+    let pass = pass.filter(|p| !query_decode(p).trim().is_empty());
     let Some(pass) = pass else {
-        // A userinfo without `:` (`https://<token>@host/`) is a token in the
-        // user name: it follows the credential policy, and the password is
-        // empty, as curl sends it.
+        // A userinfo without a password (`https://<token>@host/`, or
+        // `https://<token>:@host/`) is a token in the user name: it follows
+        // the credential policy, and the password is empty, as curl sends it.
         let (token, literal) = match decode_keeping_references(user) {
             Some(token) => {
                 let literal = has_literal_secret(token.trim(), b.template_syntax);
@@ -792,7 +795,7 @@ pub fn userinfo_auth(b: &mut Builder, user: &str, pass: Option<&str>, pointer: &
             b.report.warn(
                 "url_user_token",
                 pointer,
-                "the URL's userinfo has no ':', so its user name is read as a token and follows the credential policy",
+                "the URL's userinfo has no password, so its user name is read as a token and follows the credential policy",
             );
         }
         let username = credential_text_with(b, &token, literal, "username", pointer, "token in the URL's user name");
@@ -843,69 +846,17 @@ pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<U
 }
 
 /// The byte offset of the `@` that ends the userinfo in `after_scheme` (a
-/// URL with its `scheme://` removed), if it has userinfo. The authority ends
-/// at the first `/`, `?` or `#` (RFC 3986 section 3.2), so an `@` in the path,
-/// query or fragment is not one; within the authority the last `@` ends the
-/// userinfo, as URL parsers (Postman's among them) read a password holding
-/// an `@`. Characters inside a `{{…}}` expression are skipped, so a `/` in
-/// `{{ 'a/b' | urlencode }}` does not end the authority early.
+/// URL with its `scheme://` removed), if it has userinfo
+/// ([`anvil_domain::secret::userinfo_end`]: the last `@` of the authority,
+/// read both as plain text and with `{{…}}` expressions skipped whole, so an
+/// ambiguous userinfo is taken off whole rather than left in the URL).
 pub fn userinfo_end(after_scheme: &str) -> Option<usize> {
-    let mut last_at = None;
-    scan_outside_references(after_scheme, |i, c| match c {
-        '/' | '?' | '#' => false,
-        '@' => {
-            last_at = Some(i);
-            true
-        }
-        _ => true,
-    });
-    last_at
+    anvil_domain::secret::userinfo_end(after_scheme)
 }
 
 /// A URL's userinfo as written: the user name, and the password after the
 /// first `:` (`None` when there is no `:`).
 pub type Userinfo = (String, Option<String>);
-
-/// Visit each character of `s` outside `{{…}}` expressions (the first `}}`
-/// closes one, as the resolver reads it) with its byte offset, until `f`
-/// returns false. A delimiter inside an expression (`{{ 'a/b' | f }}`)
-/// therefore never ends a URL part. Linear: once a `{{` has no closing `}}`,
-/// none later has one either, and the rest is visited as plain text.
-fn scan_outside_references(s: &str, mut f: impl FnMut(usize, char) -> bool) {
-    let mut i = 0;
-    let mut unterminated = false;
-    while i < s.len() {
-        let rest = &s[i..];
-        if !unterminated && rest.starts_with("{{") {
-            match rest[2..].find("}}") {
-                Some(close) => {
-                    i += close + 4;
-                    continue;
-                }
-                None => unterminated = true,
-            }
-        }
-        let c = rest.chars().next().unwrap_or(' ');
-        if !f(i, c) {
-            return;
-        }
-        i += c.len_utf8();
-    }
-}
-
-/// The byte offset of the first `needle` in `s` outside `{{…}}` expressions.
-fn first_outside_references(s: &str, needle: char) -> Option<usize> {
-    let mut found = None;
-    scan_outside_references(s, |i, c| {
-        if c == needle {
-            found = Some(i);
-            false
-        } else {
-            true
-        }
-    });
-    found
-}
 
 /// Remove a `#fragment`, ignoring `#` inside `{{…}}` references.
 pub fn strip_fragment(url: &str) -> &str {
