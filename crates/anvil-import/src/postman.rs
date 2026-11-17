@@ -44,6 +44,7 @@ pub(crate) fn import_collection(root: &Value, dialect: Dialect, b: &mut Builder)
             "Postman collection v2.0: imported with the v2.1 mapping (auth parameters accept both shapes)",
         );
     }
+    reserve_variable_keys(b, root, 0);
     b.workspace.variables = variables(b, root.get("variable"), "/variable");
     b.workspace.auth = match root.get("auth") {
         Some(a) => auth(b, a, "/auth", &name),
@@ -56,6 +57,21 @@ pub(crate) fn import_collection(root: &Value, dialect: Dialect, b: &mut Builder)
         return Err(ImportError::Invalid { dialect, pointer: "/item".into(), message: "collection has no `item` array".into() });
     }
     Ok(())
+}
+
+/// Reserve the collection's and every folder's variable names before any
+/// placeholder is made, so a placeholder never names one of them.
+fn reserve_variable_keys(b: &mut Builder, node: &Value, depth: usize) {
+    for var in node.get("variable").and_then(Value::as_array).into_iter().flatten() {
+        if let Some(key) = str_of(var, "key").or_else(|| str_of(var, "id")) {
+            b.env_names.reserve(key);
+        }
+    }
+    if depth < MAX_FOLDER_DEPTH {
+        for item in node.get("item").and_then(Value::as_array).into_iter().flatten() {
+            reserve_variable_keys(b, item, depth + 1);
+        }
+    }
 }
 
 fn walk_items(b: &mut Builder, items: &[Value], base: &str, parent: Option<Id>, depth: usize) {

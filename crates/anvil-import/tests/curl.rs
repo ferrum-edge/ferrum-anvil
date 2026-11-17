@@ -199,7 +199,8 @@ fn url_credentials_and_scheme_default() {
     let r = curl("curl http://bob:pa%3Ass@example.com/x");
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "http://example.com/x");
-    assert!(matches!(&s.auth, AuthConfig::Basic { username, password } if username == "bob" && password.is_pure_reference()));
+    // A literal userinfo is replaced by placeholders, user name included.
+    assert!(matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password.is_pure_reference()));
     let r = curl("curl example.com/x");
     assert_eq!(r.requests[0].spec.url, "http://example.com/x");
     assert!(has(&r, "curl_default_scheme"));
@@ -458,27 +459,34 @@ fn data_read_from_a_file_still_defaults_to_post() {
 }
 
 /// GHSA-c236-7r9g-c9p2: the userinfo ends at the last `@` of the authority,
-/// so a password holding `@` leaves nothing in the URL; escaped braces in
-/// userinfo never become a `{{reference}}` (such a password becomes a
-/// required `{{password}}` in either credential mode).
+/// so a password holding `@` leaves nothing in the URL. A userinfo that is
+/// not exactly references is replaced by fresh placeholders; with
+/// include_credentials only the password literal is kept, in the password.
+/// Escaped braces never become a `{{reference}}`.
 #[test]
-fn userinfo_ends_at_the_last_at_and_escaped_braces_stay_data() {
+fn literal_userinfo_is_replaced_by_placeholders() {
     let r = curl("curl 'https://admin:p@tok-SENSITIVE-cu1@api.example.com/v1?next=a@b'");
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "https://api.example.com/v1");
-    assert!(matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password.is_pure_reference()));
+    assert!(
+        matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password == &SensitiveValue::template("{{password}}"))
+    );
+    assert!(has(&r, "url_userinfo_replaced"));
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu1"));
     let keep = ImportOptions { include_credentials: true, ..opts() };
+    let r = import(b"curl 'https://admin:p@tok-SENSITIVE-cu1@api.example.com/v1'", &keep).unwrap();
+    assert!(
+        matches!(&r.requests[0].spec.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password == &SensitiveValue::template("p@tok-SENSITIVE-cu1"))
+    );
     for options in [opts(), keep] {
         let r = import(b"curl 'https://%7B%7Bu%7D%7D:%7B%7Bid%7D%7D@example.test/'", &options).unwrap();
         match &r.requests[0].spec.auth {
             AuthConfig::Basic { username, password } => {
-                assert_eq!(username, "%7B%7Bu%7D%7D");
-                assert_eq!(password, &SensitiveValue::template("{{password}}"));
+                assert_eq!(username, "{{username}}");
+                assert!(!matches!(password, SensitiveValue::Template { value } if value == "{{id}}"), "escaped braces became a reference");
             }
             _ => panic!("expected Basic auth"),
         }
-        assert!(has(&r, "url_password_not_decoded") && has(&r, "url_user_not_decoded"));
     }
 }
 
@@ -544,26 +552,38 @@ fn credentials_moved_from_a_verbatim_query_keep_escaped_names_and_report_convers
     assert!(has(&r, "query_not_utf8"));
 }
 
-/// Review round 4 of #573, dsf F1: a userinfo without `:` is a token in the
-/// user name; it follows the credential policy, and the password is empty.
+/// Review round 4 of #573 (dsf F1) and of #575: a token alone in the
+/// userinfo, or one beside an empty password or inside an expression with a
+/// `:`, is never kept as a user name; the placeholders never take the name
+/// of a variable the source defines or references.
 #[test]
-fn a_token_alone_in_the_userinfo_is_a_credential() {
-    let r = curl("curl 'https://tok-SENSITIVE-cu7@api.example.test/v1'");
-    let s = &r.requests[0].spec;
-    assert_eq!(s.url, "https://api.example.test/v1");
-    match &s.auth {
+fn a_token_in_the_userinfo_is_a_credential() {
+    for url in [
+        "https://tok-SENSITIVE-cu7@api.example.test/v1",
+        "https://tok-SENSITIVE-cu7:@api.example.test/v1",
+        r#"https://{{ "tok-SENSITIVE-cu7:rest" }}@api.example.test/v1"#,
+    ] {
+        let r = curl(&format!("curl '{url}'"));
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.test/v1", "{url}");
+        assert!(matches!(&s.auth, AuthConfig::Basic { username, .. } if username == "{{username}}"), "{url}");
+        assert!(has(&r, "url_userinfo_replaced"), "{url}");
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu7"), "{url}");
+    }
+    // References stay references, without a warning.
+    let r = curl("curl 'https://{{api_token}}@api.example.test/v1'");
+    assert!(matches!(&r.requests[0].spec.auth, AuthConfig::Basic { username, .. } if username == "{{api_token}}"));
+    assert!(!has(&r, "url_userinfo_replaced"));
+    // A source that already references `username` and `password` gets other
+    // placeholder names.
+    let r = curl("curl -H 'X-User: {{username}}' -H 'X-Pass: {{password}}' 'https://tok-SENSITIVE-cu8:pw@api.example.test/v1'");
+    match &r.requests[0].spec.auth {
         AuthConfig::Basic { username, password } => {
-            assert_eq!(username, "{{username}}");
-            assert_eq!(password, &SensitiveValue::template(""));
+            assert_eq!(username, "{{username_2}}");
+            assert_eq!(password, &SensitiveValue::template("{{password_2}}"));
         }
         _ => panic!("expected Basic auth"),
     }
-    assert!(has(&r, "url_user_token"));
-    assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu7"));
-    // A reference stays a reference, without a warning.
-    let r = curl("curl 'https://{{api_token}}@api.example.test/v1'");
-    assert!(matches!(&r.requests[0].spec.auth, AuthConfig::Basic { username, .. } if username == "{{api_token}}"));
-    assert!(!has(&r, "url_user_token"));
 }
 
 /// Postman, cURL and HAR never evaluate `{{…}}`: an expression-looking name

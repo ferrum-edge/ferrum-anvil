@@ -108,17 +108,17 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
     res.iter().find(|(r, _)| r.is_match(s)).map(|(_, why)| *why)
 }
 
-/// Whether `s` holds a URL (`scheme://user:password@host`) whose userinfo
-/// password has literal material: anything but exactly one whole reference
-/// ([`is_pure_reference`], so a helper with arguments such as
-/// `{{$randomFrom a|b}}` is literal). The scheme may end in a reference
-/// (`{{scheme}}://`). The userinfo is found as the importers find it
-/// ([`anvil_domain::secret::userinfo_end_in_text`]: the last `@` of the
-/// authority read as plain text or with `{{…}}` expressions skipped whole,
-/// quoted `}}` included), and the password runs from its first `:`. So a
-/// user name or password holding an `@`, braces, a quoted `}}` or a spaced
-/// reference is judged whole, as written. Linear in `s`.
+/// Whether free text `s` holds a URL (`scheme://userinfo@host`) whose
+/// userinfo is not exactly variable references
+/// ([`anvil_domain::secret::is_plain_userinfo`], Insomnia's strict syntax, so
+/// a literal user name or password, a token or an expression counts). The
+/// scheme may end in a reference (`{{scheme}}://`). Each `://` is checked,
+/// including one inside an expression, with the authority read as plain
+/// text up to the first `/`, `?`, `#` or whitespace: linear, and `{{…}}`
+/// content is never skipped. A request URL field is also read as a URL
+/// ([`url_has_literal_userinfo`]).
 fn has_url_password(s: &str) -> bool {
+    use anvil_domain::secret::{TemplateSyntax, is_plain_userinfo};
     let mut from = 0;
     while let Some(found) = s[from..].find("://") {
         let start = from + found;
@@ -126,22 +126,27 @@ fn has_url_password(s: &str) -> bool {
         if !s[..start].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '}') {
             continue;
         }
-        let authority = &s[from..];
-        let (at, scanned) = anvil_domain::secret::userinfo_end_in_text(authority);
-        // Continue near the end of the scanned authority: a `://` inside it
-        // (in a skipped expression) starts no other URL, and this keeps the
-        // scan linear.
-        from += scanned.saturating_sub(2);
-        if let Some(at) = at
-            && let Some(colon) = authority[..at].find(':')
+        let rest = &s[from..];
+        let end = rest.find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace()).unwrap_or(rest.len());
+        if let Some(at) = rest[..end].rfind('@')
+            && !is_plain_userinfo(&rest[..at], TemplateSyntax::Nunjucks)
         {
-            let password = &authority[colon + 1..at];
-            if !password.is_empty() && !is_pure_reference(password) {
-                return true;
-            }
+            return true;
         }
     }
     false
+}
+
+/// Whether a request URL field has a userinfo, found as the importers find
+/// it ([`anvil_domain::secret::userinfo_end`]), that is not exactly variable
+/// references.
+fn url_has_literal_userinfo(url: &str) -> bool {
+    use anvil_domain::secret::{TemplateSyntax, is_plain_userinfo, userinfo_end};
+    let rest = match url.split_once("://") {
+        Some((scheme, rest)) if !scheme.is_empty() && !scheme.contains(['/', '?', '#', '@']) => rest,
+        _ => url,
+    };
+    userinfo_end(rest).is_some_and(|at| !is_plain_userinfo(&rest[..at], TemplateSyntax::Nunjucks))
 }
 
 pub struct Sanitized {
@@ -320,9 +325,14 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: 
                 let child_ptr = format!("{ptr}/{}", escape_ptr(&k));
                 // Free-text fields are scanned, not modified.
                 if let Some(serde_json::Value::String(text)) = map.get(&k) {
-                    if matches!(k.as_str(), "text" | "url" | "query" | "envelope" | "variables" | "extra_json")
-                        && let Some(why) = looks_like_credential(text)
-                    {
+                    let why = if k == "url" && url_has_literal_userinfo(text) {
+                        Some("contains a password in the URL")
+                    } else if matches!(k.as_str(), "text" | "url" | "query" | "envelope" | "variables" | "extra_json") {
+                        looks_like_credential(text)
+                    } else {
+                        None
+                    };
+                    if let Some(why) = why {
                         s.warnings
                             .push(ContentWarning { pointer: child_ptr.clone(), reason: format!("{k} {why}; {FREE_TEXT_REMEDIATION}") });
                     }
@@ -684,6 +694,12 @@ mod tests {
             "https://admin:{{ 'tok-SENSITIVE-pw11}}/s' | urlencode }}@api.example.test/",
             "https://admin:{{ 'tok-SENSITIVE-pw12}}?s' | urlencode }}@api.example.test/",
             "https://user:tok-SENSITIVE-pw13{{ss@api.example.test/v1?q={{x}}",
+            // Round 2 of #575: any userinfo that is not exactly references,
+            // past the 4 KiB the earlier scan allowed, and a credential URL
+            // inside an expression.
+            "https://admin:{{password}}@api.example.com/v1",
+            "https://tok-SENSITIVE-pw14@api.example.com/",
+            "https://{{ 'https://admin:tok-SENSITIVE-pw15@api.example.test' | replace('https://', '') }}/v1",
         ] {
             let mut v = spec(loud);
             let s = sanitize(&mut v, &[]);
@@ -691,11 +707,14 @@ mod tests {
             assert!(s.warnings[0].reason.contains("password in the URL"));
             assert_eq!(s.warnings[0].pointer, "/requests/0/spec/url");
         }
+        let long = format!("https://admin:{{{{{}'tok-SENSITIVE-pw16/x'|urlencode}}}}@api.example.test/v1", " ".repeat(8192));
+        let mut v = spec(&long);
+        assert_eq!(sanitize(&mut v, &[]).warnings.len(), 1, "a long password expression was not flagged");
         for quiet in [
-            "https://admin:{{password}}@api.example.com/v1",
-            "https://admin:{{ password }}@api.example.com/v1",
+            "https://{{user}}:{{password}}@api.example.com/v1",
+            "https://{{ user }}:{{ password }}@api.example.com/v1",
+            "https://{{api_token}}@api.example.com/v1",
             "https://api.example.com:8443/v1?email=a:b@c.example",
-            "https://admin@api.example.com/",
         ] {
             let mut v = spec(quiet);
             assert!(sanitize(&mut v, &[]).warnings.is_empty(), "a URL without a literal password was flagged");

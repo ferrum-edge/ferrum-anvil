@@ -157,6 +157,22 @@ const SHAPES: &[Shape] = &[
         json_body: None,
         export: ALL,
     },
+    // Round 2 of #575: a credential URL inside an expression, and a `:`
+    // inside a user name expression.
+    Shape {
+        name: "credential URL inside an expression",
+        url: r#"https://{{ "https://admin:tok-SENSITIVE-c43@api.example.test" | replace("https://", "") }}/v1"#,
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
+    Shape {
+        name: "colon inside a user name expression",
+        url: r#"https://{{ "tok-SENSITIVE-c44:rest" }}@api.example.test/v1"#,
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
     // An expression opened in the password and closed only in the query does
     // not hide the userinfo (review of #575, dsf F2).
     Shape {
@@ -296,7 +312,12 @@ fn check(source: &[u8], export: Export, label: &str) {
 #[test]
 fn every_importer_redacts_and_every_export_extracts() {
     let importers: [(&str, Build); 4] = [("cURL", curl), ("HAR", har), ("Postman", postman), ("Insomnia", insomnia)];
-    for shape in SHAPES {
+    // Round 2 of #575: a password expression longer than any scan bound.
+    let long: &'static str = Box::leak(
+        format!("https://admin:{{{{{}\"tok-SENSITIVE-c45/x\"|urlencode}}}}@api.example.test/v1", " ".repeat(8192)).into_boxed_str(),
+    );
+    let long_shape = Shape { name: "password expression past 4 KiB", url: long, headers: &[], json_body: None, export: ALL };
+    for shape in SHAPES.iter().chain(std::iter::once(&long_shape)) {
         for (i, (importer, build)) in importers.iter().enumerate() {
             check(&build(shape), shape.export[i], &format!("{importer}, {}", shape.name));
         }

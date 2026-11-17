@@ -257,6 +257,8 @@ pub fn import(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult, Import
     }
     let sha = util::sha256_hex(bytes);
     let mut b = builder::Builder::new(opts, &sha);
+    // Placeholders never take a name the source references.
+    common::reserve_source_references(&mut b, &String::from_utf8_lossy(bytes));
     match (&parsed, detected.dialect) {
         (Parsed::Structured(v), Dialect::Swagger20 | Dialect::OpenApi30 | Dialect::OpenApi31 | Dialect::OpenApi32) => {
             openapi::import(v, detected.dialect, &mut b)?

@@ -140,94 +140,71 @@ pub fn classify_template_value(value: &str, syntax: TemplateSyntax) -> TemplateK
     }
 }
 
-/// Bytes a `{{…}}` expression may span and still be skipped as one when a
-/// URL's authority is scanned ([`userinfo_end`]). A longer one is read as
-/// plain text, which bounds the work.
-const EXPRESSION_BYTES: usize = 4096;
-
-/// The length of the `{{…}}` expression `s` starts with, through its closing
-/// `}}`. A `}}` inside a single- or double-quoted string (Nunjucks lexes
-/// `'a}}b'` as one string, with backslash escapes) does not close it. `None`
-/// when it does not close within [`EXPRESSION_BYTES`].
-fn expression_len(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut i = 2;
-    let mut quote = None;
-    while i + 1 < bytes.len() && i < EXPRESSION_BYTES {
-        let c = bytes[i];
-        match quote {
-            Some(q) => {
-                if c == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if c == q {
-                    quote = None;
-                }
+/// The byte offset of the `@` that ends the userinfo in `after_scheme` (a
+/// URL with its `scheme://` removed), if it has one. `{{…}}` expressions are
+/// not parsed; the rule fails closed instead:
+///
+/// * When no `{{` comes before the first `@`, RFC 3986 applies: the
+///   authority ends at the first `/`, `?` or `#`, and its last `@` ends the
+///   userinfo.
+/// * Otherwise a delimiter only ends the authority when it is unambiguous:
+///   outside every `{{` seen so far (counting `{{` and `}}`), and not
+///   followed by a stray `}}` that shows it was inside an expression after
+///   all (`{{ 'a}}/b' | f }}`). The userinfo then ends at the last `@` before
+///   the first unambiguous delimiter, or before the end when there is none,
+///   so an ambiguous userinfo is taken off whole rather than left in the URL.
+///
+/// One pass, linear in the input.
+pub fn userinfo_end(after_scheme: &str) -> Option<usize> {
+    let bytes = after_scheme.as_bytes();
+    let first_at = after_scheme.find('@')?;
+    if !after_scheme[..first_at].contains("{{") {
+        let end = after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
+        return after_scheme[..end].rfind('@');
+    }
+    let mut depth = 0usize;
+    let mut boundary = None;
+    let mut ats = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"{{") {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        if bytes[i..].starts_with(b"}}") {
+            if depth > 0 {
+                depth -= 1;
+            } else {
+                // A stray `}}`: the delimiter taken as the boundary was inside
+                // an expression.
+                boundary = None;
             }
-            None if c == b'\'' || c == b'"' => quote = Some(c),
-            None if c == b'}' && bytes[i + 1] == b'}' => return Some(i + 2),
-            None => {}
+            i += 2;
+            continue;
+        }
+        match bytes[i] {
+            b'/' | b'?' | b'#' if depth == 0 && boundary.is_none() => boundary = Some(i),
+            b'@' => ats.push(i),
+            _ => {}
         }
         i += 1;
     }
-    None
+    let end = boundary.unwrap_or(bytes.len());
+    ats.into_iter().rev().find(|&at| at < end)
 }
 
-/// The last `@` of the authority at the start of `after` and how far the
-/// scan went. The authority ends at the first `/`, `?` or `#` (and, in free
-/// text, whitespace); with `expressions`, a `{{…}}` expression
-/// ([`expression_len`]) is skipped whole, and after one that does not close
-/// the rest is read as plain text (linear work).
-fn authority_last_at(after: &str, expressions: bool, stop_at_whitespace: bool) -> (Option<usize>, usize) {
-    let mut i = 0;
-    let mut last_at = None;
-    let mut skip_expressions = expressions;
-    while i < after.len() {
-        let rest = &after[i..];
-        if skip_expressions && rest.starts_with("{{") {
-            match expression_len(rest) {
-                Some(len) => {
-                    i += len;
-                    continue;
-                }
-                None => skip_expressions = false,
-            }
-        }
-        let c = rest.chars().next().unwrap_or(' ');
-        if matches!(c, '/' | '?' | '#') || (stop_at_whitespace && c.is_whitespace()) {
-            break;
-        }
-        if c == '@' {
-            last_at = Some(i);
-        }
-        i += c.len_utf8();
-    }
-    (last_at, i)
-}
-
-/// The byte offset of the `@` that ends the userinfo in `after_scheme` (a
-/// URL with its `scheme://` removed), if it has one. Within the authority
-/// (up to the first `/`, `?` or `#`, RFC 3986 section 3.2) the last `@` ends
-/// the userinfo. The authority is read twice, as plain text and with
-/// `{{…}}` expressions skipped whole (so a delimiter inside
-/// `{{ 'a/b' | urlencode }}`, quoted `}}` included, does not end it), and the
-/// later `@` wins: an ambiguous userinfo is taken off whole rather than left
-/// in the URL.
-pub fn userinfo_end(after_scheme: &str) -> Option<usize> {
-    userinfo_end_in(after_scheme, false).0
-}
-
-/// [`userinfo_end`] for a URL inside free text, where whitespace also ends
-/// the authority; also returns how far the scan went.
-pub fn userinfo_end_in_text(after_scheme: &str) -> (Option<usize>, usize) {
-    userinfo_end_in(after_scheme, true)
-}
-
-fn userinfo_end_in(after_scheme: &str, stop_at_whitespace: bool) -> (Option<usize>, usize) {
-    let (aware, aware_end) = authority_last_at(after_scheme, true, stop_at_whitespace);
-    let (plain, plain_end) = authority_last_at(after_scheme, false, stop_at_whitespace);
-    (aware.max(plain), aware_end.max(plain_end))
+/// Whether a URL userinfo is exactly variable references in `syntax`:
+/// `{{user}}`, `{{user}}:` or `{{user}}:{{password}}`. Anything else (a
+/// literal user name or password, an expression, a token) is credential
+/// material.
+pub fn is_plain_userinfo(userinfo: &str, syntax: TemplateSyntax) -> bool {
+    let (user, pass) = match userinfo.split_once(':') {
+        Some((u, p)) => (u, p),
+        None => (userinfo, ""),
+    };
+    classify_template_value(user, syntax) == TemplateKind::Reference
+        && matches!(classify_template_value(pass, syntax), TemplateKind::Empty | TemplateKind::Reference)
 }
 
 /// Marker text substituted wherever a secret would otherwise be displayed or
@@ -365,26 +342,41 @@ mod template_kind_tests {
     use super::*;
 
     #[test]
-    fn userinfo_ends_at_the_last_at_of_either_reading() {
+    fn userinfo_ends_at_the_last_at_before_an_unambiguous_delimiter() {
         for (after, userinfo) in [
             ("admin:pw@host/x", Some("admin:pw")),
             ("admin:p@ss@host/x@y", Some("admin:p@ss")),
             ("host/x@y", None),
             ("host?email=a@b", None),
+            ("admin:pw@{{host}}/x", Some("admin:pw")),
+            ("{{host}}/x?e=a@b&k={{key}}&m=c@d", None),
+            ("{{baseUrl}}/users/me@x", None),
             // A delimiter, or a quoted `}}`, inside an expression.
             ("admin:{{ 'a/b?c#d' | urlencode }}@host/x", Some("admin:{{ 'a/b?c#d' | urlencode }}")),
             ("admin:{{ 'tok}}/suffix' | urlencode }}@host/x", Some("admin:{{ 'tok}}/suffix' | urlencode }}")),
             ("admin:{{ \"q}}?x\" }}@host", Some("admin:{{ \"q}}?x\" }}")),
-            // An expression that closes only in the query does not hide the
-            // real `@`.
+            // An expression that closes only in the query.
             ("user:pa{{ss@host/v1?q={{x}}", Some("user:pa{{ss")),
-            ("{{baseUrl}}/users/me@x", None),
+            // A credential URL inside an expression is taken off up to its `@`.
+            ("{{ 'https://admin:tok@api.example.test' | replace('https://', '') }}/v1", Some("{{ 'https://admin:tok")),
         ] {
             assert_eq!(userinfo_end(after).map(|at| &after[..at]), userinfo, "{after:?}");
         }
-        // Linear on unterminated expressions.
-        let long = format!("u:{}@host", "{".repeat(1 << 20));
-        assert!(userinfo_end(&long).is_some());
+        let long = format!("admin:{{{{{}'tok/x'|urlencode}}}}@api.example.test/v1", " ".repeat(8192));
+        assert_eq!(userinfo_end(&long), long.find("}}@").map(|i| i + 2));
+        let unterminated = format!("u:{}@host", "{".repeat(1 << 20));
+        assert!(userinfo_end(&unterminated).is_some());
+    }
+
+    #[test]
+    fn only_references_make_a_plain_userinfo() {
+        use TemplateSyntax::Nunjucks;
+        for plain in ["{{user}}", "{{user}}:", "{{user}}:{{pass}}", "{{ _.user }}:{{ _.pass }}"] {
+            assert!(is_plain_userinfo(plain, Nunjucks), "{plain:?}");
+        }
+        for literal in ["admin", "admin:pw", "admin:{{pw}}", "{{user}}:pw", ":{{pw}}", "{{ 'tok:rest' }}", "", "tok"] {
+            assert!(!is_plain_userinfo(literal, Nunjucks), "{literal:?}");
+        }
     }
 
     #[test]

@@ -281,7 +281,9 @@ impl PlaceholderNames {
         self.used.insert(sanitize_var(name));
     }
 
-    fn name(&mut self, readable: &str) -> String {
+    /// A free placeholder name for `readable` (sanitized and bounded), now
+    /// reserved.
+    pub fn name(&mut self, readable: &str) -> String {
         let mut base = sanitize_var(readable);
         base.truncate(PATH_NAME_BYTES);
         if self.used.insert(base.clone()) {
@@ -296,6 +298,23 @@ impl PlaceholderNames {
                 return candidate;
             }
         }
+    }
+}
+
+/// Reserve every name the source references as `{{name}}` (Insomnia's
+/// `{{ _.name }}` too), so a placeholder the import makes never names a
+/// variable the source already uses. One pass over the input.
+pub fn reserve_source_references(b: &mut Builder, text: &str) {
+    let mut rest = text;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        let expr = after[..close].trim();
+        let name = expr.strip_prefix("_.").unwrap_or(expr);
+        if !name.is_empty() && name.len() <= 256 {
+            b.env_names.reserve(name);
+        }
+        rest = &after[close + 2..];
     }
 }
 
@@ -746,11 +765,10 @@ pub fn listed_query_param(b: &mut Builder, raw_name: &str, raw_value: &str, poin
     (name, value, true)
 }
 
-/// Split URL userinfo (`user:password@`) off `url`: the URL without it, and
-/// the user name and password as written (percent-encoded). A URL without a
-/// scheme is read from its start (Postman and Insomnia accept
-/// `user:pw@host/path`). The userinfo ends at the last `@` of the authority
-/// ([`userinfo_end`]).
+/// Split URL userinfo (`user:password@`) off `url`: the URL without it,
+/// and the userinfo as written. A URL without a scheme is read from its
+/// start (Postman and Insomnia accept `user:pw@host/path`). The userinfo
+/// ends where [`userinfo_end`] says; an empty one is dropped.
 pub fn take_userinfo(url: &str) -> (String, Option<Userinfo>) {
     let (prefix, rest) = match url.split_once("://") {
         Some((scheme, rest)) if !scheme.is_empty() && !scheme.contains(['/', '?', '#', '@']) => (&url[..scheme.len() + 3], rest),
@@ -758,71 +776,55 @@ pub fn take_userinfo(url: &str) -> (String, Option<Userinfo>) {
     };
     let Some(at) = userinfo_end(rest) else { return (url.to_string(), None) };
     let userinfo = &rest[..at];
-    // The first `:` splits user name and password; a `:` inside an expression
-    // in the user name moves more into the password, which fails closed.
-    let parts = match userinfo.find(':') {
-        Some(colon) => (userinfo[..colon].to_string(), Some(userinfo[colon + 1..].to_string())),
-        None => (userinfo.to_string(), None),
-    };
-    (format!("{prefix}{}", &rest[at + 1..]), Some(parts))
+    let without = format!("{prefix}{}", &rest[at + 1..]);
+    if userinfo.trim().is_empty() {
+        return (without, None);
+    }
+    (without, Some(userinfo.to_string()))
 }
 
-/// Basic auth from URL userinfo as written ([`take_userinfo`]): the engine
-/// never sends credentials in the URL, and the password follows the
-/// credential policy (a `{{password}}` placeholder and a redaction unless
-/// `include_credentials`).
+/// Basic auth from URL userinfo as written ([`take_userinfo`]); the engine
+/// never sends credentials in the URL.
 ///
-/// Each part is percent-decoded only when that keeps its references
-/// ([`decode_keeping_references`]): escaped text never becomes a reference
-/// the engine resolves. A user name that cannot be decoded so is kept as
-/// written (`url_user_not_decoded`); such a password cannot be stored, so it
-/// becomes a required `{{password}}` in either credential mode
-/// (`url_password_not_decoded`).
-pub fn userinfo_auth(b: &mut Builder, user: &str, pass: Option<&str>, pointer: &str) -> AuthConfig {
-    let pass = pass.filter(|p| !query_decode(p).trim().is_empty());
-    let Some(pass) = pass else {
-        // A userinfo without a password (`https://<token>@host/`, or
-        // `https://<token>:@host/`) is a token in the user name: it follows
-        // the credential policy, and the password is empty, as curl sends it.
-        let (token, literal) = match decode_keeping_references(user) {
-            Some(token) => {
-                let literal = has_literal_secret(token.trim(), b.template_syntax);
-                (token, literal)
-            }
-            None => (user.to_string(), true),
+/// A userinfo that is exactly variable references (`{{user}}`,
+/// `{{user}}:`, `{{user}}:{{password}}`, in the source's syntax;
+/// [`anvil_domain::secret::is_plain_userinfo`]) keeps them. Anything else is
+/// credential material, and no part of it is kept as a user name or in the
+/// URL: the user name becomes a fresh placeholder, and the password a fresh
+/// placeholder too (with a redaction), or, with `include_credentials`, the
+/// literal after the first `:` (the whole userinfo when there is none),
+/// kept only in the password, a secret field. Fresh placeholders come from
+/// the import's name allocator, so they never name a variable the source
+/// defines or references (`url_userinfo_replaced`).
+pub fn userinfo_auth(b: &mut Builder, userinfo: &str, pointer: &str) -> AuthConfig {
+    if anvil_domain::secret::is_plain_userinfo(userinfo, b.template_syntax) {
+        let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+        return AuthConfig::Basic { username: user.to_string(), password: SensitiveValue::template(pass) };
+    }
+    let user_var = b.env_names.name("username");
+    let username = format!("{{{{{user_var}}}}}");
+    b.report.require_var(&user_var, true, "the user name in the URL is not imported", pointer);
+    let password = if b.opts.include_credentials {
+        // The password part, or the whole userinfo when it holds an
+        // expression or has no (or an empty) password: no part is dropped.
+        let literal = match userinfo.split_once(':') {
+            Some((_, p)) if !p.trim().is_empty() && !userinfo.contains("{{") => p,
+            _ => userinfo,
         };
-        if literal {
-            b.report.warn(
-                "url_user_token",
-                pointer,
-                "the URL's userinfo has no password, so its user name is read as a token and follows the credential policy",
-            );
-        }
-        let username = credential_text_with(b, &token, literal, "username", pointer, "token in the URL's user name");
-        return AuthConfig::Basic { username, password: SensitiveValue::template("") };
+        SensitiveValue::template(decode_keeping_references(literal).unwrap_or_else(|| literal.to_string()))
+    } else {
+        let pass_var = b.env_names.name("password");
+        let placeholder = format!("{{{{{pass_var}}}}}");
+        b.report.redacted(pointer, "credentials in the URL", &placeholder);
+        b.report.require_var(&pass_var, true, "the credentials in the URL were redacted on import", pointer);
+        SensitiveValue::template(placeholder)
     };
-    let username = decode_keeping_references(user).unwrap_or_else(|| {
-        b.report.warn(
-            "url_user_not_decoded",
-            pointer,
-            "the user name in the URL is kept percent-encoded: decoding it would make or change a {{reference}}, or it is not UTF-8",
-        );
-        user.to_string()
-    });
-    let password = match decode_keeping_references(pass) {
-        Some(pass) => credential(b, &pass, "password", pointer, "password in the URL"),
-        None => {
-            b.report.warn(
-                "url_password_not_decoded",
-                pointer,
-                "the password in the URL was not imported: decoding it would make or change a {{reference}}, or it is not UTF-8; \
-                 supply it as the variable 'password'",
-            );
-            b.report.redacted(pointer, "password in the URL", "{{password}}");
-            b.report.require_var("password", true, "the password in the URL could not be imported", pointer);
-            SensitiveValue::template("{{password}}")
-        }
-    };
+    b.report.warn(
+        "url_userinfo_replaced",
+        pointer,
+        "the URL's user name and password are not exactly variable references, so they were taken off the URL and replaced \
+         by placeholders to supply (with included credentials, only the password literal is kept, in the auth password)",
+    );
     AuthConfig::Basic { username, password }
 }
 
@@ -832,9 +834,9 @@ pub fn userinfo_auth(b: &mut Builder, user: &str, pass: Option<&str>, pointer: &
 /// win, as curl prefers `-u`; the userinfo, already removed from the URL,
 /// is then dropped with a `url_credentials_dropped` warning.
 pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<Userinfo>, pointer: &str) {
-    let Some((user, pass)) = userinfo else { return };
+    let Some(userinfo) = userinfo else { return };
     if matches!(auth, AuthConfig::Inherit) {
-        *auth = userinfo_auth(b, &user, pass.as_deref(), pointer);
+        *auth = userinfo_auth(b, &userinfo, pointer);
     } else {
         b.report.warn(
             "url_credentials_dropped",
@@ -847,16 +849,15 @@ pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<U
 
 /// The byte offset of the `@` that ends the userinfo in `after_scheme` (a
 /// URL with its `scheme://` removed), if it has userinfo
-/// ([`anvil_domain::secret::userinfo_end`]: the last `@` of the authority,
-/// read both as plain text and with `{{…}}` expressions skipped whole, so an
-/// ambiguous userinfo is taken off whole rather than left in the URL).
+/// ([`anvil_domain::secret::userinfo_end`]: RFC 3986 unless a `{{` comes
+/// before the first `@`, and then the last `@` before the first unambiguous
+/// delimiter, so an ambiguous userinfo is taken off whole).
 pub fn userinfo_end(after_scheme: &str) -> Option<usize> {
     anvil_domain::secret::userinfo_end(after_scheme)
 }
 
-/// A URL's userinfo as written: the user name, and the password after the
-/// first `:` (`None` when there is no `:`).
-pub type Userinfo = (String, Option<String>);
+/// A URL's userinfo as written (`user:password`).
+pub type Userinfo = String;
 
 /// Remove a `#fragment`, ignoring `#` inside `{{…}}` references.
 pub fn strip_fragment(url: &str) -> &str {

@@ -59,24 +59,27 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   decoded one (so `%7B%7Bapi_key%7D%7D` cannot read a variable `api_key`).
   A value that decodes to whitespace only stays in the query, and a `+` or
   an escape that is not UTF-8 in a moved pair is reported.
-- URL userinfo (`https://user:password@host/`) becomes Basic auth with a
-  `{{password}}` placeholder in every migration importer, and the URL loses it
-  (the engine never sends credentials in the URL). The userinfo ends at the
-  last `@` before the path, so a password holding `@` is removed whole, and
-  a `/`, `?` or `#` inside a `{{…}}` expression (a quoted `}}` included)
-  does not end it early; the authority is read both as plain text and with
-  expressions skipped, and the later `@` wins, so an ambiguous userinfo is
-  taken off whole. A userinfo without a password (`https://<token>@host/`
-  or `https://<token>:@host/`) is read as a token in the user name and
-  follows the credential policy (`url_user_token`; the password is empty).
-  A
-  request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a Postman
-  or Insomnia auth helper) or with auth explicitly off keeps that, and the
-  userinfo is dropped (`url_credentials_dropped`). A user name or password
-  whose decoding would make or change a `{{reference}}` (`%7B%7Bid%7D%7D`), or
-  is not UTF-8, is never decoded: the user name is kept as written
-  (`url_user_not_decoded`) and the password becomes a required `{{password}}`
-  even with `include_credentials` (`url_password_not_decoded`).
+- URL userinfo (`https://user:password@host/`) is taken off the URL in every
+  migration importer (the engine never sends credentials in the URL) and
+  becomes Basic auth. Where it ends follows RFC 3986 (the last `@` before the
+  first `/`, `?` or `#`) unless a `{{` comes before the first `@`; then it
+  ends at the last `@` before the first unambiguous delimiter (outside every
+  `{{`, and not followed by a stray `}}`), so a delimiter or a quoted `}}`
+  inside an expression never leaves part of it in the URL, and an
+  ambiguous userinfo is taken off whole. Expressions are not parsed.
+  A userinfo that is exactly variable references (`{{user}}`,
+  `{{user}}:`, `{{user}}:{{password}}`) keeps them. Anything else (a literal
+  user name or password, a token, an expression) is credential material and
+  no part of it is kept as a user name or in the URL: the user name becomes
+  a fresh `{{username}}` placeholder and the password a fresh `{{password}}`
+  placeholder (`url_userinfo_replaced`); with `include_credentials` the
+  password keeps the literal (the part after the first `:`, or the whole
+  userinfo when it has an expression or no password), a secret field.
+  Fresh placeholders never take a name the source defines or references
+  (`username_2` then). A request with auth of its own (a cURL `-u` or
+  `--oauth2-bearer`, a Postman or Insomnia auth helper) or with auth
+  explicitly off keeps that, and the userinfo is dropped
+  (`url_credentials_dropped`).
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia

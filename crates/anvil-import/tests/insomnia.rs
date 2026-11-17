@@ -595,7 +595,7 @@ fn url_userinfo_becomes_basic_auth_unless_auth_is_disabled() {
         let s = &r.requests[0].spec;
         assert_eq!(s.url, "https://api.example.com/v1/status");
         assert!(
-            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password == &SensitiveValue::template("{{password}}")),
+            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password == &SensitiveValue::template("{{password}}")),
             "expected Basic auth with a placeholder password"
         );
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-in1"));
