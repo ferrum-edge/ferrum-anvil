@@ -47,6 +47,9 @@
   and `--overwrite`/`--delete` (with their `-scope` and `-all` forms) choose what to replace or
   delete. `--import` names the import when the workspace has several. Both use the same reviewed
   plan/apply path, and nothing is sent (#544).
+- Gateway profiles: the desktop's Connection profiles dialog has **Open console** for a saved
+  console link (opened read-only in the system browser by the backend), and `anvil gateway list`
+  prints the link (#567).
 
 ### Security
 
@@ -142,6 +145,35 @@
   a datagram over 2 KiB is sent and received: one to send was silently never sent, and a larger
   answer was never read and blocked every later one, so the exchange recorded "no response
   observed" (`datagrams_received: 0`) although the answer had arrived (GHSA-62g8-g8px-5xm3).
+- The default Postman and Insomnia import no longer keeps a literal credential as plaintext. - A URL
+  with userinfo (`https://user:password@host/`) loses it on import, in Postman's string, raw or
+  rebuilt object form and in an Insomnia request URL. It gets Basic auth with a `{{password}}`
+  placeholder, as the cURL and HAR importers already did. - In all four importers the userinfo now
+  ends at the last `@` of the authority, so a password holding `@` is removed whole. - Auth of the
+  request's own (a cURL `-u`, a Postman or Insomnia auth helper) or auth explicitly off now wins
+  over URL userinfo, which is dropped (`url_credentials_dropped`). cURL URL userinfo used to replace
+  `-u`. - A user name or password whose decoding would make or change a `{{reference}}`, or is not
+  UTF-8, is never decoded into one; such a password becomes a required `{{password}}`. -
+  Credential-named Postman path variables and Insomnia path parameters (`:webhook_token`) become
+  placeholders. - So does every value (string, number or boolean) under a credential-named member of
+  an Insomnia environment array (`{"accounts": [{"api_key": "…"}]}`). Only a plain reference or an
+  argument-free helper is kept there, so a helper with arguments or a quoted Nunjucks expression
+  (`{{ 'key' }}`) is redacted. Placeholder names never take a variable name of any environment of
+  the import. - Whether a credential-named value is a reference to keep or a literal to redact
+  follows one rule on import and export: only a plain reference (`{{ name }}`, `{{ _.name }}`) is a
+  reference, so a quoted string (`{{ 'key' }}`), a number, a filter or a dynamic helper inside
+  `{{…}}` is literal. A dynamic helper such as `{{$guid}}` under a credential name is now redacted
+  on import and extracted on export. - A credential moved out of a query kept in the URL keeps an
+  escaped name encoded, and its placeholder is named after the name as written, so escaped braces
+  never make it read an existing variable. - Each is listed in `report.redactions` unless
+  `include_credentials` is set. - Before, such a password or key was stored in the request and left
+  the machine in share-safely and encrypted-transfer exports. Re-import affected collections, and
+  treat a credential of this kind in a workspace or bundle made by an earlier build as disclosed
+  (GHSA-c236-7r9g-c9p2).
+- Share-safely and encrypted-transfer exports warn in the preview about a URL password in
+  `user:password@` that is not exactly one `{{reference}}`. That includes one mixing a reference
+  with literal text, a helper with arguments, or a password holding a brace or an `@`. Free text is
+  still exported as written (GHSA-c236-7r9g-c9p2).
 
 ### Changed
 
@@ -224,6 +256,10 @@
 - The AUTH-X04/X05, AUTH-017 and 425 diagnostics regression tests run against every embedded Ferrum
   catalog, not only 0.9.5/0.9.7 (#540).
 - `docs/completion-report.md` dates its source and website rows 2026-11-10 (#545).
+- BREAKING: a gateway profile's console link must be an absolute `https` or `http` URL with a host
+  and no user name or password; any other link is refused when the profile is saved (#567).
+- BREAKING: `anvil load run` can now exit 2 where it exited 1 (chained plans), and the summary CSV
+  writes empty cells instead of `0` for unmeasured values (#565, #566).
 
 ### Removed
 
@@ -481,6 +517,41 @@
   selected proxy profile's password only; an OAuth client secret or vault variable only for a fixed
   endpoint that passes its policy) is now tested directly, and the AUTH-002 redaction test checks
   the literal password it plants (#543).
+- `anvil load run` decides its exit code from the send (unit) ledger, so a chain whose step failed
+  an assertion exits 2 even when a later step timed out or failed at transport; the summary line is
+  labelled `iterations` and a `sends:` line reports the unit counts, assertion failures included
+  (#565).
+- Load reports no longer show unmeasured values as 0 µs: the summary CSV leaves an empty latency
+  distribution's values (and `timeouts_censored,elapsed_max_us` without timeouts) empty, and closed
+  and iteration runs export empty start-lag cells, with "not measured" in the HTML report and the
+  desktop (#566).
+- Failure lab: the policy profile no longer sets `ip_restriction` `mode`, and `lint-profiles.rb`
+  refuses `hmac_auth.allow_unsafe_replayable_v1`, `ip_restriction.mode` and
+  `jwks_auth.providers[].audience`, which Ferrum Edge after v0.9.20 rejects;
+  `discovery.hide_denied_items` is allowed only while the lab runs v0.9.20, where the mcp profile
+  still needs it (#569).
+- gRPC and gRPC-Web diagnostics: a status with no message before it no longer names the API owner;
+  Ferrum Edge's message-less gRPC outcomes are listed as candidates (`ferrum.grpc_status_outcomes`);
+  the marker rules judge the response shape (a token on a gRPC request's 4xx or beside grpc-status 0
+  is inconsistent, an unmarked 5xx is reported, and `overload`/`config_stale` count on a gRPC error
+  only over HTTP/3); the diagnostic reference lookup reads trailers; and the catalogs give
+  `plugin.grpc_web.invalid_request` its real grpc-status 3 (#570).
+- In a query kept in the URL as written (one with a bare `flag` segment, one whose escapes would
+  decode into a `{{reference}}`, or one written into an Insomnia URL), a credential-named
+  `name=value` pair is now a sensitive parameter. Before, its placeholder was written into the URL
+  text, where a supplied value was sent unencoded (an `&` in it added a parameter), and a literal
+  kept with `include_credentials` was neither marked sensitive nor extracted on export.
+- A Postman `query` list value or Insomnia parameter with percent escapes was stored as written and
+  encoded again when sent, so `redirect_uri=https%3A%2F%2F…` went out as `%253A…`. - It is now
+  stored decoded when encoding the decoded text gives back exactly the source and decoding adds no
+  `{{reference}}`. - Any other value with escapes is kept as written and reported
+  (`query_value_not_decoded`). - For a cURL, HAR or Postman raw URL query, a `+` (sent as `%2B`
+  where the source sends `+`) and an escape that is not UTF-8 (replaced by U+FFFD) are now reported
+  (`query_plus_sent_encoded`, `query_not_utf8`). - A URL query whose decoding would make or change a
+  `{{reference}}` stays in the URL as written (#563).
+- A cURL command whose data is read from a file (`-d @order.json`, `--json @order.json`,
+  `--data-urlencode comment@notes.txt`) imports as POST, as curl sends it, instead of GET. The file
+  is still not read (`curl_data_file`); `-G`, `-I` and an explicit `-X` keep precedence (#564).
 
 ## [0.1.7] - 2026-11-03
 
