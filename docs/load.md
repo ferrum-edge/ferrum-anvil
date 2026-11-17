@@ -524,9 +524,14 @@ reader cannot keep a finished worker alive.
   `grpc_status`, `stream` (with `messages_sent` for client and bidirectional
   gRPC), `websocket`, `websocket_close`, `tcp`, `datagram`, `dtls_handshake`,
   `tunnel`); `datagram,observed_received_per_sent` is labelled an
-  observation, and empty distributions have empty values, not zeros. In
-  `timeline_csv`, a second with no successful unit has empty
-  `success_p50_us` and `success_p99_us`.
+  observation, and empty distributions have empty values, not zeros: the
+  summary `latency_success_us`, `latency_failure_us` and `setup_us` rows keep
+  only `count` (0), and `timeouts_censored,elapsed_max_us` is empty without
+  censored timeouts. In `timeline_csv`, a second with no successful unit has
+  empty `success_p50_us` and `success_p99_us`. Start lag exists only for an
+  open workload: for closed and iteration runs `generator,p99_schedule_lag_us`,
+  `generator,max_schedule_lag_us` and the timeline's `p99_schedule_lag_us`
+  are empty, and the HTML report and the desktop say "not measured".
 * **HTML** (`html::to_html`): one self-contained file — inline CSS and inline
   SVG only, no JavaScript, no external fonts/images/stylesheets, and an
   embedded CSP (`default-src 'none'`). Every dynamic string is escaped,

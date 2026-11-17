@@ -563,7 +563,16 @@ fn opt<T: ToString>(v: Option<T>) -> String {
     v.map(|v| v.to_string()).unwrap_or_default()
 }
 
-/// Summary CSV: `section,metric,value` rows.
+/// Whether the workload measures start (schedule) lag. Only an open
+/// (arrival-rate) workload schedules arrivals; closed and iteration runs have
+/// no schedule, so their lag fields hold no measurement (not 0 µs of lag).
+pub fn schedule_lag_measured(w: &Workload) -> bool {
+    matches!(w, Workload::OpenArrivalRate { .. })
+}
+
+/// Summary CSV: `section,metric,value` rows. A value with no measurement
+/// behind it (a distribution without samples, start lag of a workload without
+/// a schedule) is empty, never 0.
 pub fn summary_csv(r: &LoadReport) -> String {
     let mut rows: Vec<Vec<String>> = vec![vec!["section".into(), "metric".into(), "value".into()]];
     let mut add = |s: &str, m: &str, v: String| rows.push(vec![s.into(), m.into(), v]);
@@ -625,14 +634,14 @@ pub fn summary_csv(r: &LoadReport) -> String {
             ("p99", l.p99_us),
             ("max", l.max_us),
         ] {
-            add(name, k, v.to_string());
+            add(name, k, if l.count == 0 && k != "count" { String::new() } else { v.to_string() });
         }
     }
     let t = &r.timeouts_censored;
     add("timeouts_censored", "count", t.count.to_string());
     add("timeouts_censored", "deadline_ms_min", opt(t.deadline_ms_min));
     add("timeouts_censored", "deadline_ms_max", opt(t.deadline_ms_max));
-    add("timeouts_censored", "elapsed_max_us", t.elapsed_at_timeout.max_us.to_string());
+    add("timeouts_censored", "elapsed_max_us", if t.count == 0 { String::new() } else { t.elapsed_at_timeout.max_us.to_string() });
     add("timeouts_censored", "label", t.label.clone());
     for (s, n) in &r.status_distribution {
         add("status", &s.to_string(), n.to_string());
@@ -649,8 +658,9 @@ pub fn summary_csv(r: &LoadReport) -> String {
     add("generator", "peak_cpu_percent", opt(g.peak_cpu_percent.map(|v| format!("{v:.1}"))));
     add("generator", "peak_rss_bytes", opt(g.peak_rss_bytes));
     add("generator", "peak_open_fds", opt(g.peak_open_fds));
-    add("generator", "p99_schedule_lag_us", g.p99_schedule_lag_us.to_string());
-    add("generator", "max_schedule_lag_us", g.max_schedule_lag_us.to_string());
+    let lag = |v: u64| if schedule_lag_measured(&r.plan.workload) { v.to_string() } else { String::new() };
+    add("generator", "p99_schedule_lag_us", lag(g.p99_schedule_lag_us));
+    add("generator", "max_schedule_lag_us", lag(g.max_schedule_lag_us));
     add("generator", "target_not_achieved", g.target_not_achieved.to_string());
     add("integrity", "sha256", opt(r.integrity_sha256.clone()));
     csv_string(rows)
@@ -773,6 +783,7 @@ fn protocol_csv(p: &ProtocolLoadMetrics, add: &mut impl FnMut(&str, &str, String
 
 /// Per-bucket timeline CSV.
 pub fn timeline_csv(r: &LoadReport) -> String {
+    let lag_measured = schedule_lag_measured(&r.plan.workload);
     let mut rows = vec![
         [
             "second",
@@ -804,7 +815,7 @@ pub fn timeline_csv(r: &LoadReport) -> String {
             b.in_flight.to_string(),
             success_us(b.p50_us),
             success_us(b.p99_us),
-            b.p99_schedule_lag_us.to_string(),
+            if lag_measured { b.p99_schedule_lag_us.to_string() } else { String::new() },
         ]);
     }
     csv_string(rows)
@@ -995,6 +1006,61 @@ pub(crate) mod tests {
         assert_eq!((rows[1][p50], rows[1][p99]), ("", ""), "{t}");
         assert_eq!((rows[2][p50], rows[2][p99]), ("1500", "9000"), "{t}");
         assert_eq!(rows[1].len(), rows[0].len(), "every column is still there");
+    }
+
+    fn csv_value<'a>(csv: &'a str, section: &str, metric: &str) -> &'a str {
+        let prefix = format!("{section},{metric},");
+        csv.lines().find_map(|l| l.strip_prefix(prefix.as_str())).unwrap_or_else(|| panic!("no {section},{metric} row in {csv}"))
+    }
+
+    /// No successful unit: the summary leaves the success distribution empty
+    /// (only its count, 0, remains), as the protocol distributions do.
+    #[test]
+    fn summary_csv_leaves_an_empty_distribution_empty() {
+        let mut r = sample_report();
+        r.latency_success = LatencySummary::default();
+        let s = summary_csv(&r);
+        assert_eq!(csv_value(&s, "latency_success_us", "count"), "0", "{s}");
+        for k in ["min", "mean", "p50", "p90", "p95", "p99", "max"] {
+            assert_eq!(csv_value(&s, "latency_success_us", k), "", "latency_success_us,{k} in {s}");
+        }
+        assert_eq!(csv_value(&s, "timeouts_censored", "elapsed_max_us"), "", "{s}");
+        // A distribution with samples keeps its values.
+        let s = summary_csv(&sample_report());
+        assert_eq!((csv_value(&s, "latency_success_us", "count"), csv_value(&s, "latency_success_us", "min")), ("3", "1000"), "{s}");
+    }
+
+    /// Closed and iteration workloads have no schedule: their start-lag fields
+    /// are empty in both CSVs. An open workload's are unchanged.
+    #[test]
+    fn schedule_lag_is_exported_only_for_an_open_workload() {
+        let lag_column = |t: &str| {
+            let rows: Vec<Vec<String>> = t.lines().map(|l| l.split(',').map(str::to_string).collect()).collect();
+            let i = rows[0].iter().position(|c| c == "p99_schedule_lag_us").unwrap();
+            rows[1..].iter().map(|r| r[i].clone()).collect::<Vec<_>>()
+        };
+        let mut open = sample_report();
+        open.generator.p99_schedule_lag_us = 300;
+        open.generator.max_schedule_lag_us = 900;
+        let s = summary_csv(&open);
+        assert_eq!((csv_value(&s, "generator", "p99_schedule_lag_us"), csv_value(&s, "generator", "max_schedule_lag_us")), ("300", "900"));
+        assert!(lag_column(&timeline_csv(&open)).iter().all(|v| v == "300"));
+        for w in [
+            Workload::ClosedVirtualUsers { stages: vec![Stage { duration_secs: 1, target: 1 }], think_time_ms: 0 },
+            Workload::Iterations { iterations: 5, concurrency: 1 },
+        ] {
+            let mut r = open.clone();
+            r.plan.workload = w;
+            r.generator.p99_schedule_lag_us = 0;
+            r.generator.max_schedule_lag_us = 0;
+            let s = summary_csv(&r);
+            assert_eq!(
+                (csv_value(&s, "generator", "p99_schedule_lag_us"), csv_value(&s, "generator", "max_schedule_lag_us")),
+                ("", ""),
+                "{s}"
+            );
+            assert!(lag_column(&timeline_csv(&r)).iter().all(String::is_empty), "{:?}", r.plan.workload);
+        }
     }
 
     #[test]
