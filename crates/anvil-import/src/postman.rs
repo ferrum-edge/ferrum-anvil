@@ -8,8 +8,8 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type, maybe_redact, redact_raw_query,
-    scrub_body, scrub_graphql_variables, split_query,
+    apply_userinfo, body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type, listed_query_param,
+    maybe_redact, redact_raw_query, scrub_body, scrub_graphql_variables, split_query, take_userinfo, warn_query_conversions,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -105,7 +105,7 @@ fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str
             description(req.get("description")),
         ),
     };
-    let (url, params) = url(b, &url_v, &ptr(&rptr, "url"));
+    let (url, params, userinfo) = url(b, &url_v, &ptr(&rptr, "url"));
     let mut spec = RequestSpec::http(&method, &url);
     spec.params = params;
     spec.headers = headers(b, header_v, &ptr(&rptr, "header"));
@@ -119,6 +119,7 @@ fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str
         Some(a) => auth(b, a, &ptr(&rptr, "auth"), name),
         None => AuthConfig::Inherit,
     };
+    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(&rptr, "url"));
     for k in ["proxy", "certificate"] {
         if req.get(k).is_some() {
             b.report.unsupported(
@@ -254,10 +255,11 @@ fn headers(b: &mut Builder, v: Option<&Value>, at: &str) -> Vec<KeyValue> {
 }
 
 /// URL: `raw` wins; otherwise rebuilt from parts. Query parameters come from
-/// the `query` array (keeping disabled entries) or the raw query string.
-/// Path variables (`:id`) are substituted from `url.variable` or become
-/// `{{id}}` placeholders.
-fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>) {
+/// the `query` array (keeping disabled entries; [`listed_query_param`]) or
+/// the raw query string. Path variables (`:id`) are substituted from
+/// `url.variable` or become `{{id}}` placeholders. URL userinfo is removed
+/// and returned for [`apply_userinfo`].
+fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<(String, String)>) {
     let (raw, query_list, path_vars) = match v {
         Value::String(s) => (s.clone(), None, None),
         Value::Object(_) => {
@@ -267,7 +269,11 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>) {
         _ => (String::new(), None, None),
     };
     check_dynamic_vars(b, &raw, &ptr(at, "raw"));
+    let (raw, userinfo) = take_userinfo(&raw);
     let (base, raw_pairs) = split_query(&raw);
+    if query_list.is_none() {
+        warn_query_conversions(b, !raw_pairs.is_empty(), &raw, &ptr(at, "raw"));
+    }
     let base = if raw_pairs.is_empty() && query_list.is_some() {
         base.split('?').next().unwrap_or("").to_string()
     } else if raw_pairs.is_empty() && base.contains('?') {
@@ -284,9 +290,17 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>) {
                 let p = format!("{}/{i}", ptr(at, "query"));
                 let Some(k) = str_of(q, "key") else { continue };
                 let raw_v = q.get("value").map(scalar_text).unwrap_or_default();
-                let (value, sensitive) = maybe_redact(b, k, &raw_v, &p, "query");
+                let (name, value, sensitive) = listed_query_param(b, k, &raw_v, &p);
+                if raw_v.contains('+') {
+                    b.report.warn(
+                        "query_plus_sent_encoded",
+                        &p,
+                        "a '+' in this query value is kept as a plus and sent as %2B, where Postman sends it as is (servers that read \
+                         '+' as a space would see a plus): edit the parameter if a space was meant",
+                    );
+                }
                 params.push(KeyValue {
-                    name: k.to_string(),
+                    name,
                     value,
                     enabled: q.get("disabled").and_then(Value::as_bool) != Some(true),
                     description: description(q.get("description")),
@@ -303,7 +317,7 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>) {
         }
     }
     let url = substitute_path_vars(b, &base, path_vars.as_deref().unwrap_or(&[]), &ptr(at, "variable"));
-    (url, params)
+    (url, params, userinfo)
 }
 
 fn rebuild_url(v: &Value) -> String {
@@ -345,14 +359,17 @@ fn substitute_path_vars(b: &mut Builder, url: &str, vars: &[Value], at: &str) ->
         .split('/')
         .map(|seg| {
             let Some(name) = seg.strip_prefix(':').filter(|n| !n.is_empty()) else { return seg.to_string() };
-            let val =
-                vars.iter().find(|v| str_of(v, "key") == Some(name)).and_then(|v| v.get("value")).map(scalar_text).unwrap_or_default();
+            let found = vars.iter().position(|v| str_of(v, "key") == Some(name));
+            let val = found.and_then(|i| vars[i].get("value")).map(scalar_text).unwrap_or_default();
             if val.is_empty() {
                 let var = sanitize_var(name);
-                b.report.require_var(&var, false, "Postman path variable without a value", at);
+                b.report.require_var(&var, is_credential_name(name), "Postman path variable without a value", at);
                 format!("{{{{{var}}}}}")
             } else {
-                val
+                // A credential-named path variable (`:api_key`,
+                // `:webhook_token`) follows the credential policy.
+                let pointer = found.map_or_else(|| at.to_string(), |i| format!("{at}/{i}"));
+                maybe_redact(b, name, &val, &pointer, "path variable").0
             }
         })
         .collect();

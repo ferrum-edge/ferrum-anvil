@@ -6,6 +6,7 @@ use crate::builder::Builder;
 use crate::util::{
     has_literal_secret, is_credential_name, is_json_media, is_numeric_credential_name, is_xml_media, media_essence, sanitize_var,
 };
+use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::{Body, KeyValue};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::workspace::Variable;
@@ -24,8 +25,15 @@ pub fn credential(b: &mut Builder, value: &str, var: &str, pointer: &str, field:
 /// Same policy as [`credential`] for values stored as plain text (header,
 /// query and body fields).
 pub fn credential_text(b: &mut Builder, value: &str, var: &str, pointer: &str, field: &str) -> String {
+    let literal = has_literal_secret(value.trim());
+    credential_text_with(b, value, literal, var, pointer, field)
+}
+
+/// [`credential_text`] with the caller's judgement of whether a non-empty
+/// `value` is literal material (`literal`); a value that is not is kept.
+fn credential_text_with(b: &mut Builder, value: &str, literal: bool, var: &str, pointer: &str, field: &str) -> String {
     let t = value.trim();
-    if !t.is_empty() && !has_literal_secret(t) {
+    if !t.is_empty() && !literal {
         return value.to_string();
     }
     let var = sanitize_var(var);
@@ -251,6 +259,125 @@ fn scrub_json_at(b: &mut Builder, v: &mut Value, pointer: &str, path: &mut Vec<S
     }
 }
 
+/// Whether a credential value holds literal material: [`has_literal_secret`],
+/// or a dynamic helper with arguments (`{{$randomFrom a|b}}`), whose
+/// arguments are literal text the engine sends. Only variable references
+/// and argument-free helpers (`{{$guid}}`) are not.
+fn has_literal_material(v: &str) -> bool {
+    has_literal_secret(v) || template_tokens(v).iter().any(|t| t.trim().strip_prefix('$').is_some_and(|h| h.contains(char::is_whitespace)))
+}
+
+/// Bytes of the readable part of a placeholder name made from a JSON path.
+const PATH_NAME_BYTES: usize = 48;
+
+/// Placeholder names for credential leaves of one JSON value: readable
+/// (`accounts_0_api_key`, bounded), and distinct for distinct leaves. When
+/// two paths read the same (`a-b` and `a_b`, or a long name cut short), the
+/// later one gets a suffix from a hash of its full path.
+struct PathNames {
+    used: std::collections::HashSet<String>,
+}
+
+impl PathNames {
+    fn name(&mut self, readable: &str, identity: &[u8; 32]) -> String {
+        let mut base = sanitize_var(readable);
+        if base.len() > PATH_NAME_BYTES {
+            base.truncate(PATH_NAME_BYTES);
+        }
+        if self.used.insert(base.clone()) {
+            return base;
+        }
+        let hashed = format!("{base}_{}", hex::encode(&identity[..6]));
+        let mut name = hashed.clone();
+        let mut n = 2;
+        while !self.used.insert(name.clone()) {
+            name = format!("{hashed}_{n}");
+            n += 1;
+        }
+        name
+    }
+}
+
+/// The identity of a child path: a hash of the parent's identity and the
+/// member name or index, so each level costs its own name once.
+fn child_identity(parent: &[u8; 32], segment: &str) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(parent);
+    h.update([0u8]);
+    h.update(segment.as_bytes());
+    h.finalize().into()
+}
+
+/// The readable part of a child path, bounded so it never grows past what
+/// a name keeps.
+fn child_readable(parent: &str, segment: &str) -> String {
+    let mut out = format!("{parent}_{}", crate::util::clip(segment, PATH_NAME_BYTES));
+    if out.len() > PATH_NAME_BYTES * 2 {
+        let mut end = PATH_NAME_BYTES * 2;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
+    out
+}
+
+/// Apply the credential policy to a JSON value that is stored as text (an
+/// Insomnia environment value that is an array): every scalar under a
+/// credential-named member, whatever it is called and whatever its type
+/// (string, number or boolean), becomes a placeholder named by its path
+/// under `name` ([`PathNames`]). Numbers and booleans keep an unquoted
+/// placeholder ([`render_json`]). Returns whether anything was redacted.
+pub fn scrub_stored_json(b: &mut Builder, v: &mut Value, name: &str, pointer: &str) -> bool {
+    let before = b.report.redactions_made();
+    let mut names = PathNames { used: std::collections::HashSet::new() };
+    let root = child_identity(&[0u8; 32], name);
+    scrub_stored_at(b, v, &mut names, &sanitize_var(&crate::util::clip(name, PATH_NAME_BYTES)), &root, pointer, false);
+    b.report.redactions_made() > before
+}
+
+fn scrub_stored_at(
+    b: &mut Builder,
+    v: &mut Value,
+    names: &mut PathNames,
+    readable: &str,
+    identity: &[u8; 32],
+    pointer: &str,
+    credential: bool,
+) {
+    match v {
+        Value::Object(m) => {
+            for (k, child) in m.iter_mut() {
+                let p = crate::util::ptr(pointer, &segment(k));
+                let under = credential || is_credential_name(k);
+                scrub_stored_at(b, child, names, &child_readable(readable, k), &child_identity(identity, k), &p, under);
+            }
+        }
+        Value::Array(a) => {
+            for (i, child) in a.iter_mut().enumerate() {
+                let i = i.to_string();
+                let p = crate::util::ptr(pointer, &i);
+                scrub_stored_at(b, child, names, &child_readable(readable, &i), &child_identity(identity, &i), &p, credential);
+            }
+        }
+        Value::String(s) if credential => {
+            let var = names.name(readable, identity);
+            let literal = has_literal_material(s.trim());
+            *s = credential_text_with(b, s, literal, &var, pointer, &format!("environment value {var}"));
+        }
+        Value::Number(_) | Value::Bool(_) if credential => {
+            let var = names.name(readable, identity);
+            let literal = v.to_string();
+            let new = credential_text_with(b, &literal, true, &var, pointer, &format!("environment value {var}"));
+            if new != literal {
+                *v = Value::String(format!("{NUMERIC_PLACEHOLDER}{new}{NUMERIC_PLACEHOLDER}"));
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Parse a JSON document embedded in a string field of the source (a request
 /// body, a GraphQL payload) under the import bounds. Its nodes are charged to
 /// one budget shared by every embedded document of the import, so many small
@@ -443,7 +570,9 @@ pub fn query_decode(s: &str) -> String {
 
 /// Split a URL into base (without query/fragment) and decoded query pairs.
 /// When some pair has no `=` (or the query is otherwise not a plain list of
-/// pairs), the query stays in the URL verbatim and no pairs are returned.
+/// pairs), or decoding a name or value would make or change a
+/// `{{reference}}` (`%7B%7Bid%7D%7D`, which the source sends as literal
+/// text), the query stays in the URL verbatim and no pairs are returned.
 pub fn split_query(url: &str) -> (String, Vec<(String, String)>) {
     let no_frag = strip_fragment(url);
     let Some((base, q)) = no_frag.split_once('?') else {
@@ -455,20 +584,210 @@ pub fn split_query(url: &str) -> (String, Vec<(String, String)>) {
     let mut pairs = vec![];
     for p in q.split('&') {
         match p.split_once('=') {
-            Some((k, v)) if !k.is_empty() => pairs.push((query_decode(k), query_decode(v))),
+            Some((k, v)) if !k.is_empty() => {
+                let (name, value) = (query_decode(k), query_decode(v));
+                if !same_references(k, &name) || !same_references(v, &value) {
+                    return (no_frag.to_string(), vec![]);
+                }
+                pairs.push((name, value));
+            }
             _ => return (no_frag.to_string(), vec![]),
         }
     }
     (base.to_string(), pairs)
 }
 
+/// Report what a URL query's decoded parameters ([`split_query`]) send
+/// differently from the source, which sends the query as written: a `+`
+/// (sent as `%2B`, where form-decoding servers read the source's `+` as a
+/// space) and escapes that are not UTF-8 (replaced by U+FFFD).
+pub fn warn_query_conversions(b: &mut Builder, pairs_found: bool, url: &str, pointer: &str) {
+    let Some((_, q)) = strip_fragment(url).split_once('?') else { return };
+    if !pairs_found {
+        return;
+    }
+    if q.contains('+') {
+        b.report.warn(
+            "query_plus_sent_encoded",
+            pointer,
+            "a '+' in the query is kept as a plus and sent as %2B; servers that read '+' as a space would see a plus: edit the \
+             parameter if a space was meant",
+        );
+    }
+    if q.split(['&', '=']).any(|part| percent_encoding::percent_decode_str(part).decode_utf8().is_err()) {
+        b.report.warn(
+            "query_not_utf8",
+            pointer,
+            "a query escape is not UTF-8 and was replaced by U+FFFD in the parameter; edit it before sending",
+        );
+    }
+}
+
+/// The `{{…}}` references in `s` as the resolver reads them: each `{{` up to
+/// the first `}}` after it.
+fn template_tokens(s: &str) -> Vec<&str> {
+    let mut out = vec![];
+    let mut rest = s;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        out.push(&after[..close]);
+        rest = &after[close + 2..];
+    }
+    out
+}
+
+/// Whether `decoded` has exactly the `{{references}}` of the source text
+/// `source`: the same tokens in the same order, and no new `{{` or `}}`.
+/// Escaped text (`%7B%7Bid%7D%7D`, `%7B{{id}}`, `{{i%64}}`) is data in the
+/// source and must never become, or change, a reference the engine
+/// resolves.
+fn same_references(source: &str, decoded: &str) -> bool {
+    template_tokens(source) == template_tokens(decoded)
+        && source.matches("{{").count() == decoded.matches("{{").count()
+        && source.matches("}}").count() == decoded.matches("}}").count()
+}
+
+/// `s` percent-decoded, when it decodes to UTF-8 and keeps its references
+/// ([`same_references`]).
+fn decode_keeping_references(s: &str) -> Option<String> {
+    let decoded = percent_encoding::percent_decode_str(s).decode_utf8().ok()?;
+    same_references(s, &decoded).then(|| decoded.into_owned())
+}
+
+/// What the engine sends for a stored query parameter name or value: every
+/// byte outside `A-Za-z0-9-._~` percent-encoded (`anvil_auth::encode_query_component`).
+fn engine_query_encode(s: &str) -> String {
+    const QUERY_COMPONENT: &percent_encoding::AsciiSet =
+        &percent_encoding::NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'.').remove(b'~');
+    percent_encoding::utf8_percent_encode(s, QUERY_COMPONENT).to_string()
+}
+
+/// The text to store for a name or value of a source's query parameter list
+/// (Postman `url.query`, Insomnia `parameters`), which the source sends with
+/// its `%XX` escapes as written. Stored text is encoded once by the engine,
+/// so a value with escapes is stored decoded when, and only when, encoding
+/// that decoded text gives back exactly the source (`%3A%2F%2F` is stored as
+/// `://`) and decoding makes or changes no `{{reference}}`. Anything else is
+/// stored as written, as before, and reported (`query_value_not_decoded`)
+/// when it holds an escape the engine would encode again.
+pub fn listed_query_text(b: &mut Builder, s: &str, pointer: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    if let Some(decoded) = decode_keeping_references(s)
+        && engine_query_encode(&decoded) == s
+    {
+        return decoded;
+    }
+    if s.as_bytes().windows(3).any(|w| w[0] == b'%' && w[1].is_ascii_hexdigit() && w[2].is_ascii_hexdigit()) {
+        b.report.warn(
+            "query_value_not_decoded",
+            pointer,
+            "this query value has percent escapes that cannot be stored decoded without changing what is sent; it is kept as \
+             written, so its '%' is sent as %25: check it before sending",
+        );
+    }
+    s.to_string()
+}
+
+/// One entry of a source's query parameter list as stored: its name and
+/// value ([`listed_query_text`]), with the credential policy applied by the
+/// name as stored or percent-decoded (`%70assword` is a credential name even
+/// when it is kept as written). Returns the name, the value and whether the
+/// entry is sensitive.
+pub fn listed_query_param(b: &mut Builder, raw_name: &str, raw_value: &str, pointer: &str) -> (String, String, bool) {
+    let name = listed_query_text(b, raw_name, pointer);
+    let value = listed_query_text(b, raw_value, pointer);
+    let decoded_name = query_decode(raw_name);
+    if !(is_credential_name(&name) || is_credential_name(&decoded_name)) || value.trim().is_empty() {
+        return (name, value, false);
+    }
+    let value = credential_text(b, &value, &decoded_name, pointer, &format!("query {decoded_name}"));
+    (name, value, true)
+}
+
+/// Split URL userinfo (`user:password@`) off `url`: the URL without it, and
+/// the user name and password as written (percent-encoded). A URL without a
+/// scheme is read from its start (Postman and Insomnia accept
+/// `user:pw@host/path`). The userinfo ends at the last `@` of the authority
+/// ([`userinfo_end`]).
+pub fn take_userinfo(url: &str) -> (String, Option<(String, String)>) {
+    let (prefix, rest) = match url.split_once("://") {
+        Some((scheme, rest)) if !scheme.is_empty() && !scheme.contains(['/', '?', '#', '@']) => (&url[..scheme.len() + 3], rest),
+        _ => ("", url),
+    };
+    let Some(at) = userinfo_end(rest) else { return (url.to_string(), None) };
+    let userinfo = &rest[..at];
+    let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+    (format!("{prefix}{}", &rest[at + 1..]), Some((user.to_string(), pass.to_string())))
+}
+
+/// Basic auth from URL userinfo as written ([`take_userinfo`]): the engine
+/// never sends credentials in the URL, and the password follows the
+/// credential policy (a `{{password}}` placeholder and a redaction unless
+/// `include_credentials`).
+///
+/// Each part is percent-decoded only when that keeps its references
+/// ([`decode_keeping_references`]): escaped text never becomes a reference
+/// the engine resolves. A user name that cannot be decoded so is kept as
+/// written (`url_user_not_decoded`); such a password cannot be stored, so it
+/// becomes a required `{{password}}` in either credential mode
+/// (`url_password_not_decoded`).
+pub fn userinfo_auth(b: &mut Builder, user: &str, pass: &str, pointer: &str) -> AuthConfig {
+    let username = decode_keeping_references(user).unwrap_or_else(|| {
+        b.report.warn(
+            "url_user_not_decoded",
+            pointer,
+            "the user name in the URL is kept percent-encoded: decoding it would make or change a {{reference}}, or it is not UTF-8",
+        );
+        user.to_string()
+    });
+    let password = match decode_keeping_references(pass) {
+        Some(pass) => credential(b, &pass, "password", pointer, "password in the URL"),
+        None => {
+            b.report.warn(
+                "url_password_not_decoded",
+                pointer,
+                "the password in the URL was not imported: decoding it would make or change a {{reference}}, or it is not UTF-8; \
+                 supply it as the variable 'password'",
+            );
+            b.report.redacted(pointer, "password in the URL", "{{password}}");
+            b.report.require_var("password", true, "the password in the URL could not be imported", pointer);
+            SensitiveValue::template("{{password}}")
+        }
+    };
+    AuthConfig::Basic { username, password }
+}
+
+/// Apply URL userinfo to a request whose own auth is `auth`. It becomes
+/// Basic auth only when the request inherits its auth. Auth of its own (a
+/// cURL `-u`, a Postman or Insomnia auth helper) and an explicit "no auth"
+/// win, as curl prefers `-u`; the userinfo, already removed from the URL,
+/// is then dropped with a `url_credentials_dropped` warning.
+pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<(String, String)>, pointer: &str) {
+    let Some((user, pass)) = userinfo else { return };
+    if matches!(auth, AuthConfig::Inherit) {
+        *auth = userinfo_auth(b, &user, &pass, pointer);
+    } else {
+        b.report.warn(
+            "url_credentials_dropped",
+            pointer,
+            "the user name and password in the URL were removed and not imported: the request has auth of its own (or none), \
+             which is kept",
+        );
+    }
+}
+
 /// The byte offset of the `@` that ends the userinfo in `after_scheme` (a
 /// URL with its `scheme://` removed), if it has userinfo. The authority ends
 /// at the first `/`, `?` or `#` (RFC 3986 section 3.2), so an `@` in the path,
-/// query or fragment is not one.
+/// query or fragment is not one; within the authority the last `@` ends the
+/// userinfo, as URL parsers (Postman's among them) read a password holding
+/// an `@`.
 pub fn userinfo_end(after_scheme: &str) -> Option<usize> {
     let authority_end = after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
-    after_scheme[..authority_end].find('@')
+    after_scheme[..authority_end].rfind('@')
 }
 
 /// Remove a `#fragment`, ignoring `#` inside `{{…}}` references.

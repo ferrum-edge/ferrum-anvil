@@ -519,3 +519,141 @@ fn unscannable_bodies_are_flagged() {
     }));
     assert!(has_at(&r, "body_not_scanned", "/resources/1/body"));
 }
+
+fn v4_with(request: serde_json::Value, env: serde_json::Value, o: &anvil_import::ImportOptions) -> anvil_import::ImportResult {
+    let mut request = request;
+    for (k, v) in [("_id", "req_1"), ("_type", "request"), ("parentId", "wrk_1"), ("name", "R")] {
+        request[k] = v.into();
+    }
+    if request.get("method").is_none() {
+        request["method"] = "GET".into();
+    }
+    let doc = v4_export(serde_json::json!([
+        { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+        { "_id": "env_base", "_type": "environment", "parentId": "wrk_1", "name": "Base", "data": env },
+        request,
+    ]));
+    anvil_import::import(&doc, o).unwrap()
+}
+
+fn v5_with(request: serde_json::Value, env: serde_json::Value, o: &anvil_import::ImportOptions) -> anvil_import::ImportResult {
+    let mut request = request;
+    request["name"] = "R".into();
+    request["meta"] = serde_json::json!({ "id": "req_1" });
+    if request.get("method").is_none() {
+        request["method"] = "GET".into();
+    }
+    let doc = serde_json::json!({
+        "type": "collection.insomnia.rest/5.0", "name": "W",
+        "environments": { "name": "Base", "data": env },
+        "collection": [request],
+    });
+    anvil_import::import(doc.to_string().as_bytes(), o).unwrap()
+}
+
+fn both(request: serde_json::Value, env: serde_json::Value, o: &anvil_import::ImportOptions) -> [anvil_import::ImportResult; 2] {
+    [v4_with(request.clone(), env.clone(), o), v5_with(request, env, o)]
+}
+
+fn keep() -> anvil_import::ImportOptions {
+    anvil_import::ImportOptions { include_credentials: true, ..opts() }
+}
+
+fn template_text(v: &SensitiveValue) -> String {
+    match v {
+        SensitiveValue::Template { value } => value.clone(),
+        SensitiveValue::Secret { .. } => panic!("expected a template value"),
+    }
+}
+
+/// #563: a parameter's escapes are stored decoded only when the engine's
+/// one encoding sends exactly what Insomnia sends; anything else is kept as
+/// written and reported.
+#[test]
+fn parameters_are_decoded_only_when_exact() {
+    let request = serde_json::json!({ "url": "https://example.test/cb", "parameters": [
+        { "name": "redirect_uri", "value": "https%3A%2F%2Fapp.example.com%2Fdone" },
+        { "name": "n", "value": "caf%E9" },
+        { "name": "t", "value": "%7B%7Bid%7D%7D" },
+        { "name": "q", "value": "a+b" },
+    ]});
+    for r in both(request, serde_json::json!({}), &opts()) {
+        let values: Vec<&str> = r.requests[0].spec.params.iter().map(|p| p.value.as_str()).collect();
+        assert_eq!(values, ["https://app.example.com/done", "caf%E9", "%7B%7Bid%7D%7D", "a+b"]);
+        assert!(has_at(&r, "query_value_not_decoded", "parameters/1") && has_at(&r, "query_value_not_decoded", "parameters/2"));
+        assert!(!has_at(&r, "query_value_not_decoded", "parameters/0"));
+    }
+}
+
+/// GHSA-c236-7r9g-c9p2: URL userinfo becomes Basic auth with a
+/// `{{password}}` placeholder; disabled auth wins and drops it.
+#[test]
+fn url_userinfo_becomes_basic_auth_unless_auth_is_disabled() {
+    let request = serde_json::json!({ "url": "https://admin:tok-SENSITIVE-in1@api.example.com/v1/status" });
+    for r in both(request.clone(), serde_json::json!({}), &opts()) {
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.com/v1/status");
+        assert!(
+            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password == &SensitiveValue::template("{{password}}")),
+            "expected Basic auth with a placeholder password"
+        );
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-in1"));
+    }
+    let mut disabled = request;
+    disabled["authentication"] = serde_json::json!({ "type": "basic", "disabled": true });
+    for r in both(disabled, serde_json::json!({}), &opts()) {
+        assert!(!matches!(r.requests[0].spec.auth, AuthConfig::Basic { .. }));
+        assert!(has(&r, "url_credentials_dropped"));
+    }
+}
+
+/// GHSA-c236-7r9g-c9p2: every scalar under a credential-named member of an
+/// environment array is redacted (strings, numbers, booleans, arrays of
+/// them, helper arguments), with distinct placeholders.
+#[test]
+fn credential_members_of_environment_arrays_are_redacted() {
+    let env = serde_json::json!({
+        "accounts": [
+            { "name": "a", "api_key": "tok-SENSITIVE-in2", "pin": 571571571, "mfa": true },
+            { "name": "b", "tokens": ["tok-SENSITIVE-in3", "{{ref}}"], "secret": "{{$randomFrom tok-SENSITIVE-in4 x}}" }
+        ],
+        "keys": [{ "credentials": { "a-b": "tok-SENSITIVE-in5", "a_b": "tok-SENSITIVE-in6" } }],
+        "hosts": ["a.example", "b.example"],
+    });
+    let request = serde_json::json!({ "url": "https://example.test/x" });
+    for r in both(request.clone(), env.clone(), &opts()) {
+        let var = |n: &str| r.workspace.variables.iter().find(|v| v.name == n).map(|v| template_text(&v.value));
+        let accounts = var("accounts").expect("accounts variable");
+        let keys = var("keys").expect("keys variable");
+        for text in [&accounts, &keys] {
+            assert!(!text.contains("tok-SENSITIVE") && !text.contains("571571571"), "a credential member stayed");
+        }
+        assert!(accounts.contains("{{ref}}"), "a reference is kept");
+        assert_eq!(var("hosts").as_deref(), Some(r#"["a.example","b.example"]"#));
+        let names: std::collections::HashSet<&str> = r.report.required_variables.iter().map(|v| v.name.as_str()).collect();
+        assert!(names.len() >= 6, "each credential leaf has its own placeholder");
+        let parsed: serde_json::Value = serde_json::from_str(&keys).unwrap();
+        let creds = &parsed[0]["credentials"];
+        assert_ne!(creds["a-b"], creds["a_b"], "different leaves get different placeholders");
+    }
+    for r in both(request, env, &keep()) {
+        let accounts = r.workspace.variables.iter().find(|v| v.name == "accounts").unwrap();
+        assert!(template_text(&accounts.value).contains("571571571"));
+    }
+}
+
+/// GHSA-c236-7r9g-c9p2: a credential-named path parameter follows the
+/// credential policy.
+#[test]
+fn credential_named_path_parameters_are_redacted() {
+    let request = serde_json::json!({ "url": "https://hooks.example.com/:webhook_token/:id", "pathParameters": [
+        { "name": "webhook_token", "value": "tok-SENSITIVE-in7" }, { "name": "id", "value": "42" },
+    ]});
+    for r in both(request.clone(), serde_json::json!({}), &opts()) {
+        assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/{{webhook_token}}/42");
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-in7"));
+    }
+    for r in both(request, serde_json::json!({}), &keep()) {
+        assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/tok-SENSITIVE-in7/42");
+    }
+}

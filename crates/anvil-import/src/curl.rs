@@ -765,19 +765,14 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     if raw_url != url {
         b.report.warn("curl_default_scheme", &url_at, "no scheme in the URL; curl defaults to http://");
     }
-    // Credentials embedded in the URL are moved to Basic auth.
+    // Credentials embedded in the URL become Basic auth, unless `-u` (or
+    // another auth option) gave the request its own, which curl prefers.
     let mut auth = auth;
-    if let Some((scheme, rest)) = url.split_once("://")
-        && let Some(at_pos) = crate::common::userinfo_end(rest)
-    {
-        let userinfo = rest[..at_pos].to_string();
-        let (user, pass) =
-            userinfo.split_once(':').map(|(u, p)| (u.to_string(), p.to_string())).unwrap_or((userinfo.clone(), String::new()));
-        let pw = credential(b, &crate::common::query_decode(&pass), "password", &url_at, "password in the URL");
-        auth = AuthConfig::Basic { username: crate::common::query_decode(&user), password: pw };
-        url = format!("{scheme}://{}", &rest[at_pos + 1..]);
-    }
+    let (without, userinfo) = crate::common::take_userinfo(&url);
+    url = without;
+    crate::common::apply_userinfo(b, &mut auth, userinfo, &url_at);
     let (base, pairs) = split_query(&url);
+    crate::common::warn_query_conversions(b, !pairs.is_empty(), &url, &url_at);
     // A query that is not a plain list of pairs stays in the URL verbatim;
     // its credential-like values are still redacted in place.
     let base = if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &url_at, "query") } else { base };

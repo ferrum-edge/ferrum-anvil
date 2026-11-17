@@ -247,3 +247,119 @@ fn graphql_variables_numeric_credentials_and_unscannable_bodies() {
     let xml = serde_json::json!({"mode": "raw", "raw": "<p>placeholder-secret</p>", "options": {"raw": {"language": "xml"}}});
     assert!(has(&postman_body(xml, &opts()), "body_not_scanned"));
 }
+
+fn postman_request(request: serde_json::Value, o: &ImportOptions) -> anvil_import::ImportResult {
+    let doc = serde_json::json!({
+        "info": {"name": "c", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+        "item": [{"name": "r", "request": request}]
+    });
+    import(doc.to_string().as_bytes(), o).unwrap()
+}
+
+fn with_query(query: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"method": "GET", "url": {"raw": "https://x.example.com/cb", "query": query}})
+}
+
+/// #563: Postman sends a list value's escapes as written. A value is stored
+/// decoded only when the engine's one encoding sends exactly the source
+/// (`%3A%2F%2F`); anything else is kept as written, as before, and reported.
+#[test]
+fn query_list_values_are_decoded_only_when_exact() {
+    let r = postman_request(
+        with_query(serde_json::json!([
+            {"key": "redirect_uri", "value": "https%3A%2F%2Fapp.example.com%2Fdone"},
+            {"key": "lower", "value": "a%3ab"},
+            {"key": "braces", "value": "%7B%7Bid%7D%7D"},
+            {"key": "plus", "value": "a+b"},
+            {"key": "plain", "value": "v1"}
+        ])),
+        &opts(),
+    );
+    let s = &r.requests[0].spec;
+    let values: Vec<(&str, &str)> = s.params.iter().map(|p| (p.name.as_str(), p.value.as_str())).collect();
+    assert_eq!(
+        values,
+        [
+            ("redirect_uri", "https://app.example.com/done"),
+            ("lower", "a%3ab"),
+            ("braces", "%7B%7Bid%7D%7D"),
+            ("plus", "a+b"),
+            ("plain", "v1")
+        ]
+    );
+    assert!(has_at(&r, "query_value_not_decoded", "/url/query/1") && has_at(&r, "query_value_not_decoded", "/url/query/2"));
+    assert!(has_at(&r, "query_plus_sent_encoded", "/url/query/3"));
+    assert!(!has_at(&r, "query_value_not_decoded", "/url/query/0"));
+}
+
+/// A credential name is recognized decoded too, even when it is kept as
+/// written (`%70assword` re-encodes differently).
+#[test]
+fn an_escaped_credential_name_in_a_query_list_is_redacted() {
+    let r = postman_request(with_query(serde_json::json!([{"key": "%70assword", "value": "tok-SENSITIVE-pm1"}])), &opts());
+    let p = &r.requests[0].spec.params[0];
+    assert!(p.sensitive && p.value == "{{password}}");
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-pm1"));
+}
+
+/// GHSA-c236-7r9g-c9p2: URL userinfo becomes Basic auth with a
+/// `{{password}}` placeholder for the string, raw and rebuilt URL forms; the
+/// userinfo ends at the last `@` of the authority.
+#[test]
+fn url_userinfo_becomes_basic_auth_and_its_password_is_redacted() {
+    for url in [
+        serde_json::json!("https://admin:tok-SENSITIVE-pm2@api.example.com/v1/status"),
+        serde_json::json!({"raw": "https://admin:p@tok-SENSITIVE-pm2@api.example.com/v1/status"}),
+        serde_json::json!({"protocol": "https", "host": ["admin:tok-SENSITIVE-pm2@api", "example", "com"], "path": ["v1", "status"]}),
+    ] {
+        let r = postman_request(serde_json::json!({"method": "GET", "url": url.clone()}), &opts());
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.com/v1/status");
+        assert!(
+            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password == &SensitiveValue::template("{{password}}")),
+            "expected Basic auth with a placeholder password"
+        );
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-pm2"));
+        assert_eq!(r.report.redactions.len(), 1);
+
+        let r = postman_request(serde_json::json!({"method": "GET", "url": url}), &ImportOptions { include_credentials: true, ..opts() });
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.com/v1/status");
+        assert!(matches!(&s.auth, AuthConfig::Basic { password, .. } if !password.is_pure_reference()));
+    }
+}
+
+/// Auth of the request's own, and an explicit "no auth", win over URL
+/// userinfo, which is dropped with a warning.
+#[test]
+fn own_auth_and_noauth_win_over_url_userinfo() {
+    for auth in
+        [serde_json::json!({"type": "bearer", "bearer": [{"key": "token", "value": "{{tok}}"}]}), serde_json::json!({"type": "noauth"})]
+    {
+        let r = postman_request(
+            serde_json::json!({"method": "GET", "url": "https://admin:tok-SENSITIVE-pm3@api.example.com/x", "auth": auth}),
+            &opts(),
+        );
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.com/x");
+        assert!(!matches!(&s.auth, AuthConfig::Basic { .. }));
+        assert!(has(&r, "url_credentials_dropped"));
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-pm3"));
+    }
+}
+
+/// GHSA-c236-7r9g-c9p2: a credential-named path variable follows the
+/// credential policy; other path variables are substituted as before.
+#[test]
+fn credential_named_path_variables_are_redacted() {
+    let request = serde_json::json!({"method": "POST", "url": {
+        "raw": "https://hooks.example.com/:webhook_token/orders/:id",
+        "variable": [{"key": "webhook_token", "value": "tok-SENSITIVE-pm4"}, {"key": "id", "value": "42"}]
+    }});
+    let r = postman_request(request.clone(), &opts());
+    assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/{{webhook_token}}/orders/42");
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-pm4"));
+    assert!(r.report.required_variables.iter().any(|v| v.name == "webhook_token" && v.secret));
+    let r = postman_request(request, &ImportOptions { include_credentials: true, ..opts() });
+    assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/tok-SENSITIVE-pm4/orders/42");
+}

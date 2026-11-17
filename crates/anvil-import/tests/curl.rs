@@ -440,3 +440,61 @@ fn data_read_from_a_file_still_defaults_to_post() {
     assert_eq!(curl("curl -X PUT -d @order.json https://api.example.com/orders").requests[0].spec.method, "PUT");
     assert_eq!(curl("curl https://api.example.com/orders").requests[0].spec.method, "GET");
 }
+
+/// GHSA-c236-7r9g-c9p2: the userinfo ends at the last `@` of the authority,
+/// so a password holding `@` leaves nothing in the URL; escaped braces in
+/// userinfo never become a `{{reference}}` (such a password becomes a
+/// required `{{password}}` in either credential mode).
+#[test]
+fn userinfo_ends_at_the_last_at_and_escaped_braces_stay_data() {
+    let r = curl("curl 'https://admin:p@tok-SENSITIVE-cu1@api.example.com/v1?next=a@b'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/v1");
+    assert!(matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password.is_pure_reference()));
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu1"));
+    let keep = ImportOptions { include_credentials: true, ..opts() };
+    for options in [opts(), keep] {
+        let r = import(b"curl 'https://%7B%7Bu%7D%7D:%7B%7Bid%7D%7D@example.test/'", &options).unwrap();
+        match &r.requests[0].spec.auth {
+            AuthConfig::Basic { username, password } => {
+                assert_eq!(username, "%7B%7Bu%7D%7D");
+                assert_eq!(password, &SensitiveValue::template("{{password}}"));
+            }
+            _ => panic!("expected Basic auth"),
+        }
+        assert!(has(&r, "url_password_not_decoded") && has(&r, "url_user_not_decoded"));
+    }
+}
+
+/// `-u` wins over URL userinfo, as in curl, and the userinfo is dropped with
+/// a warning.
+#[test]
+fn user_option_wins_over_url_userinfo() {
+    let r = curl("curl -u alice:tok-SENSITIVE-cu2 'https://bob:tok-SENSITIVE-cu3@api.example.com/x'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/x");
+    assert!(matches!(&s.auth, AuthConfig::Basic { username, password } if username == "alice" && password.is_pure_reference()));
+    assert!(has(&r, "url_credentials_dropped"));
+    let text = serde_json::to_string(&r.requests).unwrap();
+    assert!(!text.contains("tok-SENSITIVE-cu2") && !text.contains("tok-SENSITIVE-cu3"));
+}
+
+/// #563: a URL query's parameters keep main's decoding; what they send
+/// differently from curl (a `+`, an escape that is not UTF-8) is reported,
+/// and escaped braces never decode to a reference (the query stays as
+/// written).
+#[test]
+fn url_query_conversions_are_reported_and_braces_stay_data() {
+    let r = curl("curl 'https://api.example.com/search?q=hello+world'");
+    assert_eq!(param(&r.requests[0].spec, "q").unwrap().value, "hello+world");
+    assert!(has(&r, "query_plus_sent_encoded"));
+    let r = curl("curl 'https://api.example.com/search?n=caf%E9'");
+    assert!(has(&r, "query_not_utf8"));
+    let r = curl("curl 'https://api.example.com/search?q=%7B%7Bid%7D%7D'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/search?q=%7B%7Bid%7D%7D");
+    assert!(s.params.is_empty());
+    let r = curl("curl 'https://api.example.com/search?r=https%3A%2F%2Fa.example'");
+    assert_eq!(param(&r.requests[0].spec, "r").unwrap().value, "https://a.example");
+    assert!(!has(&r, "query_plus_sent_encoded") && !has(&r, "query_not_utf8"));
+}

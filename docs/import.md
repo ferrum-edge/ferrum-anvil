@@ -41,6 +41,24 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   (`Bearer {{token}}`) is not a literal secret and is kept.
 - A query kept in the URL verbatim (one with a bare `flag` segment, or written
   into an Insomnia URL) has its credential-like values replaced in place.
+- URL userinfo (`https://user:password@host/`) becomes Basic auth with a
+  `{{password}}` placeholder in every migration importer, and the URL loses it
+  (the engine never sends credentials in the URL). The userinfo ends at the
+  last `@` before the path, so a password holding `@` is removed whole. A
+  request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a Postman
+  or Insomnia auth helper) or with auth explicitly off keeps that, and the
+  userinfo is dropped (`url_credentials_dropped`). A user name or password
+  whose decoding would make or change a `{{reference}}` (`%7B%7Bid%7D%7D`), or
+  is not UTF-8, is never decoded: the user name is kept as written
+  (`url_user_not_decoded`) and the password becomes a required `{{password}}`
+  even with `include_credentials` (`url_password_not_decoded`).
+- Credential-named Postman path variables and Insomnia path parameters
+  (`:webhook_token`, `:api_key`) follow the same policy. So does every value
+  (string, number or boolean) under a credential-named member of an Insomnia
+  environment value that is an array (`{"accounts": [{"api_key": "…"}]}`,
+  `"tokens": ["…"]`), each with its own placeholder named by its path; a
+  dynamic helper with arguments (`{{$randomFrom a|b}}`) counts as literal
+  there.
 - JSON bodies and GraphQL variables are scanned recursively: string members
   with credential-like names, and numbers under such names (`pin`, `otp`, …;
   not names recognized only by `token`, such as `max_tokens`), whose
@@ -54,6 +72,24 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 - Detection is name-based and best effort; bodies that cannot be scanned (XML,
   SOAP, arbitrary text, unparsable JSON, JSON beyond the embedded-document
   budget) produce a `body_not_scanned` warning.
+
+### Query values
+
+The engine percent-encodes a stored query parameter once when it sends it
+(every byte outside `A-Za-z0-9-._~`).
+
+- A Postman `query` list entry or Insomnia parameter holds text the source
+  sends with its `%XX` escapes as written. A value with escapes is stored
+  decoded when, and only when, encoding the decoded text gives back exactly
+  the source and decoding makes or changes no `{{reference}}`: then
+  `%3A%2F%2F` is sent as `%3A%2F%2F`, not `%253A%252F%252F`. Any other value
+  with escapes is stored as written and reported (`query_value_not_decoded`),
+  as its `%` is sent as `%25`.
+- A URL query (cURL, HAR, a Postman raw URL) is decoded into parameters. A
+  `+` stays a plus, sent as `%2B` where the source sends `+`
+  (`query_plus_sent_encoded`, also for a Postman list value), and an escape
+  that is not UTF-8 becomes U+FFFD (`query_not_utf8`). A query whose decoding
+  would make or change a `{{reference}}` stays in the URL as written.
 
 ### Limits
 

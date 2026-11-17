@@ -9,8 +9,9 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type, maybe_redact,
-    parse_embedded_json, parse_form, redact_raw_query, scrub_body, scrub_graphql_variables, scrub_json, warn_unscanned,
+    apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type,
+    listed_query_param, maybe_redact, parse_embedded_json, parse_form, redact_raw_query, render_json, scrub_body, scrub_graphql_variables,
+    scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -97,16 +98,34 @@ fn sort_key(v: &Value) -> f64 {
     v.get("metaSortKey").or_else(|| v.pointer("/meta/sortKey")).and_then(Value::as_f64).unwrap_or(0.0)
 }
 
-/// Flatten nested environment data (`{api: {host: x}}` → `api.host`).
-fn flatten(prefix: &str, v: &Value, out: &mut Vec<(String, String)>, depth: usize) {
+/// Flatten nested environment data (`{api: {host: x}}` → `api.host`). An
+/// array (or an object nested too deep) becomes one variable holding its
+/// JSON text; unless credentials are included, every scalar under a
+/// credential-named member in it becomes a placeholder
+/// ([`scrub_stored_json`]), as the same member of a nested object (a
+/// credential-named variable) is redacted.
+fn flatten(b: &mut Builder, at: &str, prefix: &str, v: &Value, out: &mut Vec<(String, String)>, depth: usize) {
     match v {
         Value::Object(m) if depth < 16 => {
             for (k, x) in m {
                 let name = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
-                flatten(&name, x, out, depth + 1);
+                flatten(b, at, &name, x, out, depth + 1);
             }
         }
-        Value::Array(_) | Value::Object(_) => out.push((prefix.to_string(), v.to_string())),
+        Value::Array(_) | Value::Object(_) => {
+            let text = v.to_string();
+            let text = if b.opts.include_credentials {
+                text
+            } else {
+                let mut scrubbed = v.clone();
+                if scrub_stored_json(b, &mut scrubbed, prefix, &ptr(at, prefix)) {
+                    render_json(&scrubbed, false, &text).unwrap_or(text)
+                } else {
+                    text
+                }
+            };
+            out.push((prefix.to_string(), text));
+        }
         other => out.push((prefix.to_string(), scalar_text(other))),
     }
 }
@@ -114,7 +133,7 @@ fn flatten(prefix: &str, v: &Value, out: &mut Vec<(String, String)>, depth: usiz
 fn env_vars(b: &mut Builder, data: Option<&Value>, at: &str) -> Vec<Variable> {
     let mut flat = vec![];
     if let Some(d) = data {
-        flatten("", d, &mut flat, 0);
+        flatten(b, at, "", d, &mut flat, 0);
     }
     let mut out = vec![];
     for (k, v) in flat {
@@ -549,6 +568,30 @@ fn kv_list(b: &mut Builder, v: Option<&Value>, at: &str, what: &str) -> Vec<KeyV
     out
 }
 
+/// Query `parameters`. Insomnia sends a value's `%XX` escapes as written,
+/// so a value with escapes is stored decoded only when the engine's one
+/// encoding sends the same bytes ([`listed_query_param`]).
+fn query_params(b: &mut Builder, v: Option<&Value>, at: &str) -> Vec<KeyValue> {
+    let mut out = vec![];
+    for (i, h) in v.and_then(Value::as_array).into_iter().flatten().enumerate() {
+        let p = format!("{at}/{i}");
+        let raw_name = template(b, str_of(h, "name").unwrap_or(""), &p);
+        if raw_name.is_empty() {
+            continue;
+        }
+        let raw_value = template(b, &h.get("value").map(scalar_text).unwrap_or_default(), &p);
+        let (name, value, sensitive) = listed_query_param(b, &raw_name, &raw_value, &p);
+        out.push(KeyValue {
+            name,
+            value,
+            enabled: h.get("disabled").and_then(Value::as_bool) != Some(true),
+            description: str_of(h, "description").unwrap_or("").to_string(),
+            sensitive,
+        });
+    }
+    out
+}
+
 fn request(
     b: &mut Builder,
     r: &Value,
@@ -561,12 +604,14 @@ fn request(
     let name = str_of(r, "name").unwrap_or("").to_string();
     let method = str_of(r, "method").unwrap_or("GET").to_ascii_uppercase();
     let raw_url = template(b, str_of(r, "url").unwrap_or(""), &ptr(at, "url"));
+    // Userinfo is never kept in the URL (the engine refuses it).
+    let (raw_url, userinfo) = take_userinfo(&raw_url);
     let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
     // A query written into the URL itself is kept verbatim; its
     // credential-like values are redacted in place.
     let url = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { url };
     let mut spec = RequestSpec::http(&method, &url);
-    spec.params = kv_list(b, r.get("parameters"), &ptr(at, "parameters"), "query");
+    spec.params = query_params(b, r.get("parameters"), &ptr(at, "parameters"));
     spec.headers = kv_list(b, r.get("headers"), &ptr(at, "headers"), "header");
     let ct = header_content_type(&spec.headers);
     let mut declared = None;
@@ -577,6 +622,7 @@ fn request(
         Some(a) => auth(b, a, &ptr(at, "authentication"), &name),
         None => AuthConfig::Inherit,
     };
+    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(at, "url"));
     spec.settings = settings;
     for (ev, s) in scripts {
         if let Some(src) = s.and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
@@ -608,10 +654,13 @@ fn path_params(b: &mut Builder, url: &str, params: Option<&Value>, at: &str) -> 
             let val = p.get("value").map(scalar_text).unwrap_or_default();
             let rep = if val.is_empty() {
                 let v = sanitize_var(name);
-                b.report.require_var(&v, false, "Insomnia path parameter without a value", at);
+                b.report.require_var(&v, is_credential_name(name), "Insomnia path parameter without a value", at);
                 format!("{{{{{v}}}}}")
             } else {
-                encode_path_value(&template(b, &val, at))
+                // A credential-named path parameter (`:api_key`) follows the
+                // credential policy; its placeholder stays a reference.
+                let val = template(b, &val, at);
+                encode_path_value(&maybe_redact(b, name, &val, at, "path parameter").0)
             };
             resolved.push((name.to_string(), rep.clone()));
             rep
