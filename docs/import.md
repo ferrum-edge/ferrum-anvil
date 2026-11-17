@@ -38,13 +38,16 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   and listed in `report.redactions`, unless `ImportOptions::include_credentials`
   is set (kept values are then marked sensitive).
 - A value that is only plain variable references plus an auth scheme word
-  (`Bearer {{token}}`) is not a literal secret and is kept. A plain
-  reference is `{{ name }}` or Insomnia's `{{ _.name }}`, where the name is
-  `[A-Za-z_][A-Za-z0-9_.-]*`. Anything else inside `{{…}}`, such as a
-  quoted string (`{{ 'key' }}`), a number, a filter or a dynamic helper
-  (with or without arguments), is literal, and so is redacted under a
-  credential name. The export sanitizer applies the same rule
-  (`anvil_domain::secret::classify_template_value`).
+  (`Bearer {{token}}`) is not a literal secret and is kept. What counts as a
+  reference follows the source (`anvil_domain::secret::classify_template_value`):
+  Postman, cURL and HAR never evaluate `{{…}}`, so any text without braces
+  there is a variable name, and only a dynamic helper with arguments
+  (`{{$randomFrom a|b}}`, which Anvil would evaluate) is literal. Insomnia
+  evaluates Nunjucks, so there a reference is only an identifier
+  (`[A-Za-z_][A-Za-z0-9_]*`) or a dotted path of them, optionally after
+  `_.`; a quoted string (`{{ 'key' }}`), a number, `-` or another operator,
+  a filter or a helper is literal and is redacted under a credential name.
+  The export sanitizer, which cannot tell the source, uses the Insomnia rule.
 - A query kept in the URL verbatim (one with a bare `flag` segment, one whose
   decoding would make a `{{reference}}`, or one written into an Insomnia URL)
   keeps its exact syntax, but its credential-named `name=value` segments
@@ -59,7 +62,11 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 - URL userinfo (`https://user:password@host/`) becomes Basic auth with a
   `{{password}}` placeholder in every migration importer, and the URL loses it
   (the engine never sends credentials in the URL). The userinfo ends at the
-  last `@` before the path, so a password holding `@` is removed whole. A
+  last `@` before the path, so a password holding `@` is removed whole, and
+  a `/`, `?` or `#` inside a `{{…}}` expression does not end it early. A
+  userinfo without `:` (`https://<token>@host/`) is read as a token in the
+  user name and follows the credential policy (`url_user_token`; the
+  password is empty). A
   request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a Postman
   or Insomnia auth helper) or with auth explicitly off keeps that, and the
   userinfo is dropped (`url_credentials_dropped`). A user name or password

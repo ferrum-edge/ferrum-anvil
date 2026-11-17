@@ -543,3 +543,36 @@ fn credentials_moved_from_a_verbatim_query_keep_escaped_names_and_report_convers
     let r = import(b"curl 'https://api.example.test/v1?flag&api_key=caf%E9'", &keep).unwrap();
     assert!(has(&r, "query_not_utf8"));
 }
+
+/// Review round 4 of #573, dsf F1: a userinfo without `:` is a token in the
+/// user name; it follows the credential policy, and the password is empty.
+#[test]
+fn a_token_alone_in_the_userinfo_is_a_credential() {
+    let r = curl("curl 'https://tok-SENSITIVE-cu7@api.example.test/v1'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.test/v1");
+    match &s.auth {
+        AuthConfig::Basic { username, password } => {
+            assert_eq!(username, "{{username}}");
+            assert_eq!(password, &SensitiveValue::template(""));
+        }
+        _ => panic!("expected Basic auth"),
+    }
+    assert!(has(&r, "url_user_token"));
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu7"));
+    // A reference stays a reference, without a warning.
+    let r = curl("curl 'https://{{api_token}}@api.example.test/v1'");
+    assert!(matches!(&r.requests[0].spec.auth, AuthConfig::Basic { username, .. } if username == "{{api_token}}"));
+    assert!(!has(&r, "url_user_token"));
+}
+
+/// Postman, cURL and HAR never evaluate `{{…}}`: an expression-looking name
+/// is a variable name, kept as a reference.
+#[test]
+fn expression_looking_names_are_references_outside_insomnia() {
+    let r = curl("curl -H 'X-Api-Key: {{api-key}}' -H 'X-Auth-Token: {{ x-1 }}' https://api.example.test/v1");
+    let s = &r.requests[0].spec;
+    assert_eq!(header(s, "X-Api-Key").unwrap().value, "{{api-key}}");
+    assert_eq!(header(s, "X-Auth-Token").unwrap().value, "{{ x-1 }}");
+    assert!(r.report.redactions.is_empty());
+}

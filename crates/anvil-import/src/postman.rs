@@ -259,7 +259,7 @@ fn headers(b: &mut Builder, v: Option<&Value>, at: &str) -> Vec<KeyValue> {
 /// the raw query string. Path variables (`:id`) are substituted from
 /// `url.variable` or become `{{id}}` placeholders. URL userinfo is removed
 /// and returned for [`apply_userinfo`].
-fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<(String, String)>) {
+fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<crate::common::Userinfo>) {
     let (raw, query_list, path_vars) = match v {
         Value::String(s) => (s.clone(), None, None),
         Value::Object(_) => {
@@ -518,7 +518,7 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
         }
         "oauth2" => {
             let access = p("accessToken");
-            if crate::util::has_literal_secret(&access) {
+            if crate::util::has_literal_secret(&access, b.template_syntax) {
                 b.report.redacted(&fp("accessToken"), "cached OAuth 2 access token", "(dropped)");
             }
             let grant = match p("grant_type").as_str() {

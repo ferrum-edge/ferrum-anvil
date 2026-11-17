@@ -50,6 +50,9 @@ pub(crate) struct Builder<'o> {
     /// by every environment of the import, which reserve their variable
     /// names first ([`crate::common::PlaceholderNames`]).
     pub env_names: crate::common::PlaceholderNames,
+    /// How the source reads `{{…}}` when a credential value is judged
+    /// literal or a reference (Insomnia sets Nunjucks).
+    pub template_syntax: anvil_domain::secret::TemplateSyntax,
 }
 
 impl<'o> Builder<'o> {
@@ -91,6 +94,7 @@ impl<'o> Builder<'o> {
             title: None,
             limit_warned: false,
             env_names: Default::default(),
+            template_syntax: Default::default(),
         }
     }
 

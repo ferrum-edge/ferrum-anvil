@@ -18,7 +18,7 @@ use crate::{Dialect, ImportError};
 use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, KeyLocation, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::request::{Body, KeyValue, MultipartContent, MultipartPart, RequestSpec};
-use anvil_domain::secret::SensitiveValue;
+use anvil_domain::secret::{SensitiveValue, TemplateSyntax};
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::workspace::Variable;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -201,6 +201,7 @@ fn reserve_v5_folder_env_names(b: &mut Builder, items: &[Value], depth: usize) {
 // ---------------------------------------------------------------- v4 ----
 
 pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError> {
+    b.template_syntax = TemplateSyntax::Nunjucks;
     let Some(resources) = root.get("resources").and_then(Value::as_array) else {
         return Err(ImportError::Invalid {
             dialect: Dialect::InsomniaV4,
@@ -502,6 +503,7 @@ fn v4_settings(b: &mut Builder, r: &Value, at: &str) -> SettingsOverrides {
 // ---------------------------------------------------------------- v5 ----
 
 pub(crate) fn import_v5(root: &Value, b: &mut Builder) -> Result<(), ImportError> {
+    b.template_syntax = TemplateSyntax::Nunjucks;
     let ty = str_of(root, "type").unwrap_or("");
     let name = str_of(root, "name").unwrap_or("Insomnia collection").to_string();
     b.title = Some(name.clone());

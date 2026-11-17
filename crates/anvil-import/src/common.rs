@@ -25,7 +25,7 @@ pub fn credential(b: &mut Builder, value: &str, var: &str, pointer: &str, field:
 /// Same policy as [`credential`] for values stored as plain text (header,
 /// query and body fields).
 pub fn credential_text(b: &mut Builder, value: &str, var: &str, pointer: &str, field: &str) -> String {
-    let literal = has_literal_secret(value.trim());
+    let literal = has_literal_secret(value.trim(), b.template_syntax);
     credential_text_with(b, value, literal, var, pointer, field)
 }
 
@@ -54,7 +54,7 @@ fn credential_text_with(b: &mut Builder, value: &str, literal: bool, var: &str, 
 /// is dropped (without `include_credentials`) and listed as a required
 /// variable, so references to it fail validation until the user supplies it.
 pub fn env_var(b: &mut Builder, key: &str, value: &str, secret: bool, enabled: bool, at: &str) -> Option<Variable> {
-    let literal = has_literal_secret(value);
+    let literal = has_literal_secret(value, b.template_syntax);
     if secret && literal && !b.opts.include_credentials {
         b.report.redacted(at, format!("variable {key}"), &format!("{{{{{key}}}}}"));
         b.report.require_var(key, true, "secret variable value was redacted on import", at);
@@ -344,7 +344,7 @@ fn scrub_stored_at(
         }
         Value::String(s) if credential => {
             let (var, p) = leaf_names(names, root, pointer, path);
-            let literal = has_literal_secret(s.trim());
+            let literal = has_literal_secret(s.trim(), b.template_syntax);
             *s = credential_text_with(b, s, literal, &var, &p, &format!("environment value {var}"));
         }
         Value::Number(_) | Value::Bool(_) if credential => {
@@ -751,15 +751,18 @@ pub fn listed_query_param(b: &mut Builder, raw_name: &str, raw_value: &str, poin
 /// scheme is read from its start (Postman and Insomnia accept
 /// `user:pw@host/path`). The userinfo ends at the last `@` of the authority
 /// ([`userinfo_end`]).
-pub fn take_userinfo(url: &str) -> (String, Option<(String, String)>) {
+pub fn take_userinfo(url: &str) -> (String, Option<Userinfo>) {
     let (prefix, rest) = match url.split_once("://") {
         Some((scheme, rest)) if !scheme.is_empty() && !scheme.contains(['/', '?', '#', '@']) => (&url[..scheme.len() + 3], rest),
         _ => ("", url),
     };
     let Some(at) = userinfo_end(rest) else { return (url.to_string(), None) };
     let userinfo = &rest[..at];
-    let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
-    (format!("{prefix}{}", &rest[at + 1..]), Some((user.to_string(), pass.to_string())))
+    let parts = match first_outside_references(userinfo, ':') {
+        Some(colon) => (userinfo[..colon].to_string(), Some(userinfo[colon + 1..].to_string())),
+        None => (userinfo.to_string(), None),
+    };
+    (format!("{prefix}{}", &rest[at + 1..]), Some(parts))
 }
 
 /// Basic auth from URL userinfo as written ([`take_userinfo`]): the engine
@@ -773,7 +776,28 @@ pub fn take_userinfo(url: &str) -> (String, Option<(String, String)>) {
 /// written (`url_user_not_decoded`); such a password cannot be stored, so it
 /// becomes a required `{{password}}` in either credential mode
 /// (`url_password_not_decoded`).
-pub fn userinfo_auth(b: &mut Builder, user: &str, pass: &str, pointer: &str) -> AuthConfig {
+pub fn userinfo_auth(b: &mut Builder, user: &str, pass: Option<&str>, pointer: &str) -> AuthConfig {
+    let Some(pass) = pass else {
+        // A userinfo without `:` (`https://<token>@host/`) is a token in the
+        // user name: it follows the credential policy, and the password is
+        // empty, as curl sends it.
+        let (token, literal) = match decode_keeping_references(user) {
+            Some(token) => {
+                let literal = has_literal_secret(token.trim(), b.template_syntax);
+                (token, literal)
+            }
+            None => (user.to_string(), true),
+        };
+        if literal {
+            b.report.warn(
+                "url_user_token",
+                pointer,
+                "the URL's userinfo has no ':', so its user name is read as a token and follows the credential policy",
+            );
+        }
+        let username = credential_text_with(b, &token, literal, "username", pointer, "token in the URL's user name");
+        return AuthConfig::Basic { username, password: SensitiveValue::template("") };
+    };
     let username = decode_keeping_references(user).unwrap_or_else(|| {
         b.report.warn(
             "url_user_not_decoded",
@@ -804,10 +828,10 @@ pub fn userinfo_auth(b: &mut Builder, user: &str, pass: &str, pointer: &str) -> 
 /// cURL `-u`, a Postman or Insomnia auth helper) and an explicit "no auth"
 /// win, as curl prefers `-u`; the userinfo, already removed from the URL,
 /// is then dropped with a `url_credentials_dropped` warning.
-pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<(String, String)>, pointer: &str) {
+pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<Userinfo>, pointer: &str) {
     let Some((user, pass)) = userinfo else { return };
     if matches!(auth, AuthConfig::Inherit) {
-        *auth = userinfo_auth(b, &user, &pass, pointer);
+        *auth = userinfo_auth(b, &user, pass.as_deref(), pointer);
     } else {
         b.report.warn(
             "url_credentials_dropped",
@@ -823,10 +847,64 @@ pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<(
 /// at the first `/`, `?` or `#` (RFC 3986 section 3.2), so an `@` in the path,
 /// query or fragment is not one; within the authority the last `@` ends the
 /// userinfo, as URL parsers (Postman's among them) read a password holding
-/// an `@`.
+/// an `@`. Characters inside a `{{…}}` expression are skipped, so a `/` in
+/// `{{ 'a/b' | urlencode }}` does not end the authority early.
 pub fn userinfo_end(after_scheme: &str) -> Option<usize> {
-    let authority_end = after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
-    after_scheme[..authority_end].rfind('@')
+    let mut last_at = None;
+    scan_outside_references(after_scheme, |i, c| match c {
+        '/' | '?' | '#' => false,
+        '@' => {
+            last_at = Some(i);
+            true
+        }
+        _ => true,
+    });
+    last_at
+}
+
+/// A URL's userinfo as written: the user name, and the password after the
+/// first `:` (`None` when there is no `:`).
+pub type Userinfo = (String, Option<String>);
+
+/// Visit each character of `s` outside `{{…}}` expressions (the first `}}`
+/// closes one, as the resolver reads it) with its byte offset, until `f`
+/// returns false. A delimiter inside an expression (`{{ 'a/b' | f }}`)
+/// therefore never ends a URL part. Linear: once a `{{` has no closing `}}`,
+/// none later has one either, and the rest is visited as plain text.
+fn scan_outside_references(s: &str, mut f: impl FnMut(usize, char) -> bool) {
+    let mut i = 0;
+    let mut unterminated = false;
+    while i < s.len() {
+        let rest = &s[i..];
+        if !unterminated && rest.starts_with("{{") {
+            match rest[2..].find("}}") {
+                Some(close) => {
+                    i += close + 4;
+                    continue;
+                }
+                None => unterminated = true,
+            }
+        }
+        let c = rest.chars().next().unwrap_or(' ');
+        if !f(i, c) {
+            return;
+        }
+        i += c.len_utf8();
+    }
+}
+
+/// The byte offset of the first `needle` in `s` outside `{{…}}` expressions.
+fn first_outside_references(s: &str, needle: char) -> Option<usize> {
+    let mut found = None;
+    scan_outside_references(s, |i, c| {
+        if c == needle {
+            found = Some(i);
+            false
+        } else {
+            true
+        }
+    });
+    found
 }
 
 /// Remove a `#fragment`, ignoring `#` inside `{{…}}` references.

@@ -34,14 +34,43 @@ pub fn sensitive_name(name: &str, extra: &[String]) -> bool {
     anvil_domain::credential_names::is_export_secret_name(name, extra)
 }
 
-/// Whether `s` carries no literal text: empty, or exactly one plain
-/// `{{name}}` reference spanning the whole (trimmed) value
-/// ([`anvil_domain::secret::classify_template_value`], the rule the
-/// importers use too). A quoted string, a number, a filter or a dynamic
-/// helper (`{{$guid}}`, `{{$randomFrom a|b}}`) is literal text.
+/// Whether `s` carries no literal text: empty, or exactly one `{{name}}`
+/// reference spanning the whole (trimmed) value, judged by the strictest
+/// syntax ([`anvil_domain::secret::TemplateSyntax::Nunjucks`]) since an
+/// export cannot tell where a value came from: a quoted string, a number,
+/// `-` or another operator, a filter or a dynamic helper (`{{$guid}}`,
+/// `{{$randomFrom a|b}}`) is literal text.
 fn is_pure_reference(s: &str) -> bool {
-    use anvil_domain::secret::{TemplateKind, classify_template_value};
-    matches!(classify_template_value(s), TemplateKind::Empty | TemplateKind::Reference)
+    use anvil_domain::secret::{TemplateKind, TemplateSyntax, classify_template_value};
+    matches!(classify_template_value(s, TemplateSyntax::Nunjucks), TemplateKind::Empty | TemplateKind::Reference)
+}
+
+/// Whether a variable's text is a JSON object or array (an imported
+/// environment value) holding literal material under a credential-named
+/// member: a string that is not a pure reference, or a number or boolean,
+/// anywhere beneath such a member. Text that does not parse is not one.
+fn json_text_has_credential_member(text: &str, extra: &[String]) -> bool {
+    fn literal_under(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::String(s) => !is_pure_reference(s),
+            serde_json::Value::Number(_) | serde_json::Value::Bool(_) => true,
+            serde_json::Value::Array(a) => a.iter().any(literal_under),
+            serde_json::Value::Object(m) => m.values().any(literal_under),
+            serde_json::Value::Null => false,
+        }
+    }
+    fn walk(v: &serde_json::Value, extra: &[String]) -> bool {
+        match v {
+            serde_json::Value::Object(m) => m.iter().any(|(k, x)| if sensitive_name(k, extra) { literal_under(x) } else { walk(x, extra) }),
+            serde_json::Value::Array(a) => a.iter().any(|x| walk(x, extra)),
+            _ => false,
+        }
+    }
+    let t = text.trim_start();
+    if !(t.starts_with('[') || t.starts_with('{')) {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(t).is_ok_and(|v| walk(&v, extra))
 }
 
 fn escape_ptr(s: &str) -> String {
@@ -256,7 +285,9 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: 
                         val["value"] = serde_json::Value::String(String::new());
                     } else if !secret
                         && is_tpl
-                        && (sensitive_name(&name, extra) || looks_like_credential(&text).is_some())
+                        && (sensitive_name(&name, extra)
+                            || looks_like_credential(&text).is_some()
+                            || json_text_has_credential_member(&text, extra))
                         && !text.is_empty()
                         && !is_pure_reference(&text)
                     {

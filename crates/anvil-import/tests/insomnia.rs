@@ -744,3 +744,24 @@ fn sub_environment_placeholders_never_take_a_base_variable_name() {
     assert!(!base.contains("{{keys_0_api_key}}"), "a base placeholder took a sub-environment variable name");
     assert!(!sub.contains("tok-SENSITIVE") && !base.contains("tok-SENSITIVE"), "a credential member stayed");
 }
+
+/// Review round 4 of #573, sol F1 and F2: in Nunjucks, subtraction and
+/// numeric operands are expressions (literal), and a delimiter inside a
+/// password expression does not end the URL's authority early.
+#[test]
+fn nunjucks_expressions_and_delimiters_in_passwords_are_redacted() {
+    let request = serde_json::json!({
+        "url": "https://admin:{{ 'tok-SENSITIVE-in14/x?y#z' | urlencode }}@api.example.test/v1",
+        "headers": [{ "name": "X-Api-Key", "value": "{{ _.zero--571571578 }}" }],
+    });
+    let env = serde_json::json!({ "zero": 0, "accounts": [{ "pin": "{{ _.zero--571571579 }}" }] });
+    for r in both(request, env, &opts()) {
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.test/v1");
+        assert!(matches!(&s.auth, AuthConfig::Basic { password, .. } if password == &SensitiveValue::template("{{password}}")));
+        assert_eq!(header(s, "X-Api-Key").unwrap().value, "{{X_Api_Key}}");
+        let accounts = r.workspace.variables.iter().find(|v| v.name == "accounts").map(|v| template_text(&v.value)).unwrap();
+        let text = serde_json::to_string(&r.requests).unwrap();
+        assert!(!text.contains("tok-SENSITIVE-in14") && !text.contains("57157157") && !accounts.contains("57157157"), "a literal stayed");
+    }
+}
