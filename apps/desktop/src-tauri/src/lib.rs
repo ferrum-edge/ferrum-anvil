@@ -190,6 +190,7 @@ pub fn run() {
             commands::integrations_list,
             commands::integration_save,
             commands::integration_delete,
+            commands::integration_open_console,
             commands::settings_get,
             commands::settings_save,
             commands::storage_cleanup_last,

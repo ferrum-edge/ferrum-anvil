@@ -120,6 +120,10 @@ pub struct Outcome {
     /// True when the body is the backend's own (pass-through) body.
     pub body_passthrough: bool,
     pub grpc_status: Option<i32>,
+    /// HTTP 200 and `grpc_status` with no message: a trailers-only response,
+    /// trailers after no message, or a gRPC-Web trailer frame alone. Such an
+    /// outcome has no body to compare ([`grpc_status_only`]).
+    pub grpc_status_only: bool,
     pub evidence_visibility: String,
     pub shared_signal_with: Vec<String>,
     pub minimum_truthful_diagnosis: String,
@@ -260,6 +264,35 @@ fn pattern_from_text(alt: &str) -> Option<BodyPattern> {
     serde_json::from_str::<serde_json::Value>(candidate).ok().map(BodyPattern::Json)
 }
 
+/// Whether a catalog outcome's public signal is a gRPC status with no message
+/// (HTTP 200, a `grpc_status`, and a `body_shape` that is empty, says
+/// "empty (trailers-only)" or is a gRPC-Web trailer frame) on a gRPC wire
+/// shape (`grpc-status`, `x-grpc-web` or an `application/grpc` content type
+/// among its headers, or trailers in its transport). Such a signal has no
+/// body: a JSON form its notes give is the plugin's HTTP rendering, which
+/// the gRPC client never sees.
+fn grpc_status_only(sig: &serde_json::Value, statuses: &[u16], grpc_status: Option<i32>) -> bool {
+    if grpc_status.is_none() || statuses != [200] {
+        return false;
+    }
+    let body = match sig.get("body_shape") {
+        None | Some(serde_json::Value::Null) => "",
+        Some(serde_json::Value::String(s)) => s.trim(),
+        Some(_) => return false,
+    };
+    let lower = body.to_ascii_lowercase();
+    let no_message =
+        body.is_empty() || lower.starts_with("empty") || lower.starts_with("(empty") || lower.starts_with("grpc-web trailer frame");
+    let grpc_header = |(name, value): (&String, &serde_json::Value)| {
+        name.eq_ignore_ascii_case("grpc-status")
+            || name.eq_ignore_ascii_case("x-grpc-web")
+            || (name.eq_ignore_ascii_case("content-type") && value.as_str().is_some_and(|v| v.trim().starts_with("application/grpc")))
+    };
+    let grpc_wire = sig.get("other_headers").and_then(|h| h.as_object()).is_some_and(|h| h.iter().any(grpc_header))
+        || sig.get("transport").and_then(|t| t.as_str()).is_some_and(|t| t.to_ascii_lowercase().contains("trailers"));
+    no_message && grpc_wire
+}
+
 fn parse_bodies(v: &serde_json::Value) -> (Vec<BodyPattern>, bool) {
     let Some(s) = v.as_str() else { return (vec![], false) };
     let passthrough = s.to_ascii_lowercase().contains("backend's own") || s.to_ascii_lowercase().contains("backend body");
@@ -327,14 +360,18 @@ pub fn load(raw: &str) -> Result<FerrumCatalog, serde_json::Error> {
         .map(|o| {
             let sig = &o.public_signal;
             let (body_patterns, body_passthrough) = parse_bodies(sig.get("body_shape").unwrap_or(&serde_json::Value::Null));
+            let statuses = parse_statuses(sig.get("http_status").unwrap_or(&serde_json::Value::Null));
+            let grpc_status = sig.get("grpc_status").and_then(|g| g.as_i64()).map(|g| g as i32);
+            let grpc_status_only = grpc_status_only(sig, &statuses, grpc_status);
             Outcome {
                 id: o.id.clone(),
                 family: o.family.clone(),
-                statuses: parse_statuses(sig.get("http_status").unwrap_or(&serde_json::Value::Null)),
+                statuses,
                 tokens: parse_tokens(sig.get("x_gateway_error").unwrap_or(&serde_json::Value::Null), &tokens),
-                body_patterns,
+                body_patterns: if grpc_status_only { vec![] } else { body_patterns },
                 body_passthrough,
-                grpc_status: sig.get("grpc_status").and_then(|g| g.as_i64()).map(|g| g as i32),
+                grpc_status,
+                grpc_status_only,
                 evidence_visibility: o.evidence_visibility.clone(),
                 shared_signal_with: o.shared_signal_with.clone(),
                 minimum_truthful_diagnosis: o.minimum_truthful_diagnosis.clone(),
@@ -369,6 +406,9 @@ pub struct Signal<'a> {
     pub body_text: &'a str,
     pub body: &'a BodyFacts,
     pub grpc_status: Option<i32>,
+    /// The gRPC call ended with its status and no message before it
+    /// (`Ctx::grpc_status_without_message`).
+    pub grpc_no_message: bool,
 }
 
 /// A JSON-RPC error response (MCP, A2A) as the client observed it.
@@ -398,6 +438,10 @@ pub enum MatchStrength {
     Exact,
     /// Status and token matched; the body is the backend's own pass-through.
     PassThrough,
+    /// HTTP status, token and grpc-status matched a gRPC outcome that sends
+    /// no message, and none arrived: there is no body to compare, and a
+    /// service behind the gateway can answer in the same shape.
+    GrpcStatusOnly,
 }
 
 impl FerrumCatalog {
@@ -443,6 +487,8 @@ impl FerrumCatalog {
                 out.push((o, MatchStrength::Exact));
             } else if o.body_patterns.is_empty() && o.body_passthrough {
                 out.push((o, MatchStrength::PassThrough));
+            } else if o.grpc_status_only && s.grpc_no_message && s.grpc_status.is_some() && s.grpc_status == o.grpc_status {
+                out.push((o, MatchStrength::GrpcStatusOnly));
             }
         }
         out
@@ -558,7 +604,14 @@ mod tests {
     fn outcomes_new_in_0_9_9_match_only_their_own_catalog() {
         let body = br#"{"error":"Request path contains a path parameter"}"#;
         let bf = body_facts(Some("application/json"), body);
-        let signal = Signal { status: 400, token: None, body_text: std::str::from_utf8(body).unwrap(), body: &bf, grpc_status: None };
+        let signal = Signal {
+            status: 400,
+            token: None,
+            body_text: std::str::from_utf8(body).unwrap(),
+            body: &bf,
+            grpc_status: None,
+            grpc_no_message: false,
+        };
         let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
         assert_eq!(ids(catalog_for("ferrum-edge-0.9.9").unwrap()), ["gateway.routing.path_parameter_refused"]);
         assert!(ids(catalog_for("ferrum-edge-0.9.8").unwrap()).is_empty());
@@ -578,7 +631,7 @@ mod tests {
         for reason in ["unsupported_charset", "jsonrpc_request_unparseable"] {
             let text = format!(r#"{{"error":"MCP request body could not be inspected","message":"{reason}"}}"#);
             let bf = body_facts(Some("application/json"), text.as_bytes());
-            let signal = Signal { status: 400, token: None, body_text: &text, body: &bf, grpc_status: None };
+            let signal = Signal { status: 400, token: None, body_text: &text, body: &bf, grpc_status: None, grpc_no_message: false };
             let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
             for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20"] {
                 let catalog = catalog_for(id).unwrap();
@@ -590,7 +643,7 @@ mod tests {
 
         let text = r#"{"error":"MCP request body could not be inspected","message":"unsupported_content_encoding"}"#;
         let bf = body_facts(Some("application/json"), text.as_bytes());
-        let signal = Signal { status: 400, token: None, body_text: text, body: &bf, grpc_status: None };
+        let signal = Signal { status: 400, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
         let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
         for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20"] {
             let expected = ["plugin.ai_prompt_shield.mcp_body_uninspectable"];
@@ -608,7 +661,8 @@ mod tests {
     fn buffered_read_error_body_changed_in_0_9_14() {
         let ids = |id: &str, text: &str| {
             let bf = body_facts(None, text.as_bytes());
-            let signal = Signal { status: 502, token: Some("backend_error"), body_text: text, body: &bf, grpc_status: None };
+            let signal =
+                Signal { status: 502, token: Some("backend_error"), body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
             let mut ids: Vec<String> = catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
             ids.sort();
             ids
@@ -641,7 +695,7 @@ mod tests {
         ];
         for (status, text, expected) in cases {
             let bf = body_facts(Some("application/json"), text.as_bytes());
-            let signal = Signal { status, token: None, body_text: text, body: &bf, grpc_status: None };
+            let signal = Signal { status, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
             let ids = |id: &str| catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
             assert_eq!(ids("ferrum-edge-0.9.15"), [expected], "{text}");
             assert!(ids("ferrum-edge-0.9.14").is_empty(), "{text}");
@@ -657,7 +711,7 @@ mod tests {
     fn oidc_state_cache_full_is_absent_from_0_9_15_only() {
         let text = r#"{"error":"OIDC state cache full"}"#;
         let bf = body_facts(Some("application/json"), text.as_bytes());
-        let signal = Signal { status: 503, token: None, body_text: text, body: &bf, grpc_status: None };
+        let signal = Signal { status: 503, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
         let ids = |id: &str| catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
         assert_eq!(ids("ferrum-edge-0.9.14"), ["plugin.oidc_relying_party.challenge_browser_state_cache_full"]);
         assert!(ids("ferrum-edge-0.9.15").is_empty());
@@ -679,7 +733,7 @@ mod tests {
         ];
         for (status, token, text, expected) in cases {
             let bf = body_facts(Some("application/json"), text.as_bytes());
-            let signal = Signal { status, token, body_text: text, body: &bf, grpc_status: None };
+            let signal = Signal { status, token, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
             let ids = |id: &str| catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
             assert_eq!(ids("ferrum-edge-0.9.20"), [expected], "{text}");
             assert!(ids("ferrum-edge-0.9.15").is_empty(), "{text}");
@@ -693,7 +747,7 @@ mod tests {
         let text = r#"{"error":"Backend WebSocket connection failed"}"#;
         let bf = body_facts(Some("application/json"), text.as_bytes());
         for token in ["connection_failure", "backend_error"] {
-            let signal = Signal { status: 502, token: Some(token), body_text: text, body: &bf, grpc_status: None };
+            let signal = Signal { status: 502, token: Some(token), body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
             let ids: Vec<String> =
                 catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
             assert_eq!(ids, ["protocol.ws.backend_connect_failed"], "{token}");
@@ -753,7 +807,7 @@ mod tests {
         }
         for (status, text, expected) in &variants {
             let bf = body_facts(Some("application/json"), text.as_bytes());
-            let signal = Signal { status: *status, token: None, body_text: text, body: &bf, grpc_status: None };
+            let signal = Signal { status: *status, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
             let ids: Vec<String> =
                 catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
             assert_eq!(ids, [*expected], "{status} {text}");
@@ -797,7 +851,7 @@ mod tests {
             (Some("backend_error"), request, &[][..]),
         ] {
             let bf = body_facts(Some("application/json"), text.as_bytes());
-            let signal = Signal { status: 503, token, body_text: text, body: &bf, grpc_status: None };
+            let signal = Signal { status: 503, token, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
             let ids: Vec<String> =
                 catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
             assert_eq!(ids, expected, "{token:?} {text}");
@@ -852,6 +906,7 @@ mod tests {
                 body_text: std::str::from_utf8(body).unwrap(),
                 body: &bf,
                 grpc_status: None,
+                grpc_no_message: false,
             });
             assert!(
                 m.len() > 3,
@@ -920,6 +975,67 @@ mod tests {
         assert!(c.match_jsonrpc_error(&sig(200, -31999, "other", None)).code_only.is_empty());
     }
 
+    /// gRPC outcomes that answer with a status and no message (HTTP 200,
+    /// trailers-only or a gRPC-Web trailer frame) have no body to compare:
+    /// they match on status, token and grpc-status when no message arrived,
+    /// as a weaker kind of match, and never when one did (#570).
+    #[test]
+    fn grpc_status_only_outcomes_match_without_a_body() {
+        let c = default_catalog();
+        let only: Vec<&str> = c.outcomes.iter().filter(|o| o.grpc_status_only).map(|o| o.id.as_str()).collect();
+        assert!(only.len() >= 28, "{only:?}");
+        for id in [
+            "gateway.routing.grpc_requires_post",
+            "protocol.grpc.overload_h3",
+            "protocol.grpc.route_method_not_allowed",
+            "plugin.grpc_deadline.missing_deadline",
+            "plugin.grpc_method_router.method_not_permitted",
+            "plugin.waf.grpc_reject_mapping",
+            "plugin.grpc_web.invalid_request",
+        ] {
+            let o = c.outcome(id).unwrap_or_else(|| panic!("{id}"));
+            assert!(o.grpc_status_only && o.body_patterns.is_empty(), "{id}: {:?}", o.body_patterns);
+        }
+        // Edge maps the plugin's HTTP 400 to INVALID_ARGUMENT; the generic
+        // gRPC-Web rendering has no fixed status, so it is no candidate.
+        assert_eq!(c.outcome("plugin.grpc_web.invalid_request").unwrap().grpc_status, Some(3));
+        let generic = c.outcome("generic.reject.grpc_web_rendering").unwrap();
+        assert!(generic.grpc_status.is_none() && !generic.grpc_status_only);
+        // A 200 with a body, or without a gRPC wire shape, is not one.
+        for id in ["plugin.oidc_relying_party.logout_short_circuit", "plugin.cors.preflight_unmatched_ignore"] {
+            assert!(!c.outcome(id).unwrap().grpc_status_only, "{id}");
+        }
+        let bf = body_facts(Some("application/grpc"), b"");
+        let sig = |token: Option<&'static str>, grpc_status: i32, grpc_no_message: bool| Signal {
+            status: 200,
+            token,
+            body_text: "",
+            body: &bf,
+            grpc_status: Some(grpc_status),
+            grpc_no_message,
+        };
+        let ids = |m: Vec<(&Outcome, MatchStrength)>| {
+            assert!(
+                m.iter().all(|(_, s)| *s == MatchStrength::GrpcStatusOnly),
+                "{:?}",
+                m.iter().map(|x| (&x.0.id, x.1)).collect::<Vec<_>>()
+            );
+            m.into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>()
+        };
+        for cat in catalogs() {
+            let m = ids(cat.match_signal(&sig(None, 3, true)));
+            for id in ["gateway.routing.grpc_requires_post", "plugin.grpc_deadline.missing_deadline"] {
+                assert!(m.iter().any(|x| x == id), "{}: {id} in {m:?}", cat.compatibility_id);
+            }
+            assert!(!m.iter().any(|x| x == "protocol.grpc.overload_h3"), "another grpc-status: {m:?}");
+            let m = ids(cat.match_signal(&sig(Some("overload"), 14, true)));
+            assert!(m.iter().any(|x| x == "protocol.grpc.overload_h3"), "{}: {m:?}", cat.compatibility_id);
+            assert!(!m.iter().any(|x| x == "protocol.grpc.backend_unavailable"), "a token the outcome does not send: {m:?}");
+            // A message arrived: the service answered something, so no outcome without one matches.
+            assert!(cat.match_signal(&sig(None, 3, false)).is_empty(), "{}", cat.compatibility_id);
+        }
+    }
+
     #[test]
     fn placeholder_bodies_match_as_patterns() {
         for c in catalogs() {
@@ -931,6 +1047,7 @@ mod tests {
                 body_text: std::str::from_utf8(body).unwrap(),
                 body: &bf,
                 grpc_status: None,
+                grpc_no_message: false,
             });
             assert!(
                 m.iter().any(|(o, _)| o.id == "size.query_param_count_exceeded"),

@@ -474,7 +474,6 @@ plugin_configs:
     proxy_id: gw014-ip-deny
     enabled: true
     config:
-      mode: allow_first
       deny:
         - 127.0.0.1
 
@@ -566,7 +565,6 @@ plugin_configs:
     proxy_id: gw019-reject-decorated
     enabled: true
     config:
-      mode: allow_first
       deny:
         - 127.0.0.1
 
@@ -598,7 +596,6 @@ plugin_configs:
     proxy_id: gw019-reject-known-token
     enabled: true
     config:
-      mode: allow_first
       deny:
         - 127.0.0.1
 

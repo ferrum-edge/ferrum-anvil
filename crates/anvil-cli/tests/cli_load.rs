@@ -7,6 +7,7 @@ use anvil_app::profiles::ProfileManager;
 use anvil_domain::assertions::{Assertion, AssertionKind, Comparison};
 use anvil_domain::load::LoadReport;
 use anvil_domain::request::{PayloadEncoding, Protocol, RequestSpec, StreamPayload, UdpSpec, WsBootstrap, WsMessage, WsSpec};
+use anvil_domain::settings::{SettingsOverrides, TimeoutOverrides};
 use anvil_storage::KdfParams;
 use std::path::Path;
 use std::process::Output;
@@ -157,5 +158,53 @@ async fn load_run_exit_codes_put_assertion_failures_first() {
     let o = anvil(data, &["load", "run", "Codes", "asserted", "--i-am-authorized"]).await;
     let out = text(&o);
     assert!(out.contains("2 application failures, 2 assertion failures"), "{out}");
+    assert_eq!(o.status.code(), Some(2), "{out}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chain_step_assertion_failure_exits_2_when_a_later_step_times_out() {
+    anvil_transport::init();
+    anvil_fixtures::init();
+    let http = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path();
+    {
+        let pm = ProfileManager::new(data);
+        let (s, dek, _) = pm.create_passphrase("ci", PASS, KdfParams::testing()).unwrap();
+        let h = anvil_storage::vault::read_header(&s.dir).unwrap();
+        let app = App::open(s.dir, h, dek).unwrap();
+        let ws = app.create_workspace("Chain").unwrap();
+        // Step 1 completes (200) but fails its assertion; the chain goes on.
+        let mut asserted = RequestSpec::http("GET", &format!("http://{}/status/200", http.addr));
+        asserted.assertions = vec![Assertion {
+            enabled: true,
+            label: String::new(),
+            kind: AssertionKind::Status { comparison: Comparison::Equals, value: "201".into() },
+        }];
+        app.create_request(&ws.meta.id, None, "Asserted", asserted).unwrap();
+        // Step 2 times out, so the iteration ends as a timeout.
+        let mut slow = RequestSpec::http("GET", &format!("http://{}/delay-headers/2000", http.addr));
+        slow.settings = SettingsOverrides {
+            timeouts: Some(TimeoutOverrides { total_ms: Some(Some(150)), ..Default::default() }),
+            ..Default::default()
+        };
+        app.create_request(&ws.meta.id, None, "Slow", slow).unwrap();
+    }
+
+    let o = anvil(
+        data,
+        &["load", "create", "Chain", "chained", "--request", "Asserted", "--request", "Slow", "--iterations", "3", "--concurrency", "1"],
+    )
+    .await;
+    assert!(o.status.success(), "{}", text(&o));
+    let o = anvil(data, &["load", "run", "Chain", "chained", "--i-am-authorized"]).await;
+    let out = text(&o);
+    // The iteration ledger counts each iteration once, by its timeout; the
+    // unit ledger keeps step 1's failed assertions, and they decide the code.
+    assert!(out.contains("iterations 3 started, 0 completed, 0 transport failures, 3 timeouts"), "{out}");
+    assert!(
+        out.contains("sends: 6 started, 3 completed, 0 transport failures, 3 timeouts, 0 application failures, 3 assertion failures"),
+        "{out}"
+    );
     assert_eq!(o.status.code(), Some(2), "{out}");
 }

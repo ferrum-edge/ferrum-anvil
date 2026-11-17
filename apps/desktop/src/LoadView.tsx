@@ -1415,9 +1415,14 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
             </tr>
             <tr>
               <td className="k">Schedule lag p99 / max</td>
-              <td className="v">
-                {fmtUs(r.generator.p99_schedule_lag_us)} / {fmtUs(r.generator.max_schedule_lag_us)}
-              </td>
+              {/* Only an open workload schedules arrivals; elsewhere the lag fields hold no measurement. */}
+              {r.plan.workload.model === "open_arrival_rate" ? (
+                <td className="v">
+                  {fmtUs(r.generator.p99_schedule_lag_us)} / {fmtUs(r.generator.max_schedule_lag_us)}
+                </td>
+              ) : (
+                <td className="v faint">not measured (no arrival schedule)</td>
+              )}
             </tr>
             <tr>
               <td className="k">Bytes sent / received</td>

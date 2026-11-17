@@ -973,6 +973,26 @@ describe("ReportView", () => {
     const successRow = screen.getByText("Successful exchanges").closest("tr")!;
     expect(successRow.textContent).toContain("— (no samples)");
   });
+
+  it("shows start lag only for an open workload, never 0 µs for a run without a schedule", async () => {
+    const iterations = sampleReport();
+    const open: LoadReport = {
+      ...sampleReport(),
+      run_id: "run-2",
+      plan: { ...plan(), workload: { model: "open_arrival_rate", stages: [{ duration_secs: 5, target: 10 }], max_in_flight: 4 } },
+      generator: { ...iterations.generator, p99_schedule_lag_us: 300, max_schedule_lag_us: 900 },
+    };
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
+      if (cmd === "load_report") return args.runId === "run-2" ? open : iterations;
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const lagRow = async () => (await screen.findByText("Schedule lag p99 / max")).closest("tr")!.textContent;
+    const r = render(<ReportView runId="run-1" reports={[]} notify={() => {}} onDeleted={() => {}} />);
+    expect(await lagRow()).toBe("Schedule lag p99 / maxnot measured (no arrival schedule)");
+    r.unmount();
+    render(<ReportView runId="run-2" reports={[]} notify={() => {}} onDeleted={() => {}} />);
+    expect(await lagRow()).toBe("Schedule lag p99 / max300 µs / 900 µs");
+  });
 });
 
 describe("PlanEditor save", () => {

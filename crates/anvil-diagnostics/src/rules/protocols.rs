@@ -121,11 +121,15 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
             ),
         );
     }
+    // The failure a gRPC status reports is confirmed; who authored it is not
+    // when no message came before it: a gateway refusing the call before
+    // routing answers in the same shape.
+    let grpc_owner = if ctx.grpc_status_without_message() { Owner::Unknown } else { Owner::ApiOwner };
     match ctx.input.protocol_status {
         ProtocolStatus::Grpc { http_status, grpc_status, grpc_message, source } => match (grpc_status, source) {
             (Some(0), _) => {}
             (Some(code), src) => out.push(
-                Draft::new("app.grpc_status", "protocol.grpc", Confidence::Confirmed, SourceScope::Unknown, Owner::ApiOwner, Severity::Error)
+                Draft::new("app.grpc_status", "protocol.grpc", Confidence::Confirmed, SourceScope::Unknown, grpc_owner, Severity::Error)
                     .ev_at(E::GrpcStatus, "grpc-status", code.to_string(), idx)
                     .ev_at(E::GrpcStatus, "grpc-message", grpc_message.clone().unwrap_or_default(), idx)
                     .ev_at(E::GrpcStatus, "status.source", format!("{src:?}"), idx)
@@ -136,10 +140,11 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
                     .var("http_status", http_status.map(|s| s.to_string()).unwrap_or_else(|| "no".into()))
                     .var(
                         "trailers_only",
-                        if matches!(src, GrpcStatusSource::TrailersOnly) {
-                            "The status arrived as a trailers-only response (no messages), which gateways and servers both use for early rejection.".into()
-                        } else {
-                            String::new()
+                        match src {
+                            GrpcStatusSource::TrailersOnly => "The status arrived as a trailers-only response (no messages), which gateways and servers both use for early rejection, so it does not show which of them answered.",
+                            GrpcStatusSource::TrailerFrame if ctx.grpc_status_without_message() => "The status arrived in a gRPC-Web trailer frame with no message before it, which gateways and servers both use for early rejection, so it does not show which of them answered.",
+                            _ if ctx.grpc_status_without_message() => "No message arrived before the status; a gateway can end a call with its own status before the service answers, so it does not show which of them answered.",
+                            _ => "",
                         },
                     ),
             ),
@@ -530,6 +535,53 @@ mod tests {
 
     fn tcp(sent: u64, received: u64, by: ClosedBy) -> ProtocolStatus {
         ProtocolStatus::Tcp { bytes_sent: sent, bytes_received: received, half_closed: false, closed_by: by }
+    }
+
+    /// A gRPC status with no message before it (trailers-only, a gRPC-Web
+    /// trailer frame alone, or trailers after no message) is the shape a
+    /// gateway refusing the call before routing answers with: the failure is
+    /// confirmed, but no owner is named. After a message the service answered,
+    /// and the status stays the API owner's (#570).
+    #[test]
+    fn a_grpc_status_with_no_message_names_no_owner() {
+        use anvil_domain::diagnostics::Confidence;
+        use anvil_domain::outcome::GrpcStatusSource;
+        let status =
+            |source| ProtocolStatus::Grpc { http_status: Some(200), grpc_status: Some(7), grpc_message: Some("denied".into()), source };
+        let replied = StreamTranscript { messages: vec![tcp_message(Direction::Received, "grpc_message", 12)], ..Default::default() };
+        let silent = StreamTranscript { messages: vec![tcp_message(Direction::Sent, "grpc_message", 12)], ..Default::default() };
+        for (source, stream, sentence) in [
+            (GrpcStatusSource::TrailersOnly, None, "trailers-only"),
+            (GrpcStatusSource::TrailersOnly, Some(&silent), "trailers-only"),
+            (GrpcStatusSource::TrailerFrame, Some(&silent), "gRPC-Web trailer frame with no message"),
+            (GrpcStatusSource::TrailerFrame, None, "gRPC-Web trailer frame with no message"),
+            (GrpcStatusSource::Trailers, Some(&silent), "No message arrived before the status"),
+        ] {
+            let f = diagnose_with_stream(Protocol::Grpc, status(source), stream);
+            let d = find(&f, "app.grpc_status");
+            assert_eq!((d.confidence, d.owner), (Confidence::Confirmed, Owner::Unknown), "{source:?} {}", stream.is_some());
+            assert!(d.explanation.contains(sentence), "{source:?}: {}", d.explanation);
+            assert!(d.does_not_prove.iter().any(|x| x.contains("Which component")), "{:?}", d.does_not_prove);
+        }
+        // A long call's retained entries drop its middle: the whole-session
+        // counter still shows the message arrived.
+        let evicted = StreamTranscript {
+            messages: vec![tcp_message(Direction::Sent, "grpc_message", 12)],
+            dropped_messages: 1,
+            received_count: 1,
+            ..Default::default()
+        };
+        for (source, stream) in [
+            (GrpcStatusSource::Trailers, &replied),
+            (GrpcStatusSource::TrailerFrame, &replied),
+            (GrpcStatusSource::Trailers, &evicted),
+            (GrpcStatusSource::TrailerFrame, &evicted),
+        ] {
+            let f = diagnose_with_stream(Protocol::Grpc, status(source), Some(stream));
+            let d = find(&f, "app.grpc_status");
+            assert_eq!((d.confidence, d.owner), (Confidence::Confirmed, Owner::ApiOwner), "{source:?}");
+            assert!(!d.explanation.contains("does not show which"), "{source:?}: {}", d.explanation);
+        }
     }
 
     fn tcp_message(direction: Direction, kind: &str, size: u64) -> StreamMessage {

@@ -39,6 +39,8 @@ function backend() {
       case "integration_delete":
         saved = saved.filter((p) => p.id !== args?.profileId);
         return null;
+      case "integration_open_console":
+        return null;
       case "integration_save": {
         const p = args?.profile as IntegrationProfile;
         saved = [...saved.filter((x) => x.id !== p.id), p];
@@ -260,6 +262,45 @@ describe("Ferrum gateway profiles", () => {
     expect(screen.queryByRole("button", { name: "Remove gateway" })).toBeNull();
     expect(calls("integration_delete")).toHaveLength(0);
   });
+  it("opens the saved console link through the backend, never an unsaved edit of it", async () => {
+    saved = [{ ...gateway, console_url: "https://foundry.example/gateways/gw-1" }];
+    await openGateways();
+    expect(await screen.findByText(/· console link/)).toBeTruthy();
+    fireEvent.click(await screen.findByText(gateway.name));
+    const open = screen.getByRole("button", { name: "Open console" }) as HTMLButtonElement;
+    fireEvent.click(open);
+    // The backend reads the stored link by the profile's id; the webview sends no URL.
+    await waitFor(() => expect(calls("integration_open_console")).toEqual([{ profileId: "gw-1" }]));
+    fireEvent.change(screen.getByDisplayValue("https://foundry.example/gateways/gw-1"), { target: { value: "https://other.example/" } });
+    expect(open.disabled).toBe(true);
+    expect(screen.getByText("Save the profile to open the edited link.")).toBeTruthy();
+    fireEvent.click(open);
+    expect(calls("integration_open_console")).toHaveLength(1);
+  });
+
+  it("reports a console link the backend refuses to open", async () => {
+    saved = [{ ...gateway, console_url: "javascript:alert(1)" }];
+    const answer = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (cmd: string, args?: Args) => {
+      if (cmd === "integration_open_console") throw "the console link must be an https or http URL, not javascript:";
+      return answer(cmd, args);
+    });
+    await openGateways();
+    fireEvent.click(await screen.findByText(gateway.name));
+    fireEvent.click(screen.getByRole("button", { name: "Open console" }));
+    expect(await screen.findByText("The console link was not opened: the console link must be an https or http URL, not javascript:")).toBeTruthy();
+  });
+
+  it("offers no console button for a profile without a saved link", async () => {
+    await openGateways();
+    fireEvent.click(await screen.findByText(gateway.name));
+    expect(screen.queryByRole("button", { name: "Open console" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    fireEvent.click(screen.getByRole("button", { name: "New gateway" }));
+    fireEvent.change(screen.getByPlaceholderText("https://foundry.example/…"), { target: { value: "https://foundry.example/" } });
+    expect(screen.queryByRole("button", { name: "Open console" })).toBeNull();
+  });
+
   it("waits for the caller's refresh after a removal and reports its failure", async () => {
     let fail!: (e: Error) => void;
     const onChanged = vi.fn(() => new Promise<void>((_resolve, reject) => (fail = reject)));

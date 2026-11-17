@@ -364,6 +364,18 @@
   },
   "drift": [
     {
+      "change_id": "grpc_web_reject_status_corrected",
+      "kind": "correction",
+      "refs": "v0.9.7 (Anvil #570 review)",
+      "client_visible_effect": "plugin.grpc_web.invalid_request answers with grpc-status 3 (INVALID_ARGUMENT), as its body_shape says: the plugin rejects with HTTP 400, which the gateway maps to INVALID_ARGUMENT before rendering the gRPC-Web trailer frame. generic.reject.grpc_web_rendering has no fixed grpc-status: it renders whatever status the plugin rejection maps to.",
+      "evidence": "8fed134 src/plugins/grpc_web.rs (invalid_grpc_web_request: status_code 400); src/proxy/grpc_proxy.rs (http_reject_status_to_grpc_status: BAD_REQUEST => INVALID_ARGUMENT)",
+      "anvil_impact": "The numeric grpc_status fields (13) were unused until gRPC status-only outcomes became matchable; invalid_request now matches grpc-status 3, and the generic rendering is no longer offered as a candidate for any one status.",
+      "outcome_ids": [
+        "plugin.grpc_web.invalid_request",
+        "generic.reject.grpc_web_rendering"
+      ]
+    },
+    {
       "change_id": "retry_rs_unchanged",
       "kind": "unchanged",
       "refs": "v0.9.5 -> v0.9.7",
@@ -22098,7 +22110,7 @@
           "Content-Type": "negotiated application/grpc-web[+proto] or application/grpc-web-text[+proto]"
         },
         "body_shape": "gRPC-Web trailer frame (base64 in -text mode) carrying grpc-status: 3 and grpc-message: \"Invalid gRPC-Web request: {error}\"; plugin-authored form is HTTP 400 {\"error\":\"Invalid gRPC-Web request: {error}\"}",
-        "grpc_status": 13,
+        "grpc_status": 3,
         "ws_close_code": null,
         "transport": "complete HTTP response"
       },
@@ -23310,7 +23322,7 @@
           "Content-Type": "negotiated application/grpc-web* type"
         },
         "body_shape": "gRPC-Web trailer frame (grpc-status/grpc-message) - base64 for -text",
-        "grpc_status": 13,
+        "grpc_status": null,
         "ws_close_code": null,
         "transport": "complete HTTP response"
       },

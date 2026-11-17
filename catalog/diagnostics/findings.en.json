@@ -1,5 +1,5 @@
 {
-  "version": "2026.11.03-1",
+  "version": "2026.11.17-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -1848,6 +1848,26 @@
       ],
       "confirm_with": []
     },
+    "ferrum.grpc_status_outcomes": {
+      "title": "gRPC status a known gateway outcome also sends",
+      "explanation": "The call ended with HTTP {status}, grpc-status {code} and no message before it. On {release}, Ferrum Edge answers in exactly this shape for {outcomes}, but a service behind it can send the same status, so the gateway may not have produced it.",
+      "alternatives": [
+        "The service behind the gateway returned this status itself (a trailers-only response, or a gRPC-Web trailer frame with no message)."
+      ],
+      "does_not_prove": [
+        "That the gateway produced this status.",
+        "Which of the listed outcomes applied, if any."
+      ],
+      "remediation": [
+        {
+          "text": "Compare the grpc-message with the service's own errors, or ask the gateway operator for the correlated log entry or diagnostic detail for this call.",
+          "owner": "gateway_operator"
+        }
+      ],
+      "confirm_with": [
+        "Gateway logs or authorized diagnostic detail for this request."
+      ]
+    },
     "ferrum.jsonrpc_code": {
       "title": "JSON-RPC error code used by a known gateway outcome",
       "explanation": "The response is JSON-RPC error {code}. On {release} this code is used by {outcomes}, but the message or gateway marker differs from the audited body, so the gateway may not have produced it.",
@@ -1979,15 +1999,21 @@
       "explanation": "The call ended with grpc-status {code} ({name}) {message}. HTTP status was {http_status}; for gRPC, HTTP 200 does not mean the RPC succeeded. {trailers_only}",
       "alternatives": [],
       "does_not_prove": [
-        "Which component (gateway or service) produced the status, when it came as a trailers-only response."
+        "Which component (gateway or service) produced the status, when no message arrived before it (a trailers-only response, or a gRPC-Web trailer frame alone)."
       ],
       "remediation": [
         {
-          "text": "Handle the status per the service's contract; check grpc-status-details if present.",
+          "text": "If the service sent the status, handle it per the service's contract; check grpc-status-details if present.",
           "owner": "api_owner"
+        },
+        {
+          "text": "If no message arrived before the status, the gateway may have refused the call itself: ask the gateway operator for the correlated log entry or diagnostic detail before treating it as the service's answer.",
+          "owner": "gateway_operator"
         }
       ],
-      "confirm_with": []
+      "confirm_with": [
+        "When no message arrived before the status: the gateway's log entry or diagnostic detail for the call, or the service's own log, to see which of them answered."
+      ]
     },
     "app.grpc_status_missing": {
       "title": "The RPC ended without a status",

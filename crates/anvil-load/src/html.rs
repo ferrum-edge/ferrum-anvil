@@ -766,13 +766,21 @@ pub fn to_html(r: &LoadReport) -> String {
 
     // Generator.
     let g = &r.generator;
+    let lag_measured = crate::report::schedule_lag_measured(&r.plan.workload);
     h.push_str(r#"<h2>Generator health</h2><div class="card"><table>"#);
     let na = "unavailable".to_string();
     for (k, v) in [
         ("Peak CPU", g.peak_cpu_percent.map(|v| format!("{v:.0} % of one core")).unwrap_or(na.clone())),
         ("Peak RSS", g.peak_rss_bytes.map(fmt_bytes).unwrap_or(na.clone())),
         ("Peak open descriptors", g.peak_open_fds.map(fmt_n).unwrap_or(na.clone())),
-        ("Start lag p99 / max", format!("{} / {}", fmt_us(g.p99_schedule_lag_us), fmt_us(g.max_schedule_lag_us))),
+        (
+            "Start lag p99 / max",
+            if lag_measured {
+                format!("{} / {}", fmt_us(g.p99_schedule_lag_us), fmt_us(g.max_schedule_lag_us))
+            } else {
+                "not measured (no arrival schedule)".into()
+            },
+        ),
         ("Target achieved", if g.target_not_achieved { "no".into() } else { "yes or not applicable".into() }),
     ] {
         let _ = write!(h, r#"<tr><th>{}</th><td>{}</td></tr>"#, esc(k), esc(&v));
@@ -806,7 +814,7 @@ pub fn to_html(r: &LoadReport) -> String {
                 b.in_flight,
                 success_us(b.p50_us),
                 success_us(b.p99_us),
-                fmt_us(b.p99_schedule_lag_us)
+                if lag_measured { fmt_us(b.p99_schedule_lag_us) } else { "—".into() }
             );
         }
         h.push_str("</table></details>");
@@ -909,6 +917,27 @@ mod tests {
         b.p99_schedule_lag_us = 0;
         let html = to_html(&r);
         assert!(html.contains(r#"<td class="num">—</td><td class="num">—</td><td class="num">0 µs</td></tr>"#), "{html}");
+    }
+
+    /// Closed and iteration workloads have no arrival schedule: the generator
+    /// table says start lag was not measured and the timeline shows "—",
+    /// never "0 µs". An open workload still shows its lag.
+    #[test]
+    fn start_lag_is_not_measured_without_an_arrival_schedule() {
+        let open = sample_report();
+        let html = to_html(&open);
+        assert!(html.contains("<tr><th>Start lag p99 / max</th><td>0 µs / 0 µs</td></tr>"), "{html}");
+        assert!(html.contains(r#"<td class="num">300 µs</td></tr>"#), "{html}");
+        for w in [
+            Workload::ClosedVirtualUsers { stages: vec![Stage { duration_secs: 1, target: 1 }], think_time_ms: 0 },
+            Workload::Iterations { iterations: 5, concurrency: 1 },
+        ] {
+            let mut r = open.clone();
+            r.plan.workload = w;
+            let html = to_html(&r);
+            assert!(html.contains("<tr><th>Start lag p99 / max</th><td>not measured (no arrival schedule)</td></tr>"), "{html}");
+            assert!(!html.contains(r#"<td class="num">300 µs</td></tr>"#), "{html}");
+        }
     }
 
     #[test]

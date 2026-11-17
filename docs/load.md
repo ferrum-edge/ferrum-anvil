@@ -336,7 +336,11 @@ The terminal classes are disjoint. `completed` follows the unit's definition
 `completed` and may overlap. `in_flight_at_end` is work whose outcome is
 unknown: units in flight when a crashed worker's last snapshot was taken, or
 tasks that ignored cancellation past the drain window. For a single-request
-iteration the two ledgers are identical.
+iteration the two ledgers are identical. In a chain they can differ: an
+iteration whose step 1 failed an assertion and whose step 2 then timed out is
+one timeout in `counts` (its assertion failure is not in `counts`, which only
+splits completed iterations), and one assertion failure plus one timeout in
+`requests`.
 
 **Protocol denominators** (`protocol_metrics`) balance against the unit
 ledger; `report::check_protocol_balance` checks them in every scenario test,
@@ -520,9 +524,14 @@ reader cannot keep a finished worker alive.
   `grpc_status`, `stream` (with `messages_sent` for client and bidirectional
   gRPC), `websocket`, `websocket_close`, `tcp`, `datagram`, `dtls_handshake`,
   `tunnel`); `datagram,observed_received_per_sent` is labelled an
-  observation, and empty distributions have empty values, not zeros. In
-  `timeline_csv`, a second with no successful unit has empty
-  `success_p50_us` and `success_p99_us`.
+  observation, and empty distributions have empty values, not zeros: the
+  summary `latency_success_us`, `latency_failure_us` and `setup_us` rows keep
+  only `count` (0), and `timeouts_censored,elapsed_max_us` is empty without
+  censored timeouts. In `timeline_csv`, a second with no successful unit has
+  empty `success_p50_us` and `success_p99_us`. Start lag exists only for an
+  open workload: for closed and iteration runs `generator,p99_schedule_lag_us`,
+  `generator,max_schedule_lag_us` and the timeline's `p99_schedule_lag_us`
+  are empty, and the HTML report and the desktop say "not measured".
 * **HTML** (`html::to_html`): one self-contained file — inline CSS and inline
   SVG only, no JavaScript, no external fonts/images/stylesheets, and an
   embedded CSP (`default-src 'none'`). Every dynamic string is escaped,
@@ -593,8 +602,11 @@ a hold stage (`[{0 s → N}, {D s → N}]`). `--iterations` runs a fixed count o
 over a 10 s window. `--fresh` selects the fresh connection mode; the default is
 persistent. `--csv` writes the summary CSV.
 
-`anvil load run` exit codes follow the CLI convention (as `anvil send` and
-`anvil run`):
+`anvil load run` prints the iteration ledger (`counts`) on its summary line
+and the unit ledger (`requests`) on the `sends:` line below it. Exit codes
+follow the CLI convention (as `anvil send` and `anvil run`) and are decided
+from the unit ledger, so a chain step's failed assertion counts whatever a
+later step did:
 
 | Code | When |
 |---|---|

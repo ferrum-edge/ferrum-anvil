@@ -572,6 +572,16 @@ pub fn integration_delete(st: State<'_, DesktopState>, profile_id: String) -> R<
     st.app()?.delete_integration(&id(&profile_id)?).map_err(e)
 }
 
+/// Open a saved gateway profile's console link (Foundry/Nexus) in the system
+/// browser, read-only. The link is the stored one, never one from the
+/// webview, and only an http(s) URL without credentials is opened
+/// (`anvil_app::workspace::console_link`).
+#[tauri::command]
+pub fn integration_open_console(st: State<'_, DesktopState>, profile_id: String) -> R<()> {
+    let url = st.app()?.integration_console_link(&id(&profile_id)?).map_err(e)?;
+    tauri_plugin_opener::open_url(url.as_str(), None::<&str>).map_err(|x| x.to_string())
+}
+
 #[tauri::command]
 pub fn settings_get(st: State<'_, DesktopState>) -> R<AppSettings> {
     st.app()?.settings().map_err(e)

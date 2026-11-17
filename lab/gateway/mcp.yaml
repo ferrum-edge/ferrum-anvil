@@ -13,6 +13,11 @@
 # (policy.hide_denied_tools and discovery.hide_denied_items off), so tools/list tells a denial from
 # a hidden tool. validation.validate_tool_arguments (on by default) checks tools/call arguments
 # against the listed inputSchema before forwarding.
+#
+# discovery.hide_denied_items is v0.9.20-only: there it defaults to true and hides denied tools on
+# its own, so it must be set false here. Ferrum Edge after v0.9.20 removes it (#7136; an unknown key
+# fails config load) and policy.hide_denied_tools alone decides. Delete the discovery block when the
+# lab moves past v0.9.20; lint-profiles.rb refuses the key once RELEASE.lock names another release.
 version: "1"
 
 resource_counts:

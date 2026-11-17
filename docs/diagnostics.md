@@ -53,7 +53,7 @@ require a PROXY protocol header"; a 400, TLS alert or close right after
 Anvil sent one gains "the listener may not expect a PROXY protocol header"
 (see [protocols.md §3.10](protocols.md)).
 
-The catalog has 183 finding codes. The status bar shows the catalog version,
+The catalog has 184 finding codes. The status bar shows the catalog version,
 and every record names the findings catalog and Ferrum catalog it used.
 
 | Family | Codes | Examples |
@@ -67,7 +67,7 @@ and every record names the findings catalog and Ferrum catalog it used.
 | `request.*` | 5 | canceled; processing uncertain; an earlier attempt may have processed; `425 Too Early` with the retry outcome |
 | `early_data.*` | 4 | TLS 1.3 / QUIC 0-RTT: accepted (with the replay note), rejected and re-sent by the transport, no session ticket, tickets without early data |
 | `http.*` | 14 | generic status explanations (fallbacks, listed after hop-specific findings), quoting an RFC 9457 problem report when the body is one |
-| `ferrum.*` | 31 | trusted marker tokens, outcome matches, ambiguity, unverified/absent/conflicting/unknown markers, missing release catalog; the gateway's own diagnostic records and their lookup outcomes (`ferrum.detail.*`, G01) |
+| `ferrum.*` | 32 | trusted marker tokens, outcome matches, ambiguity, gRPC statuses a gateway outcome also sends, unverified/absent/conflicting/unknown markers, missing release catalog; the gateway's own diagnostic records and their lookup outcomes (`ferrum.detail.*`, G01) |
 | `app.*`, `auth.*` | 13 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry; JWT-SVID local checks (expired, wrong audience, invalid) and a 401 after sending one |
 | `grpc.*`, `grpc_web.*` | 2 | invalid length-prefixed framing; a gRPC-Web response with no trailer frame |
 | `masque.*` | 5 | CONNECT-UDP tunnel: proxy refused, no extended CONNECT or HTTP/3 datagrams, SETTINGS never arrived, abnormal end |
@@ -339,7 +339,8 @@ catalog whose id equals the profile's `compatibility_id`:
   `HOST`, or was cancelled (Ctrl-C) saves nothing; when it produced a
   record, Anvil says why.
 - `anvil gateway list WORKSPACE` lists a workspace's profiles (id, name,
-  catalog, hosts, and whether trust needs verified TLS), and `anvil gateway
+  catalog, hosts, whether trust needs verified TLS, and the console link when
+  one is set), and `anvil gateway
   remove WORKSPACE PROFILE` (id, or a name no other profile of the workspace
   has, case ignored by Unicode's lowercase rules as for workspaces) removes
   one. An id wins: an argument that is one profile's id and another
@@ -352,6 +353,14 @@ catalog whose id equals the profile's `compatibility_id`:
   request) keep the id, which then matches no profile; the desktop settings
   show it as "removed profile", with **Clear** to inherit again. A vault
   secret its lookup credential names is kept.
+- A profile's **console link** (`console_url`, optional) points at the
+  gateway's page in Ferrum Foundry or Nexus, for read-only context. Anvil
+  never fetches it and never edits anything there: the desktop's **Open
+  console** (on a saved profile) asks the backend to open the stored link in
+  the system browser. Only an absolute `https` or `http` URL with a host and
+  no user name or password is saved or opened; anything else is refused
+  (an imported profile's link is checked again when it is opened, and
+  `anvil gateway list` names it as refused instead of printing it).
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 
@@ -418,6 +427,38 @@ A missing marker does not prove the response came from the backend
 (`ferrum.marker.absent` explains this). A 403 alone never proves a WAF:
 WAF and bot-detection default bodies are byte-identical, and backend 403s
 look the same.
+
+### gRPC and gRPC-Web
+
+Ferrum Edge refuses many gRPC calls itself with HTTP 200, a non-zero
+`grpc-status` and no message: a trailers-only response, trailers after no
+message, or a gRPC-Web trailer frame alone (routing, size, deadline,
+`grpc_method_router`, `body_validator`, WAF and `grpc_web` refusals), usually
+without `X-Gateway-Error`. A service behind it can answer in exactly the same
+shape, so:
+
+- `app.grpc_status` names no owner (`unknown`) when no message arrived before
+  the status (the transcript's whole-session received count, not only its
+  retained entries, decides); the RPC failure itself is still confirmed. After
+  a message the service answered, and the status stays the API owner's.
+- On a trusted profile, such a status is compared with the catalog outcomes
+  that answer that way (HTTP 200, the token if any, and the `grpc-status`; there
+  is no body to compare): `ferrum.grpc_status_outcomes` (warning, confidence
+  and owner `unknown`) lists them and says the gateway may not have produced
+  the status. It is never a `ferrum.outcome` match, and it lists only matched
+  outcomes, not the catalog's look-alike siblings (one may answer HTTP 400
+  JSON instead). `plugin.grpc_web.invalid_request` answers `grpc-status 3`
+  (the plugin's HTTP 400 mapped to INVALID_ARGUMENT); the generic gRPC-Web
+  rendering of other plugin rejections has no fixed status and is not listed.
+- The marker is judged by the response's shape, not the request's protocol:
+  `X-Gateway-Error` is a gateway error class only on a 5xx or on HTTP 200 with
+  a non-zero `grpc-status` (and there `overload` and `config_stale` only over
+  HTTP/3: the HTTP/1.1 and HTTP/2 gRPC overload and stale-configuration
+  refusals carry no marker). On a gRPC request's 401 JSON refusal, or beside
+  `grpc-status: 0`, it is `ferrum.marker.inconsistent`; an HTTP 5xx with neither
+  a marker nor a `grpc-status` gets `ferrum.marker.absent`.
+- `X-Gateway-Error` and `X-Ferrum-Diagnostic-Ref` are read from the trailers as
+  well as the headers, by the marker rules and by the G01 lookup's binding.
 
 <a id="adopting-the-gateway-diagnostic-reference-g01"></a>
 
