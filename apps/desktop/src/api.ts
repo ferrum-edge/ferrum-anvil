@@ -772,6 +772,8 @@ export const api = {
   integrations: (workspaceId: string) => call<IntegrationProfile[]>("integrations_list", { workspaceId }),
   saveIntegration: (profile: IntegrationProfile) => call<IntegrationProfile>("integration_save", { profile }),
   deleteIntegration: (profileId: string) => call<void>("integration_delete", { profileId }),
+  /** Opens the saved profile's console link in the system browser (http(s) only, checked by the backend). */
+  openIntegrationConsole: (profileId: string) => call<void>("integration_open_console", { profileId }),
   settings: () => call<AppSettings>("settings_get"),
   saveSettings: (settings: AppSettings) => call<void>("settings_save", { settings }),
   /** The last storage cleanup (at most once a day when the profile opens); null before the first. */

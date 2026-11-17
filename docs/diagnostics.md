@@ -339,7 +339,8 @@ catalog whose id equals the profile's `compatibility_id`:
   `HOST`, or was cancelled (Ctrl-C) saves nothing; when it produced a
   record, Anvil says why.
 - `anvil gateway list WORKSPACE` lists a workspace's profiles (id, name,
-  catalog, hosts, and whether trust needs verified TLS), and `anvil gateway
+  catalog, hosts, whether trust needs verified TLS, and the console link when
+  one is set), and `anvil gateway
   remove WORKSPACE PROFILE` (id, or a name no other profile of the workspace
   has, case ignored by Unicode's lowercase rules as for workspaces) removes
   one. An id wins: an argument that is one profile's id and another
@@ -352,6 +353,14 @@ catalog whose id equals the profile's `compatibility_id`:
   request) keep the id, which then matches no profile; the desktop settings
   show it as "removed profile", with **Clear** to inherit again. A vault
   secret its lookup credential names is kept.
+- A profile's **console link** (`console_url`, optional) points at the
+  gateway's page in Ferrum Foundry or Nexus, for read-only context. Anvil
+  never fetches it and never edits anything there: the desktop's **Open
+  console** (on a saved profile) asks the backend to open the stored link in
+  the system browser. Only an absolute `https` or `http` URL with a host and
+  no user name or password is saved or opened; anything else is refused
+  (an imported profile's link is checked again when it is opened, and
+  `anvil gateway list` names it as refused instead of printing it).
 
 ### JSON-RPC outcomes (MCP and A2A gateways)
 

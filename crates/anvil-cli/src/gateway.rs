@@ -5,6 +5,7 @@
 
 use crate::env::find_workspace;
 use anvil_app::App;
+use anvil_app::workspace::console_link;
 use anvil_contract::terminal_safe as t;
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::workspace::{Workspace, names_match};
@@ -14,8 +15,8 @@ use clap::Subcommand;
 #[derive(Subcommand)]
 pub enum GatewayCmd {
     /// List the workspace's Ferrum gateway profiles (by name, case ignored,
-    /// then id): id, name, catalog, hosts, and whether trust needs verified
-    /// TLS.
+    /// then id): id, name, catalog, hosts, whether trust needs verified
+    /// TLS, and the console link when one is set.
     List {
         /// Workspace (id, or a name no other workspace has).
         workspace: String,
@@ -58,10 +59,17 @@ pub fn gateway_cmd(app: &App, cmd: &GatewayCmd) -> Result<i32> {
 }
 
 fn line(p: &IntegrationProfile) -> String {
-    let IntegrationKind::FerrumGateway { hosts, compatibility_id, require_verified_tls, .. } = &p.kind;
+    let IntegrationKind::FerrumGateway { hosts, compatibility_id, require_verified_tls, console_url, .. } = &p.kind;
     let hosts: Vec<String> = hosts.iter().map(|h| t(&h.port.map_or_else(|| h.host.clone(), |port| format!("{}:{port}", h.host)))).collect();
     let tls = if *require_verified_tls { "verified TLS required" } else { "plain-HTTP trust (lab)" };
-    format!("{}  {}  {}  {}  {tls}", p.id, t(&p.name), t(compatibility_id), hosts.join(", "))
+    // The link as the desktop would open it; one an import wrote that would
+    // not open is named as refused, not printed.
+    let console = match console_url.as_deref().map(console_link) {
+        None => String::new(),
+        Some(Ok(u)) => format!("  console {}", t(u.as_str())),
+        Some(Err(e)) => format!("  console link refused: {}", t(&e.to_string())),
+    };
+    format!("{}  {}  {}  {}  {tls}{console}", p.id, t(&p.name), t(compatibility_id), hosts.join(", "))
 }
 
 /// The profile of `ws` that `key` names: its id, or its name with case

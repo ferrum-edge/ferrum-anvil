@@ -246,3 +246,33 @@ async fn a_workspace_name_matches_case_ignored_beyond_ascii() {
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert!(text(&o).contains("removed Ferrum gateway profile 'Bar' from 'CAFÉ'"), "{}", text(&o));
 }
+
+/// `anvil gateway list` prints a profile's console link when one is set
+/// (#567); a profile without one prints no console column.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_list_prints_a_console_link() {
+    let (_dir, data, _f) = setup().await;
+    let plain = save_gateway(&data, "A plain gateway", "gw-a.example");
+    let linked = {
+        let mut p = save_gateway(&data, "B linked gateway", "gw-b.example");
+        let IntegrationKind::FerrumGateway { console_url, .. } = &mut p.kind;
+        *console_url = Some("https://foundry.example/gateways/b".into());
+        open(&data).save_integration(p).unwrap()
+    };
+
+    let o = anvil(&data, &["gateway", "list", "Lab"]).await;
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let listed = String::from_utf8_lossy(&o.stdout).to_string();
+    let lines: Vec<&str> = listed.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            format!("{}  A plain gateway  {CATALOG}  gw-a.example  plain-HTTP trust (lab)", plain.id),
+            format!(
+                "{}  B linked gateway  {CATALOG}  gw-b.example  plain-HTTP trust (lab)  console https://foundry.example/gateways/b",
+                linked.id
+            ),
+        ],
+        "{listed}"
+    );
+}

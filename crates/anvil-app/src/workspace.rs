@@ -51,6 +51,34 @@ impl<T> Move<T> {
     }
 }
 
+/// A gateway profile's console link (a Ferrum Foundry or Nexus page), as
+/// Anvil opens it: in the system browser, read-only, never fetched by Anvil.
+/// Only an absolute `https`/`http` URL with a host and no user name or
+/// password is accepted; the refusal never quotes the link.
+pub fn console_link(raw: &str) -> Result<url::Url> {
+    let u = url::Url::parse(raw.trim()).map_err(|_| AppError::Invalid("the console link is not an absolute URL".into()))?;
+    if !matches!(u.scheme(), "https" | "http") {
+        return Err(AppError::Invalid(format!("the console link must be an https or http URL, not {}:", u.scheme())));
+    }
+    if u.host_str().is_none_or(str::is_empty) {
+        return Err(AppError::Invalid("the console link has no host".into()));
+    }
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err(AppError::Invalid("the console link must not carry a user name or password".into()));
+    }
+    Ok(u)
+}
+
+/// Refuse to save a gateway profile whose console link [`console_link`]
+/// would not open.
+fn check_console_link(p: &IntegrationProfile) -> Result<()> {
+    let IntegrationKind::FerrumGateway { console_url, .. } = &p.kind;
+    if let Some(raw) = console_url.as_deref() {
+        console_link(raw)?;
+    }
+    Ok(())
+}
+
 pub fn spec_hash(spec: &RequestSpec) -> String {
     hex::encode(Sha256::digest(serde_json::to_vec(spec).unwrap_or_default()))
 }
@@ -835,6 +863,7 @@ impl App {
     }
 
     pub fn save_integration(&self, mut p: IntegrationProfile) -> Result<IntegrationProfile> {
+        check_console_link(&p)?;
         p.updated_at = chrono::Utc::now();
         self.store.put(kind::INTEGRATION, &p.id, Some(&p.workspace_id), None, 0.0, &p)?;
         Ok(p)
@@ -845,6 +874,7 @@ impl App {
     /// ([`covers_host`]). The check and the save are one write transaction,
     /// so concurrent saves for one host leave one profile.
     pub fn save_gateway_unless_covered(&self, mut p: IntegrationProfile, host: &str) -> Result<GatewaySave> {
+        check_console_link(&p)?;
         p.updated_at = chrono::Utc::now();
         Ok(self.store.atomically(|s| {
             let saved: Vec<IntegrationProfile> = s.list(kind::INTEGRATION, Some(&p.workspace_id))?;
@@ -854,6 +884,18 @@ impl App {
             s.put(kind::INTEGRATION, &p.id, Some(&p.workspace_id), None, 0.0, &p)?;
             Ok(GatewaySave::Saved(p))
         })?)
+    }
+
+    /// The console link (Foundry/Nexus) of saved gateway profile `id`,
+    /// checked by [`console_link`]: what the desktop hands to the system
+    /// browser. It is read from the store, never taken from the caller.
+    pub fn integration_console_link(&self, id: &Id) -> Result<url::Url> {
+        let p: IntegrationProfile = self.store.get(kind::INTEGRATION, id)?.ok_or_else(|| AppError::NotFound("gateway profile".into()))?;
+        let IntegrationKind::FerrumGateway { console_url, .. } = &p.kind;
+        match console_url.as_deref() {
+            Some(raw) => console_link(raw),
+            None => Err(AppError::Invalid("this gateway profile has no console link".into())),
+        }
     }
 
     /// Delete a Ferrum gateway profile: sends to its hosts are no longer

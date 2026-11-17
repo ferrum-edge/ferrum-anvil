@@ -336,6 +336,18 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
   };
   // A saved gateway profile can be removed; a new one is only discarded.
   const removable = editing?.kind === "ferrum" && ints.some((p) => p.id === editing.value.id);
+  // The saved profile's console link is opened by the backend, from the
+  // store (http(s) only); an unsaved edit of the link is not.
+  const savedGateway = editing?.kind === "ferrum" ? ints.find((p) => p.id === editing.value.id) : undefined;
+  const openConsole = async () => {
+    if (!savedGateway) return;
+    setErr(null);
+    try {
+      await api.openIntegrationConsole(savedGateway.id);
+    } catch (e) {
+      setErr(`The console link was not opened: ${String((e as Error).message)}`);
+    }
+  };
   const removeIt = async () => {
     if (!editing) return;
     const id = editing.value.id;
@@ -450,7 +462,7 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
                     icon="layers"
                     newLabel="New gateway"
                     empty="No gateways declared."
-                    items={ints.map((p) => ({ id: p.id, name: p.name, meta: `${p.compatibility_id} · ${p.hosts.map((h) => h.host + (h.port ? `:${h.port}` : "")).join(", ")}${p.require_verified_tls === false ? " · plain-HTTP trust (lab)" : ""}` }))}
+                    items={ints.map((p) => ({ id: p.id, name: p.name, meta: `${p.compatibility_id} · ${p.hosts.map((h) => h.host + (h.port ? `:${h.port}` : "")).join(", ")}${p.require_verified_tls === false ? " · plain-HTTP trust (lab)" : ""}${p.console_url ? " · console link" : ""}` }))}
                     onEdit={(id) => setEditing({ kind: "ferrum", value: ints.find((p) => p.id === id)! })}
                     onNew={() => setEditing({ kind: "ferrum", value: { ...base, name: "My gateway", kind: "ferrum_gateway", hosts: [{ host: "gateway.example.com" }], compatibility_id: FERRUM_COMPATIBILITY[0].id, require_verified_tls: true } })}
                   />
@@ -460,7 +472,9 @@ export function ProfilesDialog(props: { workspaceId: string; onClose: () => void
           )}
           {editing?.kind === "tls" && <TlsForm p={editing.value as TlsProfile} onChange={(value) => setEditing({ kind: "tls", value })} />}
           {editing?.kind === "proxy" && <ProxyForm p={editing.value as ProxyProfile} tlsProfiles={tls} onChange={(value) => setEditing({ kind: "proxy", value })} />}
-          {editing?.kind === "ferrum" && <FerrumForm p={editing.value as IntegrationProfile} onChange={(value) => setEditing({ kind: "ferrum", value })} />}
+          {editing?.kind === "ferrum" && (
+            <FerrumForm p={editing.value as IntegrationProfile} savedConsoleUrl={savedGateway?.console_url ?? null} onOpenConsole={openConsole} onChange={(value) => setEditing({ kind: "ferrum", value })} />
+          )}
           {err && <div className="bad-box">{err}</div>}
         </Modal>
       </div>
@@ -881,7 +895,19 @@ export function ProxyForm({ p, tlsProfiles, onChange }: { p: ProxyProfile; tlsPr
   );
 }
 
-function FerrumForm({ p, onChange }: { p: IntegrationProfile; onChange: (p: IntegrationProfile) => void }) {
+function FerrumForm({
+  p,
+  savedConsoleUrl,
+  onOpenConsole,
+  onChange,
+}: {
+  p: IntegrationProfile;
+  /** The console link of the saved profile (`null` for a new or link-less one): the one Open console opens. */
+  savedConsoleUrl: string | null;
+  onOpenConsole: () => void;
+  onChange: (p: IntegrationProfile) => void;
+}) {
+  const edited = (p.console_url ?? null) !== savedConsoleUrl;
   return (
     <div className="form">
       <label className="lbl">
@@ -909,9 +935,17 @@ function FerrumForm({ p, onChange }: { p: IntegrationProfile; onChange: (p: Inte
       </label>
       {p.require_verified_tls === false && <div className="warn-box">Plain-HTTP trust is meant for local labs. Any host on the path could forge markers; findings are capped at “likely”.</div>}
       <label className="lbl">
-        Console link (optional, opened read-only)
-        <input className="field mono" value={p.console_url ?? ""} onChange={(e) => onChange({ ...p, console_url: e.target.value || null })} />
+        Console link (optional: a Ferrum Foundry or Nexus page, https or http, opened read-only in your browser)
+        <input className="field mono" value={p.console_url ?? ""} placeholder="https://foundry.example/…" onChange={(e) => onChange({ ...p, console_url: e.target.value || null })} />
       </label>
+      {savedConsoleUrl && (
+        <div className="row">
+          <button className="btn small" type="button" disabled={edited} onClick={onOpenConsole}>
+            Open console
+          </button>
+          {edited && <span className="faint small-text">Save the profile to open the edited link.</span>}
+        </div>
+      )}
       <DiagnosticLookupForm p={p} onChange={onChange} />
     </div>
   );

@@ -109,3 +109,45 @@ fn a_per_send_profile_is_kept_to_its_workspace_and_brings_no_lookup() {
     // Nothing was saved.
     assert!(app.integrations(&ws).unwrap().is_empty());
 }
+
+fn with_console(mut p: IntegrationProfile, link: &str) -> IntegrationProfile {
+    let IntegrationKind::FerrumGateway { console_url, .. } = &mut p.kind;
+    *console_url = Some(link.into());
+    p
+}
+
+/// A gateway profile's console link is saved and handed out for opening only
+/// as an absolute http(s) URL with a host and no credentials (#567).
+#[test]
+fn only_an_http_console_link_is_saved_or_opened() {
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("W").unwrap().meta.id;
+
+    let p = app.save_integration(with_console(gateway(ws, "gw.example.com", None), "https://foundry.example/gateways/gw-1")).unwrap();
+    assert_eq!(app.integration_console_link(&p.id).unwrap().as_str(), "https://foundry.example/gateways/gw-1");
+    let lab = app.save_integration(with_console(gateway(ws, "127.0.0.1", None), "http://127.0.0.1:3000/nexus")).unwrap();
+    assert_eq!(app.integration_console_link(&lab.id).unwrap().as_str(), "http://127.0.0.1:3000/nexus");
+
+    for (link, why) in [
+        ("javascript:alert(1)", "an https or http URL, not javascript:"),
+        ("file:///etc/passwd", "an https or http URL, not file:"),
+        ("ftp://foundry.example/", "an https or http URL, not ftp:"),
+        ("foundry.example/gateways", "not an absolute URL"),
+        ("https://user:pw@foundry.example/", "must not carry a user name or password"),
+    ] {
+        let err = app.save_integration(with_console(gateway(ws, "gw.example.org", None), link)).expect_err(link);
+        assert!(err.to_string().contains(why), "{link}: {err}");
+        let Err(err) = app.save_gateway_unless_covered(with_console(gateway(ws, "gw.example.org", None), link), "gw.example.org") else {
+            panic!("{link} was saved");
+        };
+        assert!(err.to_string().contains(why), "{link}: {err}");
+        assert!(anvil_app::workspace::console_link(link).is_err(), "{link}");
+    }
+    assert_eq!(app.integrations(&ws).unwrap().len(), 2, "a refused link saves nothing");
+
+    let none = app.save_integration(gateway(ws, "gw.example.net", None)).unwrap();
+    let err = app.integration_console_link(&none.id).expect_err("no link");
+    assert!(err.to_string().contains("has no console link"), "{err}");
+    assert!(app.integration_console_link(&Id::new()).is_err());
+}
