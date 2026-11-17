@@ -34,10 +34,17 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 unmaintained = "workspace"
 unsound = "all"
-# Every entry needs a reason and an exit condition. Reviewed 2026-09-25;
-# these are also listed as open items in docs/release.md.
+# Every entry needs a reason and an exit condition. Reviewed 2026-09-25
+# (RUSTSEC-2026-0543 added 2026-11-17); these are also listed as open items in
+# docs/release.md.
 ignore = [
     { id = "RUSTSEC-2024-0429", reason = "glib 0.18 VariantStrIter unsoundness, via Tauri's Linux GTK stack (gtk-rs 0.18 is pinned by tauri/wry/tao/muda/webkit2gtk 2.0). Neither Anvil nor those crates (nor rfd) call VariantStrIter. Exit: Tauri moves to gtk >= 0.19 (glib >= 0.20)." },
+    # chrono 0.4.45 is a direct workspace dependency of 16 crates (about 170
+    # files, mostly serialized DateTime<Utc> timestamps) and enters through
+    # schemars 1.2.3 (our `chrono04` feature) and serde_with 3.23.0
+    # (tauri-utils). Replacing it is a migration that must keep every stored
+    # and published timestamp format: ferrum-edge/ferrum-anvil#576.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained notice (chronotope/chrono#1768, all versions, no patched release); informational, no known vulnerability and no maintained drop-in replacement. Paths: direct workspace dependency of anvil-app, -auth, -cli, -contract, -desktop, -diagnostics, -domain, -engine, -identity, -import, -lab, -load, -portability, -runner, -storage, -transport; schemars 1.2.3 (chrono04 feature); serde_with 3.23.0 via tauri-utils. Exit: the workspace migrates to jiff or time and drops chrono and the chrono04 feature (ferrum-edge/ferrum-anvil#576)." },
 ]
 
 [licenses]
