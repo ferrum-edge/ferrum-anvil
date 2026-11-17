@@ -54,6 +54,37 @@ The lab default must be covered by the pin, and its catalog source must match
 its release lock. These checks use no network and do not establish live
 gateway compatibility.
 
+## Checking against Edge main
+
+The pin binds these checks to a released Edge, so they cannot see a change
+that has landed only on Edge `main`. ferrum-contracts records those changes on
+its `main` branch (each vocabulary's `main_branch_delta`), and the weekly
+`edge-main-drift.yml` workflow runs the same parity checks against it as an
+early warning (ferrum-edge/ferrum-contracts#76). It fetches every path `PIN`
+lists from ferrum-contracts `main` at one resolved commit into
+`ANVIL_CONTRACTS_MAIN_DIR`, then runs the ignored tests
+`contracts_main_vocabularies_match_anvil` and
+`contracts_main_diagnostic_ref_matches_anvils_reader` in
+`crates/anvil-diagnostics/tests/contracts_adoption.rs`:
+
+```bash
+ANVIL_CONTRACTS_MAIN_DIR=/path/to/files \
+  cargo test -p anvil-diagnostics --test contracts_adoption -- --ignored contracts_main
+```
+
+They share their assertions with the pinned tests (token, class and header
+parity with the 0.9.20 catalog, the diagnostic token wording, the
+DiagnosticFinding schema and the diagnostic-ref reader vocabularies and
+fixtures), minus the byte, PIN and provenance checks that hold only for the
+tag. A failure, or a vendored path missing on `main`, opens or updates one
+issue labelled `edge-main-drift`; a clean run closes it. The issue names the
+contracts commit, the `main_branch_delta` commit and how far Edge `main` has
+moved past it, and quotes the delta summaries for review. Only the issue job
+holds `issues: write`, with the repository's own `GITHUB_TOKEN`. It is never a
+required check. The real-gateway lab is not run against Edge `main`: a lab run
+diagnoses with the audited catalog of its gateway's release, and `main` has
+none.
+
 ## Bumping the pin
 
 1. Choose an immutable `contracts-edge-*` release tag and resolve its commit

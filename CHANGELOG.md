@@ -4,6 +4,17 @@
 
 ### Added
 
+- A weekly, non-required **Edge main drift** workflow (`.github/workflows/edge-main-drift.yml`)
+  runs the contract parity checks against ferrum-contracts `main`, whose vocabularies record
+  unreleased Ferrum Edge `main` changes (ferrum-edge/ferrum-contracts#76). It fetches every path
+  `contracts/ferrum-contracts/PIN` lists from one resolved contracts commit and runs the new
+  ignored tests `contracts_main_vocabularies_match_anvil` and
+  `contracts_main_diagnostic_ref_matches_anvils_reader`, which share their assertions with the
+  pinned tests (now factored into `assert_vocabularies_match_anvil` and
+  `assert_diagnostic_ref_contract_matches_anvils_reader`) minus the byte, PIN and provenance
+  checks. A failure, or a vendored path missing on `main`, opens or updates one issue labelled
+  `edge-main-drift` with the `main_branch_delta` commit and summaries; a clean run closes it. Only
+  that job holds `issues: write`, with the repository's own `GITHUB_TOKEN`.
 - Adopt published `contracts-edge-0.9.20` (`39da322083044c2e92617209e62983c92387f0ad`)
   byte-exact. Four vendored files change: the gateway error and header vocabularies (v0.9.20
   provenance; the closed token vocabulary adds `loop_detected`, the 19 error classes and their
