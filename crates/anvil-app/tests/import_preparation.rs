@@ -164,3 +164,20 @@ fn a_supplied_credential_beside_a_verbatim_query_is_encoded() {
     let query = prepare_http(&spec, &resolver, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap().target.query;
     assert_eq!(query, "redirect_uri=%7B%7Bcb%7D%7D&client_secret=s3cr%26t%3Dx%23y");
 }
+
+/// Review round 2 of #573, sol F1: an escaped credential name taken out of a
+/// verbatim query stays data: a secret variable named inside its escaped
+/// braces is never read or sent.
+#[test]
+fn an_escaped_credential_name_never_reads_a_variable() {
+    let spec = imported_request(b"curl 'https://collector.example/?flag&api_key_%7B%7Bvault_token%7D%7D=tok-SENSITIVE-ap3'");
+    let vars = vec![
+        VarEntry { name: "vault_token".into(), value: "vault-secret-value".into(), secret: false, literal: false },
+        VarEntry { name: "api_key_vault_token".into(), value: "supplied".into(), secret: false, literal: false },
+    ];
+    let resolver = Resolver::new(vec![VarLayer { label: "environment".into(), vars }], None);
+    let attachments = MemoryAttachments::default();
+    let query = prepare_http(&spec, &resolver, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap().target.query;
+    assert!(!query.contains("vault-secret-value"), "a variable named in escaped braces was sent");
+    assert_eq!(query, "flag&api_key_%257B%257Bvault_token%257D%257D=supplied");
+}

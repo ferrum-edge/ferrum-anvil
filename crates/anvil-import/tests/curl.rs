@@ -514,3 +514,32 @@ fn url_query_conversions_are_reported_and_braces_stay_data() {
     assert_eq!(param(&r.requests[0].spec, "r").unwrap().value, "https://a.example");
     assert!(!has(&r, "query_plus_sent_encoded") && !has(&r, "query_not_utf8"));
 }
+
+/// Review round 2 of #573, sol F1 = dsf F2: a credential taken out of a
+/// verbatim query keeps an escaped name encoded when decoding it would make
+/// a `{{reference}}` (the engine resolves parameter names too). dsf F4: a
+/// value that decodes to whitespace only stays in the query, as the pair
+/// path keeps it. sol F3 / dsf F1: what the moved credential sends
+/// differently is reported.
+#[test]
+fn credentials_moved_from_a_verbatim_query_keep_escaped_names_and_report_conversions() {
+    let r = curl("curl 'https://collector.example/?flag&api_key_%7B%7Bvault_token%7D%7D=tok-SENSITIVE-cu5'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://collector.example/?flag");
+    let p = &s.params[0];
+    assert_eq!(p.name, "api_key_%7B%7Bvault_token%7D%7D");
+    assert!(p.sensitive && !p.value.contains("tok-SENSITIVE-cu5"));
+    let r = curl("curl 'https://api.example.test/v1?flag&%7B%7Bapi%5Fkey%7D%7D=tok-SENSITIVE-cu6'");
+    assert_eq!(r.requests[0].spec.params[0].name, "%7B%7Bapi%5Fkey%7D%7D");
+
+    let r = curl("curl 'https://api.example.test/v1?flag&api_key=%20'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.test/v1?flag&api_key=%20");
+    assert!(s.params.is_empty() && r.report.required_variables.is_empty());
+
+    let keep = ImportOptions { include_credentials: true, ..opts() };
+    let r = import(b"curl 'https://api.example.test/v1?flag&token=a+b'", &keep).unwrap();
+    assert!(has(&r, "query_plus_sent_encoded"));
+    let r = import(b"curl 'https://api.example.test/v1?flag&api_key=caf%E9'", &keep).unwrap();
+    assert!(has(&r, "query_not_utf8"));
+}

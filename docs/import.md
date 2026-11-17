@@ -44,7 +44,10 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   keeps its exact syntax, but its credential-named `name=value` segments
   become sensitive parameters: a credential is never left in URL text, where
   its placeholder would resolve without percent-encoding and a kept literal
-  would not be extracted on export.
+  would not be extracted on export. A moved name whose decoding would make a
+  `{{reference}}` keeps its encoded spelling (the engine resolves parameter
+  names), a value that decodes to whitespace only stays in the query, and a
+  `+` or an escape that is not UTF-8 in a moved pair is reported.
 - URL userinfo (`https://user:password@host/`) becomes Basic auth with a
   `{{password}}` placeholder in every migration importer, and the URL loses it
   (the engine never sends credentials in the URL). The userinfo ends at the
@@ -61,9 +64,11 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   (string, number or boolean) under a credential-named member of an Insomnia
   environment value that is an array (`{"accounts": [{"api_key": "…"}]}`,
   `"tokens": ["…"]`), each with its own placeholder named by its path
-  (bounded, and never the name of another variable or placeholder of the
-  environment); a dynamic helper with arguments (`{{$randomFrom a|b}}`)
-  counts as literal there.
+  (bounded, and never the name of a variable or placeholder of any
+  environment of the import); only a plain reference (`{{ _.name }}`) or an
+  argument-free helper (`{{$guid}}`) is kept there, so a helper with
+  arguments (`{{$randomFrom a|b}}`) or a quoted expression (`{{ 'key' }}`) is
+  redacted as literal.
 - JSON bodies and GraphQL variables are scanned recursively: string members
   with credential-like names, and numbers under such names (`pin`, `otp`, …;
   not names recognized only by `token`, such as `max_tokens`), whose

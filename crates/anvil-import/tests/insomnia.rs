@@ -703,3 +703,44 @@ fn deep_environment_paths_stay_bounded() {
     let distinct: std::collections::HashSet<&str> = r.report.required_variables.iter().map(|v| v.name.as_str()).collect();
     assert!(distinct.len() >= 500, "each leaf has its own placeholder");
 }
+
+/// Review round 2 of #573, sol F2: a Nunjucks expression with a quoted
+/// literal (or anything but a plain reference) under a credential name is
+/// literal material and is redacted; a plain `{{ _.name }}` reference stays.
+#[test]
+fn quoted_expressions_in_environment_arrays_are_redacted() {
+    let env = serde_json::json!({ "accounts": [
+        { "api_key": "{{ 'tok-SENSITIVE-in11' }}", "token": "{{ _.shared }}", "secret": "{{ x | upper }}" }
+    ]});
+    for r in both(serde_json::json!({ "url": "https://example.test/x" }), env, &opts()) {
+        let text = r.workspace.variables.iter().find(|v| v.name == "accounts").map(|v| template_text(&v.value)).unwrap();
+        assert!(!text.contains("tok-SENSITIVE-in11"), "a quoted credential stayed");
+        assert!(!text.contains("upper"), "a filtered expression stayed");
+        assert!(text.contains("{{shared}}"), "a plain reference is kept");
+    }
+}
+
+/// Review round 2 of #573, dsf F3: a sub-environment placeholder never takes
+/// a base-environment variable name (which would shadow it), nor the
+/// reverse.
+#[test]
+fn sub_environment_placeholders_never_take_a_base_variable_name() {
+    let doc = serde_json::json!({
+        "type": "collection.insomnia.rest/5.0", "name": "W",
+        "environments": {
+            "name": "Base",
+            "data": { "accounts_0_api_key": "base-value", "keys": [{ "api_key": "tok-SENSITIVE-in12" }] },
+            "subEnvironments": [{ "name": "Sub", "data": {
+                "accounts": [{ "api_key": "tok-SENSITIVE-in13" }],
+                "keys_0_api_key": "sub-value"
+            } }]
+        },
+        "collection": [{ "name": "R", "meta": { "id": "req_1" }, "method": "GET", "url": "https://example.test/x" }],
+    });
+    let r = anvil_import::import(doc.to_string().as_bytes(), &opts()).unwrap();
+    let base = r.workspace.variables.iter().find(|v| v.name == "keys").map(|v| template_text(&v.value)).unwrap();
+    let sub = r.environments[0].variables.iter().find(|v| v.name == "accounts").map(|v| template_text(&v.value)).unwrap();
+    assert!(!sub.contains("{{accounts_0_api_key}}"), "a sub-environment placeholder took a base variable name");
+    assert!(!base.contains("{{keys_0_api_key}}"), "a base placeholder took a sub-environment variable name");
+    assert!(!sub.contains("tok-SENSITIVE") && !base.contains("tok-SENSITIVE"), "a credential member stayed");
+}

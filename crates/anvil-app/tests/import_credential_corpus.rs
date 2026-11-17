@@ -89,6 +89,13 @@ const SHAPES: &[Shape] = &[
         export: ALL,
     },
     Shape {
+        name: "escaped credential name beside a bare flag",
+        url: "https://api.example.test/v1?flag&api_key_%7B%7Bvault_token%7D%7D=tok-SENSITIVE-c16",
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
+    Shape {
         name: "credential beside escaped braces",
         url: "https://api.example.test/v1?q=%7B%7Bid%7D%7D&client_secret=tok-SENSITIVE-c15",
         headers: &[],
@@ -242,11 +249,31 @@ fn importer_specific_shapes_are_redacted() {
     let mut insomnia_path = insomnia_request("https://hooks.example.test/:webhook_token/x");
     insomnia_path["pathParameters"] = json!([{ "name": "webhook_token", "value": "tok-SENSITIVE-c8" }]);
     let env = json!({ "accounts": [{ "api_key": "tok-SENSITIVE-c9", "pin": 571571573, "tokens": ["tok-SENSITIVE-c9b"] }] });
+    let quoted = json!({ "accounts": [{ "api_key": "{{ 'tok-SENSITIVE-c17' }}" }] });
+    let sub_env = json!({
+        "type": "collection.insomnia.rest/5.0", "name": "W",
+        "environments": {
+            "name": "Base", "data": { "accounts_0_api_key": "base-value" },
+            "subEnvironments": [{ "name": "Sub", "data": { "accounts": [{ "api_key": "tok-SENSITIVE-c18" }] } }]
+        },
+        "collection": [{ "name": "R", "meta": { "id": "req_1" }, "method": "GET", "url": "https://api.example.test/v1" }],
+    })
+    .to_string()
+    .into_bytes();
     let rows: Vec<(&str, Vec<u8>, Export)> = vec![
         // A path is URL text: redacted on import, only scanned on export.
         ("Postman, credential path variable", postman_doc(path), Export::Skip),
         ("Insomnia, credential path parameter", insomnia_doc(insomnia_path, json!({})), Export::Skip),
         ("Insomnia, environment array", insomnia_doc(insomnia_request("https://api.example.test/v1"), env), Export::Warn),
+        // A kept expression starting with `{{` is not a JSON credential field
+        // the export's free-text pattern recognizes; the default import
+        // redacts it.
+        (
+            "Insomnia, quoted expression in an environment array",
+            insomnia_doc(insomnia_request("https://api.example.test/v1"), quoted),
+            Export::Skip,
+        ),
+        ("Insomnia v5, sub-environment array", sub_env, Export::Warn),
         ("cURL, -G data", b"curl -G -d 'api_key=tok-SENSITIVE-c10' https://api.example.test/v1".to_vec(), Export::Extract),
         (
             "cURL, -u beside URL userinfo",

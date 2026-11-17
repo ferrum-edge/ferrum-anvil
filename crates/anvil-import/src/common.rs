@@ -260,11 +260,20 @@ fn scrub_json_at(b: &mut Builder, v: &mut Value, pointer: &str, path: &mut Vec<S
 }
 
 /// Whether a credential value holds literal material: [`has_literal_secret`],
-/// or a dynamic helper with arguments (`{{$randomFrom a|b}}`), whose
-/// arguments are literal text the engine sends. Only variable references
-/// and argument-free helpers (`{{$guid}}`) are not.
+/// or a `{{…}}` expression that is not a plain reference ([`is_plain_reference`]):
+/// a helper with arguments (`{{$randomFrom a|b}}`) or a Nunjucks expression
+/// with a quoted literal (`{{ 'key' }}`), whose text is the credential.
 fn has_literal_material(v: &str) -> bool {
-    has_literal_secret(v) || template_tokens(v).iter().any(|t| t.trim().strip_prefix('$').is_some_and(|h| h.contains(char::is_whitespace)))
+    has_literal_secret(v) || template_tokens(v).iter().any(|t| !is_plain_reference(t))
+}
+
+/// Whether a `{{…}}` expression only names a variable (`name`, `api.version`,
+/// Insomnia's `_.name`) or an argument-free helper (`$guid`). Anything else
+/// (arguments, quotes, filters, spaces inside) is treated as literal text.
+fn is_plain_reference(expr: &str) -> bool {
+    let t = expr.trim();
+    let name = t.strip_prefix('$').unwrap_or(t);
+    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
 /// Bytes of the readable part of a placeholder name made from a JSON path.
@@ -275,22 +284,22 @@ const PATH_NAME_BYTES: usize = 48;
 /// and distinct from each other and from the environment's own variable
 /// names, which are reserved first. A name already taken gets the next free
 /// `_2`, `_3`, … suffix (found in amortized constant time).
+#[derive(Default)]
 pub struct PlaceholderNames {
     used: std::collections::HashSet<String>,
     next: std::collections::HashMap<String, usize>,
 }
 
 impl PlaceholderNames {
+    /// Reserve a name that exists in the scope (a variable name), as written
+    /// and as a placeholder would spell it.
+    pub fn reserve(&mut self, name: &str) {
+        self.used.insert(name.to_string());
+        self.used.insert(sanitize_var(name));
+    }
+
     /// Names that already exist in the scope (variable names); a
     /// placeholder never takes one.
-    pub fn reserving<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
-        let mut used = std::collections::HashSet::new();
-        for n in names {
-            used.insert(n.to_string());
-            used.insert(sanitize_var(n));
-        }
-        PlaceholderNames { used, next: std::collections::HashMap::new() }
-    }
 
     fn name(&mut self, readable: &str) -> String {
         let mut base = sanitize_var(readable);
@@ -527,20 +536,38 @@ pub fn redact_raw_query(b: &mut Builder, url: &str, pointer: &str, what: &str) -
     let mut params = vec![];
     for seg in q.split('&') {
         let credential = match seg.split_once('=') {
-            Some((k, v)) if !v.trim().is_empty() && is_credential_name(&query_decode(k)) => Some((k, v)),
+            Some((k, v)) if !query_decode(v).trim().is_empty() && is_credential_name(&query_decode(k)) => Some((k, v)),
             _ => None,
         };
         let Some((k, v)) = credential else {
             kept.push(seg);
             continue;
         };
-        let name = query_decode(k);
+        // Matched by its decoded spelling, but stored decoded only when that
+        // makes or changes no `{{reference}}`: the engine resolves names too.
+        let var = query_decode(k);
+        let name = decode_keeping_references(k).unwrap_or_else(|| k.to_string());
         let decoded = query_decode(v);
         let value = if same_references(v, &decoded) {
-            credential_text(b, &decoded, &name, pointer, &format!("{what} {name}"))
+            credential_text(b, &decoded, &var, pointer, &format!("{what} {var}"))
         } else {
-            credential_text_with(b, v, true, &name, pointer, &format!("{what} {name}"))
+            credential_text_with(b, v, true, &var, pointer, &format!("{what} {var}"))
         };
+        if seg.contains('+') {
+            b.report.warn(
+                "query_plus_sent_encoded",
+                pointer,
+                "a '+' in a credential query parameter is kept as a plus and sent as %2B, where the source sends it as is",
+            );
+        }
+        if percent_encoding::percent_decode_str(k).decode_utf8().is_err() || percent_encoding::percent_decode_str(v).decode_utf8().is_err()
+        {
+            b.report.warn(
+                "query_not_utf8",
+                pointer,
+                "a credential query parameter has an escape that is not UTF-8; it was replaced by U+FFFD: edit it before sending",
+            );
+        }
         params.push(KeyValue { name, value, enabled: true, description: String::new(), sensitive: true });
     }
     let url = if kept.is_empty() { format!("{base}{fragment}") } else { format!("{base}?{}{fragment}", kept.join("&")) };

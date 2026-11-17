@@ -9,9 +9,9 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    PlaceholderNames, apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type,
-    keep_declared_content_type, listed_query_param, maybe_redact, parse_embedded_json, parse_form, redact_raw_query, render_json,
-    scrub_body, scrub_graphql_variables, scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
+    apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type,
+    listed_query_param, maybe_redact, parse_embedded_json, parse_form, redact_raw_query, render_json, scrub_body, scrub_graphql_variables,
+    scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -124,13 +124,18 @@ fn flatten(prefix: &str, v: &Value, out: &mut Vec<(String, Flat)>, depth: usize)
 /// scalar under a credential-named member in it becomes a placeholder
 /// ([`scrub_stored_json`]), as the same member of a nested object (a
 /// credential-named variable) is redacted. Placeholder names are shared by
-/// the whole environment and never take one of its variable names.
+/// every environment of the import and never take a variable name of any of
+/// them ([`reserve_env_names`]), so no environment layer shadows another's
+/// placeholder.
 fn env_vars(b: &mut Builder, data: Option<&Value>, at: &str) -> Vec<Variable> {
     let mut flat = vec![];
     if let Some(d) = data {
         flatten("", d, &mut flat, 0);
     }
-    let mut names = PlaceholderNames::reserving(flat.iter().map(|(k, _)| k.as_str()));
+    let mut names = std::mem::take(&mut b.env_names);
+    for (k, _) in &flat {
+        names.reserve(k);
+    }
     let mut out = vec![];
     for (k, item) in flat {
         let p = ptr(at, &k);
@@ -150,7 +155,47 @@ fn env_vars(b: &mut Builder, data: Option<&Value>, at: &str) -> Vec<Variable> {
             out.push(var);
         }
     }
+    b.env_names = names;
     out
+}
+
+/// The variable names environment data flattens to ([`flatten`]).
+fn flat_names(prefix: &str, v: &Value, out: &mut Vec<String>, depth: usize) {
+    match v {
+        Value::Object(m) if depth < 16 => {
+            for (k, x) in m {
+                let name = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                flat_names(&name, x, out, depth + 1);
+            }
+        }
+        _ => out.push(prefix.to_string()),
+    }
+}
+
+/// Reserve the variable names of environment data (a base, sub- or folder
+/// environment) before any placeholder is made, so a placeholder of one
+/// environment never takes a variable name of another.
+fn reserve_env_names(b: &mut Builder, data: Option<&Value>) {
+    let mut names = vec![];
+    if let Some(d) = data {
+        flat_names("", d, &mut names, 0);
+    }
+    for n in names {
+        b.env_names.reserve(&n);
+    }
+}
+
+/// [`reserve_env_names`] for every folder environment of a v5 collection.
+fn reserve_v5_folder_env_names(b: &mut Builder, items: &[Value], depth: usize) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    for it in items {
+        if let Some(children) = it.get("children").and_then(Value::as_array) {
+            reserve_env_names(b, it.get("environment"));
+            reserve_v5_folder_env_names(b, children, depth + 1);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- v4 ----
@@ -164,6 +209,15 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
         });
     };
     let mut seen = Visited { handled: vec![false; resources.len()], walked: HashSet::new() };
+    // Every environment's variable names are reserved before any
+    // placeholder is made ([`reserve_env_names`]).
+    for r in resources {
+        match str_of(r, "_type") {
+            Some("environment") => reserve_env_names(b, r.get("data")),
+            Some("request_group") => reserve_env_names(b, r.get("environment")),
+            _ => {}
+        }
+    }
     // Resources point at their parent by id. A repeated id among resources
     // that can be parents would give children several parents (or make a
     // group its own ancestor) and repeat subtrees, so it is refused; a
@@ -471,6 +525,15 @@ pub(crate) fn import_v5(root: &Value, b: &mut Builder) -> Result<(), ImportError
     }
     if root.get("cookieJar").is_some() {
         b.report.unsupported("cookie_jar", "/cookieJar", "cookie jars are not imported (they may contain session credentials)");
+    }
+    if let Some(envs) = root.get("environments") {
+        reserve_env_names(b, envs.get("data"));
+        for sub in envs.get("subEnvironments").and_then(Value::as_array).into_iter().flatten() {
+            reserve_env_names(b, sub.get("data"));
+        }
+    }
+    if let Some(items) = root.get("collection").and_then(Value::as_array) {
+        reserve_v5_folder_env_names(b, items, 0);
     }
     if let Some(envs) = root.get("environments") {
         let base_vars = env_vars(b, envs.get("data"), "/environments/data");
