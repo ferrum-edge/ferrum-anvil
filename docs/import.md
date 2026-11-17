@@ -69,9 +69,13 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     it is not cut at all. The whole URL moves into a new secret workspace
     variable (`{{request_url}}`, `request_url_2`, ...), which is required
     unless `include_credentials` keeps the URL as its value
-    (`url_moved_to_variable`). The request's host can never change. The one
-    exception is a userinfo of exactly variable references before a literal
-    host (`https://{{user}}:{{password}}@api.example.com/`).
+    (`url_moved_to_variable`). The request's host can never change. Two
+    shapes are not ambiguous: an authority that is exactly one plain
+    reference followed by `/`, `?`, `#` or the end (`{{baseUrl}}/x?email=a@b`,
+    `https://{{host}}?q=a@b`), which holds no literal userinfo and is kept
+    as written; and, with a scheme, a userinfo of exactly variable
+    references before a literal host
+    (`https://{{user}}:{{password}}@api.example.com/`).
   - A userinfo that is exactly variable references (`{{user}}`,
     `{{user}}:`, `{{user}}:{{password}}`) keeps them. Anything else (a
     literal user name or password, a token) is credential material, and no

@@ -429,22 +429,60 @@ fn importer_specific_shapes_are_redacted() {
     }
 }
 
-/// Round 3 of #575, dsf F1: a URL with a template in its authority and an
-/// `@` (here in the query, after a JSON `}}`) is never cut, so the request
-/// cannot be retargeted at another host: it moves into a secret variable
-/// whole, kept as written with include_credentials.
+/// Round 3 of #575, dsf F1: a URL is never cut at a path or query `@`, so
+/// the request cannot be retargeted at another host. With the whole
+/// authority in one reference it is kept as written; with any other
+/// template there beside an `@` (here in the query, after a JSON `}}`) it
+/// moves into a secret variable whole, kept as written with
+/// include_credentials.
 #[test]
 fn an_ambiguous_url_never_changes_host() {
-    let url = r#"https://{{baseUrl}}/items?filter={"a":{"b":1}}&to=user@example.com"#;
-    let shape = Shape { name: "ambiguous URL", url, headers: &[], json_body: None, export: [Export::Skip; 4] };
     let importers: [(&str, Build); 4] = [("cURL", curl), ("HAR", har), ("Postman", postman), ("Insomnia", insomnia)];
+    let kept_url = r#"https://{{baseUrl}}/items?filter={"a":{"b":1}}&to=user@example.com"#;
+    let moved_url = r#"https://api.{{region}}.example.test/items?filter={"a":{"b":1}}&to=user@example.com"#;
     for (importer, build) in importers {
-        let r = import(&build(&shape), &ImportOptions::default()).unwrap_or_else(|e| panic!("{importer}: {e}"));
-        let stored = &r.requests[0].spec.url;
-        assert_eq!(stored, "{{request_url}}", "{importer}: the URL was cut");
-        let kept = import(&build(&shape), &ImportOptions { include_credentials: true, ..ImportOptions::default() }).unwrap();
+        let shape = |url| Shape { name: "ambiguous URL", url, headers: &[], json_body: None, export: [Export::Skip; 4] };
+        let r = import(&build(&shape(kept_url)), &ImportOptions::default()).unwrap_or_else(|e| panic!("{importer}: {e}"));
+        assert!(r.requests[0].spec.url.starts_with("https://{{baseUrl}}/items"), "{importer}: the host changed");
+        let r = import(&build(&shape(moved_url)), &ImportOptions::default()).unwrap_or_else(|e| panic!("{importer}: {e}"));
+        assert_eq!(r.requests[0].spec.url, "{{request_url}}", "{importer}: the URL was cut");
+        let kept = import(&build(&shape(moved_url)), &ImportOptions { include_credentials: true, ..ImportOptions::default() }).unwrap();
         let var = kept.workspace.variables.iter().find(|v| v.name == "request_url").expect("request_url variable");
         assert!(var.secret, "{importer}: the URL variable is not secret");
-        assert!(serde_json::to_string(&var.value).unwrap().contains("{{baseUrl}}/items"), "{importer}: the URL was not kept whole");
+        assert!(
+            serde_json::to_string(&var.value).unwrap().contains("api.{{region}}.example.test/items"),
+            "{importer}: the URL was not kept whole"
+        );
+    }
+}
+
+/// A URL whose whole authority is one plain reference (`{{baseUrl}}/x`) has
+/// no literal userinfo and is kept as written; any other template before
+/// the authority's end beside an `@` still moves the URL into a variable.
+#[test]
+fn a_reference_authority_keeps_the_url() {
+    let importers: [(&str, Build); 4] = [("cURL", curl), ("HAR", har), ("Postman", postman), ("Insomnia", insomnia)];
+    let shape = |url: &'static str| Shape { name: "reference authority", url, headers: &[], json_body: None, export: [Export::Skip; 4] };
+    let stored =
+        |build: Build, url: &'static str| import(&build(&shape(url)), &ImportOptions::default()).unwrap().requests[0].spec.url.clone();
+    // Kept: not moved and not cut (its query may still become parameters).
+    let kept = |stored: &str, url: &str| stored != "{{request_url}}" && stored.starts_with(url.split('?').next().unwrap_or(url));
+    for (importer, build) in importers {
+        // HAR imports only `http(s)` URLs.
+        let schemeless = importer != "HAR";
+        for url in ["https://{{host}}/x?email=a@b", "https://{{host}}?q=a@b"] {
+            assert!(kept(&stored(build, url), url), "{importer}: {url}");
+        }
+        if schemeless {
+            for url in ["{{baseUrl}}/x?email=a@b", "{{baseUrl}}?q=a@b"] {
+                assert!(kept(&stored(build, url), url), "{importer}: {url}");
+            }
+            for url in ["{{baseUrl}}@evil/x", "{{ base Url }}/x@y", "{{a}}{{b}}/x@y"] {
+                assert_eq!(stored(build, url), "{{request_url}}", "{importer}: {url}");
+            }
+        }
+        for url in ["https://{{ base Url }}/x@y", "https://{{a}}{{b}}/x@y", "https://pre{{a}}/x@y"] {
+            assert_eq!(stored(build, url), "{{request_url}}", "{importer}: {url}");
+        }
     }
 }

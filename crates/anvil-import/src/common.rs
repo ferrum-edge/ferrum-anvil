@@ -790,14 +790,22 @@ pub fn take_userinfo(url: &str, syntax: anvil_domain::secret::TemplateSyntax) ->
         Some((scheme, rest)) if !scheme.is_empty() && !scheme.contains(['/', '?', '#', '@']) => (&url[..scheme.len() + 3], rest),
         _ => ("", url),
     };
+    // `{{baseUrl}}/x?email=a@b`: the whole authority is one variable, so the
+    // URL has no literal userinfo and is kept as written.
+    if !prefix.contains("{{") && anvil_domain::secret::authority_is_one_reference(rest) {
+        return TakenUrl::Plain(url.to_string());
+    }
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     if url[..prefix.len() + end].contains("{{") {
         if !url.contains('@') {
             return TakenUrl::Plain(url.to_string());
         }
         return match rest[..end].rfind('@') {
+            // A schemeless URL (`{{baseUrl}}@host/x`) may hold its scheme and
+            // host in the reference: always ambiguous.
             Some(at)
-                if !prefix.contains("{{")
+                if !prefix.is_empty()
+                    && !prefix.contains("{{")
                     && !rest[at + 1..end].contains("{{")
                     && anvil_domain::secret::is_plain_userinfo(&rest[..at], syntax) =>
             {

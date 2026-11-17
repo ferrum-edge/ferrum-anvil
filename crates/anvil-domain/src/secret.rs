@@ -140,6 +140,18 @@ pub fn classify_template_value(value: &str, syntax: TemplateSyntax) -> TemplateK
     }
 }
 
+/// Whether a URL's authority (`after_scheme`: the URL after `scheme://`, or
+/// the whole URL when it has no scheme) is exactly one plain reference, by
+/// the strict rule ([`TemplateSyntax::Nunjucks`]), followed by `/`, `?`, `#`
+/// or the end (`{{baseUrl}}/x?email=a@b`): the whole authority is inside
+/// that variable, so no literal text in the URL is userinfo.
+pub fn authority_is_one_reference(after_scheme: &str) -> bool {
+    let Some(inner) = after_scheme.strip_prefix("{{") else { return false };
+    let Some(close) = inner.find("}}") else { return false };
+    is_plain_reference_expr(&inner[..close], TemplateSyntax::Nunjucks)
+        && inner[close + 2..].chars().next().is_none_or(|c| matches!(c, '/' | '?' | '#'))
+}
+
 /// Whether a URL userinfo is exactly variable references in `syntax`:
 /// `{{user}}`, `{{user}}:` or `{{user}}:{{password}}`. Anything else (a
 /// literal user name or password, an expression, a token) is credential
@@ -286,6 +298,16 @@ mod tests {
 #[cfg(test)]
 mod template_kind_tests {
     use super::*;
+
+    #[test]
+    fn a_leading_reference_can_hold_the_whole_authority() {
+        for whole in ["{{baseUrl}}/x?email=a@b", "{{baseUrl}}?q=a@b", "{{ _.baseUrl }}#a@b", "{{baseUrl}}"] {
+            assert!(authority_is_one_reference(whole), "{whole:?}");
+        }
+        for not in ["{{baseUrl}}@evil/x", "{{ base Url }}/x@y", "{{a}}{{b}}/x@y", "pre{{a}}/x@y", "{{a-b}}/x", "{{unterminated/x"] {
+            assert!(!authority_is_one_reference(not), "{not:?}");
+        }
+    }
 
     #[test]
     fn only_references_make_a_plain_userinfo() {

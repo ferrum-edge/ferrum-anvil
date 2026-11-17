@@ -127,6 +127,11 @@ fn has_url_password(s: &str) -> bool {
             continue;
         }
         let rest = &s[from..];
+        // `https://{{host}}/x?email=a@b`: the whole authority is one
+        // variable, so an `@` after it is in the path or query.
+        if anvil_domain::secret::authority_is_one_reference(rest) {
+            continue;
+        }
         let limit = rest.find("://").unwrap_or(rest.len());
         let bytes = rest.as_bytes();
         let mut seen_template = false;
@@ -711,6 +716,7 @@ mod tests {
         let mut v = spec("https://api.example.com:8443/v1?email=a:b@c.example");
         assert_eq!(sanitize(&mut v, &[]).warnings.len(), 1);
         for quiet in [
+            "https://{{host}}/v1?email=a@b",
             "https://{{user}}:{{password}}@api.example.com/v1",
             "https://{{ user }}:{{ password }}@api.example.com/v1",
             "https://{{api_token}}@api.example.com/v1",
