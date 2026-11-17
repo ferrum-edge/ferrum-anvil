@@ -440,3 +440,30 @@ fn data_read_from_a_file_still_defaults_to_post() {
     assert_eq!(curl("curl -X PUT -d @order.json https://api.example.com/orders").requests[0].spec.method, "PUT");
     assert_eq!(curl("curl https://api.example.com/orders").requests[0].spec.method, "GET");
 }
+
+/// The engine percent-encodes a stored parameter once, so parameters hold
+/// decoded text. A query whose bytes no decoded text reproduces (a `+`,
+/// which curl sends as is, a lone `%`, an escape that is not UTF-8) stays
+/// in the URL exactly as curl sends it (#563).
+#[test]
+fn query_values_are_stored_decoded_or_kept_verbatim() {
+    let r = curl("curl 'https://api.example.com/cb?redirect_uri=https%3A%2F%2Fapp.example.com%2Fdone&q=caf%C3%A9'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/cb");
+    assert_eq!(param(s, "redirect_uri").unwrap().value, "https://app.example.com/done");
+    assert_eq!(param(s, "q").unwrap().value, "caf\u{e9}");
+
+    for query in ["q=hello+world&ts=2024-01-01T00:00:00+01:00", "n=caf%E9&page=2", "discount=50%&page=2", "a=1&b=%zz"] {
+        let r = curl(&format!("curl 'https://api.example.com/search?{query}#frag'"));
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, format!("https://api.example.com/search?{query}"), "{query}");
+        assert!(s.params.is_empty(), "{query}: {:?}", s.params);
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains('\u{fffd}'), "{query}");
+    }
+
+    // Credential-like values in a verbatim query are still redacted.
+    let r = curl("curl 'https://api.example.com/search?q=a+b&api_key=placeholder-secret'");
+    assert_eq!(r.requests[0].spec.url, "https://api.example.com/search?q=a+b&api_key={{api_key}}");
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+    assert_eq!(r.report.redactions.len(), 1);
+}

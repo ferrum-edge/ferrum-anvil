@@ -9,8 +9,9 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type, maybe_redact,
-    parse_embedded_json, parse_form, redact_raw_query, scrub_body, scrub_graphql_variables, scrub_json, warn_unscanned,
+    ListedParam, QueryForm, body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type,
+    listed_query_params, maybe_redact, parse_embedded_json, parse_form, redact_raw_query, scrub_body, scrub_graphql_variables, scrub_json,
+    warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -549,6 +550,30 @@ fn kv_list(b: &mut Builder, v: Option<&Value>, at: &str, what: &str) -> Vec<KeyV
     out
 }
 
+/// Query `parameters` as decoded text ([`listed_query_params`]). Insomnia
+/// keeps a value's `%XX` escapes and encodes everything else when it sends
+/// it, so `%3A` is stored as `:` and `+` as a plus, and Anvil's one encoding
+/// sends what Insomnia sent.
+fn query_params(b: &mut Builder, url: &mut String, v: Option<&Value>, at: &str) -> Vec<KeyValue> {
+    let mut listed = vec![];
+    for (i, h) in v.and_then(Value::as_array).into_iter().flatten().enumerate() {
+        let p = format!("{at}/{i}");
+        let name = template(b, str_of(h, "name").unwrap_or(""), &p);
+        if name.is_empty() {
+            continue;
+        }
+        let value = template(b, &h.get("value").map(scalar_text).unwrap_or_default(), &p);
+        listed.push(ListedParam {
+            name,
+            value: Some(value),
+            enabled: h.get("disabled").and_then(Value::as_bool) != Some(true),
+            description: str_of(h, "description").unwrap_or("").to_string(),
+            pointer: p,
+        });
+    }
+    listed_query_params(b, url, listed, QueryForm::Insomnia, at)
+}
+
 fn request(
     b: &mut Builder,
     r: &Value,
@@ -564,9 +589,10 @@ fn request(
     let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
     // A query written into the URL itself is kept verbatim; its
     // credential-like values are redacted in place.
-    let url = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { url };
+    let mut url = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { url };
+    let params = query_params(b, &mut url, r.get("parameters"), &ptr(at, "parameters"));
     let mut spec = RequestSpec::http(&method, &url);
-    spec.params = kv_list(b, r.get("parameters"), &ptr(at, "parameters"), "query");
+    spec.params = params;
     spec.headers = kv_list(b, r.get("headers"), &ptr(at, "headers"), "header");
     let ct = header_content_type(&spec.headers);
     let mut declared = None;

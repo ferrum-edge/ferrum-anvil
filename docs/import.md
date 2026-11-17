@@ -39,8 +39,9 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   is set (kept values are then marked sensitive).
 - A value that is only variable references plus an auth scheme word
   (`Bearer {{token}}`) is not a literal secret and is kept.
-- A query kept in the URL verbatim (one with a bare `flag` segment, or written
-  into an Insomnia URL) has its credential-like values replaced in place.
+- A query kept in the URL verbatim (one with a bare `flag` segment, one no
+  parameter can send unchanged, or one written into an Insomnia URL) has its
+  credential-like values replaced in place.
 - JSON bodies and GraphQL variables are scanned recursively: string members
   with credential-like names, and numbers under such names (`pin`, `otp`, …;
   not names recognized only by `token`, such as `max_tokens`), whose
@@ -54,6 +55,25 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 - Detection is name-based and best effort; bodies that cannot be scanned (XML,
   SOAP, arbitrary text, unparsable JSON, JSON beyond the embedded-document
   budget) produce a `body_not_scanned` warning.
+
+### Query values
+
+Request parameters hold decoded text, which the engine percent-encodes once
+when it sends the request (every byte outside `A-Za-z0-9-._~`). Importers
+decode what the source sends, so an imported request carries the same query:
+
+- cURL, HAR and Postman (the raw URL and the `query` list) send a query as
+  written: `%3A` is stored as `:` and sent as `%3A`, never `%253A`.
+- Insomnia keeps a parameter's `%XX` escapes and encodes the rest, so a `+`
+  in an Insomnia parameter is a plus, stored as `+` and sent as `%2B`.
+- A query no parameter can send unchanged stays in the URL exactly as the
+  source sends it: a cURL, HAR or Postman `+` (sent as is, and read as a space
+  by form-decoding servers), a lone `%` there, or an escape that is not UTF-8
+  (`%E9`). From a Postman `query` list or Insomnia `parameters`, the enabled
+  entries are appended to the URL in order (`query_kept_in_url`); a disabled
+  entry stays a parameter as written (`query_param_not_decoded`).
+- Reserved characters a source left bare (`:` or `/` in a value) are sent
+  percent-encoded, which every decoder reads the same.
 
 ### Limits
 

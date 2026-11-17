@@ -519,3 +519,78 @@ fn unscannable_bodies_are_flagged() {
     }));
     assert!(has_at(&r, "body_not_scanned", "/resources/1/body"));
 }
+
+fn v4_with(request: serde_json::Value, env: serde_json::Value, o: &anvil_import::ImportOptions) -> anvil_import::ImportResult {
+    let mut request = request;
+    for (k, v) in [("_id", "req_1"), ("_type", "request"), ("parentId", "wrk_1"), ("name", "R"), ("method", "GET")] {
+        request[k] = v.into();
+    }
+    let doc = v4_export(serde_json::json!([
+        { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+        { "_id": "env_base", "_type": "environment", "parentId": "wrk_1", "name": "Base", "data": env },
+        request,
+    ]));
+    anvil_import::import(&doc, o).unwrap()
+}
+
+fn v5_with(request: serde_json::Value, env: serde_json::Value, o: &anvil_import::ImportOptions) -> anvil_import::ImportResult {
+    let mut request = request;
+    request["name"] = "R".into();
+    request["meta"] = serde_json::json!({ "id": "req_1" });
+    request["method"] = "GET".into();
+    let doc = serde_json::json!({
+        "type": "collection.insomnia.rest/5.0", "name": "W",
+        "environments": { "name": "Base", "data": env },
+        "collection": [request],
+    });
+    anvil_import::import(doc.to_string().as_bytes(), o).unwrap()
+}
+
+fn both(request: serde_json::Value, env: serde_json::Value, o: &anvil_import::ImportOptions) -> [anvil_import::ImportResult; 2] {
+    [v4_with(request.clone(), env.clone(), o), v5_with(request, env, o)]
+}
+
+/// Insomnia keeps a parameter's `%XX` escapes and encodes everything else
+/// when it sends it, so parameters are stored decoded: the engine's one
+/// encoding then sends `%3A`, not `%253A`, and `+` as `%2B`, as Insomnia
+/// does (#563).
+#[test]
+fn parameters_are_stored_decoded() {
+    let request = serde_json::json!({ "url": "https://example.test/cb", "parameters": [
+        { "name": "redirect_uri", "value": "https%3A%2F%2Fapp.example.com%2Fdone" },
+        { "name": "q", "value": "a+b" },
+        { "name": "pct", "value": "50%" },
+        { "name": "n", "value": "caf%C3%A9" },
+    ]});
+    for r in both(request, serde_json::json!({}), &opts()) {
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://example.test/cb");
+        let values: Vec<&str> = s.params.iter().map(|p| p.value.as_str()).collect();
+        assert_eq!(values, ["https://app.example.com/done", "a+b", "50%", "caf\u{e9}"]);
+        assert!(!has(&r, "query_kept_in_url"));
+    }
+}
+
+/// An escape that is not UTF-8 has no decoded form: the enabled parameters
+/// go into the URL as Insomnia sends them, never with U+FFFD (#563).
+#[test]
+fn parameters_without_a_decoded_form_go_into_the_url_as_sent() {
+    let request = serde_json::json!({ "url": "https://example.test/x?keep=1#frag", "parameters": [
+        { "name": "n", "value": "caf%E9" },
+        { "name": "api_key", "value": "placeholder-secret" },
+        { "name": "sp", "value": "a b&c+d" },
+        { "name": "ref", "value": "{{ _.region }}" },
+        { "name": "off", "value": "%FF", "disabled": true },
+    ]});
+    for r in both(request, serde_json::json!({}), &opts()) {
+        let s = &r.requests[0].spec;
+        // Appended to the URL's own query, before its fragment.
+        assert_eq!(s.url, "https://example.test/x?keep=1&n=caf%E9&api_key={{api_key}}&sp=a%20b%26c%2Bd&ref={{region}}#frag");
+        assert!(has(&r, "query_kept_in_url"));
+        assert_eq!(s.params.len(), 1);
+        assert_eq!(param(s, "off").unwrap().value, "%FF");
+        assert!(has(&r, "query_param_not_decoded"));
+        let text = serde_json::to_string(&r.requests).unwrap();
+        assert!(!text.contains("placeholder-secret") && !text.contains('\u{fffd}'), "{text}");
+    }
+}

@@ -247,3 +247,67 @@ fn graphql_variables_numeric_credentials_and_unscannable_bodies() {
     let xml = serde_json::json!({"mode": "raw", "raw": "<p>placeholder-secret</p>", "options": {"raw": {"language": "xml"}}});
     assert!(has(&postman_body(xml, &opts()), "body_not_scanned"));
 }
+
+fn postman_request(request: serde_json::Value, o: &ImportOptions) -> anvil_import::ImportResult {
+    let doc = serde_json::json!({
+        "info": {"name": "c", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+        "item": [{"name": "r", "request": request}]
+    });
+    import(doc.to_string().as_bytes(), o).unwrap()
+}
+
+/// Postman sends a query value as written, so `%3A` is stored decoded and the
+/// engine's one encoding sends `%3A` again, not `%253A`. A list with a `+`
+/// (sent as is) goes into the URL exactly as Postman sends it (#563).
+#[test]
+fn query_list_values_are_decoded_or_kept_verbatim() {
+    let url = |query: serde_json::Value| serde_json::json!({"method": "GET", "url": {"raw": "https://x.example.com/cb", "host": ["x", "example", "com"], "path": ["cb"], "query": query}});
+    let r = postman_request(
+        url(serde_json::json!([
+            {"key": "redirect_uri", "value": "https%3A%2F%2Fapp.example.com%2Fdone"},
+            {"key": "n", "value": "caf%C3%A9", "disabled": true}
+        ])),
+        &opts(),
+    );
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://x.example.com/cb");
+    assert_eq!(param(s, "redirect_uri").unwrap().value, "https://app.example.com/done");
+    assert_eq!(param(s, "n").unwrap().value, "caf\u{e9}");
+    assert!(!param(s, "n").unwrap().enabled);
+    assert!(!has(&r, "query_kept_in_url"));
+
+    let r = postman_request(
+        url(serde_json::json!([
+            {"key": "redirect_uri", "value": "https%3A%2F%2Fapp.example.com%2Fdone"},
+            {"key": "q", "value": "a+b"},
+            {"key": "api_key", "value": "placeholder-secret"},
+            {"key": "flag"},
+            {"key": "off", "value": "x+y", "disabled": true}
+        ])),
+        &opts(),
+    );
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://x.example.com/cb?redirect_uri=https%3A%2F%2Fapp.example.com%2Fdone&q=a+b&api_key={{api_key}}&flag");
+    assert!(has_at(&r, "query_kept_in_url", "/url/query"));
+    // The disabled entry is not sent; it stays a parameter, as written.
+    assert_eq!(s.params.len(), 1);
+    assert_eq!((param(s, "off").unwrap().value.as_str(), param(s, "off").unwrap().enabled), ("x+y", false));
+    assert!(has_at(&r, "query_param_not_decoded", "/url/query/4"));
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
+    assert_eq!(r.report.redactions.len(), 1);
+
+    // The raw URL path: decoded pairs, or the query as written.
+    let r = postman_request(serde_json::json!({"method": "GET", "url": "https://x.example.com/cb?r=https%3A%2F%2Fa.example&n=1"}), &opts());
+    assert_eq!(param(&r.requests[0].spec, "r").unwrap().value, "https://a.example");
+    for query in ["q=hello+world", "n=caf%E9", "discount=50%"] {
+        let r = postman_request(serde_json::json!({"method": "GET", "url": format!("https://x.example.com/search?{query}")}), &opts());
+        assert_eq!(r.requests[0].spec.url, format!("https://x.example.com/search?{query}"));
+        assert!(r.requests[0].spec.params.is_empty());
+    }
+    // Path variables are substituted before a verbatim query.
+    let r = postman_request(
+        serde_json::json!({"method": "GET", "url": {"raw": "https://x.example.com/items/:id?q=a+b", "variable": [{"key": "id", "value": "7"}]}}),
+        &opts(),
+    );
+    assert_eq!(r.requests[0].spec.url, "https://x.example.com/items/7?q=a+b");
+}

@@ -441,9 +441,51 @@ pub fn query_decode(s: &str) -> String {
     percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()
 }
 
-/// Split a URL into base (without query/fragment) and decoded query pairs.
-/// When some pair has no `=` (or the query is otherwise not a plain list of
-/// pairs), the query stays in the URL verbatim and no pairs are returned.
+/// How a source writes the query names and values it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryForm {
+    /// As sent (cURL, HAR, Postman): `%XX` escapes stand for their bytes, and
+    /// a `+` or a `%` that starts no escape is sent as it is.
+    Wire,
+    /// Encoded when sent, its `%XX` escapes kept (Insomnia): `+` and a `%`
+    /// that starts no escape are literal characters, encoded as `%2B` and
+    /// `%25`.
+    Insomnia,
+}
+
+/// The decoded text Anvil stores for a query name or value the source wrote
+/// in `form`. The engine percent-encodes a stored parameter once when it
+/// sends it (every byte outside `A-Za-z0-9-._~`), so the request carries
+/// what the source sent.
+///
+/// `None` when no stored text does that: a wire `+` (curl sends it as is,
+/// and a form-decoding server reads a space, while a stored `+` is sent as
+/// `%2B`), a wire `%` that starts no escape (sent bare, while a stored `%` is
+/// sent as `%25`), or escapes that do not decode to UTF-8 (`%E9`).
+pub fn decode_query_text(s: &str, form: QueryForm) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' if form == QueryForm::Wire => return None,
+            b'%' => {
+                let escape = bytes.get(i + 1..i + 3).is_some_and(|h| h.iter().all(u8::is_ascii_hexdigit));
+                if !escape && form == QueryForm::Wire {
+                    return None;
+                }
+                i += if escape { 3 } else { 1 };
+            }
+            _ => i += 1,
+        }
+    }
+    percent_encoding::percent_decode_str(s).decode_utf8().ok().map(std::borrow::Cow::into_owned)
+}
+
+/// Split a URL into base (without query/fragment) and decoded query pairs
+/// ([`decode_query_text`], wire form). When some pair has no `=`, or some
+/// name or value has no decoded form (a `+`, a lone `%`, an escape that is
+/// not UTF-8), the query stays in the URL verbatim, exactly as the source
+/// sends it, and no pairs are returned.
 pub fn split_query(url: &str) -> (String, Vec<(String, String)>) {
     let no_frag = strip_fragment(url);
     let Some((base, q)) = no_frag.split_once('?') else {
@@ -454,12 +496,141 @@ pub fn split_query(url: &str) -> (String, Vec<(String, String)>) {
     }
     let mut pairs = vec![];
     for p in q.split('&') {
-        match p.split_once('=') {
-            Some((k, v)) if !k.is_empty() => pairs.push((query_decode(k), query_decode(v))),
-            _ => return (no_frag.to_string(), vec![]),
+        let decoded = match p.split_once('=') {
+            Some((k, v)) if !k.is_empty() => decode_query_text(k, QueryForm::Wire).zip(decode_query_text(v, QueryForm::Wire)),
+            _ => None,
+        };
+        match decoded {
+            Some(pair) => pairs.push(pair),
+            None => return (no_frag.to_string(), vec![]),
         }
     }
     (base.to_string(), pairs)
+}
+
+/// One entry of a source's query parameter list (Postman `url.query`,
+/// Insomnia `parameters`), as the source wrote it.
+pub struct ListedParam {
+    pub name: String,
+    /// `None` for an entry without a value (`?flag`).
+    pub value: Option<String>,
+    pub enabled: bool,
+    pub description: String,
+    pub pointer: String,
+}
+
+/// The text a source in `form` sends for a listed name or value. Insomnia
+/// encodes like its own `flexibleEncodeComponent`: `%XX` escapes and
+/// `{{references}}` (or `{% tags %}`) stay, and every other byte outside
+/// `A-Za-z0-9-_.!~*'()` is percent-encoded.
+fn wire_text(s: &str, form: QueryForm) -> String {
+    if form == QueryForm::Wire {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        let open = rest.find("{{").into_iter().chain(rest.find("{%")).min();
+        let span = open.and_then(|i| {
+            let close = if rest[i..].starts_with("{{") { "}}" } else { "%}" };
+            rest[i + 2..].find(close).map(|e| (i, i + 2 + e + 2))
+        });
+        let literal_end = span.map_or(rest.len(), |(i, _)| i);
+        let bytes = rest[..literal_end].as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c == b'%' && bytes.get(i + 1..i + 3).is_some_and(|h| h.iter().all(u8::is_ascii_hexdigit)) {
+                out.push_str(&rest[i..i + 3]);
+                i += 3;
+                continue;
+            }
+            if c.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&c) {
+                out.push(c as char);
+            } else {
+                out.push_str(&format!("%{c:02X}"));
+            }
+            i += 1;
+        }
+        match span {
+            Some((start, end)) => {
+                out.push_str(&rest[start..end]);
+                rest = &rest[end..];
+            }
+            None => return out,
+        }
+    }
+}
+
+/// Map a source's query parameter list to request parameters holding decoded
+/// text ([`decode_query_text`]), applying the credential policy by name.
+///
+/// When some enabled entry has no decoded form, a parameter would send other
+/// bytes than the source. The enabled entries are then appended, in order and
+/// as the source sends them, to `url`'s query (before any fragment), with
+/// credential values still redacted, and a `query_kept_in_url` warning says
+/// so; the disabled entries stay parameters. A disabled entry without a
+/// decoded form is kept as written, with a `query_param_not_decoded` warning.
+pub fn listed_query_params(b: &mut Builder, url: &mut String, list: Vec<ListedParam>, form: QueryForm, at: &str) -> Vec<KeyValue> {
+    let decoded = |p: &ListedParam| {
+        let name = decode_query_text(&p.name, form)?;
+        let value = match &p.value {
+            Some(v) => decode_query_text(v, form)?,
+            None => String::new(),
+        };
+        Some((name, value))
+    };
+    let verbatim = list.iter().any(|p| p.enabled && decoded(p).is_none());
+    if verbatim {
+        let joined = list
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| match &p.value {
+                Some(v) => format!("{}={}", wire_text(&p.name, form), wire_text(v, form)),
+                None => wire_text(&p.name, form),
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        let redacted = redact_raw_query(b, &format!("?{joined}"), at, "query");
+        let query = redacted.strip_prefix('?').unwrap_or(&redacted);
+        let cut = strip_fragment(url).len();
+        let (head, fragment) = url.split_at(cut);
+        let sep = if !head.contains('?') {
+            "?"
+        } else if head.ends_with(['?', '&']) {
+            ""
+        } else {
+            "&"
+        };
+        *url = format!("{head}{sep}{query}{fragment}");
+        b.report.warn(
+            "query_kept_in_url",
+            at,
+            "a query parameter has a '+', a lone '%' or an escape that is not UTF-8, which no parameter value sends unchanged; \
+             the enabled parameters were added to the URL exactly as the source sends them",
+        );
+    }
+    let mut out = vec![];
+    for p in list {
+        if verbatim && p.enabled {
+            continue;
+        }
+        let (name, value) = match decoded(&p) {
+            Some(nv) => nv,
+            None => {
+                b.report.warn(
+                    "query_param_not_decoded",
+                    &p.pointer,
+                    "this disabled query parameter is kept as written: it has a '+', a lone '%' or an escape that is not UTF-8, \
+                     and Anvil encodes a parameter when it sends it; check it before enabling it",
+                );
+                (p.name.clone(), p.value.clone().unwrap_or_default())
+            }
+        };
+        let (value, sensitive) = maybe_redact(b, &name, &value, &p.pointer, "query");
+        out.push(KeyValue { name, value, enabled: p.enabled, description: p.description, sensitive });
+    }
+    out
 }
 
 /// The byte offset of the `@` that ends the userinfo in `after_scheme` (a

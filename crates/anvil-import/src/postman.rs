@@ -8,8 +8,8 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type, maybe_redact, redact_raw_query,
-    scrub_body, scrub_graphql_variables, split_query,
+    ListedParam, QueryForm, body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type,
+    listed_query_params, maybe_redact, redact_raw_query, scrub_body, scrub_graphql_variables, split_query,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -254,9 +254,12 @@ fn headers(b: &mut Builder, v: Option<&Value>, at: &str) -> Vec<KeyValue> {
 }
 
 /// URL: `raw` wins; otherwise rebuilt from parts. Query parameters come from
-/// the `query` array (keeping disabled entries) or the raw query string.
-/// Path variables (`:id`) are substituted from `url.variable` or become
-/// `{{id}}` placeholders.
+/// the `query` array (keeping disabled entries) or the raw query string, as
+/// decoded text ([`listed_query_params`], [`split_query`]): Postman sends a
+/// value as written, so `%3A` is stored as `:` and sent as `%3A` again. A
+/// query no parameter can send unchanged (a `+`, a lone `%`, an escape that
+/// is not UTF-8) stays in the URL as written. Path variables (`:id`) are
+/// substituted from `url.variable` or become `{{id}}` placeholders.
 fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>) {
     let (raw, query_list, path_vars) = match v {
         Value::String(s) => (s.clone(), None, None),
@@ -268,41 +271,44 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>) {
     };
     check_dynamic_vars(b, &raw, &ptr(at, "raw"));
     let (base, raw_pairs) = split_query(&raw);
-    let base = if raw_pairs.is_empty() && query_list.is_some() {
-        base.split('?').next().unwrap_or("").to_string()
-    } else if raw_pairs.is_empty() && base.contains('?') {
-        // A raw query that is not a plain list of pairs stays verbatim; its
-        // credential-like values are still redacted in place.
-        redact_raw_query(b, &base, &ptr(at, "raw"), "query")
-    } else {
-        base
+    // A raw query that is not a plain list of decodable pairs is kept
+    // verbatim in `base`; path variables are substituted before it.
+    let (path, raw_query) = match base.split_once('?') {
+        Some((path, query)) => (path.to_string(), Some(query.to_string())),
+        None => (base, None),
     };
-    let mut params = vec![];
-    match query_list {
+    let mut url = substitute_path_vars(b, &path, path_vars.as_deref().unwrap_or(&[]), &ptr(at, "variable"));
+    let params = match query_list {
         Some(list) => {
-            for (i, q) in list.iter().enumerate() {
-                let p = format!("{}/{i}", ptr(at, "query"));
-                let Some(k) = str_of(q, "key") else { continue };
-                let raw_v = q.get("value").map(scalar_text).unwrap_or_default();
-                let (value, sensitive) = maybe_redact(b, k, &raw_v, &p, "query");
-                params.push(KeyValue {
-                    name: k.to_string(),
-                    value,
-                    enabled: q.get("disabled").and_then(Value::as_bool) != Some(true),
-                    description: description(q.get("description")),
-                    sensitive,
-                });
-            }
+            let listed = list
+                .iter()
+                .enumerate()
+                .filter_map(|(i, q)| {
+                    Some(ListedParam {
+                        name: str_of(q, "key")?.to_string(),
+                        value: q.get("value").filter(|v| !v.is_null()).map(scalar_text),
+                        enabled: q.get("disabled").and_then(Value::as_bool) != Some(true),
+                        description: description(q.get("description")),
+                        pointer: format!("{}/{i}", ptr(at, "query")),
+                    })
+                })
+                .collect();
+            listed_query_params(b, &mut url, listed, QueryForm::Wire, &ptr(at, "query"))
         }
         None => {
+            if let Some(query) = raw_query {
+                // Its credential-like values are still redacted in place.
+                url = redact_raw_query(b, &format!("{url}?{query}"), &ptr(at, "raw"), "query");
+            }
+            let mut params = vec![];
             for (i, (k, v)) in raw_pairs.into_iter().enumerate() {
                 let p = format!("{}#query{i}", ptr(at, "raw"));
                 let (value, sensitive) = maybe_redact(b, &k, &v, &p, "query");
                 params.push(KeyValue { name: k, value, enabled: true, description: String::new(), sensitive });
             }
+            params
         }
-    }
-    let url = substitute_path_vars(b, &base, path_vars.as_deref().unwrap_or(&[]), &ptr(at, "variable"));
+    };
     (url, params)
 }
 
