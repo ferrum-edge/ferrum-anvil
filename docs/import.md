@@ -39,23 +39,36 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   is set (kept values are then marked sensitive).
 - A value that is only variable references plus an auth scheme word
   (`Bearer {{token}}`) is not a literal secret and is kept.
-- A query kept in the URL verbatim (one with a bare `flag` segment, a URL
-  query no parameter can send unchanged, or one written into an Insomnia URL)
-  has its credential-like values replaced in place.
+- A credential is never left in URL text. A URL query (cURL, HAR, a Postman
+  raw URL, or one written into an Insomnia URL) that has a credential-named
+  segment becomes parameters, whatever else it holds, so the credential's
+  placeholder is percent-encoded when its value is supplied and a kept
+  literal is marked sensitive. A bare `flag` beside it becomes a parameter
+  with an empty value, sent as `flag=` (`query_flag_as_param`). A query name
+  is matched as written and percent-decoded, so `%70assword` is a credential
+  name even when it is kept as written.
 - URL userinfo (`https://user:password@host/`) becomes Basic auth with a
   `{{password}}` placeholder in every migration importer, and the URL loses it
-  (the engine never sends credentials in the URL). A Postman or Insomnia
-  request with auth of its own keeps that auth, and the userinfo is dropped
+  (the engine never sends credentials in the URL). The userinfo ends at the
+  last `@` before the path, so a password holding `@` is removed whole. A
+  user name or password whose decoding would make or change a
+  `{{reference}}` (`%7B%7Bid%7D%7D`), or is not UTF-8, is never decoded: the
+  user name is kept as written (`url_user_not_decoded`), and the password
+  becomes a required `{{password}}` even with `include_credentials`
+  (`url_password_not_decoded`). A Postman or Insomnia request with auth of
+  its own keeps that auth, and the userinfo is dropped
   (`url_credentials_dropped`).
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy, and so do
   credential-named members of an Insomnia environment value that is an array
   (`{"accounts": [{"api_key": "…"}]}`), as members of a nested object do.
-- JSON bodies and GraphQL variables are scanned recursively: string members
-  with credential-like names, and numbers under such names (`pin`, `otp`, …;
-  not names recognized only by `token`, such as `max_tokens`), whose
-  placeholder is written unquoted (`"pin": {{pin}}`) so the value supplied
-  later is sent as a number.
+- JSON bodies, GraphQL variables and those environment arrays are scanned
+  recursively: string members with credential-like names, every string under
+  a credential-named member whose value is an array or object
+  (`"tokens": ["…"]`, `"credentials": {"v": "…"}`), and numbers under
+  numeric credential names (`pin`, `otp`, …; not names recognized only by
+  `token`, such as `max_tokens`), whose placeholder is written unquoted
+  (`"pin": {{pin}}`) so the value supplied later is sent as a number.
 - A JSON body that repeats a member name is rewritten keeping the last value of
   each member (`json_duplicate_member`), so an earlier value that was never
   scanned does not survive.
@@ -76,18 +89,18 @@ decode what the source sends, so an imported request carries the same query:
 - Insomnia keeps a parameter's `%XX` escapes and encodes the rest, so a `+`
   in an Insomnia parameter is a plus, stored as `+` and sent as `%2B`.
 - A URL query (cURL, HAR, a Postman raw URL) that no parameter can send
-  unchanged stays in the URL exactly as the source sends it: a `+` (sent as
-  is, and read as a space by form-decoding servers), a lone `%`, an escape
-  that is not UTF-8 (`%E9`), or escaped braces that would decode to a
-  `{{reference}}` (`%7B%7Bid%7D%7D`). When such a query of `name=value` pairs
-  would keep a literal under a credential name (`include_credentials`), it
-  stays parameters instead, so the credential keeps its `sensitive` mark.
+  unchanged, and that has no credential-named segment, stays in the URL
+  exactly as the source sends it: a `+` (sent as is, and read as a space by
+  form-decoding servers), a lone `%`, an escape that is not UTF-8 (`%E9`), or
+  escaped braces whose decoding would make or change a `{{reference}}`
+  (`%7B%7Bid%7D%7D`, `%7B{{id}}`). With a credential-named segment it becomes
+  parameters (see Credential redaction), converted as below.
 - Entries of a Postman `query` list or Insomnia `parameters` always stay
   parameters, so a `&`, `#` or `=` in them, literal or from a resolved
   `{{reference}}`, is encoded as data. A Postman `+` is read as a space, as
   form-decoding servers read it, and sent as `%20`, and a lone `%` is sent as
-  `%25` (`query_value_converted`). An escape that is not UTF-8, or escaped
-  braces that would decode to a reference, keep the value as written
+  `%25` (`query_value_converted`). An escape that is not UTF-8, or decoding
+  that would make or change a reference, keeps the value as written
   (`query_param_not_decoded`): it is never turned into U+FFFD or a reference,
   but its `%` is encoded when sent, so check it.
 - Reserved characters a source left bare (`:` or `/` in a value) are sent

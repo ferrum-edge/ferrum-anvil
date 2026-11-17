@@ -79,16 +79,31 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
             (regex::Regex::new(r"(?i)bearer\s+[A-Za-z0-9._~+/-]{16,}").unwrap(), "contains a bearer token"),
             (regex::Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(), "looks like an AWS access key id"),
             (regex::Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----").unwrap(), "contains a private key"),
-            // `scheme://user:password@host`: a literal password in URL
-            // userinfo (a `{{reference}}` password is not one).
-            (regex::Regex::new(r"[A-Za-z][A-Za-z0-9+.-]*://[^/?#@\s:]*:[^/?#@\s{]+@").unwrap(), "contains a password in the URL"),
             (
                 regex::Regex::new(r#"(?i)"(password|passwd|secret|token|api_?key)"\s*:\s*"[^"{]{3,}""#).unwrap(),
                 "contains a credential-named JSON field",
             ),
         ]
     });
+    if has_url_password(s) {
+        return Some("contains a password in the URL");
+    }
     res.iter().find(|(r, _)| r.is_match(s)).map(|(_, why)| *why)
+}
+
+/// Whether `s` holds a URL (`scheme://user:password@host`) whose userinfo
+/// password has literal text: anything but one whole `{{reference}}`
+/// ([`is_pure_reference`]). The userinfo runs to the last `@` before the
+/// authority ends (`/`, `?`, `#` or whitespace), so a password holding `@`
+/// or braces is seen whole.
+fn has_url_password(s: &str) -> bool {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"[A-Za-z][A-Za-z0-9+.-]*://([^/?#\s]*)@").unwrap());
+    re.captures_iter(s).any(|c| {
+        let userinfo = c.get(1).map_or("", |m| m.as_str());
+        userinfo.split_once(':').is_some_and(|(_, password)| !password.is_empty() && !is_pure_reference(password))
+    })
 }
 
 pub struct Sanitized {
@@ -596,6 +611,16 @@ mod tests {
         assert_eq!(s.warnings.len(), 1);
         assert!(s.warnings[0].reason.contains("password in the URL"), "{}", s.warnings[0].reason);
         assert_eq!(s.warnings[0].pointer, "/requests/0/spec/url");
+        // Mixed reference and literal, a literal brace, and an `@` in the
+        // password are literal material (review sol F5).
+        for loud in [
+            "https://user:{{tenant}}-live-secret-571@host.example/",
+            "https://user:p{w-literal@host.example/",
+            "https://admin:p@hunter2-literal@api.example.com/v1",
+        ] {
+            let mut v = spec(loud);
+            assert_eq!(sanitize(&mut v, &[]).warnings.len(), 1, "a literal URL password was not flagged");
+        }
         for quiet in [
             "https://admin:{{password}}@api.example.com/v1",
             "https://api.example.com:8443/v1?email=a:b@c.example",

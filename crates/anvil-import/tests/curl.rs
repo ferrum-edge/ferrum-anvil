@@ -354,17 +354,34 @@ fn short_option_clusters_count_against_the_argument_limit() {
     assert_eq!(r.requests[0].spec.method, "POST");
 }
 
+/// A query with a credential is never kept as URL text, where a placeholder
+/// would resolve without percent-encoding and a kept literal would not be
+/// marked sensitive (review dsf F1, F3): a bare `flag` beside it becomes a
+/// parameter with an empty value.
 #[test]
-fn credentials_in_a_query_with_a_bare_flag_are_redacted_in_place() {
+fn credentials_in_a_query_with_a_bare_flag_become_parameters() {
     let r = curl("curl 'https://example.test/a?flag&api_key=placeholder-secret&page=2#top'");
     let s = &r.requests[0].spec;
-    assert_eq!(s.url, "https://example.test/a?flag&api_key={{api_key}}&page=2");
+    assert_eq!(s.url, "https://example.test/a");
+    let pairs: Vec<(&str, &str, bool)> = s.params.iter().map(|p| (p.name.as_str(), p.value.as_str(), p.sensitive)).collect();
+    assert_eq!(pairs, [("flag", "", false), ("api_key", "{{api_key}}", true), ("page", "2", false)]);
+    assert!(has(&r, "query_flag_as_param"));
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
     assert_eq!(r.report.redactions.len(), 1);
-    // Kept verbatim (original encoding) with include_credentials.
+    // A kept credential stays a sensitive parameter.
     let o = ImportOptions { include_credentials: true, ..opts() };
+    for cmd in
+        ["curl 'https://example.test/a?flag&pwd=retained-credential-571'", "curl 'https://example.test/a?pwd=retained-credential-571&'"]
+    {
+        let r = import(cmd.as_bytes(), &o).unwrap();
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://example.test/a", "{cmd}");
+        let pwd = param(s, "pwd").unwrap();
+        assert!(pwd.value == "retained-credential-571" && pwd.sensitive, "{cmd}");
+    }
     let r = import(b"curl 'https://example.test/a?flag&token=a%26b'", &o).unwrap();
-    assert_eq!(r.requests[0].spec.url, "https://example.test/a?flag&token=a%26b");
+    let token = param(&r.requests[0].spec, "token").unwrap();
+    assert!(token.value == "a&b" && token.sensitive);
 }
 
 #[test]
@@ -461,9 +478,14 @@ fn query_values_are_stored_decoded_or_kept_verbatim() {
         assert!(!serde_json::to_string(&r.requests).unwrap().contains('\u{fffd}'), "{query}");
     }
 
-    // Credential-like values in a verbatim query are still redacted.
-    let r = curl("curl 'https://api.example.com/search?q=a+b&api_key=placeholder-secret'");
-    assert_eq!(r.requests[0].spec.url, "https://api.example.com/search?q=a+b&api_key={{api_key}}");
+    // A query with a credential becomes parameters, its credential redacted
+    // and encoded when its value is supplied (review dsf F1).
+    let r = curl("curl 'https://api.example.com/search?ts=2024-01-01T00:00:00+01:00&api_key=placeholder-secret'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/search");
+    assert_eq!(param(s, "ts").unwrap().value, "2024-01-01T00:00:00 01:00");
+    assert_eq!(param(s, "api_key").unwrap().value, "{{api_key}}");
+    assert!(has(&r, "query_value_converted"));
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
     assert_eq!(r.report.redactions.len(), 1);
 }
@@ -493,4 +515,53 @@ fn a_kept_credential_in_an_undecodable_query_stays_a_sensitive_parameter() {
     assert!(s.params.is_empty());
     let r = curl("curl 'https://api.example.com/search?q=%7Bid%7D'");
     assert_eq!(param(&r.requests[0].spec, "q").unwrap().value, "{id}", "single braces are no reference");
+}
+
+/// Review sol F1: an escaped credential name that stays undecoded (it is not
+/// UTF-8) is still classified by its decoded spelling and marked sensitive.
+#[test]
+fn an_escaped_credential_name_that_stays_undecoded_is_still_sensitive() {
+    let o = ImportOptions { include_credentials: true, ..opts() };
+    let r = import(b"curl 'https://example.test/?%70assword%E9=retained-literal-571'", &o).unwrap();
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://example.test/");
+    let p = param(s, "%70assword%E9").expect("the name is kept as written");
+    assert!(p.value == "retained-literal-571" && p.sensitive);
+    let r = curl("curl 'https://example.test/?%70assword%E9=retained-literal-571'");
+    let p = &r.requests[0].spec.params[0];
+    assert!(p.sensitive && p.value.starts_with("{{") && p.value.ends_with("}}"));
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("retained-literal-571"));
+}
+
+/// Review sol F2: the userinfo ends at the last `@` of the authority, so a
+/// password holding `@` leaves nothing in the URL. Sol F3: escaped braces
+/// in userinfo never become a `{{reference}}`; such a password is replaced
+/// by a required `{{password}}` in either credential mode.
+#[test]
+fn userinfo_ends_at_the_last_at_and_escaped_braces_stay_data() {
+    let r = curl("curl 'https://admin:p@hunter2-literal@api.example.com/v1?next=a@b'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/v1");
+    assert!(
+        matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password == &SensitiveValue::template("{{password}}"))
+    );
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("hunter2"));
+    let o = ImportOptions { include_credentials: true, ..opts() };
+    let r = import(b"curl 'https://admin:p@hunter2-literal@api.example.com/v1'", &o).unwrap();
+    assert!(
+        matches!(&r.requests[0].spec.auth, AuthConfig::Basic { password, .. } if password == &SensitiveValue::template("p@hunter2-literal"))
+    );
+
+    for options in [opts(), o] {
+        let r = import(b"curl 'https://%7B%7Bu%7D%7D:%7B%7Bid%7D%7D@example.test/'", &options).unwrap();
+        match &r.requests[0].spec.auth {
+            AuthConfig::Basic { username, password } => {
+                assert_eq!(username, "%7B%7Bu%7D%7D");
+                assert_eq!(password, &SensitiveValue::template("{{password}}"));
+            }
+            _ => panic!("expected Basic auth"),
+        }
+        assert!(has(&r, "url_password_not_decoded") && has(&r, "url_user_not_decoded"));
+        assert!(r.report.required_variables.iter().any(|v| v.name == "password" && v.secret));
+    }
 }

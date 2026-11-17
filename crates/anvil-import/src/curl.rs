@@ -771,9 +771,9 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
         auth = crate::common::userinfo_auth(b, &user, &pass, &url_at);
         url = without;
     }
-    // Decoded pairs, or a query kept in the URL verbatim with its
-    // credential-like values redacted in place.
-    let (base, mut params) = url_query_params(b, &url, |n| format!("{url_at}#query{n}"), &url_at, "query");
+    // Decoded pairs; a query with a credential as parameters; otherwise
+    // the query kept in the URL as written.
+    let (base, mut params) = url_query_params(b, &url, |n| format!("{url_at}#query{n}"), "query");
 
     let has_ct = headers.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
     if json {

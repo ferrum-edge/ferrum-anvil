@@ -192,8 +192,19 @@ fn listed_parameters_encode_resolved_references() {
     assert_eq!(prepared_query_with(&postman_spec, &term), "n=a%20b&q=a%26b%23c%2Bd&z=1");
 }
 
+/// A redacted credential from an undecodable URL query is a parameter, so
+/// the value supplied for its placeholder is percent-encoded when sent: a
+/// `&`, `=`, `#` or `+` in it stays data (review dsf F1).
+#[test]
+fn a_supplied_credential_from_a_url_query_is_encoded() {
+    let spec = imported_request(b"curl 'https://api.example.com/search?q=a+b&api_key=key-literal-571'");
+    assert_eq!(spec.url, "https://api.example.com/search");
+    assert_eq!(prepared_query_with(&spec, &[("api_key", "a&admin=1#x+y")]), "q=a%20b&api_key=a%26admin%3D1%23x%2By");
+}
+
 /// Escaped braces stay literal text, never a variable reference, with or
-/// without a variable of that name (review sol F5).
+/// without a variable of that name (review sol F5). Escaped text next to a
+/// real reference keeps the reference intact (round 2, sol F4).
 #[test]
 fn escaped_braces_never_become_references() {
     let id = [("id", "42")];
@@ -209,6 +220,10 @@ fn escaped_braces_never_become_references() {
         let query = prepared_query_with(&listed, vars);
         assert!(!query.contains("42") && query.contains("7B"), "{query}");
     }
+    let mixed = imported_request(&postman(serde_json::json!({ "raw": "https://api.example.com/search", "query": [
+        { "key": "q", "value": "%7B{{id}}" }
+    ] })));
+    assert_eq!(prepared_query_with(&mixed, &id), "q=%257B42");
 }
 
 /// GHSA-c236-7r9g-c9p2: URL userinfo leaves the URL on import, so the

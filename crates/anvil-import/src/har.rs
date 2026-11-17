@@ -90,7 +90,7 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
         url = without;
     }
     let query_ptr = ptr(rptr, "queryString");
-    let (base, params) = url_query_params(b, &url, |n| format!("{query_ptr}/{n}"), &uptr, "query parameter");
+    let (base, params) = url_query_params(b, &url, |n| format!("{query_ptr}/{n}"), "query parameter");
 
     let mut headers = vec![];
     let mut has_cookie = false;

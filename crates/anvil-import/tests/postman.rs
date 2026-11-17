@@ -208,7 +208,9 @@ fn raw_json_bodies_and_mixed_raw_queries_are_redacted() {
     let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
     let s = &r.requests[0].spec;
     assert_eq!(json_body(s)["password"], "{{password}}");
-    assert_eq!(s.url, "https://x.example.com/a?flag&api_key={{api_key}}");
+    // A raw query with a credential becomes parameters (review dsf F1, F3).
+    assert_eq!(s.url, "https://x.example.com/a");
+    assert_eq!((param(s, "flag").unwrap().value.as_str(), param(s, "api_key").unwrap().value.as_str()), ("", "{{api_key}}"));
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
     assert_eq!(r.report.redactions.len(), 2);
 }
@@ -324,6 +326,10 @@ fn query_list_values_are_decoded_and_stay_parameters() {
     assert_eq!(param(s, "n").unwrap().value, "caf%E9");
     assert_eq!(param(s, "t").unwrap().value, "%7B%7Bid%7D%7D");
     assert_eq!(param(s, "v").unwrap().value, "{{id}}", "a reference written as one stays one");
+    // Decoding that would shift or rewrite a reference is refused too (sol F4).
+    let r = postman_request(url(serde_json::json!([{"key": "m", "value": "%7B{{id}}"}, {"key": "e", "value": "{{i%64}}"}])), &opts());
+    let s = &r.requests[0].spec;
+    assert_eq!((param(s, "m").unwrap().value.as_str(), param(s, "e").unwrap().value.as_str()), ("%7B{{id}}", "{{i%64}}"));
     assert!(has_at(&r, "query_param_not_decoded", "/url/query/0") && has_at(&r, "query_param_not_decoded", "/url/query/1"));
 
     // The raw URL path: decoded pairs, or the query as written.
@@ -379,6 +385,17 @@ fn url_userinfo_becomes_basic_auth_and_its_password_is_redacted() {
     assert!(matches!(&s.auth, AuthConfig::Bearer { .. }));
     assert!(has(&r, "url_credentials_dropped"));
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("hunter2-literal"));
+}
+
+/// Review sol F2: a password holding `@` is removed whole (the userinfo
+/// ends at the last `@` of the authority, as Postman reads it).
+#[test]
+fn a_password_holding_an_at_sign_is_removed_whole() {
+    let r = postman_request(serde_json::json!({"method": "GET", "url": "https://admin:p@hunter2-literal@api.example.com/v1"}), &opts());
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/v1");
+    assert!(matches!(&s.auth, AuthConfig::Basic { username, .. } if username == "admin"));
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("hunter2"));
 }
 
 /// GHSA-c236-7r9g-c9p2: a credential-named path variable follows the

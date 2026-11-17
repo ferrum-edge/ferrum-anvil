@@ -304,7 +304,7 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<(
                 // Split apart from the substituted path, which a path
                 // variable's value may have given a `?`.
                 let raw_ptr = ptr(at, "raw");
-                let (rest, params) = url_query_params(b, &format!("?{query}"), |i| format!("{raw_ptr}#query{i}"), &raw_ptr, "query");
+                let (rest, params) = url_query_params(b, &format!("?{query}"), |i| format!("{raw_ptr}#query{i}"), "query");
                 (format!("{url}{rest}"), params)
             }
             None => (url, vec![]),

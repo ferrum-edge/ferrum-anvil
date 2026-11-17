@@ -9,8 +9,8 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    ListedParam, QueryForm, apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type,
-    keep_declared_content_type, listed_query_params, maybe_redact, parse_embedded_json, parse_form, redact_raw_query, render_json,
+    ListedParam, QueryForm, apply_userinfo, body_from_text, credential, credential_query_params, dedupe_content_type, env_var,
+    header_content_type, keep_declared_content_type, listed_query_params, maybe_redact, parse_embedded_json, parse_form, render_json,
     scrub_body, scrub_graphql_variables, scrub_json, take_userinfo, warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
@@ -606,10 +606,12 @@ fn request(
     // Userinfo is never kept in the URL (the engine refuses it).
     let (raw_url, userinfo) = take_userinfo(&raw_url);
     let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
-    // A query written into the URL itself is kept verbatim; its
-    // credential-like values are redacted in place.
-    let url = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { url };
-    let params = query_params(b, r.get("parameters"), &ptr(at, "parameters"));
+    // A query written into the URL itself is kept as written, unless it has
+    // a credential: then its segments become parameters, before the listed
+    // ones (Insomnia sends the URL's query first).
+    let url_ptr = ptr(at, "url");
+    let (url, mut params) = credential_query_params(b, &url, QueryForm::Insomnia, |n| format!("{url_ptr}#query{n}"), "query");
+    params.extend(query_params(b, r.get("parameters"), &ptr(at, "parameters")));
     let mut spec = RequestSpec::http(&method, &url);
     spec.params = params;
     spec.headers = kv_list(b, r.get("headers"), &ptr(at, "headers"), "header");

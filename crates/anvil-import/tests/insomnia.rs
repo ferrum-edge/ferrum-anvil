@@ -347,7 +347,10 @@ fn raw_json_bodies_and_url_queries_are_redacted() {
     ] {
         let s = &r.requests[0].spec;
         assert_eq!(json_body(s)["password"], "{{password}}");
-        assert_eq!(s.url, "https://example.test/x?flag&api_key={{api_key}}");
+        // A URL query with a credential becomes parameters (review dsf F1, F3).
+        assert_eq!(s.url, "https://example.test/x");
+        assert_eq!((param(s, "flag").unwrap().value.as_str(), param(s, "api_key").unwrap().value.as_str()), ("", "{{api_key}}"));
+        assert!(param(s, "api_key").unwrap().sensitive);
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
         assert_eq!(r.report.redactions.len(), 2);
     }
@@ -594,6 +597,7 @@ fn parameters_without_a_decoded_form_are_kept_as_written() {
         { "name": "sp", "value": "a b&c+d" },
         { "name": "ref", "value": "{{ _.region }}" },
         { "name": "t", "value": "%7B%7Bid%7D%7D" },
+        { "name": "m", "value": "%7B{{ _.id }}" },
     ]});
     for r in both(request, serde_json::json!({}), &opts()) {
         let s = &r.requests[0].spec;
@@ -601,7 +605,14 @@ fn parameters_without_a_decoded_form_are_kept_as_written() {
         let values: Vec<(&str, &str)> = s.params.iter().map(|p| (p.name.as_str(), p.value.as_str())).collect();
         assert_eq!(
             values,
-            [("n", "caf%E9"), ("api_key", "{{api_key}}"), ("sp", "a b&c+d"), ("ref", "{{region}}"), ("t", "%7B%7Bid%7D%7D")]
+            [
+                ("n", "caf%E9"),
+                ("api_key", "{{api_key}}"),
+                ("sp", "a b&c+d"),
+                ("ref", "{{region}}"),
+                ("t", "%7B%7Bid%7D%7D"),
+                ("m", "%7B{{id}}")
+            ]
         );
         assert!(has_at(&r, "query_param_not_decoded", "parameters/0") && has_at(&r, "query_param_not_decoded", "parameters/4"));
         assert!(!has_at(&r, "query_param_not_decoded", "parameters/2"));
@@ -638,6 +649,7 @@ fn url_userinfo_becomes_basic_auth_and_its_password_is_redacted() {
 fn credential_members_of_environment_arrays_are_redacted() {
     let env = serde_json::json!({
         "accounts": [{ "name": "a", "api_key": "envArrayKey-literal" }, { "name": "b", "password": "" }],
+        "profiles": [{ "tokens": ["tok-literal-571"], "credentials": { "v": "cred-literal-571" } }],
         "nested": { "api_key": "envNestedKey-literal" },
         "hosts": ["a.example", "b.example"],
     });
@@ -647,6 +659,10 @@ fn credential_members_of_environment_arrays_are_redacted() {
         let accounts = var("accounts").expect("accounts variable");
         assert!(!accounts.contains("envArrayKey-literal"), "the array member's literal stayed");
         assert!(accounts.contains("{{api_key}}"), "the array member has no placeholder");
+        // Everything under a credential name, whatever its leaves are
+        // called (review dsf F2).
+        let profiles = var("profiles").expect("profiles variable");
+        assert!(!profiles.contains("tok-literal-571") && !profiles.contains("cred-literal-571"), "a structured credential stayed");
         assert_eq!(var("hosts").as_deref(), Some(r#"["a.example","b.example"]"#));
         assert_eq!(var("nested.api_key"), None, "a secret variable's literal is dropped");
         assert!(r.report.redactions.iter().any(|x| x.pointer.contains("accounts")));
