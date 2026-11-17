@@ -169,3 +169,15 @@ fn imported_queries_send_the_source_query_bytes() {
         imported_request(&insomnia_params("https://api.example.com/search", serde_json::json!([{ "name": "n", "value": "caf%E9" }])));
     assert_eq!(prepared_query(&spec), "n=caf%E9");
 }
+
+/// GHSA-c236-7r9g-c9p2: URL userinfo leaves the URL on import, so the
+/// imported request prepares (the engine refuses credentials in the URL).
+#[test]
+fn imported_url_userinfo_leaves_the_url() {
+    let url = "https://admin:hunter2-literal@api.example.com/v1/status";
+    for source in [postman(serde_json::json!(url)), insomnia_params(url, serde_json::json!([]))] {
+        let spec = imported_request(&source);
+        assert_eq!(spec.url, "https://api.example.com/v1/status");
+        assert_eq!(prepared_query(&spec), "");
+    }
+}

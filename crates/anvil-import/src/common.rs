@@ -6,6 +6,7 @@ use crate::builder::Builder;
 use crate::util::{
     has_literal_secret, is_credential_name, is_json_media, is_numeric_credential_name, is_xml_media, media_essence, sanitize_var,
 };
+use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::{Body, KeyValue};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::workspace::Variable;
@@ -631,6 +632,46 @@ pub fn listed_query_params(b: &mut Builder, url: &mut String, list: Vec<ListedPa
         out.push(KeyValue { name, value, enabled: p.enabled, description: p.description, sensitive });
     }
     out
+}
+
+/// Split URL userinfo (`user:password@`) off `url`: the URL without it, and
+/// the percent-decoded user name and password. A URL without a scheme is
+/// read from its start (Postman and Insomnia accept `user:pw@host/path`).
+/// The authority ends at the first `/`, `?` or `#` ([`userinfo_end`]).
+pub fn take_userinfo(url: &str) -> (String, Option<(String, String)>) {
+    let (prefix, rest) = match url.split_once("://") {
+        Some((scheme, rest)) if !scheme.is_empty() && !scheme.contains(['/', '?', '#', '@']) => (&url[..scheme.len() + 3], rest),
+        _ => ("", url),
+    };
+    let Some(at) = userinfo_end(rest) else { return (url.to_string(), None) };
+    let userinfo = &rest[..at];
+    let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+    (format!("{prefix}{}", &rest[at + 1..]), Some((query_decode(user), query_decode(pass))))
+}
+
+/// Basic auth from URL userinfo ([`take_userinfo`]): the engine never sends
+/// credentials in the URL, and the password follows the credential policy
+/// (a `{{password}}` placeholder and a redaction unless
+/// `include_credentials`).
+pub fn userinfo_auth(b: &mut Builder, user: &str, pass: &str, pointer: &str) -> AuthConfig {
+    AuthConfig::Basic { username: user.to_string(), password: credential(b, pass, "password", pointer, "password in the URL") }
+}
+
+/// Apply URL userinfo to a request whose own auth is `auth`: it becomes
+/// Basic auth when the request has none of its own (`inherit` or none);
+/// otherwise the request's auth is kept, and the userinfo, already removed
+/// from the URL, is dropped with a `url_credentials_dropped` warning.
+pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<(String, String)>, pointer: &str) {
+    let Some((user, pass)) = userinfo else { return };
+    if matches!(auth, AuthConfig::Inherit | AuthConfig::None) {
+        *auth = userinfo_auth(b, &user, &pass, pointer);
+    } else {
+        b.report.warn(
+            "url_credentials_dropped",
+            pointer,
+            "the user name and password in the URL were removed and not imported: the request has its own auth, which is kept",
+        );
+    }
 }
 
 /// The byte offset of the `@` that ends the userinfo in `after_scheme` (a

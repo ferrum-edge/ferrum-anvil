@@ -311,3 +311,62 @@ fn query_list_values_are_decoded_or_kept_verbatim() {
     );
     assert_eq!(r.requests[0].spec.url, "https://x.example.com/items/7?q=a+b");
 }
+
+/// GHSA-c236-7r9g-c9p2: URL userinfo becomes Basic auth with a
+/// `{{password}}` placeholder (the engine never sends it in the URL), as in
+/// the cURL and HAR importers, for the string and object URL forms.
+#[test]
+fn url_userinfo_becomes_basic_auth_and_its_password_is_redacted() {
+    for url in [
+        serde_json::json!("https://admin:hunter2-literal@api.example.com/v1/status"),
+        serde_json::json!({"raw": "https://admin:hunter2-literal@api.example.com/v1/status"}),
+        serde_json::json!({"protocol": "https", "host": ["admin:hunter2-literal@api", "example", "com"], "path": ["v1", "status"]}),
+    ] {
+        let r = postman_request(serde_json::json!({"method": "GET", "url": url.clone()}), &opts());
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.com/v1/status");
+        assert!(
+            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password == &SensitiveValue::template("{{password}}")),
+            "{:?}",
+            s.auth
+        );
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("hunter2-literal"));
+        assert_eq!(r.report.redactions.len(), 1);
+
+        let r = postman_request(serde_json::json!({"method": "GET", "url": url}), &ImportOptions { include_credentials: true, ..opts() });
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.com/v1/status");
+        assert!(matches!(&s.auth, AuthConfig::Basic { password, .. } if password == &SensitiveValue::template("hunter2-literal")));
+        assert!(r.report.redactions.is_empty());
+    }
+    // The request's own auth is kept; the userinfo is dropped, with a warning.
+    let r = postman_request(
+        serde_json::json!({"method": "GET", "url": "https://admin:hunter2-literal@api.example.com/x",
+            "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{tok}}"}]}}),
+        &opts(),
+    );
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/x");
+    assert!(matches!(&s.auth, AuthConfig::Bearer { .. }));
+    assert!(has(&r, "url_credentials_dropped"));
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("hunter2-literal"));
+}
+
+/// GHSA-c236-7r9g-c9p2: a credential-named path variable follows the
+/// credential policy; other path variables are substituted as before.
+#[test]
+fn credential_named_path_variables_are_redacted() {
+    let request = serde_json::json!({"method": "POST", "url": {
+        "raw": "https://hooks.example.com/:webhook_token/orders/:id",
+        "variable": [{"key": "webhook_token", "value": "whk-literal-5724"}, {"key": "id", "value": "42"}]
+    }});
+    let r = postman_request(request.clone(), &opts());
+    assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/{{webhook_token}}/orders/42");
+    assert!(!serde_json::to_string(&r.requests).unwrap().contains("whk-literal-5724"));
+    assert_eq!(r.report.redactions.len(), 1);
+    assert!(r.report.required_variables.iter().any(|v| v.name == "webhook_token" && v.secret));
+
+    let r = postman_request(request, &ImportOptions { include_credentials: true, ..opts() });
+    assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/whk-literal-5724/orders/42");
+    assert!(r.report.redactions.is_empty());
+}

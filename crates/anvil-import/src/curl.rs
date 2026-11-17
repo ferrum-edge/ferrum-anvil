@@ -767,15 +767,9 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     }
     // Credentials embedded in the URL are moved to Basic auth.
     let mut auth = auth;
-    if let Some((scheme, rest)) = url.split_once("://")
-        && let Some(at_pos) = crate::common::userinfo_end(rest)
-    {
-        let userinfo = rest[..at_pos].to_string();
-        let (user, pass) =
-            userinfo.split_once(':').map(|(u, p)| (u.to_string(), p.to_string())).unwrap_or((userinfo.clone(), String::new()));
-        let pw = credential(b, &crate::common::query_decode(&pass), "password", &url_at, "password in the URL");
-        auth = AuthConfig::Basic { username: crate::common::query_decode(&user), password: pw };
-        url = format!("{scheme}://{}", &rest[at_pos + 1..]);
+    if let (without, Some((user, pass))) = crate::common::take_userinfo(&url) {
+        auth = crate::common::userinfo_auth(b, &user, &pass, &url_at);
+        url = without;
     }
     let (base, pairs) = split_query(&url);
     // A query that is not a plain list of pairs stays in the URL verbatim;

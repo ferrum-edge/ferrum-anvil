@@ -42,6 +42,15 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 - A query kept in the URL verbatim (one with a bare `flag` segment, one no
   parameter can send unchanged, or one written into an Insomnia URL) has its
   credential-like values replaced in place.
+- URL userinfo (`https://user:password@host/`) becomes Basic auth with a
+  `{{password}}` placeholder in every migration importer, and the URL loses it
+  (the engine never sends credentials in the URL). A Postman or Insomnia
+  request with auth of its own keeps that auth, and the userinfo is dropped
+  (`url_credentials_dropped`).
+- Credential-named Postman path variables and Insomnia path parameters
+  (`:webhook_token`, `:api_key`) follow the same policy, and so do
+  credential-named members of an Insomnia environment value that is an array
+  (`{"accounts": [{"api_key": "…"}]}`), as members of a nested object do.
 - JSON bodies and GraphQL variables are scanned recursively: string members
   with credential-like names, and numbers under such names (`pin`, `otp`, …;
   not names recognized only by `token`, such as `max_tokens`), whose

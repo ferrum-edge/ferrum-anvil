@@ -550,6 +550,17 @@ fn both(request: serde_json::Value, env: serde_json::Value, o: &anvil_import::Im
     [v4_with(request.clone(), env.clone(), o), v5_with(request, env, o)]
 }
 
+fn template_text(v: &SensitiveValue) -> String {
+    match v {
+        SensitiveValue::Template { value } => value.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn keep() -> anvil_import::ImportOptions {
+    anvil_import::ImportOptions { include_credentials: true, ..opts() }
+}
+
 /// Insomnia keeps a parameter's `%XX` escapes and encodes everything else
 /// when it sends it, so parameters are stored decoded: the engine's one
 /// encoding then sends `%3A`, not `%253A`, and `+` as `%2B`, as Insomnia
@@ -592,5 +603,71 @@ fn parameters_without_a_decoded_form_go_into_the_url_as_sent() {
         assert!(has(&r, "query_param_not_decoded"));
         let text = serde_json::to_string(&r.requests).unwrap();
         assert!(!text.contains("placeholder-secret") && !text.contains('\u{fffd}'), "{text}");
+    }
+}
+
+/// GHSA-c236-7r9g-c9p2: URL userinfo becomes Basic auth with a
+/// `{{password}}` placeholder, and the URL loses it.
+#[test]
+fn url_userinfo_becomes_basic_auth_and_its_password_is_redacted() {
+    let request = serde_json::json!({ "url": "https://admin:insomniaPw-literal@api.example.com/v1/status" });
+    for r in both(request.clone(), serde_json::json!({}), &opts()) {
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.com/v1/status");
+        assert!(
+            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password == &SensitiveValue::template("{{password}}")),
+            "{:?}",
+            s.auth
+        );
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("insomniaPw-literal"));
+        assert_eq!(r.report.redactions.len(), 1);
+    }
+    for r in both(request, serde_json::json!({}), &keep()) {
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.com/v1/status");
+        assert!(matches!(&s.auth, AuthConfig::Basic { password, .. } if password == &SensitiveValue::template("insomniaPw-literal")));
+    }
+}
+
+/// GHSA-c236-7r9g-c9p2: a credential-named member of an environment array
+/// is redacted, as the same member of a nested object is.
+#[test]
+fn credential_members_of_environment_arrays_are_redacted() {
+    let env = serde_json::json!({
+        "accounts": [{ "name": "a", "api_key": "envArrayKey-literal" }, { "name": "b", "password": "" }],
+        "nested": { "api_key": "envNestedKey-literal" },
+        "hosts": ["a.example", "b.example"],
+    });
+    let request = serde_json::json!({ "url": "https://example.test/x" });
+    for r in both(request.clone(), env.clone(), &opts()) {
+        let var = |n: &str| r.workspace.variables.iter().find(|v| v.name == n).map(|v| template_text(&v.value));
+        let accounts = var("accounts").expect("accounts variable");
+        assert!(!accounts.contains("envArrayKey-literal"), "{accounts}");
+        assert!(accounts.contains("{{api_key}}"), "{accounts}");
+        assert_eq!(var("hosts").as_deref(), Some(r#"["a.example","b.example"]"#));
+        assert_eq!(var("nested.api_key"), None, "a secret variable's literal is dropped");
+        assert!(r.report.redactions.iter().any(|x| x.pointer.contains("accounts")));
+        assert!(r.report.required_variables.iter().any(|v| v.name == "api_key" && v.secret));
+    }
+    for r in both(request, env, &keep()) {
+        let accounts = r.workspace.variables.iter().find(|v| v.name == "accounts").unwrap();
+        assert!(template_text(&accounts.value).contains("envArrayKey-literal"));
+    }
+}
+
+/// GHSA-c236-7r9g-c9p2: a credential-named path parameter follows the
+/// credential policy.
+#[test]
+fn credential_named_path_parameters_are_redacted() {
+    let request = serde_json::json!({ "url": "https://hooks.example.com/:webhook_token/:id", "pathParameters": [
+        { "name": "webhook_token", "value": "whk-literal-5724" }, { "name": "id", "value": "42" },
+    ]});
+    for r in both(request.clone(), serde_json::json!({}), &opts()) {
+        assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/{{webhook_token}}/42");
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("whk-literal-5724"));
+        assert_eq!(r.report.redactions.len(), 1);
+    }
+    for r in both(request, serde_json::json!({}), &keep()) {
+        assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/whk-literal-5724/42");
     }
 }

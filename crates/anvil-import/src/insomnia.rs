@@ -9,9 +9,9 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    ListedParam, QueryForm, body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type,
-    listed_query_params, maybe_redact, parse_embedded_json, parse_form, redact_raw_query, scrub_body, scrub_graphql_variables, scrub_json,
-    warn_unscanned,
+    ListedParam, QueryForm, apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type,
+    keep_declared_content_type, listed_query_params, maybe_redact, parse_embedded_json, parse_form, redact_raw_query, render_json,
+    scrub_body, scrub_graphql_variables, scrub_json, take_userinfo, warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -98,16 +98,32 @@ fn sort_key(v: &Value) -> f64 {
     v.get("metaSortKey").or_else(|| v.pointer("/meta/sortKey")).and_then(Value::as_f64).unwrap_or(0.0)
 }
 
-/// Flatten nested environment data (`{api: {host: x}}` → `api.host`).
-fn flatten(prefix: &str, v: &Value, out: &mut Vec<(String, String)>, depth: usize) {
+/// Flatten nested environment data (`{api: {host: x}}` → `api.host`). An
+/// array (or an object nested too deep) becomes one variable holding its
+/// JSON text, whose credential-named members follow the credential policy
+/// as a JSON body's do ([`scrub_json`]): `{"accounts": [{"api_key": "…"}]}`
+/// keeps no literal key, as `{"accounts": {"api_key": "…"}}` (flattened to
+/// `accounts.api_key`) does not.
+fn flatten(b: &mut Builder, at: &str, prefix: &str, v: &Value, out: &mut Vec<(String, String)>, depth: usize) {
     match v {
         Value::Object(m) if depth < 16 => {
             for (k, x) in m {
                 let name = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
-                flatten(&name, x, out, depth + 1);
+                flatten(b, at, &name, x, out, depth + 1);
             }
         }
-        Value::Array(_) | Value::Object(_) => out.push((prefix.to_string(), v.to_string())),
+        Value::Array(_) | Value::Object(_) => {
+            let text = v.to_string();
+            let text = if b.opts.include_credentials {
+                text
+            } else {
+                let mut scrubbed = v.clone();
+                let before = b.report.redactions_made();
+                scrub_json(b, &mut scrubbed, &ptr(at, prefix));
+                if b.report.redactions_made() > before { render_json(&scrubbed, false, &text).unwrap_or(text) } else { text }
+            };
+            out.push((prefix.to_string(), text));
+        }
         other => out.push((prefix.to_string(), scalar_text(other))),
     }
 }
@@ -115,7 +131,7 @@ fn flatten(prefix: &str, v: &Value, out: &mut Vec<(String, String)>, depth: usiz
 fn env_vars(b: &mut Builder, data: Option<&Value>, at: &str) -> Vec<Variable> {
     let mut flat = vec![];
     if let Some(d) = data {
-        flatten("", d, &mut flat, 0);
+        flatten(b, at, "", d, &mut flat, 0);
     }
     let mut out = vec![];
     for (k, v) in flat {
@@ -586,6 +602,8 @@ fn request(
     let name = str_of(r, "name").unwrap_or("").to_string();
     let method = str_of(r, "method").unwrap_or("GET").to_ascii_uppercase();
     let raw_url = template(b, str_of(r, "url").unwrap_or(""), &ptr(at, "url"));
+    // Userinfo is never kept in the URL (the engine refuses it).
+    let (raw_url, userinfo) = take_userinfo(&raw_url);
     let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
     // A query written into the URL itself is kept verbatim; its
     // credential-like values are redacted in place.
@@ -603,6 +621,7 @@ fn request(
         Some(a) => auth(b, a, &ptr(at, "authentication"), &name),
         None => AuthConfig::Inherit,
     };
+    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(at, "url"));
     spec.settings = settings;
     for (ev, s) in scripts {
         if let Some(src) = s.and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
@@ -634,10 +653,13 @@ fn path_params(b: &mut Builder, url: &str, params: Option<&Value>, at: &str) -> 
             let val = p.get("value").map(scalar_text).unwrap_or_default();
             let rep = if val.is_empty() {
                 let v = sanitize_var(name);
-                b.report.require_var(&v, false, "Insomnia path parameter without a value", at);
+                b.report.require_var(&v, is_credential_name(name), "Insomnia path parameter without a value", at);
                 format!("{{{{{v}}}}}")
             } else {
-                encode_path_value(&template(b, &val, at))
+                // A credential-named path parameter follows the credential
+                // policy; a placeholder is kept as a reference.
+                let val = template(b, &val, at);
+                encode_path_value(&maybe_redact(b, name, &val, at, "path parameter").0)
             };
             resolved.push((name.to_string(), rep.clone()));
             rep
