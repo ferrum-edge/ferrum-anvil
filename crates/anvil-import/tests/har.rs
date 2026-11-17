@@ -280,3 +280,26 @@ fn query_values_are_stored_decoded_or_kept_verbatim() {
         assert!(s.params.is_empty(), "{query}: {:?}", s.params);
     }
 }
+
+/// Review round 3, sol F2: placeholder names under a long credential name
+/// are bounded, so a wide array beneath it does not multiply the name.
+#[test]
+fn placeholders_under_a_long_credential_name_are_bounded() {
+    let name = format!("password{}", "x".repeat(100_000));
+    let leaves: Vec<String> = (0..2_000).map(|i| format!("leaf-literal-{i}")).collect();
+    let mut object = serde_json::Map::new();
+    object.insert(name.clone(), serde_json::json!(leaves));
+    let body = serde_json::Value::Object(object).to_string();
+    let r = har_entries_mime(&[&body], "application/json", &opts());
+    let text = match &r.requests[0].spec.body {
+        Body::Json { text } => text.clone(),
+        _ => panic!("expected a JSON body"),
+    };
+    assert!(!text.contains("leaf-literal-"), "a credential leaf stayed");
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let values = v[name.as_str()].as_array().unwrap();
+    assert_eq!(values.len(), 2_000);
+    assert!(values.iter().all(|p| p.as_str().is_some_and(|p| p.len() <= 68 && p.starts_with("{{") && p.ends_with("}}"))));
+    let distinct: std::collections::HashSet<&str> = values.iter().filter_map(|p| p.as_str()).collect();
+    assert_eq!(distinct.len(), 2_000, "different leaves keep different placeholders");
+}

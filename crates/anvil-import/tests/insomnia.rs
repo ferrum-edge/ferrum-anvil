@@ -649,7 +649,7 @@ fn url_userinfo_becomes_basic_auth_and_its_password_is_redacted() {
 fn credential_members_of_environment_arrays_are_redacted() {
     let env = serde_json::json!({
         "accounts": [{ "name": "a", "api_key": "envArrayKey-literal" }, { "name": "b", "password": "" }],
-        "profiles": [{ "tokens": ["tok-literal-571"], "credentials": { "v": "cred-literal-571" } }],
+        "profiles": [{ "tokens": ["tok-literal-571"], "credentials": { "v": "cred-literal-571", "pin": 571571571 } }],
         "nested": { "api_key": "envNestedKey-literal" },
         "hosts": ["a.example", "b.example"],
     });
@@ -663,6 +663,7 @@ fn credential_members_of_environment_arrays_are_redacted() {
         // called (review dsf F2).
         let profiles = var("profiles").expect("profiles variable");
         assert!(!profiles.contains("tok-literal-571") && !profiles.contains("cred-literal-571"), "a structured credential stayed");
+        assert!(!profiles.contains("571571571"), "a numeric credential stayed (round 3, sol F1)");
         assert_eq!(var("hosts").as_deref(), Some(r#"["a.example","b.example"]"#));
         assert_eq!(var("nested.api_key"), None, "a secret variable's literal is dropped");
         assert!(r.report.redactions.iter().any(|x| x.pointer.contains("accounts")));

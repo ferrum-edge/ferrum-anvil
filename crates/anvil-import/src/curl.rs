@@ -10,7 +10,7 @@
 //! `{{VAR}}` placeholders.
 
 use crate::builder::Builder;
-use crate::common::{body_from_text, credential, dedupe_content_type, maybe_redact, parse_form, url_query_params};
+use crate::common::{body_from_text, credential, dedupe_content_type, maybe_redact, url_query_params};
 use crate::util::is_json_media;
 use crate::{Dialect, ImportError};
 use anvil_domain::auth::AuthConfig;
@@ -765,15 +765,41 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     if raw_url != url {
         b.report.warn("curl_default_scheme", &url_at, "no scheme in the URL; curl defaults to http://");
     }
-    // Credentials embedded in the URL are moved to Basic auth.
+    // Credentials embedded in the URL become Basic auth, unless `-u` (or
+    // another auth option) gave the request its own, which curl prefers.
     let mut auth = auth;
-    if let (without, Some((user, pass))) = crate::common::take_userinfo(&url) {
-        auth = crate::common::userinfo_auth(b, &user, &pass, &url_at);
-        url = without;
+    let (without, userinfo) = crate::common::take_userinfo(&url);
+    url = without;
+    crate::common::apply_userinfo(b, &mut auth, userinfo, &url_at);
+    // The data, joined as curl sends it.
+    let joined = (!data.is_empty()).then(|| {
+        data.iter()
+            .map(|d| match d {
+                Data::Text(t) => t.clone(),
+                Data::UrlEncode(e) => urlencode_arg(e),
+            })
+            .collect::<Vec<_>>()
+            .join(if json { "" } else { "&" })
+    });
+    // `-G` appends the data to the URL's query as written, so it goes
+    // through the same query conversion as the URL itself.
+    if get
+        && form.is_empty()
+        && let Some(q) = joined.as_deref().filter(|q| !q.is_empty())
+    {
+        let head = crate::common::strip_fragment(&url).to_string();
+        let sep = if !head.contains('?') {
+            "?"
+        } else if head.ends_with(['?', '&']) {
+            ""
+        } else {
+            "&"
+        };
+        url = format!("{head}{sep}{q}");
     }
     // Decoded pairs; a query with a credential as parameters; otherwise
     // the query kept in the URL as written.
-    let (base, mut params) = url_query_params(b, &url, |n| format!("{url_at}#query{n}"), "query");
+    let (base, params) = url_query_params(b, &url, |n| format!("{url_at}#query{n}"), "query");
 
     let has_ct = headers.iter().any(|h| h.name.eq_ignore_ascii_case("content-type"));
     if json {
@@ -791,35 +817,10 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
         if !data.is_empty() {
             b.report.warn("curl_data_and_form", "/args", "both -d and -F were given (curl refuses this); the form is imported");
         }
-    } else if !data.is_empty() {
+    } else if let Some(joined) = joined {
         let all_encoded = data.iter().all(|d| matches!(d, Data::UrlEncode(_)));
-        let joined = data
-            .iter()
-            .map(|d| match d {
-                Data::Text(t) => t.clone(),
-                Data::UrlEncode(e) => urlencode_arg(e),
-            })
-            .collect::<Vec<_>>()
-            .join(if json { "" } else { "&" });
-        if get {
-            // Pairs become parameters; a segment without `=` (a bare flag)
-            // becomes a parameter of that name, so the credential policy
-            // still sees every `name=value` beside it.
-            let pairs = parse_form(&joined).map(|f| f.into_iter().map(|kv| (kv.name, kv.value)).collect::<Vec<_>>()).unwrap_or_else(|| {
-                joined
-                    .split('&')
-                    .filter(|seg| !seg.is_empty())
-                    .map(|seg| match seg.split_once('=') {
-                        Some((k, v)) => (crate::common::form_decode(k), crate::common::form_decode(v)),
-                        None => (crate::common::form_decode(seg), String::new()),
-                    })
-                    .collect()
-            });
-            for (k, v) in pairs {
-                let (value, sensitive) = maybe_redact(b, &k, &v, "/args", "query");
-                params.push(KeyValue { name: k, value, enabled: true, description: String::new(), sensitive });
-            }
-        } else {
+        // With `-G` the data is already in the query (above).
+        if !get {
             let mime = ct.clone().unwrap_or_else(|| "application/x-www-form-urlencoded".into());
             let is_form = crate::util::media_essence(&mime) == "application/x-www-form-urlencoded";
             if is_form && ct.is_none() && !all_encoded && joined.trim_start().starts_with(['{', '[']) {

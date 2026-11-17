@@ -416,3 +416,19 @@ fn credential_named_path_variables_are_redacted() {
     assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/whk-literal-5724/orders/42");
     assert!(r.report.redactions.is_empty());
 }
+
+/// Review round 3, sol F3: reading a list `+` as a space must not change a
+/// reference: `{{a+b}}` stays as written, while a `+` outside one is still
+/// converted.
+#[test]
+fn a_plus_inside_a_reference_is_kept() {
+    let url = serde_json::json!({"raw": "https://x.example.com/cb", "query": [
+        {"key": "q", "value": "{{a+b}}"}, {"key": "r", "value": "x+y {{c}}"}
+    ]});
+    let r = postman_request(serde_json::json!({"method": "GET", "url": url}), &opts());
+    let s = &r.requests[0].spec;
+    assert_eq!(param(s, "q").unwrap().value, "{{a+b}}");
+    assert!(has_at(&r, "query_param_not_decoded", "/url/query/0"));
+    assert_eq!(param(s, "r").unwrap().value, "x y {{c}}");
+    assert!(has_at(&r, "query_value_converted", "/url/query/1"));
+}

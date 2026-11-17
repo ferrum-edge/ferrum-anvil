@@ -565,3 +565,56 @@ fn userinfo_ends_at_the_last_at_and_escaped_braces_stay_data() {
         assert!(r.report.required_variables.iter().any(|v| v.name == "password" && v.secret));
     }
 }
+
+/// Review round 3, sol F1 / dsf F2: every scalar under a credential-named
+/// object or array is redacted, numbers and booleans included (their
+/// placeholders stay unquoted, so a supplied number is sent as one).
+#[test]
+fn numbers_under_credential_objects_are_redacted() {
+    let cmd = r#"curl --json '{"credentials":{"pin":571571571,"v":"cred-literal-571"},"auth":{"otp":654321,"mfa":true},"n":7}' https://example.test/"#;
+    let r = curl(cmd);
+    let text = match &r.requests[0].spec.body {
+        Body::Json { text } => text.clone(),
+        _ => panic!("expected a JSON body"),
+    };
+    for literal in ["571571571", "654321", "cred-literal-571", "true"] {
+        assert!(!text.contains(literal), "a credential leaf stayed");
+    }
+    let v = substituted(&text, &[("credentials_pin", "1"), ("credentials_v", "x"), ("auth_otp", "2"), ("auth_mfa", "false")]);
+    assert_eq!((v["credentials"]["pin"].as_u64(), v["auth"]["otp"].as_u64(), v["auth"]["mfa"].as_bool()), (Some(1), Some(2), Some(false)));
+    assert_eq!(v["n"].as_u64(), Some(7), "other numbers are kept");
+    let r = import(cmd.as_bytes(), &ImportOptions { include_credentials: true, ..opts() }).unwrap();
+    match &r.requests[0].spec.body {
+        Body::Json { text } => assert!(text.contains("571571571") && text.contains("654321")),
+        _ => panic!("expected a JSON body"),
+    }
+}
+
+/// Review round 3, sol F4 / dsf F1: `-G` data goes through the same query
+/// conversion as the URL: escaped braces never become a reference, an escape
+/// that is not UTF-8 never becomes U+FFFD, and `+` and a lone `%` are sent
+/// as curl sends them.
+#[test]
+fn get_data_goes_through_the_url_query_conversion() {
+    for (data, query) in [("q=%7B%7Bid%7D%7D", "q=%7B%7Bid%7D%7D"), ("n=caf%E9", "n=caf%E9"), ("d=50%&q=a+b", "d=50%&q=a+b")] {
+        let r = curl(&format!("curl -G -d '{data}' 'https://example.test/x?k=1#frag'"));
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, format!("https://example.test/x?k=1&{query}"), "{data}");
+        assert!(s.params.is_empty(), "{data}");
+    }
+    let r = curl("curl -G -d 'q=lamp' https://example.test/x");
+    assert_eq!(param(&r.requests[0].spec, "q").unwrap().value, "lamp");
+}
+
+/// Review round 3, dsf F3: `-u` wins over URL userinfo, as in curl, and the
+/// userinfo is dropped with a warning.
+#[test]
+fn user_option_wins_over_url_userinfo() {
+    let r = curl("curl -u alice:pw-literal-1 'https://bob:pw-literal-2@api.example.com/x'");
+    let s = &r.requests[0].spec;
+    assert_eq!(s.url, "https://api.example.com/x");
+    assert!(matches!(&s.auth, AuthConfig::Basic { username, password } if username == "alice" && password.is_pure_reference()));
+    assert!(has(&r, "url_credentials_dropped"));
+    let text = serde_json::to_string(&r.requests).unwrap();
+    assert!(!text.contains("pw-literal-1") && !text.contains("pw-literal-2") && !text.contains("bob"));
+}

@@ -238,7 +238,7 @@ fn scrub_json_at(b: &mut Builder, v: &mut Value, pointer: &str, path: &mut Vec<S
                         // Everything under a credential name is credential
                         // material, whatever its own members are called
                         // (`"tokens": ["…"]`, `"credentials": {"v": "…"}`).
-                        let var = sanitize_var(k);
+                        let var = bounded_hint(&sanitize_var(k));
                         scrub_credential_subtree(b, child, pointer, path, &var);
                     } else {
                         scrub_json_at(b, child, pointer, path);
@@ -260,32 +260,62 @@ fn scrub_json_at(b: &mut Builder, v: &mut Value, pointer: &str, path: &mut Vec<S
     }
 }
 
-/// Apply the credential policy to every string leaf under a credential-named
-/// member, whatever the leaves are called. Each leaf's placeholder names its
-/// place (`tokens_0`, `credentials_v`), so different values stay apart.
+/// Bytes of a placeholder name derived from a member path; a longer name
+/// keeps its start and a hash of the whole, so names stay distinct and a
+/// long member name repeated across a wide array costs no more than this
+/// per leaf.
+const PLACEHOLDER_HINT_BYTES: usize = 64;
+
+/// `hint` (ASCII, from [`sanitize_var`]) bounded to [`PLACEHOLDER_HINT_BYTES`].
+fn bounded_hint(hint: &str) -> String {
+    if hint.len() <= PLACEHOLDER_HINT_BYTES {
+        return hint.to_string();
+    }
+    use sha2::Digest;
+    let digest = hex::encode(&sha2::Sha256::digest(hint.as_bytes())[..6]);
+    let keep = PLACEHOLDER_HINT_BYTES - digest.len() - 1;
+    format!("{}_{digest}", &hint[..keep])
+}
+
+/// Apply the credential policy to every scalar leaf under a credential-named
+/// member, whatever the leaves are called: strings, and numbers and booleans
+/// (their placeholder is written unquoted, as [`render_json`] does for a
+/// `pin`). Each leaf's placeholder names its place (`tokens_0`,
+/// `credentials_pin`), bounded ([`bounded_hint`]), so different values stay
+/// apart.
 fn scrub_credential_subtree(b: &mut Builder, v: &mut Value, pointer: &str, path: &mut Vec<String>, var: &str) {
     match v {
         Value::Object(m) => {
             for (k, child) in m.iter_mut() {
                 path.push(segment(k));
-                scrub_credential_subtree(b, child, pointer, path, &format!("{var}_{}", sanitize_var(k)));
+                let hint = bounded_hint(&format!("{var}_{}", sanitize_var(k)));
+                scrub_credential_subtree(b, child, pointer, path, &hint);
                 path.pop();
             }
         }
         Value::Array(a) => {
             for (i, child) in a.iter_mut().enumerate() {
                 path.push(i.to_string());
-                scrub_credential_subtree(b, child, pointer, path, &format!("{var}_{i}"));
+                scrub_credential_subtree(b, child, pointer, path, &bounded_hint(&format!("{var}_{i}")));
                 path.pop();
             }
         }
-        Value::String(s) => {
+        Value::String(_) | Value::Number(_) | Value::Bool(_) => {
             let last = path.pop().unwrap_or_default();
             let p = pointer_at(pointer, path, &last);
             path.push(last);
-            *s = credential_text(b, s, var, &p, &format!("body field {var}"));
+            let field = format!("body field {var}");
+            if let Value::String(s) = v {
+                *s = credential_text(b, s, var, &p, &field);
+            } else {
+                let literal = v.to_string();
+                let new = credential_text(b, &literal, var, &p, &field);
+                if new != literal {
+                    *v = Value::String(format!("{NUMERIC_PLACEHOLDER}{new}{NUMERIC_PLACEHOLDER}"));
+                }
+            }
         }
-        _ => {}
+        Value::Null => {}
     }
 }
 
@@ -488,10 +518,18 @@ fn template_tokens(s: &str) -> Vec<&str> {
 /// must never become, or change, a reference the engine resolves. `None`
 /// also for escapes that do not decode to UTF-8.
 fn decode_keeping_references(s: &str) -> Option<String> {
-    let decoded = percent_encoding::percent_decode_str(s).decode_utf8().ok()?;
-    let same = template_tokens(s) == template_tokens(&decoded)
-        && s.matches("{{").count() == decoded.matches("{{").count()
-        && s.matches("}}").count() == decoded.matches("}}").count();
+    decode_against(s, s)
+}
+
+/// `candidate` percent-decoded, when the result keeps every `{{reference}}`
+/// of the source text `source` unchanged ([`decode_keeping_references`]).
+/// `candidate` is `source` after any other conversion (a wire `+` read as a
+/// space), so that conversion is checked against the source too.
+fn decode_against(source: &str, candidate: &str) -> Option<String> {
+    let decoded = percent_encoding::percent_decode_str(candidate).decode_utf8().ok()?;
+    let same = template_tokens(source) == template_tokens(&decoded)
+        && source.matches("{{").count() == decoded.matches("{{").count()
+        && source.matches("}}").count() == decoded.matches("}}").count();
     same.then(|| decoded.into_owned())
 }
 
@@ -530,15 +568,16 @@ pub fn decode_query_text(s: &str, form: QueryForm) -> Option<String> {
 /// * a wire `+` is read as a space, as form-decoding servers read it, and
 ///   sent as `%20`; a wire `%` that starts no escape is kept and sent as
 ///   `%25` (`query_value_converted`);
-/// * escapes that do not decode to UTF-8, or decoding that would make or
-///   change a `{{reference}}`, keep the text as written
-///   (`query_param_not_decoded`): it never becomes U+FFFD or a reference.
+/// * escapes that do not decode to UTF-8, or a conversion that would make or
+///   change a `{{reference}}` (`{{a+b}}` read as `{{a b}}`), keep the text as
+///   written (`query_param_not_decoded`): it never becomes U+FFFD or a
+///   reference.
 fn stored_query_text(b: &mut Builder, s: &str, form: QueryForm, pointer: &str) -> String {
     if let Some(decoded) = decode_query_text(s, form) {
         return decoded;
     }
     let spaced = if form == QueryForm::Wire { s.replace('+', " ") } else { s.to_string() };
-    if let Some(decoded) = decode_keeping_references(&spaced) {
+    if let Some(decoded) = decode_against(s, &spaced) {
         b.report.warn(
             "query_value_converted",
             pointer,

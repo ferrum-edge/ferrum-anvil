@@ -56,6 +56,27 @@ fn is_pure_reference(s: &str) -> bool {
     }
 }
 
+/// `s` with the whitespace inside each `{{reference}}` removed (the first
+/// `}}` closes one, as the resolver reads it). The reference names the same
+/// variable, and the text around it is unchanged.
+fn without_reference_whitespace(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains("{{") {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        out.push_str(&rest[..open + 2]);
+        out.extend(after[..close].chars().filter(|c| !c.is_whitespace()));
+        out.push_str("}}");
+        rest = &after[close + 2..];
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
 fn escape_ptr(s: &str) -> String {
     s.replace('~', "~0").replace('/', "~1")
 }
@@ -95,12 +116,14 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
 /// password has literal text: anything but one whole `{{reference}}`
 /// ([`is_pure_reference`]). The userinfo runs to the last `@` before the
 /// authority ends (`/`, `?`, `#` or whitespace), so a password holding `@`
-/// or braces is seen whole.
+/// or braces is seen whole; whitespace inside a reference (`{{ tenant }}`,
+/// which the resolver trims) does not end it.
 fn has_url_password(s: &str) -> bool {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"[A-Za-z][A-Za-z0-9+.-]*://([^/?#\s]*)@").unwrap());
-    re.captures_iter(s).any(|c| {
+    let s = without_reference_whitespace(s);
+    re.captures_iter(&s).any(|c| {
         let userinfo = c.get(1).map_or("", |m| m.as_str());
         userinfo.split_once(':').is_some_and(|(_, password)| !password.is_empty() && !is_pure_reference(password))
     })
@@ -615,6 +638,7 @@ mod tests {
         // password are literal material (review sol F5).
         for loud in [
             "https://user:{{tenant}}-live-secret-571@host.example/",
+            "https://user:{{ tenant }}-live-secret-571@host.example/",
             "https://user:p{w-literal@host.example/",
             "https://admin:p@hunter2-literal@api.example.com/v1",
         ] {
@@ -623,6 +647,7 @@ mod tests {
         }
         for quiet in [
             "https://admin:{{password}}@api.example.com/v1",
+            "https://admin:{{ password }}@api.example.com/v1",
             "https://api.example.com:8443/v1?email=a:b@c.example",
             "https://admin@api.example.com/",
         ] {

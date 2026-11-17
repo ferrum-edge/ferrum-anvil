@@ -55,17 +55,18 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   `{{reference}}` (`%7B%7Bid%7D%7D`), or is not UTF-8, is never decoded: the
   user name is kept as written (`url_user_not_decoded`), and the password
   becomes a required `{{password}}` even with `include_credentials`
-  (`url_password_not_decoded`). A Postman or Insomnia request with auth of
-  its own keeps that auth, and the userinfo is dropped
-  (`url_credentials_dropped`).
+  (`url_password_not_decoded`). A request with auth of its own (a cURL `-u`
+  or `--oauth2-bearer`, Postman or Insomnia auth) keeps that auth, as curl
+  does, and the userinfo is dropped (`url_credentials_dropped`).
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy, and so do
   credential-named members of an Insomnia environment value that is an array
   (`{"accounts": [{"api_key": "…"}]}`), as members of a nested object do.
 - JSON bodies, GraphQL variables and those environment arrays are scanned
-  recursively: string members with credential-like names, every string under
-  a credential-named member whose value is an array or object
-  (`"tokens": ["…"]`, `"credentials": {"v": "…"}`), and numbers under
+  recursively: string members with credential-like names, every string,
+  number and boolean under a credential-named member whose value is an array
+  or object (`"tokens": ["…"]`, `"credentials": {"pin": 1234}`; placeholder
+  names are bounded and stay distinct), and numbers under
   numeric credential names (`pin`, `otp`, …; not names recognized only by
   `token`, such as `max_tokens`), whose placeholder is written unquoted
   (`"pin": {{pin}}`) so the value supplied later is sent as a number.
@@ -840,7 +841,9 @@ only the first command of a pipeline/list is imported. `$VAR`/`${VAR}` become
 `-m`, `--url`, short-option clusters (`-sSL`, `-XPOST`). Method inference
 follows curl (data → POST, `-G` → GET with data in the query, `-I` → HEAD),
 also when the data is read from a file that is not imported (`-d @f`,
-`--json @f`, `--data-urlencode name@f`).
+`--json @f`, `--data-urlencode name@f`). With `-G` the data is appended to
+the URL's query as curl sends it and converted like any URL query (see
+Query values).
 A missing scheme defaults to `http://` (reported). `--max-redirs -1`
 (unlimited) follows up to 255 redirects (reported). Literal data keeps its
 bytes, line breaks included (curl strips CR/LF only from `@file` data);
