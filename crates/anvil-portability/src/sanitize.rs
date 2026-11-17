@@ -34,26 +34,14 @@ pub fn sensitive_name(name: &str, extra: &[String]) -> bool {
     anvil_domain::credential_names::is_export_secret_name(name, extra)
 }
 
-/// Whether `s` carries no literal text: empty, or exactly one `{{name}}`
-/// reference spanning the whole (trimmed) value, as the resolver reads it
-/// (the first `}}` closes it). A dynamic helper counts only without
-/// arguments (`{{$guid}}`): an argument such as `{{$randomFrom a|b}}` is
-/// literal text that is sent.
+/// Whether `s` carries no literal text: empty, or exactly one plain
+/// `{{name}}` reference spanning the whole (trimmed) value
+/// ([`anvil_domain::secret::classify_template_value`], the rule the
+/// importers use too). A quoted string, a number, a filter or a dynamic
+/// helper (`{{$guid}}`, `{{$randomFrom a|b}}`) is literal text.
 fn is_pure_reference(s: &str) -> bool {
-    let t = s.trim();
-    if t.is_empty() {
-        return true;
-    }
-    let Some(inner) = t.strip_prefix("{{") else { return false };
-    let Some(close) = inner.find("}}") else { return false };
-    if close + 2 != inner.len() {
-        return false;
-    }
-    let expr = inner[..close].trim();
-    match expr.strip_prefix('$') {
-        Some(helper) => !helper.is_empty() && !helper.contains(char::is_whitespace),
-        None => !expr.is_empty(),
-    }
+    use anvil_domain::secret::{TemplateKind, classify_template_value};
+    matches!(classify_template_value(s), TemplateKind::Empty | TemplateKind::Reference)
 }
 
 fn escape_ptr(s: &str) -> String {
@@ -519,7 +507,7 @@ mod tests {
 
     #[test]
     fn only_a_whole_value_reference_is_left_in_place() {
-        for pure in ["", "  ", "{{token}}", " {{ token }} ", "{{$guid}}", "{{api key}}"] {
+        for pure in ["", "  ", "{{token}}", " {{ token }} "] {
             assert!(is_pure_reference(pure), "{pure:?}");
         }
         for literal in [
@@ -528,6 +516,10 @@ mod tests {
             "live-{{tenant}}",
             "{{a}}{{b}}",
             "{{$randomFrom live-key-a|live-key-b}}",
+            "{{$guid}}",
+            "{{api key}}",
+            "{{ 'quoted-literal' }}",
+            "{{ 571571571 }}",
             "{{}}",
             "{{$}}",
             "{{unterminated",
@@ -659,6 +651,11 @@ mod tests {
             // templated scheme (sol F3).
             "https://alice@example.org:tok-SENSITIVE-pw7@api.example.test/",
             "{{scheme}}://admin:tok-SENSITIVE-pw8@api.example.test/",
+            // Review round 3 of #573: quoted, numeric and helper expressions
+            // are literal.
+            "https://admin:{{ 'tok-SENSITIVE-pw10' }}@api.example.test/",
+            "https://admin:{{ 571571571 }}@api.example.test/",
+            "https://admin:{{$guid}}@api.example.test/",
         ] {
             let mut v = spec(loud);
             let s = sanitize(&mut v, &[]);
@@ -669,7 +666,6 @@ mod tests {
         for quiet in [
             "https://admin:{{password}}@api.example.com/v1",
             "https://admin:{{ password }}@api.example.com/v1",
-            "https://admin:{{$guid}}@api.example.com/v1",
             "https://api.example.com:8443/v1?email=a:b@c.example",
             "https://admin@api.example.com/",
         ] {

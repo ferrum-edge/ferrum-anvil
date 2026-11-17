@@ -303,7 +303,8 @@ fn query_list_values_are_decoded_only_when_exact() {
 fn an_escaped_credential_name_in_a_query_list_is_redacted() {
     let r = postman_request(with_query(serde_json::json!([{"key": "%70assword", "value": "tok-SENSITIVE-pm1"}])), &opts());
     let p = &r.requests[0].spec.params[0];
-    assert!(p.sensitive && p.value == "{{password}}");
+    // The placeholder is named after the spelling as written.
+    assert!(p.sensitive && p.value == "{{_70assword}}");
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-pm1"));
 }
 

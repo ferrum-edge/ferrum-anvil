@@ -109,6 +109,44 @@ const SHAPES: &[Shape] = &[
         json_body: None,
         export: ALL,
     },
+    // Review round 3 of #573: only a plain reference is a reference; a
+    // quoted string, a number or a helper inside `{{…}}` is literal.
+    Shape {
+        name: "quoted expression in a credential header",
+        url: "https://api.example.test/v1",
+        // Double quotes: the cURL builder wraps the header in single quotes.
+        headers: &[("X-Api-Key", r#"{{ "tok-SENSITIVE-c19" }}"#)],
+        json_body: None,
+        export: ALL,
+    },
+    Shape {
+        name: "numeric expression in a credential header",
+        url: "https://api.example.test/v1",
+        headers: &[("X-Api-Key", "{{ 571571574 }}")],
+        json_body: None,
+        export: ALL,
+    },
+    Shape {
+        name: "helper expression in a credential header",
+        url: "https://api.example.test/v1",
+        headers: &[("X-Api-Key", "{{$randomFrom tok-SENSITIVE-c20 x}}")],
+        json_body: None,
+        export: ALL,
+    },
+    Shape {
+        name: "quoted expression as a userinfo password",
+        url: r#"https://admin:{{"tok-SENSITIVE-c21"}}@api.example.test/v1"#,
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
+    Shape {
+        name: "escaped braces as a credential query name",
+        url: "https://api.example.test/v1?flag&%7B%7Bapi_key%7D%7D=tok-SENSITIVE-c23",
+        headers: &[],
+        json_body: None,
+        export: ALL,
+    },
     Shape {
         name: "nested credential objects and numbers in a JSON body",
         url: "https://api.example.test/v1",
@@ -215,10 +253,10 @@ fn check(source: &[u8], export: Export, label: &str) {
     let mut objects = stored(&kept);
     match export {
         Export::Extract => {
-            assert!(objects.to_string().contains(MARKER), "{label}: include_credentials did not keep the literal");
+            assert!(leaks(&objects.to_string()), "{label}: include_credentials did not keep the literal");
             let s = anvil_portability::sanitize::sanitize(&mut objects, &[]);
-            assert!(!objects.to_string().contains(MARKER), "{label}: the export left a kept credential readable");
-            assert!(s.extracted.iter().any(|e| e.value.contains(MARKER)), "{label}: the export did not extract the kept credential");
+            assert!(!leaks(&objects.to_string()), "{label}: the export left a kept credential readable");
+            assert!(s.extracted.iter().any(|e| leaks(&e.value)), "{label}: the export did not extract the kept credential");
         }
         Export::Warn => {
             assert!(leaks(&objects.to_string()), "{label}: include_credentials did not keep the literal");
@@ -250,6 +288,14 @@ fn importer_specific_shapes_are_redacted() {
     insomnia_path["pathParameters"] = json!([{ "name": "webhook_token", "value": "tok-SENSITIVE-c8" }]);
     let env = json!({ "accounts": [{ "api_key": "tok-SENSITIVE-c9", "pin": 571571573, "tokens": ["tok-SENSITIVE-c9b"] }] });
     let quoted = json!({ "accounts": [{ "api_key": "{{ 'tok-SENSITIVE-c17' }}" }] });
+    let numeric = json!({ "accounts": [{ "pin": "{{ 571571575 }}" }] });
+    let scalar = json!({ "api_key": "{{ 'tok-SENSITIVE-c24' }}" });
+    let quoted_path = json!({ "method": "POST", "url": {
+        "raw": "https://hooks.example.test/:api_key/x",
+        "variable": [{ "key": "api_key", "value": "{{'tok-SENSITIVE-c22'}}" }]
+    }});
+    let mut insomnia_quoted_path = insomnia_request("https://hooks.example.test/:api_key/x");
+    insomnia_quoted_path["pathParameters"] = json!([{ "name": "api_key", "value": "{{ 'tok-SENSITIVE-c22' }}" }]);
     let sub_env = json!({
         "type": "collection.insomnia.rest/5.0", "name": "W",
         "environments": {
@@ -274,6 +320,19 @@ fn importer_specific_shapes_are_redacted() {
             Export::Skip,
         ),
         ("Insomnia v5, sub-environment array", sub_env, Export::Warn),
+        (
+            "Insomnia, numeric expression in an environment array",
+            insomnia_doc(insomnia_request("https://api.example.test/v1"), numeric),
+            Export::Skip,
+        ),
+        // A secret variable is extracted on export.
+        (
+            "Insomnia, quoted expression as a credential variable",
+            insomnia_doc(insomnia_request("https://api.example.test/v1"), scalar),
+            Export::Extract,
+        ),
+        ("Postman, quoted credential path variable", postman_doc(quoted_path), Export::Skip),
+        ("Insomnia, quoted credential path parameter", insomnia_doc(insomnia_quoted_path, json!({})), Export::Skip),
         ("cURL, -G data", b"curl -G -d 'api_key=tok-SENSITIVE-c10' https://api.example.test/v1".to_vec(), Export::Extract),
         (
             "cURL, -u beside URL userinfo",

@@ -49,6 +49,72 @@ impl SensitiveValue {
     }
 }
 
+/// What a template value (a header, query, form, auth or variable value)
+/// holds, as the importers and the export sanitizer judge credentials
+/// ([`classify_template_value`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateKind {
+    /// Nothing but whitespace.
+    Empty,
+    /// Exactly one plain variable reference and nothing else.
+    Reference,
+    /// Only plain variable references, with nothing between them but
+    /// whitespace or one auth-scheme word (`Bearer {{token}}`).
+    References,
+    /// Anything else: literal text, a quoted string, a number, a filter, a
+    /// dynamic helper (with or without arguments), an unterminated `{{`, or
+    /// text mixed with references. Under a credential name, this is
+    /// credential material.
+    Literal,
+}
+
+/// Auth-scheme words that carry no secret next to a reference.
+const SCHEME_WORDS: &[&str] = &["bearer", "basic", "token", "digest", "apikey", "dpop", "hmac", "negotiate", "jwt"];
+
+/// Whether a `{{…}}` expression is a plain variable reference: an identifier
+/// `[A-Za-z_][A-Za-z0-9_.-]*`, optionally Insomnia's `_.` prefixed, with
+/// optional whitespace around it.
+pub fn is_plain_reference_expr(expr: &str) -> bool {
+    let e = expr.trim();
+    let ident = e.strip_prefix("_.").unwrap_or(e);
+    let mut chars = ident.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// Classify a template value ([`TemplateKind`]). One rule for every place
+/// that decides whether a credential-named value is a reference to keep or a
+/// literal to redact or extract: only plain references
+/// ([`is_plain_reference_expr`]) are references; everything else is literal.
+pub fn classify_template_value(value: &str) -> TemplateKind {
+    let t = value.trim();
+    if t.is_empty() {
+        return TemplateKind::Empty;
+    }
+    let mut rest = t;
+    let mut literal = String::new();
+    let mut references = 0usize;
+    while let Some(open) = rest.find("{{") {
+        literal.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { return TemplateKind::Literal };
+        if !is_plain_reference_expr(&after[..close]) {
+            return TemplateKind::Literal;
+        }
+        references += 1;
+        rest = &after[close + 2..];
+    }
+    literal.push_str(rest);
+    let lit = literal.trim();
+    match (references, lit.is_empty()) {
+        (0, _) => TemplateKind::Literal,
+        (1, true) => TemplateKind::Reference,
+        (_, true) => TemplateKind::References,
+        _ if SCHEME_WORDS.contains(&lit.to_ascii_lowercase().as_str()) => TemplateKind::References,
+        _ => TemplateKind::Literal,
+    }
+}
+
 /// Marker text substituted wherever a secret would otherwise be displayed or
 /// written.
 pub const REDACTED: &str = "‹redacted›";
@@ -176,5 +242,38 @@ mod tests {
         let too_long = "L".repeat(REDACT_LOOKAHEAD_BYTES + 2);
         let r = |s: &str| s.replace(&too_long, "#");
         assert_eq!(redacted_excerpt(Some(&r), &format!("ab{too_long}zz"), 3), "abL");
+    }
+}
+
+#[cfg(test)]
+mod template_kind_tests {
+    use super::*;
+
+    #[test]
+    fn only_plain_references_are_references() {
+        for (v, kind) in [
+            ("", TemplateKind::Empty),
+            ("  ", TemplateKind::Empty),
+            ("{{token}}", TemplateKind::Reference),
+            (" {{ token }} ", TemplateKind::Reference),
+            ("{{ _.api.version }}", TemplateKind::Reference),
+            ("{{a-b}}", TemplateKind::Reference),
+            ("Bearer {{token}}", TemplateKind::References),
+            ("{{user}}:{{pass}}", TemplateKind::Literal),
+            ("{{a}}{{b}}", TemplateKind::References),
+            ("{{ 'tok-SENSITIVE-k1' }}", TemplateKind::Literal),
+            ("{{\"tok-SENSITIVE-k2\"}}", TemplateKind::Literal),
+            ("{{ 571571571 }}", TemplateKind::Literal),
+            ("{{ x | upper }}", TemplateKind::Literal),
+            ("{{$guid}}", TemplateKind::Literal),
+            ("{{$randomFrom a|b}}", TemplateKind::Literal),
+            ("{{api key}}", TemplateKind::Literal),
+            ("{{tenant}}-live", TemplateKind::Literal),
+            ("{{unterminated", TemplateKind::Literal),
+            ("{{}}", TemplateKind::Literal),
+            ("literal", TemplateKind::Literal),
+        ] {
+            assert_eq!(classify_template_value(v), kind, "{v:?}");
+        }
     }
 }

@@ -280,8 +280,10 @@ as written, with a warning in the preview (a JWT, a bearer token, an AWS
 access key id, a private key, a credential-named JSON member, or a URL
 password in `user:password@` that is not exactly one `{{reference}}`).
 
-A literal secret is a value that is not exactly one `{{variable}}` reference
-(or an argument-free helper such as `{{$guid}}`) spanning the whole value (in
+A literal secret is a value that is not exactly one plain `{{variable}}`
+reference spanning the whole value (`{{ name }}`, `{{ _.name }}`; a quoted
+string, a number, a filter or a dynamic helper such as `{{$guid}}` inside
+`{{…}}` is literal, as on import) (in
 a field used as written, a TLS or proxy profile's secrets, an HBONE proxy
 profile's extra headers or a header or trailer assertion, reference-shaped text
 is the literal itself), of

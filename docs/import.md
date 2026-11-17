@@ -37,8 +37,14 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   variables, cached OAuth tokens) are replaced by `{{placeholder}}` variables
   and listed in `report.redactions`, unless `ImportOptions::include_credentials`
   is set (kept values are then marked sensitive).
-- A value that is only variable references plus an auth scheme word
-  (`Bearer {{token}}`) is not a literal secret and is kept.
+- A value that is only plain variable references plus an auth scheme word
+  (`Bearer {{token}}`) is not a literal secret and is kept. A plain
+  reference is `{{ name }}` or Insomnia's `{{ _.name }}`, where the name is
+  `[A-Za-z_][A-Za-z0-9_.-]*`. Anything else inside `{{…}}`, such as a
+  quoted string (`{{ 'key' }}`), a number, a filter or a dynamic helper
+  (with or without arguments), is literal, and so is redacted under a
+  credential name. The export sanitizer applies the same rule
+  (`anvil_domain::secret::classify_template_value`).
 - A query kept in the URL verbatim (one with a bare `flag` segment, one whose
   decoding would make a `{{reference}}`, or one written into an Insomnia URL)
   keeps its exact syntax, but its credential-named `name=value` segments
@@ -46,8 +52,10 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   its placeholder would resolve without percent-encoding and a kept literal
   would not be extracted on export. A moved name whose decoding would make a
   `{{reference}}` keeps its encoded spelling (the engine resolves parameter
-  names), a value that decodes to whitespace only stays in the query, and a
-  `+` or an escape that is not UTF-8 in a moved pair is reported.
+  names), and its placeholder is named after the name as written, never a
+  decoded one (so `%7B%7Bapi_key%7D%7D` cannot read a variable `api_key`).
+  A value that decodes to whitespace only stays in the query, and a `+` or
+  an escape that is not UTF-8 in a moved pair is reported.
 - URL userinfo (`https://user:password@host/`) becomes Basic auth with a
   `{{password}}` placeholder in every migration importer, and the URL loses it
   (the engine never sends credentials in the URL). The userinfo ends at the
@@ -65,10 +73,8 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   environment value that is an array (`{"accounts": [{"api_key": "…"}]}`,
   `"tokens": ["…"]`), each with its own placeholder named by its path
   (bounded, and never the name of a variable or placeholder of any
-  environment of the import); only a plain reference (`{{ _.name }}`) or an
-  argument-free helper (`{{$guid}}`) is kept there, so a helper with
-  arguments (`{{$randomFrom a|b}}`) or a quoted expression (`{{ 'key' }}`) is
-  redacted as literal.
+  environment of the import); as everywhere, only a plain reference is
+  kept.
 - JSON bodies and GraphQL variables are scanned recursively: string members
   with credential-like names, and numbers under such names (`pin`, `otp`, …;
   not names recognized only by `token`, such as `max_tokens`), whose

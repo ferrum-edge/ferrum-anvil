@@ -259,23 +259,6 @@ fn scrub_json_at(b: &mut Builder, v: &mut Value, pointer: &str, path: &mut Vec<S
     }
 }
 
-/// Whether a credential value holds literal material: [`has_literal_secret`],
-/// or a `{{…}}` expression that is not a plain reference ([`is_plain_reference`]):
-/// a helper with arguments (`{{$randomFrom a|b}}`) or a Nunjucks expression
-/// with a quoted literal (`{{ 'key' }}`), whose text is the credential.
-fn has_literal_material(v: &str) -> bool {
-    has_literal_secret(v) || template_tokens(v).iter().any(|t| !is_plain_reference(t))
-}
-
-/// Whether a `{{…}}` expression only names a variable (`name`, `api.version`,
-/// Insomnia's `_.name`) or an argument-free helper (`$guid`). Anything else
-/// (arguments, quotes, filters, spaces inside) is treated as literal text.
-fn is_plain_reference(expr: &str) -> bool {
-    let t = expr.trim();
-    let name = t.strip_prefix('$').unwrap_or(t);
-    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'))
-}
-
 /// Bytes of the readable part of a placeholder name made from a JSON path.
 const PATH_NAME_BYTES: usize = 48;
 
@@ -297,9 +280,6 @@ impl PlaceholderNames {
         self.used.insert(name.to_string());
         self.used.insert(sanitize_var(name));
     }
-
-    /// Names that already exist in the scope (variable names); a
-    /// placeholder never takes one.
 
     fn name(&mut self, readable: &str) -> String {
         let mut base = sanitize_var(readable);
@@ -364,7 +344,7 @@ fn scrub_stored_at(
         }
         Value::String(s) if credential => {
             let (var, p) = leaf_names(names, root, pointer, path);
-            let literal = has_literal_material(s.trim());
+            let literal = has_literal_secret(s.trim());
             *s = credential_text_with(b, s, literal, &var, &p, &format!("environment value {var}"));
         }
         Value::Number(_) | Value::Bool(_) if credential => {
@@ -544,8 +524,12 @@ pub fn redact_raw_query(b: &mut Builder, url: &str, pointer: &str, what: &str) -
             continue;
         };
         // Matched by its decoded spelling, but stored decoded only when that
-        // makes or changes no `{{reference}}`: the engine resolves names too.
-        let var = query_decode(k);
+        // makes or changes no `{{reference}}`: the engine resolves names
+        // too. The placeholder is named after the source spelling as written
+        // (sanitized to `[A-Za-z0-9_]`), never after a decoded name: decoded
+        // escaped braces (`%7B%7Bapi_key%7D%7D`) would otherwise name an
+        // existing variable (`{{api_key}}`) the source never read.
+        let var = k.to_string();
         let name = decode_keeping_references(k).unwrap_or_else(|| k.to_string());
         let decoded = query_decode(v);
         let value = if same_references(v, &decoded) {
@@ -756,7 +740,9 @@ pub fn listed_query_param(b: &mut Builder, raw_name: &str, raw_value: &str, poin
     if !(is_credential_name(&name) || is_credential_name(&decoded_name)) || value.trim().is_empty() {
         return (name, value, false);
     }
-    let value = credential_text(b, &value, &decoded_name, pointer, &format!("query {decoded_name}"));
+    // The placeholder is named after the source spelling as written, never
+    // after a decoded name (see [`redact_raw_query`]).
+    let value = credential_text(b, &value, raw_name, pointer, &format!("query {name}"));
     (name, value, true)
 }
 
