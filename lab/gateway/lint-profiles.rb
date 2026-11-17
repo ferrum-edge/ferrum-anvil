@@ -45,10 +45,30 @@
 # stdout_logging config now fails startup (#6863); the lab's profiles satisfy both. See
 # docs/audit/gateway-0.9.20-delta.md.
 #
+# Ferrum Edge after v0.9.20 (main, #7114 and #7136) refuses keys v0.9.20 still accepts:
+# hmac_auth allow_unsafe_replayable_v1, ip_restriction mode, jwks_auth providers[].audience,
+# response_caching cache_key_include_query / cache_key_include_consumer and mcp_gateway
+# discovery.hide_denied_items, among others. They are left out of the lists below, so profiles
+# keep loading on the next release. The one exception is discovery.hide_denied_items: at v0.9.20 it
+# defaults to true and hides denied tools on its own, so the mcp profile must set it false there;
+# it is allowed only while the lab runs v0.9.20 (LAB_RELEASE), and fails this lint once the pin
+# moves, together with the profile that still sets it.
+#
 # Usage: ruby lab/gateway/lint-profiles.rb [profile.yaml ...]   (default: all *.yaml here)
 # Exit status 1 on any finding. `{{TOKEN}}` placeholders are tolerated.
 
 require 'yaml'
+
+# The release the lab runs against, selected as lab/scripts/fetch-gateway.sh does:
+# $ANVIL_LAB_RELEASE, else the default pin in RELEASE.lock.
+def lab_release
+  r = ENV['ANVIL_LAB_RELEASE'].to_s.strip
+  r = File.read(File.join(__dir__, 'RELEASE.lock'))[/^release (\S+)$/, 1].to_s if r.empty?
+  r.start_with?('v') ? r : "v#{r}"
+end
+LAB_RELEASE = lab_release.freeze
+# Keys only v0.9.20 needs; Ferrum Edge after it refuses them (see the header).
+V0_9_20_ONLY_MCP_DISCOVERY = LAB_RELEASE == 'v0.9.20' ? %w[hide_denied_items] : []
 
 GATEWAY = %w[version resource_counts proxies consumers plugin_configs upstreams loaded_at known_namespaces
              frontend_tls_cert_path frontend_tls_key_path frontend_tls_source_namespace
@@ -99,8 +119,8 @@ PLUGIN_KEYS = {
   'basic_auth' => %w[hide_credentials],                                               # basic_auth.rs:72-93
   'jwt_auth' => %w[token_lookup consumer_claim_field require_exp require_nbf expected_issuer
                    expected_issuers audiences leeway_secs],                           # jwt_auth.rs:170-187
-  'hmac_auth' => %w[clock_skew_seconds signing_profile allow_unsafe_replayable_v1 replay_scope
-                    replay_max_entries] + REDIS,                                      # hmac_auth.rs:177-183
+  'hmac_auth' => %w[clock_skew_seconds signing_profile replay_scope
+                    replay_max_entries] + REDIS,                                      # hmac_auth.rs:177-183 (allow_unsafe_replayable_v1 removed after v0.9.20)
   'jwks_auth' => %w[providers scope_claim role_claim consumer_identity_claim consumer_header_claim
                     claim_headers claim_headers_separator emit_mesh_request_principal_metadata require_exp
                     jwks_refresh_interval_secs jwks_max_stale_seconds
@@ -113,7 +133,7 @@ PLUGIN_KEYS = {
   'adaptive_concurrency' => %w[key_by max_tracked_keys min_limit initial_limit max_limit min_samples
                                target_latency_multiplier decrease_ratio increase_step shadow_mode
                                expose_headers],                                       # adaptive_concurrency.rs:141-153
-  'ip_restriction' => %w[allow deny mode],                                            # ip_restriction.rs:23
+  'ip_restriction' => %w[allow deny],                                                 # ip_restriction.rs:23 (mode removed after v0.9.20)
   'opa' => %w[opa_host policy_path headers timeout_ms max_response_bytes fail_open fail_closed deny_status
               deny_body deny_headers fail_closed_status fail_closed_body fail_closed_headers
               decision_pointer include_method include_path include_query include_query_credentials
@@ -169,7 +189,7 @@ NESTED = {
   %w[response_transformer rules] => %w[operation target key value new_key],           # response_transformer.rs:156
   %w[waf custom_rules] => %w[id name category severity target match_kind pattern action fp_filters
                              paranoia_min score conditions],                          # waf/rules.rs:11-24
-  %w[jwks_auth providers] => %w[jwks_uri discovery_url jwks issuer audience audiences from_headers
+  %w[jwks_auth providers] => %w[jwks_uri discovery_url jwks issuer audiences from_headers
                                 from_params forward_original_token require_exp required_scopes
                                 required_roles scope_claim role_claim consumer_identity_claim
                                 consumer_header_claim claim_headers claim_headers_separator
@@ -211,7 +231,7 @@ NESTED = {
   # mcp_gateway.rs:111-170 (MCP_ENDPOINT_KEYS ... MCP_OBSERVABILITY_KEYS); `servers` is keyed by server id.
   %w[mcp_gateway endpoint] => %w[path protocol_versions],
   %w[mcp_gateway discovery] => %w[aggregate_prompts aggregate_resources aggregate_tools cache_ttl_seconds
-                                  hide_denied_items namespace_separator on_new_tool on_schema_change],
+                                  namespace_separator on_new_tool on_schema_change] + V0_9_20_ONLY_MCP_DISCOVERY,
   %w[mcp_gateway sessions] => %w[downstream_session_header initialize_upstreams max_sessions session_ttl_seconds
                                  sse_keepalive_seconds sse_listener_max_lifetime_seconds sse_max_event_bytes
                                  sse_max_last_event_id_bytes sse_max_replay_events sse_max_retained_bytes
@@ -241,8 +261,8 @@ def check_keys(file, where, hash, allowed)
   (hash.keys - allowed).each { |k| err(file, "#{where}: unknown key '#{k}'") }
 end
 
-def lint(file)
-  doc = YAML.safe_load(File.read(file), aliases: false)
+def lint(file, text = File.read(file))
+  doc = YAML.safe_load(text, aliases: false)
   return err(file, 'not a mapping') unless doc.is_a?(Hash)
 
   check_keys(file, 'top-level', doc, GATEWAY)
@@ -368,6 +388,28 @@ def lint(file)
 rescue Psych::Exception => e
   err(file, "YAML error: #{e.message}")
 end
+
+# Self-check, every run: keys Ferrum Edge refuses after v0.9.20 are reported (and
+# discovery.hide_denied_items once the lab no longer runs v0.9.20).
+RETIRED = <<~YAML
+  version: "1"
+  proxies:
+    - { id: p, listen_path: /p, backend_scheme: http, backend_host: 127.0.0.1, backend_port: 1,
+        plugins: [{ plugin_config_id: h }, { plugin_config_id: i }, { plugin_config_id: j }, { plugin_config_id: m }] }
+  plugin_configs:
+    - { id: h, plugin_name: hmac_auth, scope: proxy, proxy_id: p, config: { allow_unsafe_replayable_v1: true } }
+    - { id: i, plugin_name: ip_restriction, scope: proxy, proxy_id: p, config: { mode: allow_first } }
+    - { id: j, plugin_name: jwks_auth, scope: proxy, proxy_id: p, config: { providers: [{ audience: a }] } }
+    - { id: m, plugin_name: mcp_gateway, scope: proxy, proxy_id: p, config: { discovery: { hide_denied_items: false } } }
+YAML
+lint('self-check', RETIRED)
+expected = ["unknown key 'allow_unsafe_replayable_v1'", "unknown key 'mode'", "unknown key 'audience'"]
+expected << "unknown key 'hide_denied_items'" unless LAB_RELEASE == 'v0.9.20'
+missed = expected.reject { |e| $errors.any? { |x| x.include?(e) } }
+extra = $errors.reject { |x| expected.any? { |e| x.include?(e) } }
+abort("self-check: retired keys not reported: #{missed.join(', ')}") unless missed.empty?
+abort("self-check: unexpected findings: #{extra.join('; ')}") unless extra.empty?
+$errors.clear
 
 files = ARGV.empty? ? Dir[File.join(__dir__, '*.yaml')].sort : ARGV
 files.each { |f| lint(f) }
