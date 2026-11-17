@@ -85,7 +85,59 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
             ),
         ]
     });
+    if has_url_password(s) {
+        return Some("contains a password in the URL");
+    }
     res.iter().find(|(r, _)| r.is_match(s)).map(|(_, why)| *why)
+}
+
+/// Whether `s` holds a URL (`scheme://user:password@host`) whose userinfo
+/// password has literal material: anything but exactly one whole reference
+/// ([`is_pure_reference`], so a helper with arguments such as
+/// `{{$randomFrom a|b}}` is literal). The authority runs from the `://` to
+/// the first `/`, `?`, `#` or whitespace outside a `{{…}}` (whose spaces,
+/// as in `{{ tenant }}`, the resolver trims), and the userinfo to its last
+/// `@`, so a password holding an `@`, braces or a spaced reference is
+/// judged whole, as written.
+fn has_url_password(s: &str) -> bool {
+    let mut from = 0;
+    while let Some(found) = s[from..].find("://") {
+        let start = from + found;
+        from = start + 3;
+        if !s[..start].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let authority = &s[from..];
+        let (mut i, mut last_at, mut first_colon) = (0, None, None);
+        while i < authority.len() {
+            let rest = &authority[i..];
+            if rest.starts_with("{{")
+                && let Some(close) = rest[2..].find("}}")
+            {
+                i += close + 4;
+                continue;
+            }
+            let c = rest.chars().next().unwrap_or(' ');
+            if matches!(c, '/' | '?' | '#') || c.is_whitespace() {
+                break;
+            }
+            if c == '@' {
+                last_at = Some(i);
+            } else if c == ':' && last_at.is_none() && first_colon.is_none() {
+                first_colon = Some(i);
+            }
+            i += c.len_utf8();
+        }
+        if let (Some(at), Some(colon)) = (last_at, first_colon)
+            && colon < at
+        {
+            let password = &authority[colon + 1..at];
+            if !password.is_empty() && !is_pure_reference(password) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub struct Sanitized {
@@ -580,6 +632,39 @@ mod tests {
         assert_eq!(s.extracted.len(), 3);
         restore(&mut v, &s.extracted).unwrap();
         assert_eq!(v, original);
+    }
+
+    /// GHSA-c236-7r9g-c9p2: a URL password with literal material is warned
+    /// about (free text is never rewritten): a mixed or spaced reference, a
+    /// helper with arguments, a brace or an `@` in it. A password that is
+    /// one whole reference, a port and an `@` in the query are not.
+    #[test]
+    fn url_userinfo_passwords_are_warned() {
+        let spec = |url: &str| serde_json::json!({"requests": [{"spec": {"url": url}}]});
+        for loud in [
+            "https://admin:tok-SENSITIVE-pw1@api.example.com/v1",
+            "https://user:{{tenant}}-tok-SENSITIVE-pw2@host.example/",
+            "https://user:{{ tenant }}-tok-SENSITIVE-pw3@host.example/",
+            "https://user:{{$randomFrom tok-SENSITIVE-pw4 x}}@host.example/",
+            "https://user:p{w-tok-SENSITIVE-pw5@host.example/",
+            "https://admin:p@tok-SENSITIVE-pw6@api.example.com/v1",
+        ] {
+            let mut v = spec(loud);
+            let s = sanitize(&mut v, &[]);
+            assert_eq!(s.warnings.len(), 1, "a literal URL password was not flagged");
+            assert!(s.warnings[0].reason.contains("password in the URL"));
+            assert_eq!(s.warnings[0].pointer, "/requests/0/spec/url");
+        }
+        for quiet in [
+            "https://admin:{{password}}@api.example.com/v1",
+            "https://admin:{{ password }}@api.example.com/v1",
+            "https://admin:{{$guid}}@api.example.com/v1",
+            "https://api.example.com:8443/v1?email=a:b@c.example",
+            "https://admin@api.example.com/",
+        ] {
+            let mut v = spec(quiet);
+            assert!(sanitize(&mut v, &[]).warnings.is_empty(), "a URL without a literal password was flagged");
+        }
     }
 
     #[test]
