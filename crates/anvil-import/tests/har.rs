@@ -265,13 +265,6 @@ fn har_entries_mime(texts: &[&str], mime: &str, o: &ImportOptions) -> anvil_impo
     anvil_import::import(doc.to_string().as_bytes(), o).unwrap()
 }
 
-fn har_get(url: &str) -> anvil_import::ImportResult {
-    let doc = serde_json::json!({ "log": { "version": "1.2", "entries": [{ "request": {
-        "method": "GET", "url": url, "headers": [], "queryString": [], "cookies": [],
-    } }] } });
-    anvil_import::import(doc.to_string().as_bytes(), &opts()).unwrap()
-}
-
 /// Query parameters hold decoded text, which the engine encodes once; a
 /// query no decoded text reproduces stays in the URL as recorded (#563).
 #[test]
