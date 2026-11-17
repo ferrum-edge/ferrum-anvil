@@ -553,7 +553,7 @@ fn both(request: serde_json::Value, env: serde_json::Value, o: &anvil_import::Im
 fn template_text(v: &SensitiveValue) -> String {
     match v {
         SensitiveValue::Template { value } => value.clone(),
-        other => panic!("{other:?}"),
+        SensitiveValue::Secret { .. } => panic!("expected a template value"),
     }
 }
 
@@ -606,7 +606,7 @@ fn parameters_without_a_decoded_form_are_kept_as_written() {
         assert!(has_at(&r, "query_param_not_decoded", "parameters/0") && has_at(&r, "query_param_not_decoded", "parameters/4"));
         assert!(!has_at(&r, "query_param_not_decoded", "parameters/2"));
         let text = serde_json::to_string(&r.requests).unwrap();
-        assert!(!text.contains("placeholder-secret") && !text.contains('\u{fffd}'), "{text}");
+        assert!(!text.contains("placeholder-secret") && !text.contains('\u{fffd}'), "a literal or U+FFFD was stored");
     }
 }
 
@@ -620,8 +620,7 @@ fn url_userinfo_becomes_basic_auth_and_its_password_is_redacted() {
         assert_eq!(s.url, "https://api.example.com/v1/status");
         assert!(
             matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password == &SensitiveValue::template("{{password}}")),
-            "{:?}",
-            s.auth
+            "expected Basic auth with a {{{{password}}}} placeholder"
         );
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("insomniaPw-literal"));
         assert_eq!(r.report.redactions.len(), 1);
@@ -646,8 +645,8 @@ fn credential_members_of_environment_arrays_are_redacted() {
     for r in both(request.clone(), env.clone(), &opts()) {
         let var = |n: &str| r.workspace.variables.iter().find(|v| v.name == n).map(|v| template_text(&v.value));
         let accounts = var("accounts").expect("accounts variable");
-        assert!(!accounts.contains("envArrayKey-literal"), "{accounts}");
-        assert!(accounts.contains("{{api_key}}"), "{accounts}");
+        assert!(!accounts.contains("envArrayKey-literal"), "the array member's literal stayed");
+        assert!(accounts.contains("{{api_key}}"), "the array member has no placeholder");
         assert_eq!(var("hosts").as_deref(), Some(r#"["a.example","b.example"]"#));
         assert_eq!(var("nested.api_key"), None, "a secret variable's literal is dropped");
         assert!(r.report.redactions.iter().any(|x| x.pointer.contains("accounts")));

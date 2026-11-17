@@ -302,7 +302,7 @@ fn query_list_values_are_decoded_and_stay_parameters() {
     );
     assert!(has_at(&r, "query_value_converted", "/url/query/0"));
     let text = serde_json::to_string(&r.requests).unwrap();
-    assert!(!text.contains("placeholder-secret") && !text.contains("retained-credential-571"), "{text}");
+    assert!(!text.contains("placeholder-secret") && !text.contains("retained-credential-571"), "a credential literal was stored");
     assert_eq!(r.report.redactions.len(), 2);
 
     // Kept credentials stay structured and marked sensitive.
@@ -357,8 +357,7 @@ fn url_userinfo_becomes_basic_auth_and_its_password_is_redacted() {
         assert_eq!(s.url, "https://api.example.com/v1/status");
         assert!(
             matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password == &SensitiveValue::template("{{password}}")),
-            "{:?}",
-            s.auth
+            "expected Basic auth with a {{{{password}}}} placeholder"
         );
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("hunter2-literal"));
         assert_eq!(r.report.redactions.len(), 1);
