@@ -537,7 +537,7 @@ fn wire_text(s: &str, form: QueryForm) -> String {
             rest[i + 2..].find(close).map(|e| (i, i + 2 + e + 2))
         });
         let literal_end = span.map_or(rest.len(), |(i, _)| i);
-        let bytes = rest[..literal_end].as_bytes();
+        let bytes = &rest.as_bytes()[..literal_end];
         let mut i = 0;
         while i < bytes.len() {
             let c = bytes[i];
