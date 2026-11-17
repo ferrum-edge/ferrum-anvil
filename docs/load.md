@@ -336,7 +336,11 @@ The terminal classes are disjoint. `completed` follows the unit's definition
 `completed` and may overlap. `in_flight_at_end` is work whose outcome is
 unknown: units in flight when a crashed worker's last snapshot was taken, or
 tasks that ignored cancellation past the drain window. For a single-request
-iteration the two ledgers are identical.
+iteration the two ledgers are identical. In a chain they can differ: an
+iteration whose step 1 failed an assertion and whose step 2 then timed out is
+one timeout in `counts` (its assertion failure is not in `counts`, which only
+splits completed iterations), and one assertion failure plus one timeout in
+`requests`.
 
 **Protocol denominators** (`protocol_metrics`) balance against the unit
 ledger; `report::check_protocol_balance` checks them in every scenario test,
@@ -593,8 +597,11 @@ a hold stage (`[{0 s → N}, {D s → N}]`). `--iterations` runs a fixed count o
 over a 10 s window. `--fresh` selects the fresh connection mode; the default is
 persistent. `--csv` writes the summary CSV.
 
-`anvil load run` exit codes follow the CLI convention (as `anvil send` and
-`anvil run`):
+`anvil load run` prints the iteration ledger (`counts`) on its summary line
+and the unit ledger (`requests`) on the `sends:` line below it. Exit codes
+follow the CLI convention (as `anvil send` and `anvil run`) and are decided
+from the unit ledger, so a chain step's failed assertion counts whatever a
+later step did:
 
 | Code | When |
 |---|---|

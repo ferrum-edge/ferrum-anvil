@@ -431,9 +431,9 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             if let Some(f) = csv {
                 std::fs::write(f, anvil_load::report::summary_csv(&report))?;
             }
-            let k = &report.counts;
+            let (k, u) = (&report.counts, &report.requests);
             println!(
-                "{:?}{}: {} started, {} completed, {} transport failures, {} timeouts, {} application failures, {} assertion failures, {} dropped; {:.1}/s; success p50 {} p95 {} p99 {}",
+                "{:?}{}: iterations {} started, {} completed, {} transport failures, {} timeouts, {} application failures, {} assertion failures, {} dropped; {:.1}/s; success p50 {} p95 {} p99 {}",
                 report.completion,
                 if report.partial { " (partial)" } else { "" },
                 k.started,
@@ -448,6 +448,14 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 us_or_none(report.latency_success.count, report.latency_success.p95_us),
                 us_or_none(report.latency_success.count, report.latency_success.p99_us)
             );
+            // The unit ledger: an iteration that stopped at a later step's
+            // timeout or transport failure counts as that terminal in the
+            // iteration ledger, so an earlier step's assertion or application
+            // failure shows only here.
+            println!(
+                "  sends: {} started, {} completed, {} transport failures, {} timeouts, {} application failures, {} assertion failures",
+                u.started, u.completed, u.transport_failures, u.timeouts, u.application_failures, u.assertion_failures
+            );
             if let Some(m) = &report.protocol_metrics {
                 for l in anvil_load::report::protocol_lines(m) {
                     println!("  {l}");
@@ -457,9 +465,11 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 println!("  note: {}", t(n));
             }
             // The CLI convention (`send`, `run`): an assertion failure wins
-            // over every other failure.
-            let failed = k.transport_failures + k.timeouts + k.application_failures > 0;
-            Ok(if k.assertion_failures > 0 {
+            // over every other failure. Decided per unit (send), not per
+            // iteration: in a chain, step 1's failed assertion still counts
+            // when step 2 then times out.
+            let failed = u.transport_failures + u.timeouts + u.application_failures > 0;
+            Ok(if u.assertion_failures > 0 {
                 2
             } else if report.completion != RunCompletion::Completed || report.partial || failed {
                 1
