@@ -167,10 +167,11 @@ fn references_only(value: &str) -> bool {
 /// - the value of a `name=value` or `name: value` pair whose name is a
 ///   credential name ([`crate::util::is_credential_name`]), quoted
 ///   (`"password": "…"`, escapes honoured, an unterminated string running to
-///   the end) or not. Any whitespace (spaces, tabs, newlines) may surround
-///   the separator, and `==`, `===`, `:=`, `!=`, `+=` count as separators.
-///   A value is kept only when it is exactly plain references, exactly a
-///   redaction marker, empty, or a plain word (`none`, `true`, …);
+///   the end) or not. Any whitespace (`char::is_whitespace`: spaces, tabs,
+///   vertical tabs, newlines, Unicode spaces) may surround the separator,
+///   and `==`, `===`, `:=`, `!=`, `+=` count as separators. A value is kept
+///   only when it is exactly plain references, exactly a redaction marker
+///   (with nothing attached), empty, or a plain word (`none`, `true`, …);
 /// - the token after an auth scheme word (`Bearer …`, `Basic …`, after any
 ///   whitespace) when it looks like one (16 characters, or 8 with both
 ///   letters and digits). When a credential-named pair's value is an auth
@@ -189,13 +190,44 @@ fn redact_credential_text(text: &str) -> String {
     let n = bytes.len();
     let name_byte = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.');
     let token_byte = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'~' | b'+' | b'/' | b'=');
-    let unquoted_end = |c: u8| c.is_ascii_whitespace() || matches!(c, b'&' | b',' | b';' | b'"' | b'\'' | b'}' | b']' | b')' | b'>' | b'`');
-    let skip_space = |mut k: usize| {
-        while k < n && bytes[k].is_ascii_whitespace() {
-            k += 1;
+    // Whitespace is `char::is_whitespace` throughout (vertical tabs and
+    // Unicode spaces included; review of #586, dsf F1). The length of the
+    // whitespace character starting at `k`, or 0.
+    let space_at = |k: usize| -> usize {
+        match bytes.get(k) {
+            None => 0,
+            Some(&c) if c < 0x80 => usize::from(char::from(c).is_whitespace()),
+            Some(_) if !text.is_char_boundary(k) => 0,
+            Some(_) => text[k..].chars().next().filter(|ch| ch.is_whitespace()).map_or(0, char::len_utf8),
         }
-        k
     };
+    // The length of the whitespace character ending at `e` (a character
+    // boundary), or 0. Looks at most four bytes back.
+    let space_before = |e: usize| -> usize {
+        if e == 0 || !text.is_char_boundary(e) {
+            return 0;
+        }
+        let mut s = e - 1;
+        while s > 0 && e - s < 4 && !text.is_char_boundary(s) {
+            s -= 1;
+        }
+        if !text.is_char_boundary(s) {
+            return 0;
+        }
+        if text[s..e].chars().next().is_some_and(char::is_whitespace) { e - s } else { 0 }
+    };
+    let skip_space = |mut k: usize| {
+        loop {
+            let len = space_at(k);
+            if len == 0 {
+                break k;
+            }
+            k += len;
+        }
+    };
+    // Where an unquoted value ends: whitespace or a delimiter.
+    let unquoted_end =
+        |k: usize| space_at(k) > 0 || matches!(bytes[k], b'&' | b',' | b';' | b'"' | b'\'' | b'}' | b']' | b')' | b'>' | b'`');
     let scheme =
         |word: &[u8]| word.len() <= 6 && ["bearer", "basic", "token", "digest"].iter().any(|s| word.eq_ignore_ascii_case(s.as_bytes()));
     // The next `}}` at or after a position, from one cached answer: a query
@@ -224,8 +256,12 @@ fn redact_credential_text(text: &str) -> String {
             while end > 0 && i - end < 3 && matches!(bytes[end - 1], b'!' | b'=' | b'+' | b'|' | b'&' | b'?' | b':') {
                 end -= 1;
             }
-            while end > 0 && bytes[end - 1].is_ascii_whitespace() {
-                end -= 1;
+            loop {
+                let len = space_before(end);
+                if len == 0 {
+                    break;
+                }
+                end -= len;
             }
             if end > 0 && matches!(bytes[end - 1], b'"' | b'\'') {
                 end -= 1;
@@ -245,11 +281,18 @@ fn redact_credential_text(text: &str) -> String {
                 if v >= n {
                     break;
                 }
-                if let Some(marker) = REDACTION_MARKERS.iter().find(|m| bytes[v..].starts_with(m.as_bytes())) {
-                    i = v + marker.len();
+                // A redaction marker is exempt only as the whole value: literal
+                // text right after it makes the value literal (review of #586,
+                // sol F2), scanned on from the marker's end, which holds a
+                // space or a `>` of its own.
+                let marker_end = REDACTION_MARKERS.iter().find(|m| bytes[v..].starts_with(m.as_bytes())).map(|m| v + m.len());
+                if let Some(after) = marker_end
+                    && (after >= n || unquoted_end(after))
+                {
+                    i = after;
                     continue;
                 }
-                let quoted = matches!(bytes[v], b'"' | b'\'');
+                let quoted = marker_end.is_none() && matches!(bytes[v], b'"' | b'\'');
                 let (from, mut to) = if quoted {
                     // To the closing quote, past escaped ones; an
                     // unterminated string runs to the end.
@@ -261,7 +304,7 @@ fn redact_credential_text(text: &str) -> String {
                     (v + 1, k.min(n))
                 } else {
                     // To a delimiter; a `{{…}}` inside is part of the value.
-                    let mut k = v;
+                    let mut k = marker_end.unwrap_or(v);
                     while k < n {
                         if bytes[k..].starts_with(b"{{")
                             && let Some(close) = next_close(k + 2)
@@ -269,7 +312,7 @@ fn redact_credential_text(text: &str) -> String {
                             k = close + 2;
                             continue;
                         }
-                        if unquoted_end(bytes[k]) {
+                        if unquoted_end(k) {
                             break;
                         }
                         k += 1;
@@ -301,7 +344,7 @@ fn redact_credential_text(text: &str) -> String {
         // `Bearer <token>` and a JWT, at the start of a word.
         if c.is_ascii_alphabetic() && (i == 0 || !name_byte(bytes[i - 1])) {
             let word_end = (i..n).find(|&k| !bytes[k].is_ascii_alphabetic()).unwrap_or(n);
-            if scheme(&bytes[i..word_end]) && word_end < n && bytes[word_end].is_ascii_whitespace() {
+            if scheme(&bytes[i..word_end]) && space_at(word_end) > 0 {
                 let t = skip_space(word_end);
                 let t_end = (t..n).find(|&k| !token_byte(bytes[k])).unwrap_or(n);
                 let token = &bytes[t..t_end];
@@ -846,6 +889,19 @@ mod tests {
             (r#"if (password === "tok-SENSITIVE-r26") {}"#, r#"if (password === "<redacted>") {}"#),
             (r#"if (password != 'tok-SENSITIVE-r27') {}"#, r#"if (password != '<redacted>') {}"#),
             ("token := tok-SENSITIVE-r28", "token := <redacted>"),
+            // Review of #586 (sol F2): a marker is exempt only as the whole
+            // value.
+            ("password=<redacted>tok-SENSITIVE-r36", "password=<redacted>"),
+            ("token=<url redacted>tok-SENSITIVE-r37 ok", "token=<redacted> ok"),
+            ("password=<redacted>{{a}}tok-SENSITIVE-r43 ok", "password=<redacted> ok"),
+            // Review of #586 (dsf F1): vertical tabs and Unicode spaces are
+            // whitespace too.
+            ("password=\u{0b}\"tok-SENSITIVE-r38\"", "password=\u{0b}\"<redacted>\""),
+            ("password\u{0b}=\u{0b}tok-SENSITIVE-r39", "password\u{0b}=\u{0b}<redacted>"),
+            ("password\u{a0}=\u{3000}'tok-SENSITIVE-r40'", "password\u{a0}=\u{3000}'<redacted>'"),
+            ("see Bearer\u{a0}tok-SENSITIVE-abcdefgh here", "see Bearer\u{a0}<redacted> here"),
+            ("password=tok-SENSITIVE-r41\u{2028}next", "password=<redacted>\u{2028}next"),
+            ("é password\u{2003}= 'tok-SENSITIVE-r44' é", "é password\u{2003}= '<redacted>' é"),
         ] {
             assert_eq!(redact_for_report(text), expected, "{expected:?}");
         }
@@ -863,6 +919,12 @@ mod tests {
         assert!(pointer.starts_with("/item/0/protocolProfileBehavior/<redacted>#"));
         report.unsupported("request_setting", "/item/0/protocolProfileBehavior/max-Redirects_2", "x");
         assert_eq!(report.unsupported[1].pointer, "/item/0/protocolProfileBehavior/max-Redirects_2");
+        // Review of #586 (sol F2, dsf F1): literal text after a marker, and a
+        // pair around a vertical tab, in a pointer token.
+        for key in ["password=<redacted>tok-SENSITIVE-r42", "token=<url redacted>tok-SENSITIVE-r45", "password\u{0b}=tok-SENSITIVE-r46"] {
+            report.unsupported("request_setting", &format!("/item/1/protocolProfileBehavior/{key}"), "x");
+        }
+        assert!(report.unsupported.iter().all(|f| !f.pointer.contains("tok-SENSITIVE")), "a pointer kept a literal");
     }
 
     /// #584: messages are importer wording and computed numbers only.
@@ -946,6 +1008,9 @@ mod tests {
             "password=<redacted>",
             "password === ",
             "Bearer \t",
+            "password=<redacted>x",
+            "password\u{a0}=\u{a0}",
+            "Bearer\u{3000}",
         ] {
             let text = unit.repeat((1 << 20) / unit.len());
             let started = std::time::Instant::now();

@@ -1078,28 +1078,53 @@ fn auth_placeholders_never_carry_an_owner_name() {
     }
 }
 
-/// #584: the free-text shapes the last line of defence must still catch
-/// (whitespace around a separator, escaped quotes, a reference beside a
-/// literal, a bare JWT key) in a retained script, which is no longer copied
-/// at all, and in a settings key, which only the pointer quotes.
+/// #584 and review of #586 (dsf F2): the free-text shapes the last line of
+/// defence must still catch, run through the channels that still quote
+/// source text: imported request, folder and workspace names (stored and
+/// exported) and settings keys (quoted only by report pointers). Each row
+/// fails if the matching heuristic regresses.
 #[test]
 fn free_text_edge_cases_leave_nothing_readable() {
-    let script = postman_doc_items(json!([{ "name": "r",
-        "event": [{ "listen": "prerequest", "script": { "type": "text/javascript", "exec": [
-            "const password =\n\"tok-SENSITIVE-c122\";",
-            "const secret\t=\t'tok-SENSITIVE-c123';",
-            "const api_key = \"\\\"tok-SENSITIVE-c124\";",
-            "const token = \"{{tenant}}-tok-SENSITIVE-c125\";",
-            "headers.Authorization = 'Bearer  tok-SENSITIVE-c126abcdef';"
-        ] } }],
-        "request": { "method": "GET", "url": "https://api.example.test/" } }]));
-    assert_nothing_readable(&script, "script edge cases");
-    let jwt_key = postman_doc_items(json!([{
-        "name": "r",
-        "protocolProfileBehavior": { "eyJhbGciOiJIUzI1NiJ9.tok-SENSITIVE-c127.c2lnbmF0dXJl": true },
-        "request": { "method": "GET", "url": "https://api.example.test/" }
-    }]));
-    let r = import(&jwt_key, &ImportOptions::default()).unwrap();
-    assert!(r.report.unsupported.iter().any(|f| f.code == "request_setting"), "the setting was not reported");
-    assert_nothing_readable(&jwt_key, "JWT settings key");
+    const SHAPES: &[&str] = &[
+        // Whitespace around the separator (sol F4), Unicode and vertical tab
+        // included (dsf F1).
+        "const password =\n\"tok-SENSITIVE-c122\";",
+        "const secret\t=\t'tok-SENSITIVE-c123';",
+        "password\u{0b}=\u{0b}tok-SENSITIVE-c130",
+        "password\u{a0}=\u{3000}'tok-SENSITIVE-c132'",
+        // An escaped quote (sol F5).
+        "const api_key = \"\\\"tok-SENSITIVE-c124\";",
+        // A reference beside a literal (sol F3), and a marker with literal
+        // text attached (sol F2 of #586).
+        "const token = \"{{tenant}}-tok-SENSITIVE-c125\";",
+        "password=<redacted>tok-SENSITIVE-c128",
+        "token=<url redacted>tok-SENSITIVE-c129",
+        // A scheme token after several spaces or a Unicode space.
+        "headers.Authorization = 'Bearer  tok-SENSITIVE-c126abcdef';",
+        "Bearer\u{a0}tok-SENSITIVE-c131abcdef",
+        // A bare JWT (sol F6).
+        "eyJhbGciOiJIUzI1NiJ9.tok-SENSITIVE-c127.c2lnbmF0dXJl",
+    ];
+    // Labelled by index: a failure message never prints the canary.
+    for (n, shape) in SHAPES.iter().enumerate() {
+        let mut settings = serde_json::Map::new();
+        settings.insert((*shape).to_string(), json!(true));
+        let postman = json!({
+            "info": { "name": shape, "schema": POSTMAN_SCHEMA },
+            "item": [{ "name": shape, "item": [{
+                "name": shape,
+                "protocolProfileBehavior": settings,
+                "request": { "method": "GET", "url": "https://api.example.test/" }
+            }] }]
+        })
+        .to_string()
+        .into_bytes();
+        let r = import(&postman, &ImportOptions::default()).unwrap();
+        assert!(r.report.unsupported.iter().any(|f| f.code == "request_setting"), "shape {n}: the setting was not reported");
+        assert!(r.requests[0].name != *shape, "shape {n}: the name was not redacted");
+        assert_nothing_readable(&postman, &format!("Postman names and settings key, shape {n}"));
+        let mut request = insomnia_request("https://api.example.test/");
+        request["name"] = json!(shape);
+        assert_nothing_readable(&insomnia_doc(request, json!({})), &format!("Insomnia name, shape {n}"));
+    }
 }

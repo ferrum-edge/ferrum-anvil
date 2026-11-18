@@ -115,10 +115,15 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     field, an auth secret) is named through the same allocator: one name
     per field name, never a name the source defines, references or derives
     (`api_key_2` when the source defines `api_key`). A path parameter keeps
-    its own name. A Postman or Insomnia auth config's secrets get a base
-    the import allocates per config (`auth_password`, `auth_2_token`, …),
-    never one derived from the collection, folder or request name, which
-    can repeat a credential.
+    its own name. A Postman or Insomnia auth config's secrets are named
+    `auth_<8 hex digits>_<field>` (`auth_3f9a0c12_password`), the digits a
+    digest of the owner's stable key (the request's operation key, the
+    folder's or collection's key, the source's own id where it has one).
+    The name never comes from a collection, folder or request name, which
+    can repeat a credential. It stays the same across reimports whatever
+    the order of the items, so a variable you filled stays with its auth
+    config. It is reserved as a whole, so no header, query or body
+    placeholder shares it (a name the source already uses gets a suffix).
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia
@@ -221,7 +226,7 @@ Report text never carries a credential, in either mode (#584):
   `String`.
 - Retained scripts carry metadata only (see above).
 - Credential placeholders and required variables are named by the import:
-  an auth config's secrets are `{{auth_password}}`, `{{auth_2_token}}`, …,
+  an auth config's secrets are `{{auth_<digest>_<field>}}` (see above),
   never derived from a collection, folder or request name.
 - What must quote the source goes through one redaction as a last line of
   defence: pointer tokens (source keys; a changed token keeps a digest so
@@ -235,10 +240,11 @@ Report text never carries a credential, in either mode (#584):
     path or an argument-free `$helper`) with `{{…}}`;
   - by credential-name heuristics, replaces with `<redacted>` the value of a
     `name=value` or `name: value` pair whose name is a credential name
-    (`==`, `!=`, `:=` and `+=` count, any whitespace may surround the
-    separator, a quoted value runs to its unescaped closing quote or the end
-    of the text, and only a value that is exactly references, exactly a
-    redaction marker or a plain word such as `none` is kept), the token
+    (`==`, `!=`, `:=` and `+=` count, any whitespace, Unicode spaces and
+    vertical tabs included, may surround the separator, a quoted value
+    runs to its unescaped closing quote or the end of the text, and only a
+    value that is exactly references, exactly a redaction marker with
+    nothing attached, or a plain word such as `none` is kept), the token
     after `Bearer`, `Basic`, `Token` or `Digest` when it looks like one, and
     a JWT, including a bare JWT pointer token. It is linear in the text.
 
