@@ -4,6 +4,24 @@
 
 ### Added
 
+- A weekly, non-required **Edge main drift** workflow (`.github/workflows/edge-main-drift.yml`)
+  checks Anvil against unreleased Ferrum Edge `main` (ferrum-edge/ferrum-contracts#76) with three
+  new ignored tests in `contracts_adoption.rs`:
+  - `edge_main_vocabulary_matches_anvils_reader` compares the `X-Gateway-Error` tokens and
+    `ErrorClass` labels in Edge main's `src/retry.rs` with Anvil's lookup reader and wording.
+    ferrum-contracts records main's changes only in prose.
+  - `contracts_main_vocabularies_match_anvil` and
+    `contracts_main_diagnostic_ref_matches_anvils_reader` run the pinned parity assertions against
+    ferrum-contracts `main`: every `PIN` path plus every diagnostic fixture main has. These
+    assertions are now factored into `assert_vocabularies_match_anvil` and
+    `assert_diagnostic_ref_contract_matches_anvils_reader`, minus the byte, PIN and provenance
+    checks, and the DiagnosticFinding fixtures are enumerated from the directory.
+
+  The workflow refuses to run when a test name no longer matches. A finding, or a check that could
+  not run, opens or updates the one `edge-main-drift` issue carrying the workflow's marker, with
+  the `main_branch_delta` commit and summaries, and only a clean run closes it. Pull-request and
+  branch runs fail on a finding instead. Only that job holds `issues: write`, with the repository's
+  own `GITHUB_TOKEN`.
 - Adopt published `contracts-edge-0.9.20` (`39da322083044c2e92617209e62983c92387f0ad`)
   byte-exact. Four vendored files change: the gateway error and header vocabularies (v0.9.20
   provenance; the closed token vocabulary adds `loop_detected`, the 19 error classes and their

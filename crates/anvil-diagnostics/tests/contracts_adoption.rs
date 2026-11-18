@@ -202,14 +202,35 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
             assert_eq!(source["commit"], "e4a606a00352674daaef08636e3e359e6c48ba18");
         }
     }
-    for compatibility_id in PINNED_RELEASES {
-        assert_catalog_matches_pin(&root, compatibility_id, &errors);
-    }
     // The lab's default pin is a release the contract pin covers.
     let lock = std::fs::read_to_string(root.join("lab/gateway/RELEASE.lock")).expect("lab/gateway/RELEASE.lock");
     let lab_release = lock.lines().find_map(|line| line.strip_prefix("release ")).expect("RELEASE.lock names a release");
     let lab_id = format!("ferrum-edge-{}", lab_release.trim().trim_start_matches('v'));
     assert!(PINNED_RELEASES.contains(&lab_id.as_str()), "the lab runs {lab_id}, which {tag:?} does not cover");
+    assert_vocabularies_match_anvil(&root, &vendor);
+
+    let report = read_json(&vendor.join("schemas/diagnostic-report/v1.schema.json"));
+    assert_eq!(report["x-contract"]["status"], "implemented");
+    let shared_status = report["x-contract"]["shared_status"].as_str().unwrap();
+    assert!(shared_status.starts_with("EXISTING shared v1"));
+    let owner = &report["x-contract"]["coordinated_release"]["qualified_owner_commit"];
+    let owner = owner.as_str().unwrap();
+    assert_eq!(owner, "81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e");
+    // Descriptions, wire constraints and historical producer parity stay exact;
+    // diagnostic_import.rs compares everything except $id / x-contract.
+}
+
+/// What Anvil reads from the error and header vocabularies and the
+/// `DiagnosticFinding` schema in `contracts` (the vendored copy, or the same
+/// files from ferrum-contracts `main`) agrees with Anvil: the catalog of every
+/// release the pin covers, the `ferrum.token.*` wording, the gateway
+/// diagnostic headers Anvil's rules read, and the finding schema and fixtures.
+fn assert_vocabularies_match_anvil(root: &Path, contracts: &Path) {
+    let errors = read_json(&contracts.join("vocabularies/gateway-errors.json"));
+    let headers = read_json(&contracts.join("vocabularies/gateway-headers.json"));
+    for compatibility_id in PINNED_RELEASES {
+        assert_catalog_matches_pin(root, compatibility_id, &errors);
+    }
     let contract_tokens: BTreeSet<String> =
         errors["x_gateway_error_tokens"].as_array().unwrap().iter().map(|entry| entry["token"].as_str().unwrap().to_owned()).collect();
 
@@ -252,17 +273,7 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     let (missing, extra) = differences(&contract_headers, &local_header_names);
     assert!(missing.is_empty() && extra.is_empty(), "gateway diagnostic header drift; missing: {missing:?}; extra: {extra:?}");
 
-    let report = read_json(&vendor.join("schemas/diagnostic-report/v1.schema.json"));
-    assert_eq!(report["x-contract"]["status"], "implemented");
-    let shared_status = report["x-contract"]["shared_status"].as_str().unwrap();
-    assert!(shared_status.starts_with("EXISTING shared v1"));
-    let owner = &report["x-contract"]["coordinated_release"]["qualified_owner_commit"];
-    let owner = owner.as_str().unwrap();
-    assert_eq!(owner, "81cbb410d34ff5fba1f3d54cfd2e7ebccaed397e");
-    // Descriptions, wire constraints and historical producer parity stay exact;
-    // diagnostic_import.rs compares everything except $id / x-contract.
-
-    let shared_schema = read_json(&vendor.join("schemas/diagnostic-finding/v1.schema.json"));
+    let shared_schema = read_json(&contracts.join("schemas/diagnostic-finding/v1.schema.json"));
     let local_schema = read_json(&root.join("contracts/schemas/DiagnosticFinding.schema.json"));
     let without_contract_metadata = |value: Value| {
         let mut object: Map<String, Value> = value.as_object().unwrap().clone();
@@ -273,24 +284,27 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     assert_eq!(
         without_contract_metadata(local_schema.clone()),
         without_contract_metadata(shared_schema.clone()),
-        "local DiagnosticFinding schema differs from the pinned schema after removing $id and x-contract"
+        "local DiagnosticFinding schema differs from the contract schema after removing $id and x-contract"
     );
 
-    let validator = jsonschema::validator_for(&shared_schema).expect("pinned DiagnosticFinding schema compiles");
-    for fixture in [
-        "fixtures/diagnostic-finding/valid/ferrum-token-backend-error.json",
-        "fixtures/diagnostic-finding/valid/ferrum-token-connection-failure.json",
-    ] {
-        let instance = read_json(&vendor.join(fixture));
-        assert!(validator.is_valid(&instance), "pinned valid fixture failed: {fixture}");
-    }
-    for fixture in [
-        "fixtures/diagnostic-finding/invalid/alloy-only-evidence-source.json",
-        "fixtures/diagnostic-finding/invalid/missing-does-not-prove.json",
-        "fixtures/diagnostic-finding/invalid/probability-confidence.json",
-    ] {
-        let instance = read_json(&vendor.join(fixture));
-        assert!(!validator.is_valid(&instance), "pinned invalid fixture unexpectedly passed: {fixture}");
+    // Every DiagnosticFinding fixture under the directory, so fixtures a newer
+    // contracts revision adds are exercised too (the vendored set is fixed by
+    // PIN).
+    let validator = jsonschema::validator_for(&shared_schema).expect("DiagnosticFinding schema compiles");
+    let fixtures = files_under(&contracts.join("fixtures/diagnostic-finding"), contracts);
+    assert!(fixtures.iter().any(|fixture| fixture.contains("/valid/")), "no valid DiagnosticFinding fixture under {}", contracts.display());
+    assert!(
+        fixtures.iter().any(|fixture| fixture.contains("/invalid/")),
+        "no invalid DiagnosticFinding fixture under {}",
+        contracts.display()
+    );
+    for fixture in fixtures {
+        let instance = read_json(&contracts.join(&fixture));
+        if fixture.contains("/valid/") {
+            assert!(validator.is_valid(&instance), "valid DiagnosticFinding fixture failed: {fixture}");
+        } else {
+            assert!(!validator.is_valid(&instance), "invalid DiagnosticFinding fixture unexpectedly passed: {fixture}");
+        }
     }
 }
 
@@ -307,7 +321,14 @@ fn local(values: &[&str]) -> BTreeSet<String> {
 /// fixtures are accepted or refused by both.
 #[test]
 fn pinned_diagnostic_ref_contract_matches_anvils_reader() {
-    let vendor = repo_root().join("contracts/ferrum-contracts");
+    assert_diagnostic_ref_contract_matches_anvils_reader(&repo_root().join("contracts/ferrum-contracts"), Some(22));
+}
+
+/// The `ferrum.diagnostic_ref.v1` schema, error classes and fixtures in
+/// `contracts` agree with Anvil's lookup reader. `fixture_count` pins the
+/// number of fixtures for the vendored copy; ferrum-contracts `main` may add
+/// some.
+fn assert_diagnostic_ref_contract_matches_anvils_reader(vendor: &Path, fixture_count: Option<usize>) {
     let schema = read_json(&vendor.join("schemas/diagnostic-ref/v1.schema.json"));
     assert_eq!(schema["title"], gateway_detail::SCHEMA_VERSION);
     assert_eq!(enum_strings(&schema["properties"]["schema_version"]), local(&[gateway_detail::SCHEMA_VERSION]));
@@ -348,19 +369,166 @@ fn pinned_diagnostic_ref_contract_matches_anvils_reader() {
     assert!(missing.is_empty() && extra.is_empty(), "error class drift; missing: {missing:?}; extra: {extra:?}");
 
     // `created_at` must be an RFC 3339 time: assert formats, as the contract's own checks do.
-    let validator = jsonschema::options().should_validate_formats(true).build(&schema).expect("pinned diagnostic-ref schema compiles");
-    let fixtures = files_under(&vendor.join("fixtures/diagnostic-ref"), &vendor);
-    assert_eq!(fixtures.len(), 22, "{fixtures:?}");
+    let validator = jsonschema::options().should_validate_formats(true).build(&schema).expect("diagnostic-ref schema compiles");
+    let fixtures = files_under(&vendor.join("fixtures/diagnostic-ref"), vendor);
+    if let Some(count) = fixture_count {
+        assert_eq!(fixtures.len(), count, "{fixtures:?}");
+    }
+    assert!(!fixtures.is_empty(), "no diagnostic-ref fixtures under {}", vendor.display());
     for fixture in fixtures {
         let bytes = std::fs::read(vendor.join(&fixture)).unwrap();
         let instance: Value = serde_json::from_slice(&bytes).unwrap();
         let anvil = gateway_detail::parse_view(&bytes);
         if fixture.contains("/valid/") {
-            assert!(validator.is_valid(&instance), "pinned valid fixture failed: {fixture}");
+            assert!(validator.is_valid(&instance), "valid fixture failed: {fixture}");
             assert!(anvil.is_ok(), "Anvil refuses the valid fixture {fixture}: {anvil:?}");
         } else {
-            assert!(!validator.is_valid(&instance), "pinned invalid fixture unexpectedly passed: {fixture}");
+            assert!(!validator.is_valid(&instance), "invalid fixture unexpectedly passed: {fixture}");
             assert!(anvil.is_err(), "Anvil accepts the invalid fixture {fixture}");
         }
     }
+}
+
+/// The directory `.github/workflows/edge-main-drift.yml` fills with the files
+/// Anvil vendors, read from ferrum-contracts `main` instead of the pinned tag.
+fn contracts_main_dir() -> PathBuf {
+    let dir = std::env::var_os("ANVIL_CONTRACTS_MAIN_DIR")
+        .map(PathBuf::from)
+        .expect("ANVIL_CONTRACTS_MAIN_DIR names a directory holding the ferrum-contracts main files");
+    assert!(dir.join("vocabularies/gateway-errors.json").is_file(), "{} holds no ferrum-contracts files", dir.display());
+    dir
+}
+
+/// Edge main early warning (ferrum-edge/ferrum-contracts#76): the pinned
+/// vocabulary parity checks, against ferrum-contracts `main`, whose
+/// vocabularies record what Edge `main` changes (`main_branch_delta`). Run
+/// weekly by `.github/workflows/edge-main-drift.yml`; never a required check.
+#[test]
+#[ignore = "needs ANVIL_CONTRACTS_MAIN_DIR; run by .github/workflows/edge-main-drift.yml"]
+fn contracts_main_vocabularies_match_anvil() {
+    assert_vocabularies_match_anvil(&repo_root(), &contracts_main_dir());
+}
+
+/// The diagnostic-ref half of the Edge main early warning.
+#[test]
+#[ignore = "needs ANVIL_CONTRACTS_MAIN_DIR; run by .github/workflows/edge-main-drift.yml"]
+fn contracts_main_diagnostic_ref_matches_anvils_reader() {
+    assert_diagnostic_ref_contract_matches_anvils_reader(&contracts_main_dir(), None);
+}
+
+/// Every `const NAME: &str = "value";` in a Rust source, by name.
+fn rust_str_consts(source: &str) -> BTreeMap<String, String> {
+    let mut consts = BTreeMap::new();
+    for line in source.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("pub const ").or_else(|| line.strip_prefix("const ")) else { continue };
+        let Some((name, rest)) = rest.split_once(':') else { continue };
+        let Some(value) = rest.trim().strip_prefix("&str = \"").and_then(|value| value.strip_suffix("\";")) else { continue };
+        consts.insert(name.trim().to_owned(), value.to_owned());
+    }
+    consts
+}
+
+/// Edge's closed `X-Gateway-Error` vocabulary, read from `src/retry.rs`:
+/// the entries of `HTTP_OBSERVABILITY_ERROR_CLASSES`, each a string literal
+/// or an `OBS_*` constant resolved to its value.
+fn edge_gateway_error_tokens(retry_rs: &str) -> BTreeSet<String> {
+    const DECLARATION: &str = "pub const HTTP_OBSERVABILITY_ERROR_CLASSES: &[&str] = &[";
+    let start = retry_rs.find(DECLARATION).expect("HTTP_OBSERVABILITY_ERROR_CLASSES in src/retry.rs") + DECLARATION.len();
+    let end = start + retry_rs[start..].find("];").expect("end of HTTP_OBSERVABILITY_ERROR_CLASSES");
+    let consts = rust_str_consts(retry_rs);
+    let entries: String = retry_rs[start..end].lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    entries
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| match entry.strip_prefix('"').and_then(|literal| literal.strip_suffix('"')) {
+            Some(literal) => literal.to_owned(),
+            None => consts.get(entry).unwrap_or_else(|| panic!("src/retry.rs: unresolved token constant {entry}")).clone(),
+        })
+        .collect()
+}
+
+/// Edge's `ErrorClass` labels, read from `ErrorClass::as_str` in `src/retry.rs`.
+fn edge_error_classes(retry_rs: &str) -> BTreeSet<String> {
+    let start = retry_rs.find("impl ErrorClass {").expect("impl ErrorClass in src/retry.rs");
+    let body = &retry_rs[start..];
+    let body = &body[body.find("fn as_str(").expect("ErrorClass::as_str in src/retry.rs")..];
+    let body = &body[..body.find("\n    }\n").expect("end of ErrorClass::as_str")];
+    let classes: BTreeSet<String> = body
+        .lines()
+        .filter_map(|line| line.split_once("=> \"").map(|(_, label)| label.trim_end_matches(',').trim_end_matches('"').to_owned()))
+        .collect();
+    assert!(!classes.is_empty(), "ErrorClass::as_str in src/retry.rs names no label");
+    classes
+}
+
+/// Shaped like Edge's `src/retry.rs`, comments included.
+const RETRY_RS_EXCERPT: &str = r#"
+impl ErrorClass {
+    /// Stable snake_case label.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ConnectionTimeout => "connection_timeout",
+            Self::RequestError => "request_error",
+        }
+    }
+}
+
+pub const OBS_CONNECTION_FAILURE: &str = "connection_failure";
+/// A comment between constants.
+pub const OBS_LOOP_DETECTED: &str = "loop_detected";
+
+pub const HTTP_OBSERVABILITY_ERROR_CLASSES: &[&str] = &[
+    OBS_CONNECTION_FAILURE,
+    // a comment inside the array
+    OBS_LOOP_DETECTED,
+    "literal_token",
+];
+"#;
+
+#[test]
+fn edge_retry_rs_vocabularies_parse() {
+    assert_eq!(edge_gateway_error_tokens(RETRY_RS_EXCERPT), local(&["connection_failure", "loop_detected", "literal_token"]));
+    assert_eq!(edge_error_classes(RETRY_RS_EXCERPT), local(&["connection_timeout", "request_error"]));
+}
+
+#[test]
+#[should_panic(expected = "unresolved token constant OBS_NEW")]
+fn edge_retry_rs_refuses_an_unresolvable_token() {
+    edge_gateway_error_tokens(&RETRY_RS_EXCERPT.replace("\"literal_token\",", "OBS_NEW,"));
+}
+
+/// Edge main early warning (ferrum-edge/ferrum-contracts#76): the
+/// `X-Gateway-Error` tokens and `ErrorClass` labels Edge `main` actually
+/// emits, from its `src/retry.rs` at the checked commit, against Anvil's
+/// lookup reader and diagnostic wording. ferrum-contracts' vocabularies
+/// describe the release and record main's changes only in prose
+/// (`main_branch_delta.summary`), so they cannot show a value main adds.
+#[test]
+#[ignore = "needs ANVIL_EDGE_MAIN_RETRY_RS; run by .github/workflows/edge-main-drift.yml"]
+fn edge_main_vocabulary_matches_anvils_reader() {
+    let path =
+        std::env::var_os("ANVIL_EDGE_MAIN_RETRY_RS").map(PathBuf::from).expect("ANVIL_EDGE_MAIN_RETRY_RS names Edge main's src/retry.rs");
+    let retry_rs = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    let tokens = edge_gateway_error_tokens(&retry_rs);
+    let (missing, extra) = differences(&tokens, &local(&gateway_detail::TOKENS));
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "Edge main X-Gateway-Error tokens vs Anvil's reader; missing: {missing:?}; extra: {extra:?}"
+    );
+    let diagnostic_tokens: BTreeSet<String> = read_json(&repo_root().join("catalog/diagnostics/findings.en.json"))["findings"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter_map(|code| code.strip_prefix("ferrum.token.").map(str::to_owned))
+        .collect();
+    let (missing, extra) = differences(&tokens, &diagnostic_tokens);
+    assert!(missing.is_empty() && extra.is_empty(), "Edge main tokens vs ferrum.token.* wording; missing: {missing:?}; extra: {extra:?}");
+    let classes = edge_error_classes(&retry_rs);
+    let (missing, extra) = differences(&classes, &local(&gateway_detail::ERROR_CLASSES));
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "Edge main ErrorClass labels vs Anvil's reader; missing: {missing:?}; extra: {extra:?}"
+    );
 }

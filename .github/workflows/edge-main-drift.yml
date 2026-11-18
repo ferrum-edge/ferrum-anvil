@@ -1,0 +1,363 @@
+# Edge main early warning (ferrum-edge/ferrum-contracts#76; docs/consumer-pins.md
+# "Checking against Edge main" in ferrum-contracts). Anvil catalogs released
+# Edge builds, and the contract tests compare the error and diagnostic
+# vocabularies it imports with the pinned contracts-edge copy only. This
+# workflow checks the same surfaces against what has not been released yet:
+#   * the X-Gateway-Error tokens and ErrorClass labels Edge `main` emits, read
+#     from its src/retry.rs at the resolved commit, against Anvil's lookup
+#     reader and wording (edge_main_vocabulary_matches_anvils_reader);
+#   * the contract parity assertions against ferrum-contracts `main`, every
+#     vendored path plus every diagnostic fixture main now has
+#     (contracts_main_vocabularies_match_anvil,
+#     contracts_main_diagnostic_ref_matches_anvils_reader).
+# All three are ignored tests in contracts_adoption.rs that read the
+# downloaded files from ANVIL_EDGE_MAIN_RETRY_RS and ANVIL_CONTRACTS_MAIN_DIR.
+#
+# Never a required check. A failure, or a check that could not run, opens or
+# updates one issue labelled `edge-main-drift`; only a clean run closes it.
+# Only the `issue` job can write, and only issues, with this repository's
+# GITHUB_TOKEN; the job that builds and runs the tests holds `contents:
+# read`. A pull request that changes this workflow or those tests runs the
+# check, and fails on a finding, without touching the issue. The real-gateway
+# lab is not part of it: the lab diagnoses a gateway with its release's
+# audited catalog, which Edge `main` does not have (docs/ci.md).
+name: Edge main drift
+
+on:
+  schedule:
+    - cron: "59 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/edge-main-drift.yml"
+      - "crates/anvil-diagnostics/tests/contracts_adoption.rs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-main-drift-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  PARITY_TESTS: >-
+    contracts_main_vocabularies_match_anvil
+    contracts_main_diagnostic_ref_matches_anvils_reader
+    edge_main_vocabulary_matches_anvils_reader
+
+jobs:
+  check:
+    name: Edge main drift check
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ steps.report.outputs.outcome }}
+      edge-commit: ${{ steps.contracts.outputs.edge-head }}
+      report: ${{ steps.report.outputs.report }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        id: setup
+        with:
+          tauri-deps: "false"
+          node: "false"
+          cache-key: edge-main-drift
+
+      - name: Fetch the Edge main and ferrum-contracts main sources
+        id: contracts
+        # Every path contracts/ferrum-contracts/PIN lists, plus every
+        # diagnostic fixture ferrum-contracts main now has, at one resolved
+        # contracts commit; and Edge main's src/retry.rs at one resolved Edge
+        # commit. A vendored path missing on main is a finding; any other
+        # fetch failure stops the run (reported as `error`).
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          resolve() {
+            local head
+            head=$(git ls-remote "https://github.com/ferrum-edge/$1" refs/heads/main | cut -f1)
+            if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Could not resolve ferrum-edge/$1 main: $head" >&2
+              exit 1
+            fi
+            echo "$head"
+          }
+          contracts=$(resolve ferrum-contracts)
+          edge_head=$(resolve ferrum-edge)
+          dir="$RUNNER_TEMP/contracts-main"
+          edge_dir="$RUNNER_TEMP/edge-main"
+          mkdir -p "$dir" "$edge_dir/src"
+          curl -fsS -o "$edge_dir/src/retry.rs" \
+            "https://raw.githubusercontent.com/ferrum-edge/ferrum-edge/$edge_head/src/retry.rs"
+
+          tree=$(gh api "repos/ferrum-edge/ferrum-contracts/git/trees/$contracts?recursive=1")
+          if [ "$(jq -r .truncated <<< "$tree")" != false ]; then
+            echo "::error::The ferrum-contracts tree listing at $contracts is truncated"
+            exit 1
+          fi
+          pinned=$(awk '$1 == "sha256" { print $3 }' contracts/ferrum-contracts/PIN | LC_ALL=C sort)
+          upstream=$(jq -r '.tree[] | select(.type == "blob") | .path
+            | select(startswith("fixtures/diagnostic-ref/") or startswith("fixtures/diagnostic-finding/"))' <<< "$tree" \
+            | LC_ALL=C sort)
+          missing=""
+          while read -r path; do
+            if ! [[ "$path" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$path" == *..* ]]; then
+              echo "::error::Unexpected contracts path: $path"
+              exit 1
+            fi
+            mkdir -p "$dir/$(dirname "$path")"
+            status=$(curl -sS -o "$dir/$path" -w '%{http_code}' \
+              "https://raw.githubusercontent.com/ferrum-edge/ferrum-contracts/$contracts/$path")
+            case "$status" in
+              200) ;;
+              404)
+                rm -f -- "${dir:?}/${path:?}"
+                missing="$missing $path"
+                ;;
+              *)
+                echo "::error::Fetching $path at $contracts answered HTTP $status"
+                exit 1
+                ;;
+            esac
+          done < <(printf '%s\n%s\n' "$pinned" "$upstream" | sed '/^$/d' | LC_ALL=C sort -u)
+          added=$(LC_ALL=C comm -13 <(printf '%s\n' "$pinned") <(printf '%s\n' "$upstream") | sed '/^$/d' | wc -l | tr -d ' ')
+
+          # main_branch_delta.commit is the Edge commit the vocabularies were
+          # last read at; when Edge main is past it, newer changes may not be
+          # recorded yet. A failed call is reported as one, not as history.
+          delta=$(jq -r '.main_branch_delta.commit // ""' "$dir/vocabularies/gateway-errors.json" 2>/dev/null || true)
+          if [[ "$delta" =~ ^[0-9a-f]{40}$ ]]; then
+            compare=$(gh api "repos/ferrum-edge/ferrum-edge/compare/$delta...$edge_head" \
+              --jq '"\(.status) \(.ahead_by)"' 2>/dev/null || true)
+            status=""
+            ahead=""
+            read -r status ahead <<< "$compare" || true
+            case "$status" in
+              identical) delta_note="read at Edge main's head" ;;
+              ahead) delta_note="read $ahead commit(s) before Edge main's head; newer changes may not be recorded yet" ;;
+              behind | diverged) delta_note="not on Edge main's history ($status)" ;;
+              *) delta_note="could not be compared with Edge main (the compare API call failed)" ;;
+            esac
+          else
+            delta="none"
+            delta_note="ferrum-contracts main records no main_branch_delta in gateway-errors.json"
+          fi
+          {
+            echo "contracts=$contracts"
+            echo "edge-head=$edge_head"
+            echo "delta=$delta"
+            echo "delta-note=$delta_note"
+            echo "missing=${missing# }"
+            echo "added-fixtures=$added"
+            echo "dir=$dir"
+            echo "retry-rs=$edge_dir/src/retry.rs"
+          } >> "$GITHUB_OUTPUT"
+          echo "Checking Anvil against Edge main $edge_head and ferrum-contracts main $contracts ($added fixture(s) beyond PIN)."
+
+      - name: Require every parity test to exist
+        id: list
+        # libtest runs nothing, successfully, when a filter matches no test:
+        # a rename must stop the check, not pass it.
+        run: |
+          set -euo pipefail
+          listed=$(cargo test --locked -p anvil-diagnostics --test contracts_adoption -- --ignored --list --format terse)
+          for name in $PARITY_TESTS; do
+            if ! grep -Fxq "$name: test" <<< "$listed"; then
+              echo "::error::contracts_adoption has no ignored test named $name"
+              exit 1
+            fi
+          done
+
+      - name: Run the parity tests against Edge main and ferrum-contracts main
+        id: parity
+        continue-on-error: true
+        env:
+          ANVIL_CONTRACTS_MAIN_DIR: ${{ steps.contracts.outputs.dir }}
+          ANVIL_EDGE_MAIN_RETRY_RS: ${{ steps.contracts.outputs.retry-rs }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # the names are a space-separated list
+          cargo test --locked -p anvil-diagnostics --test contracts_adoption -- --ignored --exact $PARITY_TESTS \
+            | tee "$RUNNER_TEMP/parity.log"
+          expected=$(wc -w <<< "$PARITY_TESTS" | tr -d ' ')
+          grep -q "test result: ok. $expected passed; 0 failed" "$RUNNER_TEMP/parity.log"
+
+      - name: Write the report
+        # Always, so a run that could not check anything still reaches the
+        # tracking issue as `error` instead of going silent.
+        id: report
+        if: ${{ !cancelled() }}
+        env:
+          CONTRACTS: ${{ steps.contracts.outputs.contracts }}
+          EDGE_HEAD: ${{ steps.contracts.outputs.edge-head }}
+          DELTA: ${{ steps.contracts.outputs.delta }}
+          DELTA_NOTE: ${{ steps.contracts.outputs.delta-note }}
+          MISSING: ${{ steps.contracts.outputs.missing }}
+          ADDED: ${{ steps.contracts.outputs.added-fixtures }}
+          DIR: ${{ steps.contracts.outputs.dir }}
+          PARITY: ${{ steps.parity.outcome }}
+          SETUP: >-
+            checkout=${{ steps.checkout.outcome }}
+            setup=${{ steps.setup.outcome }}
+            fetch-sources=${{ steps.contracts.outcome }}
+            require-parity-tests=${{ steps.list.outcome }}
+        run: |
+          set -euo pipefail
+          # A setup step that did not succeed means nothing was compared.
+          failed_setup=""
+          for entry in $SETUP; do
+            [ "${entry#*=}" = success ] || failed_setup="$failed_setup ${entry%%=*}"
+          done
+          outcome=clean
+          parity=pass
+          files=pass
+          if [ "$PARITY" != success ]; then outcome=drift; parity="**FAIL**"; fi
+          if [ -n "$MISSING" ]; then outcome=drift; files="**FAIL**: missing on main: \`$MISSING\`"; fi
+          if [ -n "$failed_setup" ]; then outcome=error; parity="not run"; files="not run"; fi
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          report="$RUNNER_TEMP/edge-main-drift.md"
+          {
+            echo "<!-- edge-main-drift -->"
+            if [ "$outcome" = error ]; then
+              echo "The Edge main drift check could not run: \`${failed_setup# }\` did not succeed, so nothing was compared. See the run log; a clean scheduled run closes this issue."
+            elif [ "$outcome" = drift ]; then
+              echo "\`$GITHUB_REPOSITORY\` fails its checks against Ferrum Edge \`main\` (its \`src/retry.rs\`) or ferrum-contracts \`main\`, which records what Edge \`main\` changes. This is an early warning: the change is not released yet, so there is time to ship a compatible Anvil release before Edge releases it."
+            else
+              echo "\`$GITHUB_REPOSITORY\` passes its checks against Ferrum Edge \`main\` and ferrum-contracts \`main\`."
+            fi
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Edge \`main\` | [\`${EDGE_HEAD:0:12}\`](https://github.com/ferrum-edge/ferrum-edge/commit/$EDGE_HEAD) |"
+            echo "| ferrum-contracts \`main\` | [\`${CONTRACTS:0:12}\`](https://github.com/ferrum-edge/ferrum-contracts/commit/$CONTRACTS), ${ADDED:-0} diagnostic fixture(s) beyond the pinned set |"
+            echo "| \`main_branch_delta\` (gateway errors) | \`${DELTA:0:12}\`: $DELTA_NOTE |"
+            echo "| Run | $run_url |"
+            echo
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Every vendored contract file exists on ferrum-contracts \`main\` | $files |"
+            echo "| Edge main tokens and ErrorClass labels (\`src/retry.rs\`), contracts-main vocabularies, \`DiagnosticFinding\` schema and diagnostic-ref contract with every current fixture, against Anvil | $parity |"
+            for vocabulary in gateway-errors gateway-headers; do
+              summary=$(jq -r '.main_branch_delta.summary // empty' "$DIR/vocabularies/$vocabulary.json" 2>/dev/null || true)
+              if [ -n "$summary" ]; then
+                echo
+                echo "<details><summary><code>$vocabulary</code> main_branch_delta summary (for review)</summary>"
+                echo
+                echo '```text'
+                printf '%s\n' "$summary" | head -c 6000
+                echo
+                echo '```'
+                echo
+                echo "</details>"
+              fi
+            done
+            echo
+            echo "The run log names each failing assertion. A clean scheduled run closes this issue."
+          } > "$report"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "outcome=$outcome"
+            echo "report=$(base64 -w0 "$report")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fail a finding the issue job will not file
+        # Pull requests and dispatches from other branches never reach the
+        # issue job, so their own status has to carry a drift or an error.
+        if: >-
+          !cancelled() && steps.report.outputs.outcome != 'clean' &&
+          (github.event_name == 'pull_request' ||
+          github.ref != format('refs/heads/{0}', github.event.repository.default_branch))
+        env:
+          OUTCOME: ${{ steps.report.outputs.outcome }}
+        run: |
+          echo "::error::The Edge main drift check found ${OUTCOME:-an error}; see the step summary."
+          exit 1
+
+  # Checks out and runs nothing. Runs whenever the check job ran (so a check
+  # that could not run is filed as `error`), never for pull requests or a
+  # dispatch from another branch. Only a clean run closes the issue.
+  issue:
+    name: Edge main drift issue
+    needs: check
+    if: >-
+      !cancelled() && needs.check.result != 'cancelled' && needs.check.result != 'skipped' &&
+      github.event_name != 'pull_request' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open, update or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_RESULT: ${{ needs.check.result }}
+          OUTCOME: ${{ needs.check.outputs.outcome }}
+          EDGE_COMMIT: ${{ needs.check.outputs.edge-commit }}
+          REPORT: ${{ needs.check.outputs.report }}
+        run: |
+          set -euo pipefail
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          label=edge-main-drift
+          marker='<!-- edge-main-drift -->'
+          title="Edge main drift: Anvil fails its checks against Ferrum Edge main"
+          report="$RUNNER_TEMP/report.md"
+          case "$OUTCOME" in
+            clean | drift | error) base64 -d <<< "$REPORT" > "$report" ;;
+            *)
+              # The check job stopped before its report step (a timeout, a
+              # runner loss): nothing was compared, and that is a finding too.
+              OUTCOME=error
+              {
+                echo "$marker"
+                echo "The Edge main drift check did not finish (check job: \`$CHECK_RESULT\`), so it compared nothing against Ferrum Edge \`main\` this run. A clean scheduled run closes this issue."
+                echo
+                echo "Run: $run_url"
+              } > "$report"
+              ;;
+          esac
+          # Only an issue this workflow wrote (its body starts with the marker)
+          # is edited or closed; a human-labelled issue is left alone.
+          number=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues?state=open&labels=$label&per_page=100" \
+            --jq '.[] | select(.pull_request == null and ((.body // "") | startswith("<!-- edge-main-drift -->"))) | .number' \
+            | sort -n | sed -n 1p)
+          case "$OUTCOME" in
+            drift | error)
+              if [ "$OUTCOME" = drift ]; then
+                note="Still failing against Ferrum Edge main at \`${EDGE_COMMIT:0:12}\`: $run_url"
+                summary="Anvil fails checks against Ferrum Edge main at ${EDGE_COMMIT:-an unknown commit}"
+              else
+                note="The Edge main drift check could not run: $run_url"
+                summary="The Edge main drift check could not run"
+              fi
+              gh label create "$label" --repo "$GITHUB_REPOSITORY" --color B60205 \
+                --description "Fails its checks against unreleased Ferrum Edge main" --force
+              if [ -n "$number" ]; then
+                gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$report"
+                gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "$note"
+                echo "::notice::Updated tracking issue #$number."
+              else
+                gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label "$label" \
+                  --body-file "$report"
+                echo "::notice::Opened a tracking issue."
+              fi
+              echo "::error::$summary; see the tracking issue."
+              exit 1
+              ;;
+            clean)
+              if [ -n "$number" ]; then
+                gh issue close "$number" --repo "$GITHUB_REPOSITORY" \
+                  --comment "Clean against Ferrum Edge main at \`${EDGE_COMMIT:0:12}\`: $run_url"
+                echo "::notice::Closed tracking issue #$number."
+              fi
+              ;;
+          esac

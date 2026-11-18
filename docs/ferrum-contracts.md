@@ -51,8 +51,51 @@ reader vocabularies. All original fixtures and precise negative expectations
 are exercised by the independent schema gate and the real parser. Alloy
 report parity removes only `$id`/`x-contract`, including description parity.
 The lab default must be covered by the pin, and its catalog source must match
-its release lock. These checks use no network and do not establish live
-gateway compatibility.
+its release lock. These pinned checks use no network and do not establish
+live gateway compatibility; the weekly Edge main check below is the one that
+reads the network.
+
+## Checking against Edge main
+
+The pin binds these checks to a released Edge, so they cannot see a change
+that has landed only on Edge `main`. The weekly `edge-main-drift.yml` workflow
+is the early warning for that (ferrum-edge/ferrum-contracts#76). It runs three
+ignored tests in `crates/anvil-diagnostics/tests/contracts_adoption.rs`:
+
+- `edge_main_vocabulary_matches_anvils_reader` reads Edge `main`'s
+  `src/retry.rs` at the resolved commit (`ANVIL_EDGE_MAIN_RETRY_RS`). It
+  compares the `X-Gateway-Error` tokens in `HTTP_OBSERVABILITY_ERROR_CLASSES`
+  and the `ErrorClass::as_str` labels with Anvil's lookup reader
+  (`gateway_detail::TOKENS`, `gateway_detail::ERROR_CLASSES`) and the
+  `ferrum.token.*` wording. ferrum-contracts' vocabularies describe the
+  release and record main's changes only in prose (`main_branch_delta.summary`),
+  so only Edge's source shows a value main adds.
+- `contracts_main_vocabularies_match_anvil` and
+  `contracts_main_diagnostic_ref_matches_anvils_reader` run the pinned parity
+  assertions against ferrum-contracts `main` (`ANVIL_CONTRACTS_MAIN_DIR`):
+  every path `PIN` lists, plus every diagnostic-ref and DiagnosticFinding
+  fixture main has, at one resolved contracts commit.
+
+```bash
+ANVIL_CONTRACTS_MAIN_DIR=/path/to/contracts-files ANVIL_EDGE_MAIN_RETRY_RS=/path/to/retry.rs \
+  cargo test -p anvil-diagnostics --test contracts_adoption -- --ignored --exact \
+  contracts_main_vocabularies_match_anvil contracts_main_diagnostic_ref_matches_anvils_reader \
+  edge_main_vocabulary_matches_anvils_reader
+```
+
+The workflow first lists the ignored tests and stops if any of the three is
+missing, so a rename cannot turn the check into a run of nothing. A failure, or
+a vendored path missing on `main`, is a finding. A check that could not run (a
+fetch, setup or listing failure) is an error. Either one opens or updates the
+one issue labelled `edge-main-drift` whose body starts with the workflow's
+marker, and only a clean run closes it. On a pull request or a dispatch from
+another branch, which never reach the issue job, the check job itself fails.
+The issue names both commits, the `main_branch_delta` commit and how far Edge
+`main` has moved past it, and quotes the delta summaries for review. Only the
+issue job holds `issues: write`, with the repository's own `GITHUB_TOKEN`. It
+is never a required check. The real-gateway lab is not run against Edge `main`:
+a lab run diagnoses with the audited catalog of its gateway's release, and
+`main` has none.
 
 ## Bumping the pin
 
@@ -66,5 +109,7 @@ gateway compatibility.
 5. Run the normal CI suite. Its pinned-contract checks must pass before
    merging the update.
 
-Contract checks perform no network access; the downloaded files and hashes
-are committed with the change.
+The pinned contract checks perform no network access; the downloaded files and
+hashes are committed with the change. Only the weekly Edge main check reads the
+two public repositories at their current `main` (see
+[Checking against Edge main](#checking-against-edge-main)).
