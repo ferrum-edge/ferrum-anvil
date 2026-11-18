@@ -518,8 +518,10 @@ fn the_quarantine_placeholder_never_binds_a_source_name() {
     ]));
     let r = import(&doc, &ImportOptions::default()).unwrap();
     let a = &r.requests[0].spec.url;
-    assert_eq!(r.requests[1].spec.url, "{{url-needs-review}}");
-    assert!(!a.contains("{{url-needs-review}}"), "a path parameter took the quarantine placeholder");
+    // The `:url-needs-review` path segment is reserved before any placeholder
+    // is allocated, so the quarantine placeholder takes the next free name.
+    assert_eq!(r.requests[1].spec.url, "{{url-needs-review_2}}");
+    assert!(!a.contains("{{url-needs-review_2}}"), "a path parameter took the quarantine placeholder");
     let doc = postman_doc_items(json!([
         { "name": "a", "request": { "method": "GET", "url": "https://api.example.test/", "header": [{ "key": "X-Id", "value": "{{url-needs-review}}" }] } },
         { "name": "b", "request": { "method": "GET", "url": quarantined } },
