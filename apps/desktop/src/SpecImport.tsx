@@ -185,7 +185,7 @@ export function SpecImport(props: { workspaceId: string | null; workspaceName: s
       </div>
       {err && <div className="bad-box">{err}</div>}
       {preview && <PreviewView p={preview} />}
-      <p className="hint">Imports never send requests or run scripts. Scripts in Postman/Insomnia collections are kept only as notes in the report. External $refs are listed, never fetched.</p>
+      <p className="hint">Imports never send requests or run scripts. Scripts in Postman/Insomnia collections are not imported: the report lists where they are, not what they say. External $refs are listed, never fetched.</p>
     </div>
   );
 }
@@ -226,7 +226,7 @@ function PreviewView({ p }: { p: SpecPreview }) {
       <Section title="Not imported / not representable" items={r.unsupported.map((x) => `${x.message} (${x.pointer})`)} />
       <Section title="Warnings" items={r.warnings.map((x) => `${x.message} (${x.pointer})`)} />
       <Section title="External references (not fetched)" items={r.external_refs.map((x) => `${x.reference} — ${humanize(x.kind)}`)} />
-      <Section title="Scripts kept as notes (never run)" items={r.scripts.map((x) => `${x.owner} ${x.event} (${x.language})`)} />
+      <Section title="Scripts found (not imported, never run)" items={r.scripts.map((x) => `${humanize(x.owner)} ${x.event} (${x.language}, ${x.lines} lines) (${x.pointer})`)} />
       <Section title="Settings imported inactive" items={r.inactive_settings.map((x) => `${x.setting}: ${x.reason}`)} />
       <details>
         <summary>First requests</summary>

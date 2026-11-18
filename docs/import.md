@@ -24,7 +24,7 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 |---|---|
 | No network or file I/O during import | The crate has no I/O code paths. External `$ref`s, `wsdl:import`, `xsd:import`/`include`/`redefine` with `schemaLocation`, `externalValue` examples, OpenID Connect discovery URLs, `oauth2MetadataUrl`, Postman/Insomnia/cURL file references are listed in `report.external_refs` with every location that uses them and `requires_approval: true`. Resolving one is a separate, explicit, per-reference user action outside this crate. |
 | Safe XML | WSDL is parsed with `roxmltree` with DTDs refused (`allow_dtd: false`): internal/external entity declarations fail the import with `ImportError::UnsafeXml`; undeclared entities are syntax errors. Node count is bounded. |
-| Nothing becomes active by import | Pre-request/test/after-response scripts and Insomnia unit tests are copied verbatim into `report.scripts` with `enabled: false, trusted: false` and never attached to requests. TLS-verification bypass (`curl -k`, Postman `strictSSL: false`), credential forwarding across redirects (`--location-trusted`, `followAuthorizationHeader`) and OpenAPI callbacks are listed in `report.inactive_settings` and never applied. Imported requests are never sent. |
+| Nothing becomes active by import | Pre-request/test/after-response scripts and Insomnia unit tests are not imported: `report.scripts` lists each one by its location, owner kind (`collection`, `folder`, `request`, `test_suite`), event, language and size, with `enabled: false, trusted: false`, never its body or its owner's name. TLS-verification bypass (`curl -k`, Postman `strictSSL: false`), credential forwarding across redirects (`--location-trusted`, `followAuthorizationHeader`) and OpenAPI callbacks are listed in `report.inactive_settings` and never applied. Imported requests are never sent. |
 | No invented credentials | Auth is imported as configs whose secrets are `{{variable}}` references, listed in `report.required_variables` and deliberately *not* defined, so a request fails validation (unresolved variable) until the user supplies a value. Credential-like body fields and parameters are never generated in samples. |
 | Credential redaction (migrations) | Literal credentials in migrated input become `{{placeholder}}` variables; see [Credential redaction](#credential-redaction). |
 | Bounded work | Inputs and generated output are bounded; see [Limits](#limits). Malformed input yields an `ImportError`, never a panic (property-tested). |
@@ -114,8 +114,11 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   - Every other credential placeholder (a header, query, form or body
     field, an auth secret) is named through the same allocator: one name
     per field name, never a name the source defines, references or derives
-    (`r_password_2` when the source defines `r_password`). A path
-    parameter keeps its own name.
+    (`api_key_2` when the source defines `api_key`). A path parameter keeps
+    its own name. A Postman or Insomnia auth config's secrets get a base
+    the import allocates per config (`auth_password`, `auth_2_token`, …),
+    never one derived from the collection, folder or request name, which
+    can repeat a credential.
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia
@@ -203,30 +206,41 @@ argument index for cURL (`/args/7`).
 The report is bounded: at most 1000 findings of one code are kept (one
 `report_truncated` warning notes the rest), a stored pointer longer than 512
 characters is clipped and suffixed with a hash of the whole pointer (so
-distinct locations stay distinct), messages and values are clipped to 2048, an external reference or
+distinct locations stay distinct), redaction field names are clipped to 2048, an external reference or
 required variable keeps at most 1000 locations, and at most 10,000 inactive
 settings, redactions and scripts are kept.
 
-Report text never carries a credential, in either mode: every message,
-pointer (each RFC 6901 token, which can be a source key; a changed token
-keeps a digest so locations stay distinct), inactive setting, redaction
-field, required-variable reason, external reference, retained script and
-operation key goes through one redaction first, and so do imported
-request, folder, environment and workspace names. That redaction:
+Report text never carries a credential, in either mode (#584):
 
-- replaces a URL userinfo that is not exactly references with `<redacted>`
-  (by the rule above), and an ambiguous URL with `<url redacted>`;
-- replaces a `{{…}}` that is not a plain name (an identifier, a dotted path
-  or an argument-free `$helper`) with `{{…}}`;
-- by credential-name heuristics, replaces with `<redacted>` the value of a
-  `name=value` or `name: value` pair whose name is a credential name
-  (quoted or not; a reference or a plain word such as `none` is kept), the
-  token after `Bearer`, `Basic`, `Token` or `Digest` when it looks like one,
-  and a JWT.
-
-cURL diagnostics do not echo an ignored URL, a connection option's value or
-the rest of a command line; the pointer locates them. A retained script is
-otherwise kept as written.
+- Messages, required-variable reasons and inactive-setting values are the
+  importer's own words and the numbers it computed (counts, configured
+  limits). They never quote a source value: not an option, a header or
+  setting name, a media type, an auth type, a version, a `$ref`, a pattern,
+  a constraint or a URL. The entry's pointer locates what it is about. In
+  the code this is a type (`Message`), which cannot be built from a
+  `String`.
+- Retained scripts carry metadata only (see above).
+- Credential placeholders and required variables are named by the import:
+  an auth config's secrets are `{{auth_password}}`, `{{auth_2_token}}`, …,
+  never derived from a collection, folder or request name.
+- What must quote the source goes through one redaction as a last line of
+  defence: pointer tokens (source keys; a changed token keeps a digest so
+  locations stay distinct), external references (shown for approval),
+  redaction field names, and imported request, folder, environment and
+  workspace names and operation keys. That redaction:
+  - replaces a URL userinfo that is not exactly references with
+    `<redacted>` (by the rule above), and an ambiguous URL with
+    `<url redacted>`;
+  - replaces a `{{…}}` that is not a plain name (an identifier, a dotted
+    path or an argument-free `$helper`) with `{{…}}`;
+  - by credential-name heuristics, replaces with `<redacted>` the value of a
+    `name=value` or `name: value` pair whose name is a credential name
+    (`==`, `!=`, `:=` and `+=` count, any whitespace may surround the
+    separator, a quoted value runs to its unescaped closing quote or the end
+    of the text, and only a value that is exactly references, exactly a
+    redaction marker or a plain word such as `none` is kept), the token
+    after `Bearer`, `Basic`, `Token` or `Digest` when it looks like one, and
+    a JWT, including a bare JWT pointer token. It is linear in the text.
 
 Codes are stable strings (for example `recursive_schema`,
 `composition_first_branch`, `contradictory_schema`, `openapi32_construct`,
