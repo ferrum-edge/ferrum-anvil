@@ -56,37 +56,62 @@ impl SensitiveValue {
 pub enum TemplateKind {
     /// Nothing but whitespace.
     Empty,
-    /// Exactly one plain variable reference and nothing else.
+    /// Exactly one variable reference and nothing else.
     Reference,
-    /// Only plain variable references, with nothing between them but
-    /// whitespace or one auth-scheme word (`Bearer {{token}}`).
+    /// Only variable references, with nothing between them but whitespace or
+    /// one auth-scheme word (`Bearer {{token}}`).
     References,
-    /// Anything else: literal text, a quoted string, a number, a filter, a
-    /// dynamic helper (with or without arguments), an unterminated `{{`, or
-    /// text mixed with references. Under a credential name, this is
-    /// credential material.
+    /// Anything else: literal text, an expression that is not a reference in
+    /// the source's syntax ([`TemplateSyntax`]), a dynamic helper with
+    /// arguments, an unterminated `{{`, or text mixed with references. Under a
+    /// credential name, this is credential material.
     Literal,
+}
+
+/// How the source of a template value reads `{{…}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TemplateSyntax {
+    /// Postman, cURL (shell variables) and HAR: `{{…}}` names a variable and
+    /// is never evaluated, so any text without braces is a variable name.
+    /// Only a dynamic helper with arguments (`{{$randomFrom a|b}}`), which
+    /// Anvil would evaluate with its literal arguments, is literal.
+    #[default]
+    Name,
+    /// Insomnia (Nunjucks) and the export sanitizer, which cannot tell where a
+    /// value came from: a reference is only an identifier
+    /// `[A-Za-z_][A-Za-z0-9_]*` or a dotted path of them, optionally after
+    /// `_.`. Anything else (a quoted string, a number, `-` or another
+    /// operator, a filter, a helper) is an expression whose text is literal.
+    Nunjucks,
 }
 
 /// Auth-scheme words that carry no secret next to a reference.
 const SCHEME_WORDS: &[&str] = &["bearer", "basic", "token", "digest", "apikey", "dpop", "hmac", "negotiate", "jwt"];
 
-/// Whether a `{{…}}` expression is a plain variable reference: an identifier
-/// `[A-Za-z_][A-Za-z0-9_.-]*`, optionally Insomnia's `_.` prefixed, with
-/// optional whitespace around it.
-pub fn is_plain_reference_expr(expr: &str) -> bool {
+/// Whether a `{{…}}` expression is a variable reference in `syntax`
+/// ([`TemplateSyntax`]).
+pub fn is_plain_reference_expr(expr: &str, syntax: TemplateSyntax) -> bool {
     let e = expr.trim();
-    let ident = e.strip_prefix("_.").unwrap_or(e);
-    let mut chars = ident.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    match syntax {
+        TemplateSyntax::Name => {
+            !e.is_empty() && !e.contains(['{', '}']) && !e.strip_prefix('$').is_some_and(|helper| helper.contains(char::is_whitespace))
+        }
+        TemplateSyntax::Nunjucks => {
+            let path = e.strip_prefix("_.").unwrap_or(e);
+            !path.is_empty()
+                && path.split('.').all(|ident| {
+                    let mut chars = ident.chars();
+                    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+                })
+        }
+    }
 }
 
-/// Classify a template value ([`TemplateKind`]). One rule for every place
-/// that decides whether a credential-named value is a reference to keep or a
-/// literal to redact or extract: only plain references
-/// ([`is_plain_reference_expr`]) are references; everything else is literal.
-pub fn classify_template_value(value: &str) -> TemplateKind {
+/// Classify a template value ([`TemplateKind`]) read in `syntax`. One rule for
+/// every place that decides whether a credential-named value is a reference
+/// to keep or a literal to redact or extract.
+pub fn classify_template_value(value: &str, syntax: TemplateSyntax) -> TemplateKind {
     let t = value.trim();
     if t.is_empty() {
         return TemplateKind::Empty;
@@ -98,7 +123,7 @@ pub fn classify_template_value(value: &str) -> TemplateKind {
         literal.push_str(&rest[..open]);
         let after = &rest[open + 2..];
         let Some(close) = after.find("}}") else { return TemplateKind::Literal };
-        if !is_plain_reference_expr(&after[..close]) {
+        if !is_plain_reference_expr(&after[..close], syntax) {
             return TemplateKind::Literal;
         }
         references += 1;
@@ -113,6 +138,97 @@ pub fn classify_template_value(value: &str) -> TemplateKind {
         _ if SCHEME_WORDS.contains(&lit.to_ascii_lowercase().as_str()) => TemplateKind::References,
         _ => TemplateKind::Literal,
     }
+}
+
+/// Whether a URL's authority (`after_scheme`: the URL after `scheme://`, or
+/// the whole URL when it has no scheme) is exactly one plain reference, by
+/// the strict rule ([`TemplateSyntax::Nunjucks`]), followed by `/`, `?`, `#`
+/// or the end (`{{baseUrl}}/x?email=a@b`): the whole authority is inside
+/// that variable, so no literal text in the URL is userinfo.
+pub fn authority_is_one_reference(after_scheme: &str) -> bool {
+    let Some(inner) = after_scheme.strip_prefix("{{") else { return false };
+    // A plain reference holds only identifier characters, dots and spaces:
+    // stop at the first other one, so a caller scanning many URLs stays
+    // linear.
+    let close = inner.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c.is_whitespace())).unwrap_or(inner.len());
+    inner[close..].starts_with("}}")
+        && is_plain_reference_expr(&inner[..close], TemplateSyntax::Nunjucks)
+        && inner[close + 2..].chars().next().is_none_or(|c| matches!(c, '/' | '?' | '#'))
+}
+
+/// Where a URL's userinfo is, found without parsing templates
+/// ([`url_userinfo`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlUserinfo {
+    /// No userinfo.
+    None,
+    /// The userinfo is `url[start..at]`, before the `@` at byte `at`.
+    Userinfo { start: usize, at: usize },
+    /// A template comes before the end of the authority and the URL holds an
+    /// `@`: where a credential in it ends cannot be told, so no part of the
+    /// URL may be trusted to be free of one.
+    Ambiguous,
+}
+
+/// Find a URL's userinfo without parsing templates: one rule for the
+/// importers (which take it off or quarantine the URL) and the export and
+/// report redaction (which extract or hide it).
+///
+/// The authority runs from after `scheme://` (or the start, for
+/// `user:pw@host/path`) to the first `/`, `?` or `#` (RFC 3986), and the
+/// userinfo is everything before its last `@`. When a template (`{{`, and for
+/// [`TemplateSyntax::Nunjucks`] a `{%` tag) comes before that end and the URL
+/// holds an `@` anywhere, the URL is [`UrlUserinfo::Ambiguous`], except:
+/// - the whole authority is one plain reference
+///   ([`authority_is_one_reference`]: `{{baseUrl}}/x?email=a@b`), so no
+///   literal text is userinfo;
+/// - with a scheme, the only templates there are a userinfo of exactly
+///   variable references in `syntax` before a literal host
+///   ([`is_plain_userinfo`]).
+pub fn url_userinfo(url: &str, syntax: TemplateSyntax) -> UrlUserinfo {
+    let templated = |t: &str| t.contains("{{") || (syntax == TemplateSyntax::Nunjucks && t.contains("{%"));
+    let (prefix_len, rest) = match url.split_once("://") {
+        Some((scheme, rest)) if !scheme.is_empty() && !scheme.contains(['/', '?', '#', '@']) => (scheme.len() + 3, rest),
+        _ => (0, url),
+    };
+    let prefix = &url[..prefix_len];
+    if !templated(prefix) && authority_is_one_reference(rest) {
+        return UrlUserinfo::None;
+    }
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let at = rest[..end].rfind('@');
+    if templated(&url[..prefix_len + end]) {
+        if !url.contains('@') {
+            return UrlUserinfo::None;
+        }
+        return match at {
+            // A schemeless URL (`{{baseUrl}}@host/x`) may hold its scheme and
+            // host in the reference: always ambiguous.
+            Some(at)
+                if prefix_len > 0 && !templated(prefix) && !templated(&rest[at + 1..end]) && is_plain_userinfo(&rest[..at], syntax) =>
+            {
+                UrlUserinfo::Userinfo { start: prefix_len, at: prefix_len + at }
+            }
+            _ => UrlUserinfo::Ambiguous,
+        };
+    }
+    match at {
+        Some(at) => UrlUserinfo::Userinfo { start: prefix_len, at: prefix_len + at },
+        None => UrlUserinfo::None,
+    }
+}
+
+/// Whether a URL userinfo is exactly variable references in `syntax`:
+/// `{{user}}`, `{{user}}:` or `{{user}}:{{password}}`. Anything else (a
+/// literal user name or password, an expression, a token) is credential
+/// material.
+pub fn is_plain_userinfo(userinfo: &str, syntax: TemplateSyntax) -> bool {
+    let (user, pass) = match userinfo.split_once(':') {
+        Some((u, p)) => (u, p),
+        None => (userinfo, ""),
+    };
+    classify_template_value(user, syntax) == TemplateKind::Reference
+        && matches!(classify_template_value(pass, syntax), TemplateKind::Empty | TemplateKind::Reference)
 }
 
 /// Marker text substituted wherever a secret would otherwise be displayed or
@@ -250,30 +366,86 @@ mod template_kind_tests {
     use super::*;
 
     #[test]
-    fn only_plain_references_are_references() {
-        for (v, kind) in [
-            ("", TemplateKind::Empty),
-            ("  ", TemplateKind::Empty),
-            ("{{token}}", TemplateKind::Reference),
-            (" {{ token }} ", TemplateKind::Reference),
-            ("{{ _.api.version }}", TemplateKind::Reference),
-            ("{{a-b}}", TemplateKind::Reference),
-            ("Bearer {{token}}", TemplateKind::References),
-            ("{{user}}:{{pass}}", TemplateKind::Literal),
-            ("{{a}}{{b}}", TemplateKind::References),
-            ("{{ 'tok-SENSITIVE-k1' }}", TemplateKind::Literal),
-            ("{{\"tok-SENSITIVE-k2\"}}", TemplateKind::Literal),
-            ("{{ 571571571 }}", TemplateKind::Literal),
-            ("{{ x | upper }}", TemplateKind::Literal),
-            ("{{$guid}}", TemplateKind::Literal),
-            ("{{$randomFrom a|b}}", TemplateKind::Literal),
-            ("{{api key}}", TemplateKind::Literal),
-            ("{{tenant}}-live", TemplateKind::Literal),
-            ("{{unterminated", TemplateKind::Literal),
-            ("{{}}", TemplateKind::Literal),
-            ("literal", TemplateKind::Literal),
+    fn a_leading_reference_can_hold_the_whole_authority() {
+        for whole in ["{{baseUrl}}/x?email=a@b", "{{baseUrl}}?q=a@b", "{{ _.baseUrl }}#a@b", "{{baseUrl}}"] {
+            assert!(authority_is_one_reference(whole), "{whole:?}");
+        }
+        for not in ["{{baseUrl}}@evil/x", "{{ base Url }}/x@y", "{{a}}{{b}}/x@y", "pre{{a}}/x@y", "{{a-b}}/x", "{{unterminated/x"] {
+            assert!(!authority_is_one_reference(not), "{not:?}");
+        }
+    }
+
+    #[test]
+    fn url_userinfo_is_found_without_parsing_templates() {
+        use TemplateSyntax::{Name, Nunjucks};
+        let userinfo = |url: &str, syntax| match url_userinfo(url, syntax) {
+            UrlUserinfo::Userinfo { start, at } => Some(url[start..at].to_string()),
+            _ => None,
+        };
+        assert_eq!(url_userinfo("https://api.example.test/x?email=a@b", Nunjucks), UrlUserinfo::None);
+        assert_eq!(userinfo("https://admin:p@w@api.example.test/x", Nunjucks).as_deref(), Some("admin:p@w"));
+        assert_eq!(userinfo("admin:pw@api.example.test/x", Nunjucks).as_deref(), Some("admin:pw"));
+        assert_eq!(userinfo("https://{{u}}:{{p}}@api.example.test/", Nunjucks).as_deref(), Some("{{u}}:{{p}}"));
+        assert_eq!(userinfo("https://{{ my user }}@api.example.test/", Name).as_deref(), Some("{{ my user }}"));
+        for kept in ["https://{{baseUrl}}/x?email=a@b", "{{baseUrl}}?q=a@b", "https://{{host}}/x"] {
+            assert_eq!(url_userinfo(kept, Nunjucks), UrlUserinfo::None, "{kept:?}");
+        }
+        for ambiguous in [
+            "{{baseUrl}}@evil/x",
+            "https://{{ base Url }}/x@y",
+            "https://pre{{a}}/x@y",
+            "https://admin:{{ 'tok/x' }}@api.example.test/",
+            "{{scheme}}://admin:pw@api.example.test/",
+            "https://{{ my user }}@api.example.test/",
+            "https://u:{% uuid 'v4' %}x@api.example.test/",
         ] {
-            assert_eq!(classify_template_value(v), kind, "{v:?}");
+            assert_eq!(url_userinfo(ambiguous, Nunjucks), UrlUserinfo::Ambiguous, "{ambiguous:?}");
+        }
+        // A `{%` tag is text outside Insomnia's syntax.
+        assert_eq!(userinfo("https://u:{% x %}@api.example.test/", Name).as_deref(), Some("u:{% x %}"));
+    }
+
+    #[test]
+    fn only_references_make_a_plain_userinfo() {
+        use TemplateSyntax::Nunjucks;
+        for plain in ["{{user}}", "{{user}}:", "{{user}}:{{pass}}", "{{ _.user }}:{{ _.pass }}"] {
+            assert!(is_plain_userinfo(plain, Nunjucks), "{plain:?}");
+        }
+        for literal in ["admin", "admin:pw", "admin:{{pw}}", "{{user}}:pw", ":{{pw}}", "{{ 'tok:rest' }}", "", "tok"] {
+            assert!(!is_plain_userinfo(literal, Nunjucks), "{literal:?}");
+        }
+    }
+
+    #[test]
+    fn references_follow_the_source_syntax() {
+        use TemplateKind::*;
+        use TemplateSyntax::*;
+        for (v, name, nunjucks) in [
+            ("", Empty, Empty),
+            ("  ", Empty, Empty),
+            ("{{token}}", Reference, Reference),
+            (" {{ token }} ", Reference, Reference),
+            ("{{ _.api.version }}", Reference, Reference),
+            ("Bearer {{token}}", References, References),
+            ("{{a}}{{b}}", References, References),
+            ("{{user}}:{{pass}}", Literal, Literal),
+            // Never evaluated by Postman, cURL or HAR: a variable name.
+            ("{{a-b}}", Reference, Literal),
+            ("{{ _.zero--571571575 }}", Reference, Literal),
+            ("{{ 'tok-SENSITIVE-k1' }}", Reference, Literal),
+            ("{{ 571571571 }}", Reference, Literal),
+            ("{{ x | upper }}", Reference, Literal),
+            ("{{api key}}", Reference, Literal),
+            ("{{$guid}}", Reference, Literal),
+            // Evaluated by Anvil with literal arguments.
+            ("{{$randomFrom a|b}}", Literal, Literal),
+            ("{{tenant}}-live", Literal, Literal),
+            ("{{unterminated", Literal, Literal),
+            ("{{}}", Literal, Literal),
+            ("literal", Literal, Literal),
+        ] {
+            assert_eq!(classify_template_value(v, Name), name, "Name: {v:?}");
+            assert_eq!(classify_template_value(v, Nunjucks), nunjucks, "Nunjucks: {v:?}");
         }
     }
 }

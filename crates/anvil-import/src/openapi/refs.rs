@@ -68,7 +68,10 @@ impl<'a> Refs<'a> {
                 return Some((cur, cur_ptr));
             };
             if r.len() > MAX_REF_LEN {
-                let msg = format!("$ref '{}' is longer than {MAX_REF_LEN} bytes and was not followed", clip(r, 64));
+                let msg = format!(
+                    "$ref '{}' is longer than {MAX_REF_LEN} bytes and was not followed",
+                    clip(&crate::report::redact_for_report(r), 64)
+                );
                 report.warn("ref_too_long", &cur_ptr, msg);
                 return None;
             }

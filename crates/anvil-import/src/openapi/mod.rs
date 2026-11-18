@@ -322,7 +322,7 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
         b.report.warn(
             "relative_server_url",
             &ptr(sptr, "url"),
-            format!("server URL '{}' is relative; it is prefixed with {{{{origin}}}}", clip(raw, 256)),
+            format!("server URL '{}' is relative; it is prefixed with {{{{origin}}}}", clip(&crate::report::redact_for_report(raw), 256)),
         );
         url = origin.trim_end_matches('/').to_string();
     }

@@ -38,13 +38,16 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   and listed in `report.redactions`, unless `ImportOptions::include_credentials`
   is set (kept values are then marked sensitive).
 - A value that is only plain variable references plus an auth scheme word
-  (`Bearer {{token}}`) is not a literal secret and is kept. A plain
-  reference is `{{ name }}` or Insomnia's `{{ _.name }}`, where the name is
-  `[A-Za-z_][A-Za-z0-9_.-]*`. Anything else inside `{{…}}`, such as a
-  quoted string (`{{ 'key' }}`), a number, a filter or a dynamic helper
-  (with or without arguments), is literal, and so is redacted under a
-  credential name. The export sanitizer applies the same rule
-  (`anvil_domain::secret::classify_template_value`).
+  (`Bearer {{token}}`) is not a literal secret and is kept. What counts as a
+  reference follows the source (`anvil_domain::secret::classify_template_value`):
+  Postman, cURL and HAR never evaluate `{{…}}`, so any text without braces
+  there is a variable name, and only a dynamic helper with arguments
+  (`{{$randomFrom a|b}}`, which Anvil would evaluate) is literal. Insomnia
+  evaluates Nunjucks, so there a reference is only an identifier
+  (`[A-Za-z_][A-Za-z0-9_]*`) or a dotted path of them, optionally after
+  `_.`; a quoted string (`{{ 'key' }}`), a number, `-` or another operator,
+  a filter or a helper is literal and is redacted under a credential name.
+  The export sanitizer, which cannot tell the source, uses the Insomnia rule.
 - A query kept in the URL verbatim (one with a bare `flag` segment, one whose
   decoding would make a `{{reference}}`, or one written into an Insomnia URL)
   keeps its exact syntax, but its credential-named `name=value` segments
@@ -56,17 +59,47 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   decoded one (so `%7B%7Bapi_key%7D%7D` cannot read a variable `api_key`).
   A value that decodes to whitespace only stays in the query, and a `+` or
   an escape that is not UTF-8 in a moved pair is reported.
-- URL userinfo (`https://user:password@host/`) becomes Basic auth with a
-  `{{password}}` placeholder in every migration importer, and the URL loses it
-  (the engine never sends credentials in the URL). The userinfo ends at the
-  last `@` before the path, so a password holding `@` is removed whole. A
-  request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a Postman
-  or Insomnia auth helper) or with auth explicitly off keeps that, and the
-  userinfo is dropped (`url_credentials_dropped`). A user name or password
-  whose decoding would make or change a `{{reference}}` (`%7B%7Bid%7D%7D`), or
-  is not UTF-8, is never decoded: the user name is kept as written
-  (`url_user_not_decoded`) and the password becomes a required `{{password}}`
-  even with `include_credentials` (`url_password_not_decoded`).
+- URL userinfo (`https://user:password@host/`) is taken off the URL in every
+  migration importer (the engine never sends credentials in the URL).
+  Templates are never parsed to find it:
+  - When no `{{` comes before the end of the authority (the first `/`, `?`
+    or `#` after `://`, RFC 3986), the userinfo is everything before the
+    authority's last `@`, so a password holding `@` is removed whole.
+  - When a `{{` (in Insomnia also a `{%` tag) does and the URL holds an `@`
+    anywhere, the URL is ambiguous:
+    it is not cut at all but quarantined (`url_quarantined`: "this URL
+    mixes a template with a possible credential in its authority; re-enter
+    it"). By default the URL is not imported: the request's URL becomes a
+    fresh reference no variable defines (`{{url-needs-review}}`: hyphenated,
+    so no path parameter, shell variable or other name the import derives
+    can be it, and never a name the source references), and the original
+    text is stored nowhere. With `include_credentials` it is kept exactly as
+    written and the same warning says it may hold a credential; a sanitized
+    export extracts it whole. Either way the request's name, folder and
+    operation key never come from its text (`<url redacted>`), and an
+    Insomnia URL is judged before its expressions are converted, so no
+    template diagnostic sees it. The request's host can never change. Two
+    shapes are not ambiguous: an authority that is exactly one plain
+    reference followed by `/`, `?`, `#` or the end (`{{baseUrl}}/x?email=a@b`,
+    `https://{{host}}?q=a@b`), which holds no literal userinfo and is kept
+    as written; and, with a scheme, a userinfo of exactly variable
+    references before a literal host
+    (`https://{{user}}:{{password}}@api.example.com/`).
+  - A userinfo that is exactly variable references (`{{user}}`,
+    `{{user}}:`, `{{user}}:{{password}}`) keeps them. Anything else (a
+    literal user name or password, a token) is credential material, and no
+    part of it is kept as a user name or in the URL: the user name becomes a
+    fresh `{{username}}` placeholder and the password a fresh `{{password}}`
+    placeholder (`url_userinfo_replaced`). With `include_credentials`, the
+    password keeps the literal (the part after the first `:`, or the whole
+    userinfo when it has no password), a secret field.
+  - Fresh placeholders never take a name the source defines or references,
+    including cURL `$NAME` shell variables, Postman path variables and
+    `url.variable` keys, and Insomnia path parameters, in any request of the
+    import (`username_2` then).
+  - A request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a
+    Postman or Insomnia auth helper) or with auth explicitly off keeps
+    that, and the userinfo is dropped (`url_credentials_dropped`).
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia
@@ -157,6 +190,16 @@ characters is clipped and suffixed with a hash of the whole pointer (so
 distinct locations stay distinct), messages and values are clipped to 2048, an external reference or
 required variable keeps at most 1000 locations, and at most 10,000 inactive
 settings, redactions and scripts are kept.
+
+Report text never carries a credential, in either mode: every message,
+inactive setting, redaction field, required-variable reason, external
+reference and operation key goes through one redaction first. A URL
+userinfo that is not exactly references becomes `<redacted>` (by the rule
+above), an ambiguous URL becomes `<url redacted>`, and a `{{…}}` that is not
+a plain name (an identifier, a dotted path or an argument-free `$helper`)
+becomes `{{…}}`. cURL diagnostics do not echo an ignored URL, a connection
+option's value or the rest of a command line; the pointer locates them.
+Retained scripts are kept verbatim.
 
 Codes are stable strings (for example `recursive_schema`,
 `composition_first_branch`, `contradictory_schema`, `openapi32_construct`,

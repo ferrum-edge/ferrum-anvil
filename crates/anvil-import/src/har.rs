@@ -10,8 +10,8 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    apply_userinfo, body_from_text, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, redact_raw_query,
-    scrub_json_text, split_query, take_userinfo, warn_query_conversions,
+    body_from_text, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, redact_raw_query, scrub_json_text,
+    split_query, take_url_credentials, warn_query_conversions,
 };
 use crate::util::{is_json_media, media_essence, ptr, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -84,12 +84,20 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     let uptr = ptr(rptr, "url");
     let mut auth = AuthConfig::Inherit;
     // Userinfo is never kept in the URL (the engine refuses it).
-    let (url, userinfo) = take_userinfo(crate::common::strip_fragment(raw_url));
-    apply_userinfo(b, &mut auth, userinfo, &uptr);
-    let (base, pairs) = split_query(&url);
-    warn_query_conversions(b, !pairs.is_empty(), &url, &uptr);
-    let (base, verbatim_credentials) =
-        if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &uptr, "query parameter") } else { (base, vec![]) };
+    // Userinfo first: a `#` inside a password expression is no fragment.
+    // A quarantined URL is stored as returned, fragment included, with no
+    // query parameters.
+    let (url, quarantined) = take_url_credentials(b, raw_url, &mut auth, &uptr);
+    let url = if quarantined { url } else { crate::common::strip_fragment(&url).to_string() };
+    let (base, pairs) = if quarantined { (url.clone(), vec![]) } else { split_query(&url) };
+    if !quarantined {
+        warn_query_conversions(b, !pairs.is_empty(), &url, &uptr);
+    }
+    let (base, verbatim_credentials) = if !quarantined && pairs.is_empty() && base.contains('?') {
+        redact_raw_query(b, &base, &uptr, "query parameter")
+    } else {
+        (base, vec![])
+    };
     let mut params: Vec<KeyValue> = pairs
         .into_iter()
         .enumerate()
@@ -141,11 +149,14 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     spec.headers = headers;
     spec.body = body;
     spec.auth = auth;
-    let host = base.split("://").nth(1).and_then(|r| r.split(['/', '?']).next()).unwrap_or("").to_string();
-    let path = base.split("://").nth(1).and_then(|r| r.find('/').map(|p| r[p..].to_string())).unwrap_or_else(|| "/".into());
+    // Names, the folder and the operation key never come from a quarantined
+    // URL's text (with include_credentials it is kept as written).
+    let shown = if quarantined { crate::common::QUARANTINED_URL_NAME.to_string() } else { base };
+    let host = shown.split("://").nth(1).and_then(|r| r.split(['/', '?']).next()).unwrap_or("").to_string();
+    let path = shown.split("://").nth(1).and_then(|r| r.find('/').map(|p| r[p..].to_string())).unwrap_or_else(|| "/".into());
     let folder = if host.is_empty() { None } else { Some(b.folder(None, &format!("har:{host}"), &host)) };
     let name = format!("{method} {}", path.split('?').next().unwrap_or(&path));
-    let key = format!("har:{index}:{method} {}", base.split('?').next().unwrap_or(&base));
+    let key = format!("har:{index}:{method} {}", shown.split('?').next().unwrap_or(&shown));
     b.add_request(folder, &name, &key, spec, rptr);
 }
 

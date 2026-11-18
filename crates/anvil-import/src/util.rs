@@ -202,14 +202,15 @@ pub fn is_numeric_credential_name(name: &str) -> bool {
         || CREDENTIAL_PARTS.iter().filter(|p| **p != "token").any(|p| n.contains(p))
 }
 
-/// True when `v` contains literal text that could be secret material:
-/// anything besides plain `{{variable}}` references and an auth-scheme word
-/// (`Bearer {{token}}` carries no literal secret). A quoted string, a
-/// number, a filter or a dynamic helper inside `{{…}}` is literal
-/// ([`anvil_domain::secret::classify_template_value`], the rule the export
-/// sanitizer uses too).
-pub fn has_literal_secret(v: &str) -> bool {
-    anvil_domain::secret::classify_template_value(v) == anvil_domain::secret::TemplateKind::Literal
+/// True when `v`, read in the source's `syntax`, contains literal text that
+/// could be secret material: anything besides `{{variable}}` references and
+/// an auth-scheme word (`Bearer {{token}}` carries no literal secret)
+/// ([`anvil_domain::secret::classify_template_value`]). In Insomnia's
+/// Nunjucks a quoted string, a number, an operator, a filter or a helper
+/// inside `{{…}}` is literal; Postman, cURL and HAR never evaluate `{{…}}`,
+/// so only a helper with arguments (which Anvil would evaluate) is.
+pub fn has_literal_secret(v: &str, syntax: anvil_domain::secret::TemplateSyntax) -> bool {
+    anvil_domain::secret::classify_template_value(v, syntax) == anvil_domain::secret::TemplateKind::Literal
 }
 
 /// Lower-cased media type without parameters.
@@ -440,16 +441,22 @@ mod tests {
 
     #[test]
     fn literal_secrets() {
-        assert!(!has_literal_secret("{{token}}"));
-        assert!(!has_literal_secret("Bearer {{token}}"));
-        assert!(!has_literal_secret(""));
-        assert!(has_literal_secret("Bearer abc"));
-        assert!(has_literal_secret("{{user}}:hunter2"));
-        // Review round 3 of #573: only plain references are references.
-        for literal in ["{{ 'tok-SENSITIVE-u1' }}", "{{ 571571571 }}", "{{$randomFrom a|b}}", "{{$guid}}", "{{ x | upper }}"] {
-            assert!(has_literal_secret(literal), "{literal:?}");
+        use anvil_domain::secret::TemplateSyntax::{Name, Nunjucks};
+        for syntax in [Name, Nunjucks] {
+            assert!(!has_literal_secret("{{token}}", syntax));
+            assert!(!has_literal_secret("Bearer {{token}}", syntax));
+            assert!(!has_literal_secret("", syntax));
+            assert!(has_literal_secret("Bearer abc", syntax));
+            assert!(has_literal_secret("{{user}}:hunter2", syntax));
+            assert!(has_literal_secret("{{$randomFrom a|b}}", syntax));
+            assert!(!has_literal_secret("{{ _.apiToken }}", syntax));
         }
-        assert!(!has_literal_secret("{{ _.apiToken }}"));
+        // Nunjucks evaluates these expressions; Postman, cURL and HAR read them
+        // as variable names.
+        for expr in ["{{ 'tok-SENSITIVE-u1' }}", "{{ 571571571 }}", "{{ x | upper }}", "{{ _.zero--571571575 }}", "{{x-1}}"] {
+            assert!(has_literal_secret(expr, Nunjucks), "{expr:?}");
+            assert!(!has_literal_secret(expr, Name), "{expr:?}");
+        }
     }
 
     #[test]

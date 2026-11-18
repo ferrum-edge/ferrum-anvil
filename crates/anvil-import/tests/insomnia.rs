@@ -567,6 +567,28 @@ fn template_text(v: &SensitiveValue) -> String {
     }
 }
 
+/// Final gate of #575: the userinfo placeholders never take the name of a
+/// path parameter, so supplying the path value never fills the credential.
+#[test]
+fn userinfo_placeholders_never_take_a_path_parameter_name() {
+    let request = serde_json::json!({
+        "url": "https://admin:tok-SENSITIVE-in15@api.example.test/items/:username/:password",
+        "pathParameters": [{ "name": "username", "value": "" }, { "name": "password", "value": "" }],
+    });
+    for r in both(request, serde_json::json!({}), &opts()) {
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.test/items/{{username}}/{{password}}");
+        match &s.auth {
+            AuthConfig::Basic { username, password } => {
+                assert_eq!(username, "{{username_2}}");
+                assert_eq!(template_text(password), "{{password_2}}");
+            }
+            _ => panic!("expected Basic auth"),
+        }
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-in15"));
+    }
+}
+
 /// #563: a parameter's escapes are stored decoded only when the engine's
 /// one encoding sends exactly what Insomnia sends; anything else is kept as
 /// written and reported.
@@ -595,7 +617,7 @@ fn url_userinfo_becomes_basic_auth_unless_auth_is_disabled() {
         let s = &r.requests[0].spec;
         assert_eq!(s.url, "https://api.example.com/v1/status");
         assert!(
-            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "admin" && password == &SensitiveValue::template("{{password}}")),
+            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password == &SensitiveValue::template("{{password}}")),
             "expected Basic auth with a placeholder password"
         );
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-in1"));
@@ -743,4 +765,31 @@ fn sub_environment_placeholders_never_take_a_base_variable_name() {
     assert!(!sub.contains("{{accounts_0_api_key}}"), "a sub-environment placeholder took a base variable name");
     assert!(!base.contains("{{keys_0_api_key}}"), "a base placeholder took a sub-environment variable name");
     assert!(!sub.contains("tok-SENSITIVE") && !base.contains("tok-SENSITIVE"), "a credential member stayed");
+}
+
+/// Review round 4 of #573, sol F1 and F2: in Nunjucks, subtraction and
+/// numeric operands are expressions (literal), and a delimiter inside a
+/// password expression does not end the URL's authority early.
+#[test]
+fn nunjucks_expressions_and_delimiters_in_passwords_are_redacted() {
+    let request = serde_json::json!({
+        "url": "https://admin:{{ 'tok-SENSITIVE-in14/x?y#z' | urlencode }}@api.example.test/v1",
+        "headers": [{ "name": "X-Api-Key", "value": "{{ _.zero--571571578 }}" }],
+    });
+    let env = serde_json::json!({ "zero": 0, "accounts": [{ "pin": "{{ _.zero--571571579 }}" }] });
+    for r in both(request, env, &opts()) {
+        let s = &r.requests[0].spec;
+        // A template in the authority beside an `@`: the URL is quarantined
+        // (not imported; review of #575).
+        assert_eq!(s.url, "{{url-needs-review}}");
+        assert!(has(&r, "url_quarantined"));
+        assert_eq!(header(s, "X-Api-Key").unwrap().value, "{{X_Api_Key}}");
+        let accounts = r.workspace.variables.iter().find(|v| v.name == "accounts").map(|v| template_text(&v.value)).unwrap();
+        let text = serde_json::to_string(&r.requests).unwrap();
+        assert!(!text.contains("tok-SENSITIVE-in14") && !text.contains("57157157") && !accounts.contains("57157157"), "a literal stayed");
+        // Final gate of #575 (sol F2, dsf F3): no template diagnostic echoes
+        // the quarantined URL's or the header's expression.
+        let report = serde_json::to_string(&r.report).unwrap();
+        assert!(!report.contains("tok-SENSITIVE-in14") && !report.contains("57157157"), "the report holds a literal");
+    }
 }

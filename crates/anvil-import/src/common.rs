@@ -25,7 +25,7 @@ pub fn credential(b: &mut Builder, value: &str, var: &str, pointer: &str, field:
 /// Same policy as [`credential`] for values stored as plain text (header,
 /// query and body fields).
 pub fn credential_text(b: &mut Builder, value: &str, var: &str, pointer: &str, field: &str) -> String {
-    let literal = has_literal_secret(value.trim());
+    let literal = has_literal_secret(value.trim(), b.template_syntax);
     credential_text_with(b, value, literal, var, pointer, field)
 }
 
@@ -54,7 +54,7 @@ fn credential_text_with(b: &mut Builder, value: &str, literal: bool, var: &str, 
 /// is dropped (without `include_credentials`) and listed as a required
 /// variable, so references to it fail validation until the user supplies it.
 pub fn env_var(b: &mut Builder, key: &str, value: &str, secret: bool, enabled: bool, at: &str) -> Option<Variable> {
-    let literal = has_literal_secret(value);
+    let literal = has_literal_secret(value, b.template_syntax);
     if secret && literal && !b.opts.include_credentials {
         b.report.redacted(at, format!("variable {key}"), &format!("{{{{{key}}}}}"));
         b.report.require_var(key, true, "secret variable value was redacted on import", at);
@@ -281,7 +281,28 @@ impl PlaceholderNames {
         self.used.insert(sanitize_var(name));
     }
 
-    fn name(&mut self, readable: &str) -> String {
+    /// A free name for `base` as written (not sanitized), now reserved: for
+    /// a name that must not be one an import derives from the source, since
+    /// every derived name is sanitized ([`sanitize_var`]: letters, digits
+    /// and `_`) and every explicit one is reserved.
+    pub fn name_verbatim(&mut self, base: &str) -> String {
+        if self.used.insert(base.to_string()) {
+            return base.to_string();
+        }
+        let mut n = self.next.get(base).copied().unwrap_or(2);
+        loop {
+            let candidate = format!("{base}_{n}");
+            n += 1;
+            if self.used.insert(candidate.clone()) {
+                self.next.insert(base.to_string(), n);
+                return candidate;
+            }
+        }
+    }
+
+    /// A free placeholder name for `readable` (sanitized and bounded), now
+    /// reserved.
+    pub fn name(&mut self, readable: &str) -> String {
         let mut base = sanitize_var(readable);
         base.truncate(PATH_NAME_BYTES);
         if self.used.insert(base.clone()) {
@@ -295,6 +316,74 @@ impl PlaceholderNames {
                 self.next.insert(base, n);
                 return candidate;
             }
+        }
+    }
+}
+
+/// Reserve every name the source references as `{{name}}` (Insomnia's
+/// `{{ _.name }}` too), so a placeholder the import makes never names a
+/// variable the source already uses. One pass over the input.
+pub fn reserve_source_references(b: &mut Builder, text: &str) {
+    let mut rest = text;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        let expr = after[..close].trim();
+        let name = expr.strip_prefix("_.").unwrap_or(expr);
+        if !name.is_empty() && name.len() <= 256 {
+            b.env_names.reserve(name);
+        }
+        rest = &after[close + 2..];
+    }
+}
+
+/// Reserve every name a request can define implicitly, before any
+/// placeholder is made, so a fresh placeholder (`{{username}}`,
+/// `{{password}}`, a path-named environment leaf) never names one:
+/// - every path parameter, written as a `:name` segment at the start of a
+///   string or after a `/` (a Postman or Insomnia URL, a Postman `path`
+///   element), up to the next `/`, `?` or `#`; a valueless one becomes
+///   `{{name}}` (sanitized);
+/// - every `key` (or `id`) of a `variable` list (Postman collection, folder
+///   and `url.variable`) and every `name` of an Insomnia `pathParameters`
+///   list.
+///
+/// Over-reserving only makes a placeholder take a suffix. One pass over the
+/// parsed document, without recursion.
+pub fn reserve_implicit_names(b: &mut Builder, root: &Value) {
+    let mut stack = vec![root];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::String(s) => reserve_path_segments(b, s),
+            Value::Array(a) => stack.extend(a.iter()),
+            Value::Object(m) => {
+                for (list, field) in [("variable", "key"), ("variable", "id"), ("pathParameters", "name")] {
+                    for entry in m.get(list).and_then(Value::as_array).into_iter().flatten() {
+                        if let Some(name) = entry.get(field).and_then(Value::as_str).filter(|n| !n.is_empty() && n.len() <= 256) {
+                            b.env_names.reserve(name);
+                        }
+                    }
+                }
+                stack.extend(m.values());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// [`reserve_implicit_names`] for the `:name` segments of one string.
+fn reserve_path_segments(b: &mut Builder, s: &str) {
+    let mut from = 0;
+    while let Some(found) = s[from..].find(':') {
+        let colon = from + found;
+        from = colon + 1;
+        if colon > 0 && s.as_bytes()[colon - 1] != b'/' {
+            continue;
+        }
+        let rest = &s[colon + 1..];
+        let name = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+        if !name.is_empty() && name.len() <= 256 {
+            b.env_names.reserve(name);
         }
     }
 }
@@ -344,7 +433,7 @@ fn scrub_stored_at(
         }
         Value::String(s) if credential => {
             let (var, p) = leaf_names(names, root, pointer, path);
-            let literal = has_literal_secret(s.trim());
+            let literal = has_literal_secret(s.trim(), b.template_syntax);
             *s = credential_text_with(b, s, literal, &var, &p, &format!("environment value {var}"));
         }
         Value::Number(_) | Value::Bool(_) if credential => {
@@ -746,56 +835,132 @@ pub fn listed_query_param(b: &mut Builder, raw_name: &str, raw_value: &str, poin
     (name, value, true)
 }
 
-/// Split URL userinfo (`user:password@`) off `url`: the URL without it, and
-/// the user name and password as written (percent-encoded). A URL without a
-/// scheme is read from its start (Postman and Insomnia accept
-/// `user:pw@host/path`). The userinfo ends at the last `@` of the authority
-/// ([`userinfo_end`]).
-pub fn take_userinfo(url: &str) -> (String, Option<(String, String)>) {
-    let (prefix, rest) = match url.split_once("://") {
-        Some((scheme, rest)) if !scheme.is_empty() && !scheme.contains(['/', '?', '#', '@']) => (&url[..scheme.len() + 3], rest),
-        _ => ("", url),
-    };
-    let Some(at) = userinfo_end(rest) else { return (url.to_string(), None) };
-    let userinfo = &rest[..at];
-    let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
-    (format!("{prefix}{}", &rest[at + 1..]), Some((user.to_string(), pass.to_string())))
+/// What [`take_userinfo`] found in a URL.
+pub enum TakenUrl {
+    /// No userinfo: the URL as it was.
+    Plain(String),
+    /// Userinfo taken off: the URL without it, and the userinfo as written.
+    Userinfo(String, Userinfo),
+    /// The authority holds a `{{…}}` and the URL has an `@`: where the
+    /// userinfo ends cannot be told without parsing the template, so the URL
+    /// is not cut at all ([`quarantine_url`]).
+    Ambiguous,
 }
 
-/// Basic auth from URL userinfo as written ([`take_userinfo`]): the engine
-/// never sends credentials in the URL, and the password follows the
-/// credential policy (a `{{password}}` placeholder and a redaction unless
-/// `include_credentials`).
-///
-/// Each part is percent-decoded only when that keeps its references
-/// ([`decode_keeping_references`]): escaped text never becomes a reference
-/// the engine resolves. A user name that cannot be decoded so is kept as
-/// written (`url_user_not_decoded`); such a password cannot be stored, so it
-/// becomes a required `{{password}}` in either credential mode
-/// (`url_password_not_decoded`).
-pub fn userinfo_auth(b: &mut Builder, user: &str, pass: &str, pointer: &str) -> AuthConfig {
-    let username = decode_keeping_references(user).unwrap_or_else(|| {
-        b.report.warn(
-            "url_user_not_decoded",
-            pointer,
-            "the user name in the URL is kept percent-encoded: decoding it would make or change a {{reference}}, or it is not UTF-8",
-        );
-        user.to_string()
-    });
-    let password = match decode_keeping_references(pass) {
-        Some(pass) => credential(b, &pass, "password", pointer, "password in the URL"),
-        None => {
-            b.report.warn(
-                "url_password_not_decoded",
-                pointer,
-                "the password in the URL was not imported: decoding it would make or change a {{reference}}, or it is not UTF-8; \
-                 supply it as the variable 'password'",
-            );
-            b.report.redacted(pointer, "password in the URL", "{{password}}");
-            b.report.require_var("password", true, "the password in the URL could not be imported", pointer);
-            SensitiveValue::template("{{password}}")
+/// Find URL userinfo without parsing templates, by the shared rule
+/// ([`anvil_domain::secret::url_userinfo`]): the authority ends at the first
+/// `/`, `?` or `#` after `scheme://` (RFC 3986) and the userinfo is
+/// everything before its last `@`; a template before that end beside an `@`
+/// anywhere makes the URL ambiguous, so it is not cut at all.
+pub fn take_userinfo(url: &str, syntax: anvil_domain::secret::TemplateSyntax) -> TakenUrl {
+    use anvil_domain::secret::UrlUserinfo;
+    match anvil_domain::secret::url_userinfo(url, syntax) {
+        UrlUserinfo::None => TakenUrl::Plain(url.to_string()),
+        UrlUserinfo::Ambiguous => TakenUrl::Ambiguous,
+        UrlUserinfo::Userinfo { start, at } => {
+            let stripped = format!("{}{}", &url[..start], &url[at + 1..]);
+            if url[start..at].trim().is_empty() {
+                TakenUrl::Plain(stripped)
+            } else {
+                TakenUrl::Userinfo(stripped, url[start..at].to_string())
+            }
         }
+    }
+}
+
+/// [`take_userinfo`] applied to a request whose auth is `auth`: the URL to
+/// store, and whether it was quarantined ([`quarantine_url`]), in which case
+/// it is stored as returned, with no query, fragment or other processing.
+/// Userinfo goes through [`apply_userinfo`].
+pub fn take_url_credentials(b: &mut Builder, url: &str, auth: &mut AuthConfig, pointer: &str) -> (String, bool) {
+    match take_userinfo(url, b.template_syntax) {
+        TakenUrl::Plain(url) => (url, false),
+        TakenUrl::Userinfo(url, userinfo) => {
+            apply_userinfo(b, auth, Some(userinfo), pointer);
+            (url, false)
+        }
+        TakenUrl::Ambiguous => (quarantine_url(b, url, pointer), true),
+    }
+}
+
+/// The reference a quarantined URL is replaced by ([`quarantine_url`]).
+pub const QUARANTINE_PLACEHOLDER: &str = "url-needs-review";
+
+/// What a name, folder or operation key derived from a quarantined URL
+/// shows instead of its text ([`quarantine_url`]).
+pub const QUARANTINED_URL_NAME: &str = "<url redacted>";
+
+/// An ambiguous request URL ([`TakenUrl::Ambiguous`]): a template before the
+/// end of its authority and an `@`, so where a credential in it ends cannot
+/// be told. Nothing in it is parsed or cut, so the request's host cannot
+/// change. Unless `include_credentials`, the URL is not imported at all: the
+/// request gets a fresh reference no variable defines (`url-needs-review`,
+/// from the import's allocator, so it never binds an existing variable) and
+/// the original text is stored nowhere. With `include_credentials`, the URL
+/// is kept exactly as written. Either way the request is reported
+/// (`url_quarantined`).
+pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str) -> String {
+    const WHY: &str = "this URL mixes a template with a possible credential in its authority";
+    if b.opts.include_credentials {
+        b.report.warn(
+            "url_quarantined",
+            pointer,
+            format!("{WHY}; it was kept as written because credentials are included, and may contain a credential"),
+        );
+        return url.to_string();
+    }
+    // Hyphenated, so no name the import derives from the source (Postman
+    // and Insomnia path parameters, cURL `$NAME`, sanitized keys) can be it,
+    // and explicit `{{…}}` references and declared variables are reserved.
+    let name = b.env_names.name_verbatim(QUARANTINE_PLACEHOLDER);
+    let reference = format!("{{{{{name}}}}}");
+    b.report.redacted(pointer, "request URL", &reference);
+    b.report.warn("url_quarantined", pointer, format!("{WHY}; it was not imported (the request uses {reference}): re-enter it"));
+    reference
+}
+
+/// Basic auth from URL userinfo as written ([`take_userinfo`]); the engine
+/// never sends credentials in the URL.
+///
+/// A userinfo that is exactly variable references (`{{user}}`,
+/// `{{user}}:`, `{{user}}:{{password}}`, in the source's syntax;
+/// [`anvil_domain::secret::is_plain_userinfo`]) keeps them. Anything else is
+/// credential material, and no part of it is kept as a user name or in the
+/// URL: the user name becomes a fresh placeholder, and the password a fresh
+/// placeholder too (with a redaction), or, with `include_credentials`, the
+/// literal after the first `:` (the whole userinfo when there is none),
+/// kept only in the password, a secret field. Fresh placeholders come from
+/// the import's name allocator, so they never name a variable the source
+/// defines or references (`url_userinfo_replaced`).
+pub fn userinfo_auth(b: &mut Builder, userinfo: &str, pointer: &str) -> AuthConfig {
+    if anvil_domain::secret::is_plain_userinfo(userinfo, b.template_syntax) {
+        let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+        return AuthConfig::Basic { username: user.to_string(), password: SensitiveValue::template(pass) };
+    }
+    let user_var = b.env_names.name("username");
+    let username = format!("{{{{{user_var}}}}}");
+    b.report.require_var(&user_var, true, "the user name in the URL is not imported", pointer);
+    let password = if b.opts.include_credentials {
+        // The password part, or the whole userinfo when it holds an
+        // expression or has no (or an empty) password: no part is dropped.
+        let literal = match userinfo.split_once(':') {
+            Some((_, p)) if !p.trim().is_empty() && !userinfo.contains("{{") => p,
+            _ => userinfo,
+        };
+        SensitiveValue::template(decode_keeping_references(literal).unwrap_or_else(|| literal.to_string()))
+    } else {
+        let pass_var = b.env_names.name("password");
+        let placeholder = format!("{{{{{pass_var}}}}}");
+        b.report.redacted(pointer, "credentials in the URL", &placeholder);
+        b.report.require_var(&pass_var, true, "the credentials in the URL were redacted on import", pointer);
+        SensitiveValue::template(placeholder)
     };
+    b.report.warn(
+        "url_userinfo_replaced",
+        pointer,
+        "the URL's user name and password are not exactly variable references, so they were taken off the URL and replaced \
+         by placeholders to supply (with included credentials, only the password literal is kept, in the auth password)",
+    );
     AuthConfig::Basic { username, password }
 }
 
@@ -804,10 +969,10 @@ pub fn userinfo_auth(b: &mut Builder, user: &str, pass: &str, pointer: &str) -> 
 /// cURL `-u`, a Postman or Insomnia auth helper) and an explicit "no auth"
 /// win, as curl prefers `-u`; the userinfo, already removed from the URL,
 /// is then dropped with a `url_credentials_dropped` warning.
-pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<(String, String)>, pointer: &str) {
-    let Some((user, pass)) = userinfo else { return };
+pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<Userinfo>, pointer: &str) {
+    let Some(userinfo) = userinfo else { return };
     if matches!(auth, AuthConfig::Inherit) {
-        *auth = userinfo_auth(b, &user, &pass, pointer);
+        *auth = userinfo_auth(b, &userinfo, pointer);
     } else {
         b.report.warn(
             "url_credentials_dropped",
@@ -818,16 +983,8 @@ pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<(
     }
 }
 
-/// The byte offset of the `@` that ends the userinfo in `after_scheme` (a
-/// URL with its `scheme://` removed), if it has userinfo. The authority ends
-/// at the first `/`, `?` or `#` (RFC 3986 section 3.2), so an `@` in the path,
-/// query or fragment is not one; within the authority the last `@` ends the
-/// userinfo, as URL parsers (Postman's among them) read a password holding
-/// an `@`.
-pub fn userinfo_end(after_scheme: &str) -> Option<usize> {
-    let authority_end = after_scheme.find(['/', '?', '#']).unwrap_or(after_scheme.len());
-    after_scheme[..authority_end].rfind('@')
-}
+/// A URL's userinfo as written (`user:password`).
+pub type Userinfo = String;
 
 /// Remove a `#fragment`, ignoring `#` inside `{{…}}` references.
 pub fn strip_fragment(url: &str) -> &str {

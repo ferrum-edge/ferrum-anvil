@@ -8,8 +8,9 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    apply_userinfo, body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type, listed_query_param,
-    maybe_redact, redact_raw_query, scrub_body, scrub_graphql_variables, split_query, take_userinfo, warn_query_conversions,
+    TakenUrl, apply_userinfo, body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type,
+    listed_query_param, maybe_redact, quarantine_url, redact_raw_query, scrub_body, scrub_graphql_variables, split_query, take_userinfo,
+    warn_query_conversions,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
@@ -44,6 +45,8 @@ pub(crate) fn import_collection(root: &Value, dialect: Dialect, b: &mut Builder)
             "Postman collection v2.0: imported with the v2.1 mapping (auth parameters accept both shapes)",
         );
     }
+    reserve_variable_keys(b, root, 0);
+    crate::common::reserve_implicit_names(b, root);
     b.workspace.variables = variables(b, root.get("variable"), "/variable");
     b.workspace.auth = match root.get("auth") {
         Some(a) => auth(b, a, "/auth", &name),
@@ -56,6 +59,21 @@ pub(crate) fn import_collection(root: &Value, dialect: Dialect, b: &mut Builder)
         return Err(ImportError::Invalid { dialect, pointer: "/item".into(), message: "collection has no `item` array".into() });
     }
     Ok(())
+}
+
+/// Reserve the collection's and every folder's variable names before any
+/// placeholder is made, so a placeholder never names one of them.
+fn reserve_variable_keys(b: &mut Builder, node: &Value, depth: usize) {
+    for var in node.get("variable").and_then(Value::as_array).into_iter().flatten() {
+        if let Some(key) = str_of(var, "key").or_else(|| str_of(var, "id")) {
+            b.env_names.reserve(key);
+        }
+    }
+    if depth < MAX_FOLDER_DEPTH {
+        for item in node.get("item").and_then(Value::as_array).into_iter().flatten() {
+            reserve_variable_keys(b, item, depth + 1);
+        }
+    }
 }
 
 fn walk_items(b: &mut Builder, items: &[Value], base: &str, parent: Option<Id>, depth: usize) {
@@ -259,7 +277,7 @@ fn headers(b: &mut Builder, v: Option<&Value>, at: &str) -> Vec<KeyValue> {
 /// the raw query string. Path variables (`:id`) are substituted from
 /// `url.variable` or become `{{id}}` placeholders. URL userinfo is removed
 /// and returned for [`apply_userinfo`].
-fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<(String, String)>) {
+fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<crate::common::Userinfo>) {
     let (raw, query_list, path_vars) = match v {
         Value::String(s) => (s.clone(), None, None),
         Value::Object(_) => {
@@ -269,7 +287,13 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<(
         _ => (String::new(), None, None),
     };
     check_dynamic_vars(b, &raw, &ptr(at, "raw"));
-    let (raw, userinfo) = take_userinfo(&raw);
+    let (raw, userinfo) = match take_userinfo(&raw, b.template_syntax) {
+        TakenUrl::Plain(raw) => (raw, None),
+        TakenUrl::Userinfo(raw, userinfo) => (raw, Some(userinfo)),
+        // Quarantined whole, query included; the `query` list repeats that
+        // query, so it adds no parameters.
+        TakenUrl::Ambiguous => return (quarantine_url(b, &raw, &ptr(at, "raw")), vec![], None),
+    };
     let (base, raw_pairs) = split_query(&raw);
     if query_list.is_none() {
         warn_query_conversions(b, !raw_pairs.is_empty(), &raw, &ptr(at, "raw"));
@@ -518,7 +542,7 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
         }
         "oauth2" => {
             let access = p("accessToken");
-            if crate::util::has_literal_secret(&access) {
+            if crate::util::has_literal_secret(&access, b.template_syntax) {
                 b.report.redacted(&fp("accessToken"), "cached OAuth 2 access token", "(dropped)");
             }
             let grant = match p("grant_type").as_str() {

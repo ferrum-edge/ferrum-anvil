@@ -50,6 +50,9 @@ pub(crate) struct Builder<'o> {
     /// by every environment of the import, which reserve their variable
     /// names first ([`crate::common::PlaceholderNames`]).
     pub env_names: crate::common::PlaceholderNames,
+    /// How the source reads `{{…}}` when a credential value is judged
+    /// literal or a reference (Insomnia sets Nunjucks).
+    pub template_syntax: anvil_domain::secret::TemplateSyntax,
 }
 
 impl<'o> Builder<'o> {
@@ -91,6 +94,7 @@ impl<'o> Builder<'o> {
             title: None,
             limit_warned: false,
             env_names: Default::default(),
+            template_syntax: Default::default(),
         }
     }
 
@@ -242,6 +246,9 @@ impl<'o> Builder<'o> {
         mut spec: RequestSpec,
         pointer: &str,
     ) -> &mut RequestDefinition {
+        // Provenance is stored and exported as written: a key derived from a
+        // URL never carries its credentials ([`crate::report::redact_for_report`]).
+        let operation_key = &crate::report::redact_for_report(operation_key);
         let text = operation_key.len().saturating_add(name.len()).saturating_add(spec.url.len()).saturating_add(pointer.len());
         self.charge_text(pointer, text);
         let mut key = operation_key.to_string();

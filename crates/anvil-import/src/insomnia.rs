@@ -9,16 +9,16 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type,
-    listed_query_param, maybe_redact, parse_embedded_json, parse_form, redact_raw_query, render_json, scrub_body, scrub_graphql_variables,
-    scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
+    TakenUrl, apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type,
+    listed_query_param, maybe_redact, parse_embedded_json, parse_form, quarantine_url, redact_raw_query, render_json, scrub_body,
+    scrub_graphql_variables, scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
 use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, KeyLocation, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::request::{Body, KeyValue, MultipartContent, MultipartPart, RequestSpec};
-use anvil_domain::secret::SensitiveValue;
+use anvil_domain::secret::{SensitiveValue, TemplateSyntax};
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::workspace::Variable;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -201,6 +201,7 @@ fn reserve_v5_folder_env_names(b: &mut Builder, items: &[Value], depth: usize) {
 // ---------------------------------------------------------------- v4 ----
 
 pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError> {
+    b.template_syntax = TemplateSyntax::Nunjucks;
     let Some(resources) = root.get("resources").and_then(Value::as_array) else {
         return Err(ImportError::Invalid {
             dialect: Dialect::InsomniaV4,
@@ -209,8 +210,10 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
         });
     };
     let mut seen = Visited { handled: vec![false; resources.len()], walked: HashSet::new() };
-    // Every environment's variable names are reserved before any
-    // placeholder is made ([`reserve_env_names`]).
+    // Every environment's variable names and every path parameter name are
+    // reserved before any placeholder is made ([`reserve_env_names`],
+    // [`crate::common::reserve_implicit_names`]).
+    crate::common::reserve_implicit_names(b, root);
     for r in resources {
         match str_of(r, "_type") {
             Some("environment") => reserve_env_names(b, r.get("data")),
@@ -502,6 +505,7 @@ fn v4_settings(b: &mut Builder, r: &Value, at: &str) -> SettingsOverrides {
 // ---------------------------------------------------------------- v5 ----
 
 pub(crate) fn import_v5(root: &Value, b: &mut Builder) -> Result<(), ImportError> {
+    b.template_syntax = TemplateSyntax::Nunjucks;
     let ty = str_of(root, "type").unwrap_or("");
     let name = str_of(root, "name").unwrap_or("Insomnia collection").to_string();
     b.title = Some(name.clone());
@@ -535,6 +539,7 @@ pub(crate) fn import_v5(root: &Value, b: &mut Builder) -> Result<(), ImportError
     if let Some(items) = root.get("collection").and_then(Value::as_array) {
         reserve_v5_folder_env_names(b, items, 0);
     }
+    crate::common::reserve_implicit_names(b, root);
     if let Some(envs) = root.get("environments") {
         let base_vars = env_vars(b, envs.get("data"), "/environments/data");
         b.workspace.variables = base_vars;
@@ -673,13 +678,27 @@ fn request(
 ) {
     let name = str_of(r, "name").unwrap_or("").to_string();
     let method = str_of(r, "method").unwrap_or("GET").to_ascii_uppercase();
-    let raw_url = template(b, str_of(r, "url").unwrap_or(""), &ptr(at, "url"));
-    // Userinfo is never kept in the URL (the engine refuses it).
-    let (raw_url, userinfo) = take_userinfo(&raw_url);
-    let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
-    // A query written into the URL itself is kept verbatim, less its
-    // credential-named pairs, which become sensitive parameters.
-    let (url, mut params) = if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { (url, vec![]) };
+    // Userinfo is never kept in the URL (the engine refuses it); an
+    // ambiguous URL is quarantined whole. The URL as written is judged first,
+    // so a quarantined URL's expressions reach no template diagnostic unless
+    // the user included credentials (the report redacts them either way).
+    let source_url = str_of(r, "url").unwrap_or("");
+    let quarantined = matches!(take_userinfo(source_url, b.template_syntax), TakenUrl::Ambiguous);
+    let templated = if quarantined && !b.opts.include_credentials { String::new() } else { template(b, source_url, &ptr(at, "url")) };
+    let (raw_url, userinfo) = match if quarantined { TakenUrl::Ambiguous } else { take_userinfo(&templated, b.template_syntax) } {
+        TakenUrl::Plain(url) => (Some(url), None),
+        TakenUrl::Userinfo(url, userinfo) => (Some(url), Some(userinfo)),
+        TakenUrl::Ambiguous => (None, None),
+    };
+    let (url, mut params) = match raw_url {
+        Some(raw_url) => {
+            let url = path_params(b, &raw_url, r.get("pathParameters"), &ptr(at, "pathParameters"));
+            // A query written into the URL itself is kept verbatim, less its
+            // credential-named pairs, which become sensitive parameters.
+            if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { (url, vec![]) }
+        }
+        None => (quarantine_url(b, &templated, &ptr(at, "url")), vec![]),
+    };
     params.extend(query_params(b, r.get("parameters"), &ptr(at, "parameters")));
     let mut spec = RequestSpec::http(&method, &url);
     spec.params = params;

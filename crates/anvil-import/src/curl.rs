@@ -201,7 +201,8 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
             b.report.unsupported(
                 "shell_pipeline",
                 "/args",
-                format!("only the first command is imported; ignored: {}", crate::util::clip(r, 80)),
+                // The ignored text is not echoed: it may hold credentials.
+                "only the first command is imported; the rest of the line is ignored",
             );
         }
     }
@@ -216,6 +217,8 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
     b.workspace.auth = AuthConfig::None;
     for w in &words {
         for v in &w.vars {
+            // `$NAME` becomes `{{NAME}}`: no placeholder may take that name.
+            b.env_names.reserve(v);
             b.report.require_var(v, crate::util::is_credential_name(v), "shell variable in the cURL command", "/args");
         }
     }
@@ -316,7 +319,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
             "-F" | "--form" | "--form-string" => {
                 if let Some(f) = value(&mut i) {
                     let Some((name, val)) = f.split_once('=') else {
-                        b.report.warn("curl_form", &at, format!("form field '{f}' has no '='; skipped"));
+                        b.report.warn("curl_form", &at, "a form field has no '='; skipped");
                         i += 1;
                         continue;
                     };
@@ -446,11 +449,16 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
             "-x" | "--proxy" | "--cacert" | "--capath" | "-E" | "--cert" | "--key" | "--cert-type" | "--key-type" | "--pass" | "--resolve"
             | "--connect-to" | "--interface" | "--dns-servers" | "--proxy-user" | "-U" => {
                 let v = value(&mut i).unwrap_or_default();
-                let shown = if matches!(opt.as_str(), "--pass" | "--proxy-user" | "-U") { "(redacted)".to_string() } else { v.clone() };
                 if matches!(opt.as_str(), "--cacert" | "--capath" | "-E" | "--cert" | "--key") {
                     b.report.external_ref(v.split(':').next().unwrap_or(&v), &at);
                 }
-                b.report.unsupported("curl_connection_option", &at, format!("`{opt} {shown}` is not imported; configure a proxy/TLS profile or DNS override instead"));
+                // The value is not echoed: a proxy URL or password may hold
+                // credentials; the pointer locates it.
+                b.report.unsupported(
+                    "curl_connection_option",
+                    &at,
+                    format!("`{opt}` and its value are not imported; configure a proxy/TLS profile or DNS override instead"),
+                );
             }
             // Output/progress/verbosity flags do not change the request.
             "-s" | "--silent" | "-S" | "--show-error" | "-v" | "--verbose" | "-i" | "--include" | "-f" | "--fail" | "--fail-with-body" | "-#"
@@ -752,8 +760,9 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     let Some((raw_url, url_at)) = urls.first().cloned() else {
         return Err(ImportError::Invalid { dialect: Dialect::Curl, pointer: "/args".into(), message: "no URL in the cURL command".into() });
     };
-    for (u, at) in urls.iter().skip(1) {
-        b.report.unsupported("curl_multiple_urls", at, format!("only the first URL is imported; '{u}' ignored"));
+    for (_, at) in urls.iter().skip(1) {
+        // The ignored URL is not echoed: it may hold credentials.
+        b.report.unsupported("curl_multiple_urls", at, "only the first URL is imported; this one is ignored");
     }
     if !b.admit(&url_at) {
         return Ok(());
@@ -768,15 +777,17 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     // Credentials embedded in the URL become Basic auth, unless `-u` (or
     // another auth option) gave the request its own, which curl prefers.
     let mut auth = auth;
-    let (without, userinfo) = crate::common::take_userinfo(&url);
-    url = without;
-    crate::common::apply_userinfo(b, &mut auth, userinfo, &url_at);
-    let (base, pairs) = split_query(&url);
-    crate::common::warn_query_conversions(b, !pairs.is_empty(), &url, &url_at);
+    let (taken, quarantined) = crate::common::take_url_credentials(b, &url, &mut auth, &url_at);
+    url = taken;
+    // A quarantined URL is stored as returned.
+    let (base, pairs) = if quarantined { (url.clone(), vec![]) } else { split_query(&url) };
+    if !quarantined {
+        crate::common::warn_query_conversions(b, !pairs.is_empty(), &url, &url_at);
+    }
     // A query that is not a plain list of pairs stays in the URL verbatim,
     // less its credential-named pairs, which become sensitive parameters.
     let (base, verbatim_credentials) =
-        if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &url_at, "query") } else { (base, vec![]) };
+        if !quarantined && pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &url_at, "query") } else { (base, vec![]) };
     let mut params: Vec<KeyValue> = pairs
         .into_iter()
         .enumerate()
@@ -918,11 +929,14 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     spec.body = body;
     spec.auth = auth;
     spec.settings = settings;
-    let host = base.split("://").nth(1).and_then(|r| r.split(['/', '?']).next()).unwrap_or(&base).to_string();
-    let path = base.split("://").nth(1).and_then(|r| r.find('/').map(|p| &r[p..])).unwrap_or("/");
+    // The title, name and operation key never come from a quarantined URL's
+    // text (with include_credentials it is kept as written).
+    let shown = if quarantined { crate::common::QUARANTINED_URL_NAME.to_string() } else { base };
+    let host = shown.split("://").nth(1).and_then(|r| r.split(['/', '?']).next()).unwrap_or(&shown).to_string();
+    let path = shown.split("://").nth(1).and_then(|r| r.find('/').map(|p| &r[p..])).unwrap_or("/");
     b.title = Some(format!("{method} {host}"));
     let name = format!("{method} {path}");
-    b.add_request(None, &name, &format!("curl:{method} {base}"), spec, &url_at);
+    b.add_request(None, &name, &format!("curl:{method} {shown}"), spec, &url_at);
     Ok(())
 }
 

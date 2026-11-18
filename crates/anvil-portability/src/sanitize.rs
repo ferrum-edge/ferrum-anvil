@@ -34,14 +34,43 @@ pub fn sensitive_name(name: &str, extra: &[String]) -> bool {
     anvil_domain::credential_names::is_export_secret_name(name, extra)
 }
 
-/// Whether `s` carries no literal text: empty, or exactly one plain
-/// `{{name}}` reference spanning the whole (trimmed) value
-/// ([`anvil_domain::secret::classify_template_value`], the rule the
-/// importers use too). A quoted string, a number, a filter or a dynamic
-/// helper (`{{$guid}}`, `{{$randomFrom a|b}}`) is literal text.
+/// Whether `s` carries no literal text: empty, or exactly one `{{name}}`
+/// reference spanning the whole (trimmed) value, judged by the strictest
+/// syntax ([`anvil_domain::secret::TemplateSyntax::Nunjucks`]) since an
+/// export cannot tell where a value came from: a quoted string, a number,
+/// `-` or another operator, a filter or a dynamic helper (`{{$guid}}`,
+/// `{{$randomFrom a|b}}`) is literal text.
 fn is_pure_reference(s: &str) -> bool {
-    use anvil_domain::secret::{TemplateKind, classify_template_value};
-    matches!(classify_template_value(s), TemplateKind::Empty | TemplateKind::Reference)
+    use anvil_domain::secret::{TemplateKind, TemplateSyntax, classify_template_value};
+    matches!(classify_template_value(s, TemplateSyntax::Nunjucks), TemplateKind::Empty | TemplateKind::Reference)
+}
+
+/// Whether a variable's text is a JSON object or array (an imported
+/// environment value) holding literal material under a credential-named
+/// member: a string that is not a pure reference, or a number or boolean,
+/// anywhere beneath such a member. Text that does not parse is not one.
+fn json_text_has_credential_member(text: &str, extra: &[String]) -> bool {
+    fn literal_under(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::String(s) => !is_pure_reference(s),
+            serde_json::Value::Number(_) | serde_json::Value::Bool(_) => true,
+            serde_json::Value::Array(a) => a.iter().any(literal_under),
+            serde_json::Value::Object(m) => m.values().any(literal_under),
+            serde_json::Value::Null => false,
+        }
+    }
+    fn walk(v: &serde_json::Value, extra: &[String]) -> bool {
+        match v {
+            serde_json::Value::Object(m) => m.iter().any(|(k, x)| if sensitive_name(k, extra) { literal_under(x) } else { walk(x, extra) }),
+            serde_json::Value::Array(a) => a.iter().any(|x| walk(x, extra)),
+            _ => false,
+        }
+    }
+    let t = text.trim_start();
+    if !(t.starts_with('[') || t.starts_with('{')) {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(t).is_ok_and(|v| walk(&v, extra))
 }
 
 fn escape_ptr(s: &str) -> String {
@@ -79,58 +108,79 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
     res.iter().find(|(r, _)| r.is_match(s)).map(|(_, why)| *why)
 }
 
-/// Whether `s` holds a URL (`scheme://user:password@host`) whose userinfo
-/// password has literal material: anything but exactly one whole reference
-/// ([`is_pure_reference`], so a helper with arguments such as
-/// `{{$randomFrom a|b}}` is literal). The scheme may end in a reference
-/// (`{{scheme}}://`). The authority runs from the `://` to the first `/`,
-/// `?`, `#` or whitespace outside a `{{…}}` (whose spaces, as in
-/// `{{ tenant }}`, the resolver trims); the userinfo runs to its last `@`,
-/// and the password from the userinfo's first `:`. So a user name or
-/// password holding an `@`, braces or a spaced reference is judged whole,
-/// as written. Linear in `s`: once a `{{` has no closing `}}`, none later
-/// has one either.
+/// Whether a URL field holds credential material by the importers' rule
+/// ([`anvil_domain::secret::url_userinfo`], strict syntax): a userinfo that
+/// is not empty or exactly variable references, or a template before the end
+/// of the authority beside an `@` anywhere (ambiguous).
+fn url_field_has_credential(url: &str) -> bool {
+    use anvil_domain::secret::{TemplateSyntax, UrlUserinfo, is_plain_userinfo, url_userinfo};
+    match url_userinfo(url, TemplateSyntax::Nunjucks) {
+        UrlUserinfo::None => false,
+        UrlUserinfo::Ambiguous => true,
+        UrlUserinfo::Userinfo { start, at } => {
+            let userinfo = &url[start..at];
+            !userinfo.trim().is_empty() && !is_plain_userinfo(userinfo, TemplateSyntax::Nunjucks)
+        }
+    }
+}
+
+/// Whether free text `s` holds a URL with credentials: at every `://`
+/// (whose scheme may end in a reference, `{{scheme}}://`), any `@` before the
+/// end of the text or (until a `{{` has been seen, since a spaced reference
+/// or an expression may hold it) the next whitespace, unless the text before
+/// that `@` is exactly variable references
+/// ([`anvil_domain::secret::is_plain_userinfo`], Insomnia's strict syntax).
+/// Quotes and an embedded `://` neither end nor restart the scan (a literal
+/// user name may hold an apostrophe, and a password expression a `://`), and
+/// `/`, `?` and `#` do not stop it, so an `@` in a path or query is flagged
+/// too: over-warning is preferred to missing a credential. A URL whose whole
+/// authority is one reference (`https://{{host}}/x?email=a@b`) is skipped.
+///
+/// Linear: a prefix holding an `@` is never plain, so a second `@` is
+/// flagged without checking, and a scan that flags nothing covers every
+/// later `://` it passed (their scans would end at the same place and see
+/// no `@` it did not), so the search resumes where it ended.
 fn has_url_password(s: &str) -> bool {
+    use anvil_domain::secret::{TemplateSyntax, authority_is_one_reference, is_plain_userinfo};
     let mut from = 0;
-    let mut unterminated = false;
     while let Some(found) = s[from..].find("://") {
         let start = from + found;
         from = start + 3;
         if !s[..start].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '}') {
             continue;
         }
-        let authority = &s[from..];
-        let (mut i, mut last_at, mut first_colon) = (0, None, None);
-        while i < authority.len() {
-            let rest = &authority[i..];
-            if !unterminated && rest.starts_with("{{") {
-                match rest[2..].find("}}") {
-                    Some(close) => {
-                        i += close + 4;
-                        continue;
-                    }
-                    None => unterminated = true,
-                }
+        let rest = &s[from..];
+        if authority_is_one_reference(rest) {
+            continue;
+        }
+        let bytes = rest.as_bytes();
+        let mut seen_template = false;
+        let mut first_at = None;
+        let mut end = bytes.len();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i..].starts_with(b"{{") {
+                seen_template = true;
+                i += 2;
+                continue;
             }
-            let c = rest.chars().next().unwrap_or(' ');
-            if matches!(c, '/' | '?' | '#') || c.is_whitespace() {
+            let c = bytes[i];
+            if !seen_template && c.is_ascii_whitespace() {
+                end = i;
                 break;
             }
-            if c == '@' {
-                last_at = Some(i);
-            } else if c == ':' && first_colon.is_none() {
-                first_colon = Some(i);
+            if c == b'@' {
+                if first_at.is_some() {
+                    return true;
+                }
+                first_at = Some(i);
             }
-            i += c.len_utf8();
+            i += 1;
         }
-        if let (Some(at), Some(colon)) = (last_at, first_colon)
-            && colon < at
-        {
-            let password = &authority[colon + 1..at];
-            if !password.is_empty() && !is_pure_reference(password) {
-                return true;
-            }
+        if first_at.is_some_and(|at| !is_plain_userinfo(&rest[..at], TemplateSyntax::Nunjucks)) {
+            return true;
         }
+        from += end;
     }
     false
 }
@@ -224,6 +274,18 @@ pub fn sanitize(v: &mut serde_json::Value, extra: &[String]) -> Sanitized {
 fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: &mut Sanitized) {
     match v {
         serde_json::Value::Object(map) => {
+            // Basic auth whose password is empty carries its credential in the
+            // user name (a URL's `https://<token>@host/`): a literal user name
+            // is extracted like a secret field.
+            let token_user = map.get("type").and_then(|t| t.as_str()) == Some("basic")
+                && map.get("password").and_then(|p| p.get("value")).and_then(|v| v.as_str()).is_some_and(|v| v.trim().is_empty())
+                && map.get("username").and_then(|u| u.as_str()).is_some_and(|u| !is_pure_reference(u));
+            if token_user {
+                let user = map["username"].as_str().unwrap_or("").to_string();
+                let ph = s.placeholder_for("username", &user);
+                s.extracted.push(Extracted { pointer: format!("{ptr}/username"), placeholder: ph.clone(), value: user });
+                map.insert("username".into(), serde_json::Value::String(format!("{{{{{ph}}}}}")));
+            }
             // SensitiveValue::Template  => {"kind":"template","value": "..."}
             let is_template = map.get("kind").and_then(|k| k.as_str()) == Some("template")
                 && map.len() == 2
@@ -256,7 +318,9 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: 
                         val["value"] = serde_json::Value::String(String::new());
                     } else if !secret
                         && is_tpl
-                        && (sensitive_name(&name, extra) || looks_like_credential(&text).is_some())
+                        && (sensitive_name(&name, extra)
+                            || looks_like_credential(&text).is_some()
+                            || json_text_has_credential_member(&text, extra))
                         && !text.is_empty()
                         && !is_pure_reference(&text)
                     {
@@ -295,6 +359,28 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: 
             let keys: Vec<String> = map.keys().cloned().collect();
             for k in keys {
                 let child_ptr = format!("{ptr}/{}", escape_ptr(&k));
+                // A URL whose userinfo is not exactly references, or whose
+                // authority mixes a template with an `@` (the importers'
+                // rule, which quarantines such a URL or keeps it as written
+                // under include_credentials), is extracted whole: no part of
+                // it can be trusted to be free of a credential.
+                if k == "url"
+                    && let Some(serde_json::Value::String(text)) = map.get(&k)
+                    && url_field_has_credential(text)
+                {
+                    let text = text.clone();
+                    let ph = s.placeholder_for("url", &text);
+                    s.warnings.push(ContentWarning {
+                        pointer: child_ptr.clone(),
+                        reason: format!(
+                            "url contains a password in the URL (or a template beside an '@' in its authority); the whole URL \
+                             is exported as {{{{{ph}}}}}, restored by an encrypted-transfer import; a share-safely recipient must re-enter it"
+                        ),
+                    });
+                    s.extracted.push(Extracted { pointer: child_ptr, placeholder: ph.clone(), value: text });
+                    map.insert(k, serde_json::Value::String(format!("{{{{{ph}}}}}")));
+                    continue;
+                }
                 // Free-text fields are scanned, not modified.
                 if let Some(serde_json::Value::String(text)) = map.get(&k) {
                     if matches!(k.as_str(), "text" | "url" | "query" | "envelope" | "variables" | "extra_json")
@@ -656,6 +742,22 @@ mod tests {
             "https://admin:{{ 'tok-SENSITIVE-pw10' }}@api.example.test/",
             "https://admin:{{ 571571571 }}@api.example.test/",
             "https://admin:{{$guid}}@api.example.test/",
+            // Review of #575: a quoted `}}` with a delimiter after it, and an
+            // expression that closes only in the query.
+            "https://admin:{{ 'tok-SENSITIVE-pw11}}/s' | urlencode }}@api.example.test/",
+            "https://admin:{{ 'tok-SENSITIVE-pw12}}?s' | urlencode }}@api.example.test/",
+            "https://user:tok-SENSITIVE-pw13{{ss@api.example.test/v1?q={{x}}",
+            // Round 2 of #575: any userinfo that is not exactly references,
+            // past the 4 KiB the earlier scan allowed, and a credential URL
+            // inside an expression.
+            "https://admin:{{password}}@api.example.com/v1",
+            "https://tok-SENSITIVE-pw14@api.example.com/",
+            "https://{{ 'https://admin:tok-SENSITIVE-pw15@api.example.test' | replace('https://', '') }}/v1",
+            // Round 3 of #575: an apostrophe in a literal user name, and a
+            // `://` inside a password expression, end no scan.
+            "https://o'brien:tok-SENSITIVE-pw19@api.example.test/",
+            "https://admin:{{ 'a://b' }}tok-SENSITIVE-pw20@api.example.test/",
+            "https://admin:{{ \"tok-SENSITIVE-pw21://x\" }}@api.example.test/",
         ] {
             let mut v = spec(loud);
             let s = sanitize(&mut v, &[]);
@@ -663,14 +765,74 @@ mod tests {
             assert!(s.warnings[0].reason.contains("password in the URL"));
             assert_eq!(s.warnings[0].pointer, "/requests/0/spec/url");
         }
+        let long = format!("https://admin:{{{{{}'tok-SENSITIVE-pw16/x'|urlencode}}}}@api.example.test/v1", " ".repeat(8192));
+        let mut v = spec(&long);
+        assert_eq!(sanitize(&mut v, &[]).warnings.len(), 1, "a long password expression was not flagged");
+        // Over-warning is preferred to missing a credential: an `@` in a query
+        // is flagged too.
+        let mut v = spec("https://api.example.com:8443/v1?email=a:b@c.example");
+        assert_eq!(sanitize(&mut v, &[]).warnings.len(), 1);
         for quiet in [
-            "https://admin:{{password}}@api.example.com/v1",
-            "https://admin:{{ password }}@api.example.com/v1",
-            "https://api.example.com:8443/v1?email=a:b@c.example",
-            "https://admin@api.example.com/",
+            "https://{{host}}/v1?email=a@b",
+            "https://{{user}}:{{password}}@api.example.com/v1",
+            "https://{{ user }}:{{ password }}@api.example.com/v1",
+            "https://{{api_token}}@api.example.com/v1",
+            "https://api.example.com/v1?q=a",
         ] {
             let mut v = spec(quiet);
             assert!(sanitize(&mut v, &[]).warnings.is_empty(), "a URL without a literal password was flagged");
+        }
+    }
+
+    /// Final gate of #575 (dsf F1): a request URL kept as written with
+    /// include_credentials (a quarantined URL, or any userinfo that is not
+    /// exactly references) is extracted whole and restored; a URL without
+    /// one is left alone, and free text is still only warned about.
+    #[test]
+    fn a_credential_url_is_extracted_whole_and_restored() {
+        for url in [
+            "https://api.{{region}}.example.test/v1?to=a:tok-SENSITIVE-pw24@b",
+            "https://admin:{{ 'tok-SENSITIVE-pw25/x' }}@api.example.test/v1",
+            "https://admin:tok-SENSITIVE-pw26@api.example.test/v1",
+        ] {
+            let mut v = serde_json::json!({"requests": [{"spec": {"url": url}}]});
+            let before = v.clone();
+            let s = sanitize(&mut v, &[]);
+            assert!(!v.to_string().contains("tok-SENSITIVE"), "a credential URL stayed readable");
+            assert_eq!(v["requests"][0]["spec"]["url"], "{{secret_url}}");
+            assert_eq!(s.extracted.len(), 1);
+            assert_eq!(s.extracted[0].pointer, "/requests/0/spec/url");
+            assert_eq!(s.warnings.len(), 1);
+            restore(&mut v, &s.extracted).unwrap();
+            assert_eq!(v, before);
+        }
+        for url in
+            ["https://{{host}}/v1?email=a@b", "https://{{user}}:{{password}}@api.example.test/", "https://api.example.test/v1?email=a@b"]
+        {
+            let mut v = serde_json::json!({"requests": [{"spec": {"url": url}}]});
+            let s = sanitize(&mut v, &[]);
+            assert!(s.extracted.is_empty(), "a URL without a credential was extracted");
+            assert_eq!(v["requests"][0]["spec"]["url"], url);
+        }
+    }
+
+    /// Round 3 of #575 (sol F2, dsf F2): a URL credential in a body is warned
+    /// about whatever the password expression holds (spaces, quotes, a
+    /// delimiter), as main did.
+    #[test]
+    fn url_credentials_in_body_text_are_warned() {
+        for text in [
+            "GET https://admin:{{ tenant }}-tok-SENSITIVE-pw17@api.example.test/v1",
+            "GET https://admin:{{ 'tok-SENSITIVE-pw18/x' | urlencode }}@api.example.test/ trailing",
+            "see \"https://admin:{{ 571571571 }}@api.example.test/\" here",
+            "curl 'https://o'brien:tok-SENSITIVE-pw22@api.example.test/'",
+            "GET https://admin:{{ 'x://y' }}-tok-SENSITIVE-pw23@api.example.test/v1",
+        ] {
+            let mut v =
+                serde_json::json!({"requests": [{"spec": {"url": "https://api.example.test/", "body": {"type": "raw", "text": text}}}]});
+            let s = sanitize(&mut v, &[]);
+            assert_eq!(s.warnings.len(), 1, "a URL credential in body text was not flagged");
+            assert_eq!(s.warnings[0].pointer, "/requests/0/spec/body/text");
         }
     }
 
@@ -682,6 +844,35 @@ mod tests {
         assert!(!has_url_password(&text));
         let text = format!("https://user:{}tok-SENSITIVE-pw9@host.example/", "{{".repeat(1 << 20));
         assert!(has_url_password(&text));
+        // Many `://` and many `@`: each byte is scanned a bounded number of
+        // times.
+        let text = "a://{{".repeat(1 << 18);
+        assert!(!has_url_password(&text));
+        let text = format!("https://{{{{u}}}}{}", "a://b ".repeat(1 << 18));
+        assert!(!has_url_password(&text));
+        let text = format!("https://{}", "@".repeat(1 << 20));
+        assert!(has_url_password(&text));
+    }
+
+    /// Review of #575, sol F3 / dsf F1: Basic auth whose password is empty
+    /// carries its credential in the user name (a URL's `<token>@host`); a
+    /// literal one is extracted and restored, a reference stays.
+    #[test]
+    fn a_token_user_name_with_an_empty_password_is_extracted() {
+        let basic = |user: &str, password: &str| serde_json::json!({"type": "basic", "username": user, "password": {"kind": "template", "value": password}});
+        let mut v = serde_json::json!({"requests": [
+            {"spec": {"auth": basic("tok-SENSITIVE-un1", "")}},
+            {"spec": {"auth": basic("{{username}}", "")}},
+            {"spec": {"auth": basic("svc", "{{password}}")}}
+        ]});
+        let original = v.clone();
+        let s = sanitize(&mut v, &[]);
+        let text = v.to_string();
+        assert!(!text.contains("tok-SENSITIVE-un1"), "a token user name stayed readable");
+        assert!(text.contains("{{username}}") && text.contains("\"svc\""), "a reference or a user with a password changed");
+        assert_eq!(s.extracted.len(), 1);
+        restore(&mut v, &s.extracted).unwrap();
+        assert_eq!(v, original);
     }
 
     #[test]
