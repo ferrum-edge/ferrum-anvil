@@ -26,6 +26,8 @@ const DROPPED_HEADERS: &[&str] =
     &["content-length", "host", "connection", "transfer-encoding", "keep-alive", "upgrade", "te", "proxy-connection"];
 
 pub(crate) fn import(root: &Value, b: &mut Builder) -> Result<(), ImportError> {
+    // References hidden by JSON escapes are reserved by their decoded text.
+    crate::common::reserve_implicit_names(b, root);
     let log = root.get("log").ok_or_else(|| ImportError::Invalid {
         dialect: Dialect::Har,
         pointer: "/log".into(),

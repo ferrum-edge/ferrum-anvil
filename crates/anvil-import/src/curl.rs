@@ -216,6 +216,9 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
     b.workspace.name = "cURL import".into();
     b.workspace.auth = AuthConfig::None;
     for w in &words {
+        // References written with shell quoting (`'{{a'"b}}"`) are reserved
+        // by the word they make.
+        crate::common::reserve_string_references(b, &w.text);
         for v in &w.vars {
             // `$NAME` becomes `{{NAME}}`: no placeholder may take that name.
             b.env_names.reserve(v);
