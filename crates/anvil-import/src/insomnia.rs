@@ -750,7 +750,7 @@ fn path_params(b: &mut Builder, url: &str, params: Option<&Value>, at: &str) -> 
                 // A credential-named path parameter (`:api_key`) follows the
                 // credential policy; its placeholder stays a reference.
                 let val = template(b, &val, at);
-                encode_path_value(&maybe_redact(b, name, &val, at, "path parameter").0)
+                encode_path_value(&crate::common::maybe_redact_path(b, name, &val, at, "path parameter").0)
             };
             resolved.push((name.to_string(), rep.clone()));
             rep
@@ -1014,8 +1014,14 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
             AuthConfig::OAuth2 {
                 config: OAuth2Config {
                     grant,
-                    token_url: get(b, "accessTokenUrl"),
-                    authorization_url: get(b, "authorizationUrl"),
+                    token_url: {
+                        let url = get(b, "accessTokenUrl");
+                        crate::common::endpoint_url(b, &url, &ptr(at, "accessTokenUrl"), "OAuth 2 token URL")
+                    },
+                    authorization_url: {
+                        let url = get(b, "authorizationUrl");
+                        crate::common::endpoint_url(b, &url, &ptr(at, "authorizationUrl"), "OAuth 2 authorization URL")
+                    },
                     client_id: get(b, "clientId"),
                     client_secret,
                     scope: get(b, "scope"),

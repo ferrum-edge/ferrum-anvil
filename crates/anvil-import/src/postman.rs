@@ -397,7 +397,7 @@ fn substitute_path_vars(b: &mut Builder, url: &str, vars: &[Value], at: &str) ->
                 // A credential-named path variable (`:api_key`,
                 // `:webhook_token`) follows the credential policy.
                 let pointer = found.map_or_else(|| at.to_string(), |i| format!("{at}/{i}"));
-                maybe_redact(b, name, &val, &pointer, "path variable").0
+                crate::common::maybe_redact_path(b, name, &val, &pointer, "path variable").0
             }
         })
         .collect();
@@ -570,8 +570,8 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
             AuthConfig::OAuth2 {
                 config: OAuth2Config {
                     grant,
-                    token_url: p("accessTokenUrl"),
-                    authorization_url: p("authUrl"),
+                    token_url: crate::common::endpoint_url(b, &p("accessTokenUrl"), &fp("accessTokenUrl"), "OAuth 2 token URL"),
+                    authorization_url: crate::common::endpoint_url(b, &p("authUrl"), &fp("authUrl"), "OAuth 2 authorization URL"),
                     client_id: p("clientId"),
                     client_secret,
                     scope: p("scope"),

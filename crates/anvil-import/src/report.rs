@@ -28,7 +28,34 @@ const MAX_TEXT_CHARS: usize = 2_048;
 /// suffixed with a hash of the whole pointer, so distinct long pointers stay
 /// distinct (for de-duplication too).
 fn bounded_pointer(p: &str) -> String {
+    let redacted = redact_pointer(p);
+    let p = redacted.as_str();
     if p.len() <= MAX_POINTER_CHARS { p.to_string() } else { format!("{}#{:016x}", clip(p, MAX_POINTER_CHARS), fnv1a64(p)) }
+}
+
+/// A pointer with each reference token ([RFC 6901]: `~1` is `/`, `~0` is
+/// `~`) redacted like report text ([`redact_for_report`]): a source key
+/// (a header name, a settings key) can hold a credential URL or literal. A
+/// token that changes keeps a digest of the original, so distinct
+/// locations stay distinct.
+///
+/// [RFC 6901]: https://www.rfc-editor.org/rfc/rfc6901
+fn redact_pointer(p: &str) -> String {
+    if !p.contains(['~', '{', '@', ':', '=', ' ']) {
+        return p.to_string();
+    }
+    p.split('/')
+        .map(|token| {
+            let decoded = token.replace("~1", "/").replace("~0", "~");
+            let redacted = redact_for_report(&decoded);
+            if redacted == decoded {
+                token.to_string()
+            } else {
+                format!("{}#{:08x}", redacted.replace('~', "~0").replace('/', "~1"), fnv1a64(token) as u32)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// `s` as stored in a report: whole when short, clipped otherwise (the
@@ -57,7 +84,145 @@ fn bounded_owned(s: String, max: usize) -> String {
 /// Over-redaction is preferred: the finding's pointer locates the source.
 /// Linear in the text.
 pub fn redact_for_report(text: &str) -> String {
-    redact_expressions(&redact_urls(text))
+    redact_credential_text(&redact_expressions(&redact_urls(text)))
+}
+
+/// The credential-name heuristics of [`redact_for_report`], for text that is
+/// not a URL or a template: the value of a `name=value` or `name: value`
+/// pair whose name is a credential name ([`crate::util::is_credential_name`]),
+/// quoted (`"password": "…"`) or not, the token after an auth scheme word
+/// (`Bearer …`, `Basic …`) when it looks like one (16 characters, or 8 with
+/// both letters and digits), and a JWT, each become `<redacted>`. A value
+/// that is a `{{…}}` reference (or one already redacted) or a plain word
+/// (`none`, `true`, …) is kept. When a credential-named pair's value is an
+/// auth scheme word (`Authorization: Bearer …`), the token after it is part
+/// of the value.
+///
+/// Strictly linear: a name is looked for at most 128 bytes back, every
+/// inspected value is skipped once inspected, and a word, token or JWT span
+/// is scanned a bounded number of times.
+fn redact_credential_text(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let name_byte = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.');
+    let token_byte = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'~' | b'+' | b'/' | b'=');
+    // Where the next value terminator is at or after a position: one cache
+    // per terminator kind, so values that start inside a span already
+    // searched reuse the answer and no byte is searched twice.
+    let unquoted_end = |c: char| c.is_whitespace() || matches!(c, '&' | ',' | ';' | '"' | '\'' | '}' | ']' | ')' | '>' | '`');
+    let mut cached: [Option<(usize, usize)>; 3] = [None; 3];
+    let mut next_end = |kind: usize, from: usize| -> usize {
+        if let Some((searched, found)) = cached[kind]
+            && searched <= from
+            && from <= found
+        {
+            return found;
+        }
+        let rest = &text[from..];
+        let found = from
+            + match kind {
+                0 => rest.find(unquoted_end),
+                1 => rest.find('"'),
+                _ => rest.find('\''),
+            }
+            .unwrap_or(rest.len());
+        cached[kind] = Some((from, found));
+        found
+    };
+    let scheme = |word: &str| word.len() <= 6 && matches!(word.to_ascii_lowercase().as_str(), "bearer" | "basic" | "token" | "digest");
+    let mut cuts: Vec<(usize, usize)> = vec![];
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        // `name=value` / `name: value` (not the `:` of a `scheme://`).
+        if (c == b'=' || c == b':') && !bytes[i..].starts_with(b"://") {
+            let mut end = i;
+            while end > 0 && i - end < 8 && bytes[end - 1] == b' ' {
+                end -= 1;
+            }
+            if end > 0 && matches!(bytes[end - 1], b'"' | b'\'') {
+                end -= 1;
+            }
+            let floor = end.saturating_sub(128);
+            let mut start = end;
+            while start > floor && name_byte(bytes[start - 1]) {
+                start -= 1;
+            }
+            let mut v = i + 1;
+            while v < bytes.len() && v - i <= 8 && bytes[v] == b' ' {
+                v += 1;
+            }
+            if start < end && v < bytes.len() && crate::util::is_credential_name(&text[start..end]) {
+                let (from, mut to) = match bytes[v] {
+                    b'"' => (v + 1, next_end(1, v + 1)),
+                    b'\'' => (v + 1, next_end(2, v + 1)),
+                    _ => (v, next_end(0, v)),
+                };
+                let value = &text[from..to];
+                let word = value.len() <= 7
+                    && matches!(value.to_ascii_lowercase().as_str(), "none" | "null" | "true" | "false" | "inherit" | "off" | "on");
+                // `Authorization: Bearer <token>`: the token after the scheme
+                // is part of the value.
+                if scheme(value) && to < bytes.len() && bytes[to] == b' ' {
+                    let t = to + 1;
+                    let t_end = (t..bytes.len()).find(|&k| !token_byte(bytes[k])).unwrap_or(bytes.len());
+                    if t_end > t {
+                        to = t_end;
+                    }
+                }
+                if !value.is_empty() && !word && !value.starts_with("{{") && !value.starts_with('<') {
+                    cuts.push((from, to));
+                }
+                // Past the value either way: nothing inspected is scanned
+                // again.
+                i = to.max(i + 1);
+                continue;
+            }
+        }
+        // `Bearer <token>` and a JWT, at the start of a word.
+        if c.is_ascii_alphabetic() && (i == 0 || !name_byte(bytes[i - 1])) {
+            let word_end = (i..bytes.len()).find(|&k| !bytes[k].is_ascii_alphabetic()).unwrap_or(bytes.len());
+            if scheme(&text[i..word_end]) && word_end < bytes.len() && bytes[word_end] == b' ' {
+                let t = word_end + 1;
+                let t_end = (t..bytes.len()).find(|&k| !token_byte(bytes[k])).unwrap_or(bytes.len());
+                let token = &text[t..t_end];
+                let digits = token.bytes().any(|b| b.is_ascii_digit());
+                let letters = token.bytes().any(|b| b.is_ascii_alphabetic());
+                if token.len() >= 16 || (token.len() >= 8 && digits && letters) {
+                    cuts.push((t, t_end));
+                    i = t_end;
+                    continue;
+                }
+            }
+            if text[i..].starts_with("eyJ") {
+                // The JWT alphabet (base64url and dots) is all name bytes, so
+                // no later word starts inside a span scanned here.
+                let t_end = (i..bytes.len())
+                    .find(|&k| !(bytes[k].is_ascii_alphanumeric() || matches!(bytes[k], b'_' | b'-' | b'.')))
+                    .unwrap_or(bytes.len());
+                if t_end - i >= 20 && text[i..t_end].matches('.').count() >= 2 {
+                    cuts.push((i, t_end));
+                    i = t_end;
+                    continue;
+                }
+            }
+            i = word_end.max(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+    if cuts.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (from, to) in cuts {
+        debug_assert!(from >= copied);
+        out.push_str(&text[copied..from]);
+        out.push_str("<redacted>");
+        copied = to;
+    }
+    out.push_str(&text[copied..]);
+    out
 }
 
 fn redact_urls(text: &str) -> String {
@@ -377,11 +542,15 @@ impl ImportReport {
             return self.truncated("script");
         }
         self.scripts.push(RetainedScript {
-            pointer: pointer.into(),
-            owner: owner.into(),
-            event: event.into(),
-            language: language.into(),
-            source,
+            // Every field comes from the source (a request name, an event
+            // or type string) and is redacted like report text.
+            pointer: bounded_pointer(pointer),
+            owner: bounded_owned(redact_for_report(owner), MAX_TEXT_CHARS),
+            event: bounded_owned(redact_for_report(event), MAX_TEXT_CHARS),
+            language: bounded_owned(redact_for_report(language), MAX_TEXT_CHARS),
+            // Retained for review, never run: credential literals in it are
+            // redacted like report text, the rest is kept as written.
+            source: redact_for_report(&source),
             enabled: false,
             trusted: false,
         });
@@ -480,6 +649,42 @@ mod tests {
         }
     }
 
+    /// Final scope of GHSA-c236 (#579): literals outside a URL or a template,
+    /// by the credential-name heuristics.
+    #[test]
+    fn report_text_never_holds_credential_literals() {
+        for (text, expected) in [
+            ("Postman body mode 'password=tok-SENSITIVE-r7' is not supported", "Postman body mode 'password=<redacted>' is not supported"),
+            ("const password = 'tok-SENSITIVE-r8';", "const password = '<redacted>';"),
+            (r#"{"api_key": "tok-SENSITIVE-r9", "note": "ok"}"#, r#"{"api_key": "<redacted>", "note": "ok"}"#),
+            ("Insomnia auth type 'Bearer tok-SENSITIVE-r10' is not supported", "Insomnia auth type 'Bearer <redacted>' is not supported"),
+            ("token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl here", "token <redacted> here"),
+            ("password: {{password}} and token={{ _.token }}", "password: {{password}} and token={{ _.token }}"),
+            ("see email=a@b and Basic authentication", "see email=a@b and Basic authentication"),
+            ("Postman setting `strictSSL` is not imported", "Postman setting `strictSSL` is not imported"),
+            ("imported without credentials (auth: none)", "imported without credentials (auth: none)"),
+            // Review of #583 (dsf F1): a scheme word as a pair's value.
+            ("Authorization: Bearer opaque-tok-SENSITIVE-r12", "Authorization: <redacted>"),
+            ("header Authorization=Basic dXNlcjpwYXNz ok", "header Authorization=<redacted> ok"),
+        ] {
+            assert_eq!(redact_for_report(text), expected, "{expected:?}");
+        }
+    }
+
+    /// Final scope of GHSA-c236 (sol F2): a pointer token (a source key) is
+    /// redacted too, and keeps a digest so locations stay distinct.
+    #[test]
+    fn report_pointers_never_hold_credentials() {
+        let mut report = super::ImportReport::default();
+        let key = "https:~1~1admin:tok-SENSITIVE-r11@api.example.test~1";
+        report.unsupported("request_setting", &format!("/item/0/protocolProfileBehavior/{key}"), "x");
+        report.unsupported("request_setting", "/item/0/protocolProfileBehavior/strictSSL", "x");
+        let pointer = &report.unsupported[0].pointer;
+        assert!(!pointer.contains("tok-SENSITIVE"), "a pointer kept a credential");
+        assert!(pointer.starts_with("/item/0/protocolProfileBehavior/https:~1~1<redacted>@api.example.test~1#"));
+        assert_eq!(report.unsupported[1].pointer, "/item/0/protocolProfileBehavior/strictSSL");
+    }
+
     #[test]
     fn report_redaction_is_linear() {
         // Over-redaction is fine: without a `/` the authority runs on.
@@ -491,5 +696,26 @@ mod tests {
         assert_eq!(redact_for_report(&text), "<url redacted>");
         let text = "{{a}} {{".repeat(1 << 16);
         assert!(redact_for_report(&text).ends_with("{{…"));
+        let text = "password= ".repeat(1 << 16) + "token=x";
+        assert!(redact_for_report(&text).ends_with("<redacted>"));
+        // Review of #583 (sol F7): exempt and unterminated values, scheme
+        // words and JWT prefixes, each about 1 MiB; a rescan would take
+        // minutes here.
+        for unit in [
+            "password=<",
+            "password=\"",
+            "password='",
+            "password={{",
+            "eyJ~",
+            "bearer bearer ",
+            "token: none ",
+            "a=b:c=",
+            "Authorization: Bearer ",
+        ] {
+            let text = unit.repeat((1 << 20) / unit.len());
+            let started = std::time::Instant::now();
+            let _ = redact_for_report(&text);
+            assert!(started.elapsed() < std::time::Duration::from_secs(20), "{unit:?} took too long");
+        }
     }
 }

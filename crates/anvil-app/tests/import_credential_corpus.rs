@@ -621,3 +621,248 @@ fn a_reference_authority_keeps_the_url() {
         }
     }
 }
+
+// Final scope of GHSA-c236: one shared row per remaining credential path.
+
+fn with_credentials(include_credentials: bool) -> ImportOptions {
+    ImportOptions { include_credentials, ..ImportOptions::default() }
+}
+
+const POSTMAN_SCHEMA: &str = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json";
+
+/// Neither the report nor the stored objects hold a canary, and a sanitized
+/// export of the stored objects holds none either, in both modes.
+fn assert_nothing_readable(source: &[u8], label: &str) {
+    for include_credentials in [false, true] {
+        let r = import(source, &with_credentials(include_credentials)).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(!leaks(&serde_json::to_string(&r.report).unwrap()), "{label}: the report holds a credential ({include_credentials})");
+        let mut objects = stored(&r);
+        if !include_credentials {
+            assert!(!leaks(&objects.to_string()), "{label}: a credential was stored");
+        }
+        let before = objects.clone();
+        let s = anvil_portability::sanitize::sanitize(&mut objects, &[]);
+        assert!(!leaks(&objects.to_string()), "{label}: a sanitized export kept a credential readable ({include_credentials})");
+        anvil_portability::sanitize::restore(&mut objects, &s.extracted).unwrap();
+        assert_eq!(objects, before, "{label}: the export did not restore ({include_credentials})");
+    }
+}
+
+/// sol F1: an explicit request, folder or collection name that repeats a
+/// credential URL is redacted like report text.
+#[test]
+fn names_never_keep_a_credential_url() {
+    let ambiguous = "https://admin:{{pw}}tok-SENSITIVE-c70@api.example.test/v1";
+    let literal = "https://admin:tok-SENSITIVE-c71@api.example.test/v1";
+    let postman = json!({
+        "info": { "name": literal, "schema": POSTMAN_SCHEMA },
+        "item": [{ "name": ambiguous, "item": [{ "name": literal, "request": { "method": "GET", "url": ambiguous } }] }]
+    })
+    .to_string()
+    .into_bytes();
+    let mut request = insomnia_request(ambiguous);
+    request["name"] = json!(literal);
+    assert_nothing_readable(&postman, "Postman names");
+    assert_nothing_readable(&insomnia_doc(request, json!({})), "Insomnia names");
+}
+
+/// sol F2: a report pointer built from a source key holds no credential.
+#[test]
+fn report_pointers_never_hold_a_credential() {
+    let source = postman_doc_items(json!([{
+        "name": "r",
+        "protocolProfileBehavior": { "https://admin:tok-SENSITIVE-c72@api.example.test/": true },
+        "request": { "method": "GET", "url": "https://api.example.test/" }
+    }]));
+    let r = import(&source, &ImportOptions::default()).unwrap();
+    assert!(r.report.unsupported.iter().any(|f| f.code == "request_setting"), "the setting was not reported");
+    assert_nothing_readable(&source, "Postman settings key");
+}
+
+/// sol F3: OAuth endpoint URLs get the request URL's userinfo rule on
+/// import and whole-URL extraction on export.
+#[test]
+fn oauth_endpoint_urls_never_keep_a_credential() {
+    let token_url = "https://client:tok-SENSITIVE-c73@issuer.example.test/token";
+    let auth_url = "https://{{tenant}}.issuer.example.test/authorize?x=a:tok-SENSITIVE-c74@b";
+    let postman = postman_doc(json!({
+        "method": "GET",
+        "url": "https://api.example.test/",
+        "auth": { "type": "oauth2", "oauth2": [
+            { "key": "grant_type", "value": "authorization_code_with_pkce" },
+            { "key": "accessTokenUrl", "value": token_url },
+            { "key": "authUrl", "value": auth_url },
+            { "key": "clientId", "value": "client" }
+        ] }
+    }));
+    let mut request = insomnia_request("https://api.example.test/");
+    request["authentication"] = json!({
+        "type": "oauth2", "grantType": "authorization_code", "usePkce": true,
+        "accessTokenUrl": token_url, "authorizationUrl": auth_url, "clientId": "client"
+    });
+    let insomnia = insomnia_doc(request, json!({}));
+    for (importer, source) in [("Postman", postman), ("Insomnia", insomnia)] {
+        let r = import(&source, &ImportOptions::default()).unwrap();
+        let config = &serde_json::to_value(&r.requests[0].spec.auth).unwrap()["config"];
+        assert_eq!(config["token_url"], "https://issuer.example.test/token", "{importer}");
+        assert_eq!(config["authorization_url"], "{{url-needs-review}}", "{importer}");
+        let kept = import(&source, &with_credentials(true)).unwrap();
+        assert!(leaks(&stored(&kept).to_string()), "{importer}: include_credentials did not keep the endpoint");
+        assert_nothing_readable(&source, importer);
+    }
+}
+
+/// sol F4: an ordinary credential placeholder never takes a name the source
+/// defines (here an alias that would resolve to another account's value).
+#[test]
+fn credential_placeholders_never_bind_a_source_variable() {
+    let postman = json!({
+        "info": { "name": "c", "schema": POSTMAN_SCHEMA },
+        "variable": [
+            { "key": "r_password", "value": "{{selected_value}}" },
+            { "key": "selected_value", "value": "other-account-value" }
+        ],
+        "item": [{ "name": "r", "request": { "method": "GET", "url": "https://api.example.test/",
+            "auth": { "type": "basic", "basic": [{ "key": "username", "value": "u" }, { "key": "password", "value": "tok-SENSITIVE-c75" }] } } }]
+    })
+    .to_string()
+    .into_bytes();
+    let mut request = insomnia_request("https://api.example.test/");
+    request["authentication"] = json!({ "type": "basic", "username": "u", "password": "tok-SENSITIVE-c76" });
+    let insomnia = insomnia_doc(request, json!({ "R_password": "{{ _.selected }}", "selected": "other-account-value" }));
+    for (importer, source) in [("Postman", postman), ("Insomnia", insomnia)] {
+        let r = import(&source, &ImportOptions::default()).unwrap();
+        let password = serde_json::to_value(&r.requests[0].spec.auth).unwrap()["password"]["value"].as_str().unwrap().to_string();
+        let defined: Vec<String> = r
+            .workspace
+            .variables
+            .iter()
+            .chain(r.environments.iter().flat_map(|e| e.variables.iter()))
+            .map(|v| format!("{{{{{}}}}}", v.name))
+            .collect();
+        assert!(password.starts_with("{{") && !defined.contains(&password), "{importer}: the placeholder binds a source variable");
+        assert_nothing_readable(&source, importer);
+    }
+}
+
+/// sol F5: a reference the source escaped (a JSON \u escape, percent-encoding,
+/// shell quoting) is reserved by its decoded spelling.
+#[test]
+fn escaped_references_are_reserved() {
+    let quarantined = "https://api.{{region}}.example.test/v1?to=a@b";
+    let json_escaped = format!(
+        r#"{{"info":{{"name":"c","schema":"{POSTMAN_SCHEMA}"}},"item":[{{"name":"a","request":{{"method":"GET","url":"https://api.example.test/","header":[{{"key":"X-Id","value":"\u007b\u007burl-needs-review\u007d\u007d"}}]}}}},{{"name":"b","request":{{"method":"GET","url":"{quarantined}"}}}}]}}"#
+    );
+    let percent = postman_doc_items(json!([
+        { "name": "a", "request": { "method": "GET", "url": "https://api.example.test/", "header": [{ "key": "X-Id", "value": "{{url%2Dneeds%2Dreview}}" }] } },
+        { "name": "b", "request": { "method": "GET", "url": quarantined } },
+    ]));
+    for (label, source) in [("JSON escape", json_escaped.into_bytes()), ("percent-encoding", percent)] {
+        let r = import(&source, &ImportOptions::default()).unwrap();
+        assert_eq!(r.requests[1].spec.url, "{{url-needs-review_2}}", "{label}: an escaped reference was not reserved");
+    }
+    let shell = format!("curl -H 'X-Id: {{{{url-'\"needs-review}}}}\" '{quarantined}'");
+    let r = import(shell.as_bytes(), &ImportOptions::default()).unwrap();
+    assert_eq!(header_value(&r, "X-Id"), Some("{{url-needs-review}}"));
+    assert_eq!(r.requests[0].spec.url, "{{url-needs-review_2}}", "shell quoting hid a reference");
+}
+
+/// dsf F1: a path parameter is reserved by its raw spelling as well as the
+/// sanitized one its placeholder takes. That is fail-safe: no placeholder
+/// can bind the parameter under either spelling, at the cost of a suffix.
+#[test]
+fn a_path_parameter_reserves_its_raw_spelling() {
+    let r = import(
+        &postman_doc_items(json!([
+            { "name": "a", "request": { "method": "GET", "url": { "raw": "https://api.example.test/items/:url-needs-review" } } },
+            { "name": "b", "request": { "method": "GET", "url": "https://api.{{region}}.example.test/v1?to=a@b" } },
+        ])),
+        &ImportOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(r.requests[0].spec.url, "https://api.example.test/items/{{url_needs_review}}");
+    assert_eq!(r.requests[1].spec.url, "{{url-needs-review_2}}");
+}
+
+/// #579: a retained script keeps no credential literal in the report.
+#[test]
+fn retained_scripts_hold_no_credential_literal() {
+    let source = postman_doc_items(json!([{ "name": "r",
+        "event": [{ "listen": "prerequest", "script": { "type": "text/javascript", "exec": [
+            "const password = 'tok-SENSITIVE-c77';",
+            "pm.request.headers.add({ key: 'Authorization', value: 'Bearer tok-SENSITIVE-c78abcdef' });",
+            "pm.sendRequest('https://admin:tok-SENSITIVE-c79@api.example.test/');"
+        ] } }],
+        "request": { "method": "GET", "url": "https://api.example.test/" } }]));
+    let r = import(&source, &ImportOptions::default()).unwrap();
+    assert_eq!(r.report.scripts.len(), 1);
+    assert!(r.report.scripts[0].source.contains("pm.request.headers.add"), "the script was not retained");
+    assert_nothing_readable(&source, "Postman script");
+}
+
+/// #579: an importer message that echoes a source value outside a URL or a
+/// template holds no credential literal.
+#[test]
+fn messages_hold_no_credential_literal() {
+    let postman = postman_doc(json!({
+        "method": "POST",
+        "url": "https://api.example.test/",
+        "body": { "mode": "password=tok-SENSITIVE-c80" }
+    }));
+    let mut request = insomnia_request("https://api.example.test/");
+    request["authentication"] = json!({ "type": "Bearer tok-SENSITIVE-c81abcdef" });
+    for (label, source) in [("Postman body mode", postman), ("Insomnia auth type", insomnia_doc(request, json!({})))] {
+        let r = import(&source, &ImportOptions::default()).unwrap();
+        assert!(!r.report.unsupported.is_empty(), "{label}: nothing was reported");
+        assert_nothing_readable(&source, label);
+    }
+}
+
+/// Review of #583 (sol F2 = dsf F2): a retained script's owner (a
+/// collection, folder or request name) and its other metadata are redacted
+/// like report text.
+#[test]
+fn retained_script_metadata_is_redacted() {
+    let name = "https://admin:tok-SENSITIVE-c84@api.example.test/v1";
+    let source = json!({
+        "info": { "name": name, "schema": POSTMAN_SCHEMA },
+        "event": [{ "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["pm.variables.set('a', 1);"] } }],
+        "item": [{ "name": name,
+            "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('ok', () => {});"] } }],
+            "request": { "method": "GET", "url": "https://api.example.test/" } }]
+    })
+    .to_string()
+    .into_bytes();
+    let r = import(&source, &ImportOptions::default()).unwrap();
+    assert_eq!(r.report.scripts.len(), 2, "the scripts were not retained");
+    assert_nothing_readable(&source, "script owner");
+}
+
+/// Review of #583 (dsf F3): OpenAPI and Swagger OAuth endpoint URLs get the
+/// request URL's userinfo rule on import.
+#[test]
+fn openapi_oauth_endpoint_urls_never_keep_a_credential() {
+    let source = json!({
+        "openapi": "3.0.3",
+        "info": { "title": "t", "version": "1" },
+        "servers": [{ "url": "https://api.example.test" }],
+        "components": { "securitySchemes": {
+            "cc": { "type": "oauth2", "flows": { "clientCredentials": {
+                "tokenUrl": "https://client:tok-SENSITIVE-c85@issuer.example.test/token", "scopes": {} } } },
+            "ac": { "type": "oauth2", "flows": { "authorizationCode": {
+                "authorizationUrl": "https://user:tok-SENSITIVE-c86@issuer.example.test/authorize",
+                "tokenUrl": "https://issuer.example.test/token", "scopes": {} } } }
+        } },
+        "paths": {
+            "/a": { "get": { "security": [{ "cc": [] }], "responses": { "200": { "description": "ok" } } } },
+            "/b": { "get": { "security": [{ "ac": [] }], "responses": { "200": { "description": "ok" } } } }
+        }
+    })
+    .to_string()
+    .into_bytes();
+    let r = import(&source, &ImportOptions::default()).unwrap();
+    let text = stored(&r).to_string();
+    assert!(text.contains("\"https://issuer.example.test/token\""), "the token URL lost more than its userinfo");
+    assert!(text.contains("\"https://issuer.example.test/authorize\""), "the authorization URL lost more than its userinfo");
+    assert_nothing_readable(&source, "OpenAPI OAuth endpoints");
+}

@@ -31,12 +31,33 @@ pub fn credential_text(b: &mut Builder, value: &str, var: &str, pointer: &str, f
 
 /// [`credential_text`] with the caller's judgement of whether a non-empty
 /// `value` is literal material (`literal`); a value that is not is kept.
+/// The placeholder is named after `var` through the shared allocator
+/// ([`PlaceholderNames::shared`]): never a name the source defines,
+/// references or derives (a variable that could resolve it to another
+/// value), and the same name for every field of the same base.
 fn credential_text_with(b: &mut Builder, value: &str, literal: bool, var: &str, pointer: &str, field: &str) -> String {
     let t = value.trim();
     if !t.is_empty() && !literal {
         return value.to_string();
     }
-    let var = sanitize_var(var);
+    let var = b.env_names.shared(var);
+    credential_placeholder(b, value, &var, pointer, field)
+}
+
+/// [`credential_text_with`] for a non-reference value and a placeholder name
+/// the caller already owns: a path parameter's own name, or one allocated by
+/// the caller ([`scrub_stored_json`]).
+pub fn credential_text_named(b: &mut Builder, value: &str, literal: bool, var: &str, pointer: &str, field: &str) -> String {
+    let t = value.trim();
+    if !t.is_empty() && !literal {
+        return value.to_string();
+    }
+    credential_placeholder(b, value, &sanitize_var(var), pointer, field)
+}
+
+fn credential_placeholder(b: &mut Builder, value: &str, var: &str, pointer: &str, field: &str) -> String {
+    let t = value.trim();
+    let var = var.to_string();
     let placeholder = format!("{{{{{var}}}}}");
     if t.is_empty() {
         b.report.require_var(&var, true, &format!("{field} has no value in the source"), pointer);
@@ -70,6 +91,18 @@ pub fn maybe_redact(b: &mut Builder, name: &str, value: &str, pointer: &str, wha
         return (value.to_string(), false);
     }
     (credential_text(b, value, name, pointer, &format!("{what} {name}")), true)
+}
+
+/// [`maybe_redact`] for a path parameter, whose placeholder keeps the
+/// parameter's own name (`:api_key` becomes `{{api_key}}` whether or not
+/// the source gave it a value): the name is the parameter's, reserved
+/// against every other placeholder ([`reserve_implicit_names`]).
+pub fn maybe_redact_path(b: &mut Builder, name: &str, value: &str, pointer: &str, what: &str) -> (String, bool) {
+    if !is_credential_name(name) || value.trim().is_empty() {
+        return (value.to_string(), false);
+    }
+    let literal = has_literal_secret(value.trim(), b.template_syntax);
+    (credential_text_named(b, value, literal, name, pointer, &format!("{what} {name}")), true)
 }
 
 /// Replace credential-looking string members of a JSON body (recursively),
@@ -271,14 +304,52 @@ const PATH_NAME_BYTES: usize = 48;
 pub struct PlaceholderNames {
     used: std::collections::HashSet<String>,
     next: std::collections::HashMap<String, usize>,
+    /// The name [`PlaceholderNames::shared`] gave each base.
+    shared: std::collections::HashMap<String, String>,
 }
 
 impl PlaceholderNames {
     /// Reserve a name that exists in the scope (a variable name), as written
-    /// and as a placeholder would spell it.
+    /// and as a placeholder would spell it, and by its percent-decoded
+    /// spelling too (`{{url%2Dneeds%2Dreview}}` may be read as
+    /// `url-needs-review`).
     pub fn reserve(&mut self, name: &str) {
         self.used.insert(name.to_string());
         self.used.insert(sanitize_var(name));
+        if name.contains('%')
+            && let Ok(decoded) = percent_encoding::percent_decode_str(name).decode_utf8()
+            && decoded != name
+        {
+            self.used.insert(sanitize_var(&decoded));
+            self.used.insert(decoded.into_owned());
+        }
+    }
+
+    /// The placeholder name for an ordinary credential field named
+    /// `readable` (sanitized, not bounded): the same name for every field of
+    /// the same base, so one variable fills them all, and never a reserved
+    /// name (the source's variables, references and implicit names, or a
+    /// name another placeholder took), which gets the next free suffix.
+    pub fn shared(&mut self, readable: &str) -> String {
+        let base = sanitize_var(readable);
+        if let Some(name) = self.shared.get(&base) {
+            return name.clone();
+        }
+        let name = if self.used.insert(base.clone()) {
+            base.clone()
+        } else {
+            let mut n = self.next.get(&base).copied().unwrap_or(2);
+            loop {
+                let candidate = format!("{base}_{n}");
+                n += 1;
+                if self.used.insert(candidate.clone()) {
+                    self.next.insert(base.clone(), n);
+                    break candidate;
+                }
+            }
+        };
+        self.shared.insert(base, name.clone());
+        name
     }
 
     /// A free name for `base` as written (not sanitized), now reserved: for
@@ -346,7 +417,13 @@ pub fn reserve_source_references(b: &mut Builder, text: &str) {
 ///   `{{name}}` (sanitized);
 /// - every `key` (or `id`) of a `variable` list (Postman collection, folder
 ///   and `url.variable`) and every `name` of an Insomnia `pathParameters`
-///   list.
+///   list;
+/// - every `{{name}}` reference in a decoded string, which escapes can hide
+///   from the raw-text pass ([`reserve_string_references`]).
+///
+/// A path parameter is reserved by its raw spelling too (`:url-needs-review`
+/// reserves `url-needs-review`), which no placeholder it makes can take;
+/// that is fail-safe: a placeholder then takes a suffix.
 ///
 /// Over-reserving only makes a placeholder take a suffix. One pass over the
 /// parsed document, without recursion.
@@ -354,7 +431,10 @@ pub fn reserve_implicit_names(b: &mut Builder, root: &Value) {
     let mut stack = vec![root];
     while let Some(v) = stack.pop() {
         match v {
-            Value::String(s) => reserve_path_segments(b, s),
+            Value::String(s) => {
+                reserve_path_segments(b, s);
+                reserve_string_references(b, s);
+            }
             Value::Array(a) => stack.extend(a.iter()),
             Value::Object(m) => {
                 for (list, field) in [("variable", "key"), ("variable", "id"), ("pathParameters", "name")] {
@@ -368,6 +448,16 @@ pub fn reserve_implicit_names(b: &mut Builder, root: &Value) {
             }
             _ => {}
         }
+    }
+}
+
+/// Reserve the `{{name}}` references of one decoded string (a parsed JSON or
+/// YAML value, a tokenized cURL word), which the raw-text pass
+/// ([`reserve_source_references`]) cannot see when the source escaped them
+/// (`\u007b\u007bname\u007d\u007d`, shell quoting).
+pub fn reserve_string_references(b: &mut Builder, s: &str) {
+    if s.contains("{{") {
+        reserve_source_references(b, s);
     }
 }
 
@@ -434,12 +524,12 @@ fn scrub_stored_at(
         Value::String(s) if credential => {
             let (var, p) = leaf_names(names, root, pointer, path);
             let literal = has_literal_secret(s.trim(), b.template_syntax);
-            *s = credential_text_with(b, s, literal, &var, &p, &format!("environment value {var}"));
+            *s = credential_text_named(b, s, literal, &var, &p, &format!("environment value {var}"));
         }
         Value::Number(_) | Value::Bool(_) if credential => {
             let (var, p) = leaf_names(names, root, pointer, path);
             let literal = v.to_string();
-            let new = credential_text_with(b, &literal, true, &var, &p, &format!("environment value {var}"));
+            let new = credential_text_named(b, &literal, true, &var, &p, &format!("environment value {var}"));
             if new != literal {
                 *v = Value::String(format!("{NUMERIC_PLACEHOLDER}{new}{NUMERIC_PLACEHOLDER}"));
             }
@@ -885,6 +975,34 @@ pub fn take_url_credentials(b: &mut Builder, url: &str, auth: &mut AuthConfig, p
 
 /// The reference a quarantined URL is replaced by ([`quarantine_url`]).
 pub const QUARANTINE_PLACEHOLDER: &str = "url-needs-review";
+
+/// An endpoint URL other than the request's (an OAuth token or
+/// authorization URL), by the request URL's rule
+/// ([`anvil_domain::secret::url_userinfo`]): a userinfo that is not exactly
+/// references is taken off and reported (it cannot become Basic auth here),
+/// and an ambiguous URL is quarantined ([`quarantine_url`]). With
+/// `include_credentials` a literal userinfo is kept, and a sanitized export
+/// extracts the whole URL.
+pub fn endpoint_url(b: &mut Builder, url: &str, pointer: &str, field: &str) -> String {
+    use anvil_domain::secret::{UrlUserinfo, is_plain_userinfo, url_userinfo};
+    match url_userinfo(url, b.template_syntax) {
+        UrlUserinfo::None => url.to_string(),
+        UrlUserinfo::Ambiguous => quarantine_url(b, url, pointer),
+        UrlUserinfo::Userinfo { start, at } => {
+            let userinfo = &url[start..at];
+            if userinfo.trim().is_empty() || is_plain_userinfo(userinfo, b.template_syntax) || b.opts.include_credentials {
+                return url.to_string();
+            }
+            b.report.redacted(pointer, format!("credentials in the {field}"), "(removed)");
+            b.report.warn(
+                "url_credentials_removed",
+                pointer,
+                format!("the {field} held credentials in its userinfo; they were not imported (supply them as the client credentials)"),
+            );
+            format!("{}{}", &url[..start], &url[at + 1..])
+        }
+    }
+}
 
 /// What a name, folder or operation key derived from a quarantined URL
 /// shows instead of its text ([`quarantine_url`]).

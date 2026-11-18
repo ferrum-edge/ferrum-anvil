@@ -364,16 +364,18 @@ fn walk(v: &mut serde_json::Value, ptr: String, key: &str, extra: &[String], s: 
                 // rule, which quarantines such a URL or keeps it as written
                 // under include_credentials), is extracted whole: no part of
                 // it can be trusted to be free of a credential.
-                if k == "url"
+                // An OAuth endpoint (`token_url`, `authorization_url`) or any
+                // other `*_url` field gets the same rule.
+                if (k == "url" || k.ends_with("_url"))
                     && let Some(serde_json::Value::String(text)) = map.get(&k)
                     && url_field_has_credential(text)
                 {
                     let text = text.clone();
-                    let ph = s.placeholder_for("url", &text);
+                    let ph = s.placeholder_for(&k, &text);
                     s.warnings.push(ContentWarning {
                         pointer: child_ptr.clone(),
                         reason: format!(
-                            "url contains a password in the URL (or a template beside an '@' in its authority); the whole URL \
+                            "{k} contains a password in the URL (or a template beside an '@' in its authority); the whole URL \
                              is exported as {{{{{ph}}}}}, restored by an encrypted-transfer import; a share-safely recipient must re-enter it"
                         ),
                     });
