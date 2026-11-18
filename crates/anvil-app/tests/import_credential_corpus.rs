@@ -817,3 +817,52 @@ fn messages_hold_no_credential_literal() {
         assert_nothing_readable(&source, label);
     }
 }
+
+/// Review of #583 (sol F2 = dsf F2): a retained script's owner (a
+/// collection, folder or request name) and its other metadata are redacted
+/// like report text.
+#[test]
+fn retained_script_metadata_is_redacted() {
+    let name = "https://admin:tok-SENSITIVE-c84@api.example.test/v1";
+    let source = json!({
+        "info": { "name": name, "schema": POSTMAN_SCHEMA },
+        "event": [{ "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["pm.variables.set('a', 1);"] } }],
+        "item": [{ "name": name,
+            "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('ok', () => {});"] } }],
+            "request": { "method": "GET", "url": "https://api.example.test/" } }]
+    })
+    .to_string()
+    .into_bytes();
+    let r = import(&source, &ImportOptions::default()).unwrap();
+    assert_eq!(r.report.scripts.len(), 2, "the scripts were not retained");
+    assert_nothing_readable(&source, "script owner");
+}
+
+/// Review of #583 (dsf F3): OpenAPI and Swagger OAuth endpoint URLs get the
+/// request URL's userinfo rule on import.
+#[test]
+fn openapi_oauth_endpoint_urls_never_keep_a_credential() {
+    let source = json!({
+        "openapi": "3.0.3",
+        "info": { "title": "t", "version": "1" },
+        "servers": [{ "url": "https://api.example.test" }],
+        "components": { "securitySchemes": {
+            "cc": { "type": "oauth2", "flows": { "clientCredentials": {
+                "tokenUrl": "https://client:tok-SENSITIVE-c85@issuer.example.test/token", "scopes": {} } } },
+            "ac": { "type": "oauth2", "flows": { "authorizationCode": {
+                "authorizationUrl": "https://user:tok-SENSITIVE-c86@issuer.example.test/authorize",
+                "tokenUrl": "https://issuer.example.test/token", "scopes": {} } } }
+        } },
+        "paths": {
+            "/a": { "get": { "security": [{ "cc": [] }], "responses": { "200": { "description": "ok" } } } },
+            "/b": { "get": { "security": [{ "ac": [] }], "responses": { "200": { "description": "ok" } } } }
+        }
+    })
+    .to_string()
+    .into_bytes();
+    let r = import(&source, &ImportOptions::default()).unwrap();
+    let text = stored(&r).to_string();
+    assert!(text.contains("\"https://issuer.example.test/token\""), "the token URL lost more than its userinfo");
+    assert!(text.contains("\"https://issuer.example.test/authorize\""), "the authorization URL lost more than its userinfo");
+    assert_nothing_readable(&source, "OpenAPI OAuth endpoints");
+}

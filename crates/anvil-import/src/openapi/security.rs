@@ -176,8 +176,17 @@ fn oauth2(ctx: &Ctx, b: &mut Builder, v: &str, key: &str, scheme: &Value, sptr: 
         return bearer(b, v, key, sptr);
     };
     let grant = if *flow == "clientCredentials" { OAuthGrant::ClientCredentials } else { OAuthGrant::AuthorizationCodePkce };
-    let token_url = str_of(f, "tokenUrl").unwrap_or("").to_string();
-    if token_url.is_empty() {
+    let raw_token_url = str_of(f, "tokenUrl").unwrap_or("");
+    // Endpoint URLs get the request URL's userinfo rule
+    // ([`crate::common::endpoint_url`]).
+    let token_url = crate::common::endpoint_url(b, raw_token_url, &ptr(fptr, "tokenUrl"), "OAuth 2 token URL");
+    let authorization_url = crate::common::endpoint_url(
+        b,
+        str_of(f, "authorizationUrl").unwrap_or(""),
+        &ptr(fptr, "authorizationUrl"),
+        "OAuth 2 authorization URL",
+    );
+    if raw_token_url.is_empty() {
         b.report.warn("oauth2_missing_token_url", fptr, format!("OAuth 2 flow of '{key}' has no tokenUrl"));
     }
     let client_id = var(b, &format!("{v}_client_id"), false, &format!("OAuth 2 client id for '{key}'"), sptr);
@@ -190,7 +199,7 @@ fn oauth2(ctx: &Ctx, b: &mut Builder, v: &str, key: &str, scheme: &Value, sptr: 
         config: OAuth2Config {
             grant,
             token_url,
-            authorization_url: str_of(f, "authorizationUrl").unwrap_or("").to_string(),
+            authorization_url,
             client_id,
             client_secret,
             scope: scopes.join(" "),

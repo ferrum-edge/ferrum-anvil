@@ -94,12 +94,41 @@ pub fn redact_for_report(text: &str) -> String {
 /// (`Bearer …`, `Basic …`) when it looks like one (16 characters, or 8 with
 /// both letters and digits), and a JWT, each become `<redacted>`. A value
 /// that is a `{{…}}` reference (or one already redacted) or a plain word
-/// (`none`, `true`, …) is kept. Linear:
-/// a name is looked for at most 128 bytes back.
+/// (`none`, `true`, …) is kept. When a credential-named pair's value is an
+/// auth scheme word (`Authorization: Bearer …`), the token after it is part
+/// of the value.
+///
+/// Strictly linear: a name is looked for at most 128 bytes back, every
+/// inspected value is skipped once inspected, and a word, token or JWT span
+/// is scanned a bounded number of times.
 fn redact_credential_text(text: &str) -> String {
     let bytes = text.as_bytes();
     let name_byte = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.');
     let token_byte = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'~' | b'+' | b'/' | b'=');
+    // Where the next value terminator is at or after a position: one cache
+    // per terminator kind, so values that start inside a span already
+    // searched reuse the answer and no byte is searched twice.
+    let unquoted_end = |c: char| c.is_whitespace() || matches!(c, '&' | ',' | ';' | '"' | '\'' | '}' | ']' | ')' | '>' | '`');
+    let mut cached: [Option<(usize, usize)>; 3] = [None; 3];
+    let mut next_end = |kind: usize, from: usize| -> usize {
+        if let Some((searched, found)) = cached[kind]
+            && searched <= from
+            && from <= found
+        {
+            return found;
+        }
+        let rest = &text[from..];
+        let found = from
+            + match kind {
+                0 => rest.find(unquoted_end),
+                1 => rest.find('"'),
+                _ => rest.find('\''),
+            }
+            .unwrap_or(rest.len());
+        cached[kind] = Some((from, found));
+        found
+    };
+    let scheme = |word: &str| word.len() <= 6 && matches!(word.to_ascii_lowercase().as_str(), "bearer" | "basic" | "token" | "digest");
     let mut cuts: Vec<(usize, usize)> = vec![];
     let mut i = 0;
     while i < bytes.len() {
@@ -119,33 +148,40 @@ fn redact_credential_text(text: &str) -> String {
                 start -= 1;
             }
             let mut v = i + 1;
-            while v < bytes.len() && bytes[v] == b' ' {
+            while v < bytes.len() && v - i <= 8 && bytes[v] == b' ' {
                 v += 1;
             }
-            if start < end && crate::util::is_credential_name(&text[start..end]) && v < bytes.len() {
-                let (from, to) = match bytes[v] {
-                    q @ (b'"' | b'\'') => (v + 1, text[v + 1..].find(q as char).map_or(bytes.len(), |e| v + 1 + e)),
-                    _ => (
-                        v,
-                        text[v..]
-                            .find(|ch: char| ch.is_whitespace() || matches!(ch, '&' | ',' | ';' | '"' | '\'' | '}' | ']' | ')' | '>' | '`'))
-                            .map_or(bytes.len(), |e| v + e),
-                    ),
+            if start < end && v < bytes.len() && crate::util::is_credential_name(&text[start..end]) {
+                let (from, mut to) = match bytes[v] {
+                    b'"' => (v + 1, next_end(1, v + 1)),
+                    b'\'' => (v + 1, next_end(2, v + 1)),
+                    _ => (v, next_end(0, v)),
                 };
                 let value = &text[from..to];
-                let word = matches!(value.to_ascii_lowercase().as_str(), "none" | "null" | "true" | "false" | "inherit" | "off" | "on");
+                let word = value.len() <= 7
+                    && matches!(value.to_ascii_lowercase().as_str(), "none" | "null" | "true" | "false" | "inherit" | "off" | "on");
+                // `Authorization: Bearer <token>`: the token after the scheme
+                // is part of the value.
+                if scheme(value) && to < bytes.len() && bytes[to] == b' ' {
+                    let t = to + 1;
+                    let t_end = (t..bytes.len()).find(|&k| !token_byte(bytes[k])).unwrap_or(bytes.len());
+                    if t_end > t {
+                        to = t_end;
+                    }
+                }
                 if !value.is_empty() && !word && !value.starts_with("{{") && !value.starts_with('<') {
                     cuts.push((from, to));
-                    i = to.max(i + 1);
-                    continue;
                 }
+                // Past the value either way: nothing inspected is scanned
+                // again.
+                i = to.max(i + 1);
+                continue;
             }
         }
         // `Bearer <token>` and a JWT, at the start of a word.
         if c.is_ascii_alphabetic() && (i == 0 || !name_byte(bytes[i - 1])) {
             let word_end = (i..bytes.len()).find(|&k| !bytes[k].is_ascii_alphabetic()).unwrap_or(bytes.len());
-            let word = text[i..word_end].to_ascii_lowercase();
-            if matches!(word.as_str(), "bearer" | "basic" | "token" | "digest") && word_end < bytes.len() && bytes[word_end] == b' ' {
+            if scheme(&text[i..word_end]) && word_end < bytes.len() && bytes[word_end] == b' ' {
                 let t = word_end + 1;
                 let t_end = (t..bytes.len()).find(|&k| !token_byte(bytes[k])).unwrap_or(bytes.len());
                 let token = &text[t..t_end];
@@ -158,7 +194,11 @@ fn redact_credential_text(text: &str) -> String {
                 }
             }
             if text[i..].starts_with("eyJ") {
-                let t_end = (i..bytes.len()).find(|&k| !token_byte(bytes[k])).unwrap_or(bytes.len());
+                // The JWT alphabet (base64url and dots) is all name bytes, so
+                // no later word starts inside a span scanned here.
+                let t_end = (i..bytes.len())
+                    .find(|&k| !(bytes[k].is_ascii_alphanumeric() || matches!(bytes[k], b'_' | b'-' | b'.')))
+                    .unwrap_or(bytes.len());
                 if t_end - i >= 20 && text[i..t_end].matches('.').count() >= 2 {
                     cuts.push((i, t_end));
                     i = t_end;
@@ -176,6 +216,7 @@ fn redact_credential_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut copied = 0;
     for (from, to) in cuts {
+        debug_assert!(from >= copied);
         out.push_str(&text[copied..from]);
         out.push_str("<redacted>");
         copied = to;
@@ -501,10 +542,12 @@ impl ImportReport {
             return self.truncated("script");
         }
         self.scripts.push(RetainedScript {
-            pointer: pointer.into(),
-            owner: owner.into(),
-            event: event.into(),
-            language: language.into(),
+            // Every field comes from the source (a request name, an event
+            // or type string) and is redacted like report text.
+            pointer: bounded_pointer(pointer),
+            owner: bounded_owned(redact_for_report(owner), MAX_TEXT_CHARS),
+            event: bounded_owned(redact_for_report(event), MAX_TEXT_CHARS),
+            language: bounded_owned(redact_for_report(language), MAX_TEXT_CHARS),
             // Retained for review, never run: credential literals in it are
             // redacted like report text, the rest is kept as written.
             source: redact_for_report(&source),
@@ -620,6 +663,9 @@ mod tests {
             ("see email=a@b and Basic authentication", "see email=a@b and Basic authentication"),
             ("Postman setting `strictSSL` is not imported", "Postman setting `strictSSL` is not imported"),
             ("imported without credentials (auth: none)", "imported without credentials (auth: none)"),
+            // Review of #583 (dsf F1): a scheme word as a pair's value.
+            ("Authorization: Bearer opaque-tok-SENSITIVE-r12", "Authorization: <redacted>"),
+            ("header Authorization=Basic dXNlcjpwYXNz ok", "header Authorization=<redacted> ok"),
         ] {
             assert_eq!(redact_for_report(text), expected, "{expected:?}");
         }
@@ -652,5 +698,24 @@ mod tests {
         assert!(redact_for_report(&text).ends_with("{{…"));
         let text = "password= ".repeat(1 << 16) + "token=x";
         assert!(redact_for_report(&text).ends_with("<redacted>"));
+        // Review of #583 (sol F7): exempt and unterminated values, scheme
+        // words and JWT prefixes, each about 1 MiB; a rescan would take
+        // minutes here.
+        for unit in [
+            "password=<",
+            "password=\"",
+            "password='",
+            "password={{",
+            "eyJ~",
+            "bearer bearer ",
+            "token: none ",
+            "a=b:c=",
+            "Authorization: Bearer ",
+        ] {
+            let text = unit.repeat((1 << 20) / unit.len());
+            let started = std::time::Instant::now();
+            let _ = redact_for_report(&text);
+            assert!(started.elapsed() < std::time::Duration::from_secs(20), "{unit:?} took too long");
+        }
     }
 }
