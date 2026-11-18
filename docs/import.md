@@ -96,10 +96,26 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   - Fresh placeholders never take a name the source defines or references,
     including cURL `$NAME` shell variables, Postman path variables and
     `url.variable` keys, and Insomnia path parameters, in any request of the
-    import (`username_2` then).
+    import (`username_2` then). References are reserved as they decode too:
+    a JSON or YAML escape (`\u007b\u007bname\u007d\u007d`), shell
+    quoting, or percent-encoding in the name (`{{url%2Dneeds%2Dreview}}`
+    reserves `url-needs-review`). A path parameter is reserved by its raw
+    spelling as well as the sanitized one its placeholder takes, which is
+    fail-safe (`:url-needs-review` makes a quarantined URL
+    `{{url-needs-review_2}}`).
   - A request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a
     Postman or Insomnia auth helper) or with auth explicitly off keeps
     that, and the userinfo is dropped (`url_credentials_dropped`).
+  - Postman and Insomnia OAuth 2 token and authorization URLs follow the
+    same rule: a userinfo that is not exactly references is taken off and
+    reported (`url_credentials_removed`; with `include_credentials` it is
+    kept and a sanitized export extracts the whole URL), and an ambiguous
+    one is quarantined.
+  - Every other credential placeholder (a header, query, form or body
+    field, an auth secret) is named through the same allocator: one name
+    per field name, never a name the source defines, references or derives
+    (`r_password_2` when the source defines `r_password`). A path
+    parameter keeps its own name.
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia
@@ -192,14 +208,25 @@ required variable keeps at most 1000 locations, and at most 10,000 inactive
 settings, redactions and scripts are kept.
 
 Report text never carries a credential, in either mode: every message,
-inactive setting, redaction field, required-variable reason, external
-reference and operation key goes through one redaction first. A URL
-userinfo that is not exactly references becomes `<redacted>` (by the rule
-above), an ambiguous URL becomes `<url redacted>`, and a `{{…}}` that is not
-a plain name (an identifier, a dotted path or an argument-free `$helper`)
-becomes `{{…}}`. cURL diagnostics do not echo an ignored URL, a connection
-option's value or the rest of a command line; the pointer locates them.
-Retained scripts are kept verbatim.
+pointer (each RFC 6901 token, which can be a source key; a changed token
+keeps a digest so locations stay distinct), inactive setting, redaction
+field, required-variable reason, external reference, retained script and
+operation key goes through one redaction first, and so do imported
+request, folder, environment and workspace names. That redaction:
+
+- replaces a URL userinfo that is not exactly references with `<redacted>`
+  (by the rule above), and an ambiguous URL with `<url redacted>`;
+- replaces a `{{…}}` that is not a plain name (an identifier, a dotted path
+  or an argument-free `$helper`) with `{{…}}`;
+- by credential-name heuristics, replaces with `<redacted>` the value of a
+  `name=value` or `name: value` pair whose name is a credential name
+  (quoted or not; a reference or a plain word such as `none` is kept), the
+  token after `Bearer`, `Basic`, `Token` or `Digest` when it looks like one,
+  and a JWT.
+
+cURL diagnostics do not echo an ignored URL, a connection option's value or
+the rest of a command line; the pointer locates them. A retained script is
+otherwise kept as written.
 
 Codes are stable strings (for example `recursive_schema`,
 `composition_first_branch`, `contradictory_schema`, `openapi32_construct`,
