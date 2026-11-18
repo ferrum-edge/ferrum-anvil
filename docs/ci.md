@@ -1,11 +1,13 @@
 # Continuous integration
 
-Ferrum Anvil runs eight GitHub Actions workflows. Every third-party action is
+Ferrum Anvil runs nine GitHub Actions workflows. Every third-party action is
 pinned to a full commit SHA (the version is in a trailing comment) and every
 tool to an exact version. Workflows default to `permissions: contents: read`.
 The release `publish` job gets `actions: read` (to list the test runs for the
 release commit). Only the `release` job, which runs for a tag and not for a dry
-run, gets `contents: write` (to create the draft release).
+run, gets `contents: write` (to create the draft release). The
+`edge-main-drift.yml` `issue` job gets `issues: write` (to open, update or close
+its one tracking issue); it checks out and runs no code.
 `website-evidence.yml` requests no token permissions. `ferrum-edge/ferrumedge`
 is private and this repository is public, so `GITHUB_TOKEN` cannot read it: the
 job needs the repository secret `FERRUMEDGE_READ_TOKEN`, a fine-grained token
@@ -22,7 +24,7 @@ pass.
 | `release-smoke.yml` | manual; an `anvil-v*` release is published; PRs touching the workflow or `scripts/release-smoke/` | macOS 15 (arm64), macOS 15 Intel, Windows 2025 (NSIS, MSI), Ubuntu 26.04 (`.deb`, AppImage), Fedora 44 container (`.rpm`) | The published, unsigned packages install natively on fresh runners, the installed app launches with its window and webview, and the release CLI imports the example and makes a loopback call (REL-001). See [release.md](release.md#clean-install-smoke-rel-001) |
 | `bundle-resources.yml` | PRs touching `crates/anvil-portability/**`, `crates/anvil-app/src/port.rs`, `crates/anvil-app/tests/bundle_import.rs` or the workflow itself; manual | Ubuntu 26.04, macOS 15 | Peak-memory regression ceilings for bundle preview/import against the policy and two baselines. See [bundle-resource-policy.md](security/bundle-resource-policy.md#hosted-qualification) |
 | `website-evidence.yml` | every release run (called from `release.yml`, tagged or dry run, beside the build; it does not gate the draft release); manual; PRs and pushes to `main` that change the workflow (e.g. the pin) | Ubuntu 26.04 | The website's JavaScript tests, including its Anvil navigation, download and capability tests (`node --test "tests/**/*.test.js"`, as its own `test.yml` runs them, no live network checks) pass at the pinned `ferrum-edge/ferrumedge` commit; uploads `website-evidence.json` (website SHA, command, counts, Anvil release tag). Failure-matrix REL-006, REL-007, REL-008 |
-| `edge-main-drift.yml` | weekly; manual; PRs touching the workflow | Ubuntu 26.04 | Early warning, not a required check: the contract parity tests against the vocabularies, schemas and fixtures on ferrum-contracts `main`, which record unreleased Edge `main` changes. A failure opens or updates one `edge-main-drift` issue. See [ferrum-contracts.md](ferrum-contracts.md#checking-against-edge-main) |
+| `edge-main-drift.yml` | weekly; manual; PRs touching the workflow or `contracts_adoption.rs` | Ubuntu 26.04 | Early warning, not a required check: Edge `main`'s tokens and error classes (its `src/retry.rs`) and the contract parity tests against the vocabularies, schemas and every fixture on ferrum-contracts `main`, against Anvil. A finding or a check that could not run opens or updates one `edge-main-drift` issue. See [ferrum-contracts.md](ferrum-contracts.md#checking-against-edge-main) |
 | `updater-e2e.yml` | PRs touching the update command (`cmd_update.rs`, `cmd_update/`), the plugin and command registration (`src-tauri/src/lib.rs`), `tauri.conf.json`, the desktop `Cargo.toml`, `apps/desktop/e2e/updater/`, the E2E helpers and driver config (`e2e/helpers.ts`, `wdio.conf.ts`), `scripts/updater-manifest.mjs` or its tests, or the workflow; push to `main` (same paths); weekly; manual | Ubuntu 26.04 (AppImage, under Xvfb), macOS 15 (.app) | REL-003 on built bundles: the E2E-instrumented bundle, built with a test updater key and a loopback endpoint, refuses an update signed by another key, with a corrupted signature or altered after signing through its real `update_install` command, with the bundle, its reported version and the persistent profile files (SQLite's `-shm` aside) unchanged during each refusal, and installs a validly signed one. Also runs `scripts/tests/updater-manifest.test.mjs`. See [release.md](release.md#signed-update-refusal-e2e-rel-003) |
 
 The `ci.yml` jobs are the required checks enforced on `main` by the "Main
