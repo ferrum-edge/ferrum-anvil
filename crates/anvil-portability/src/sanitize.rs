@@ -110,15 +110,22 @@ fn looks_like_credential(s: &str) -> Option<&'static str> {
 
 /// Whether free text `s` holds a URL with credentials: at every `://`
 /// (whose scheme may end in a reference, `{{scheme}}://`), any `@` before the
-/// end of the text, the next `://`, or (until a `{{` has been seen, since a
-/// spaced reference or a quoted expression may hold them) the next
-/// whitespace or quote, unless the text before that `@` is exactly variable
-/// references ([`anvil_domain::secret::is_plain_userinfo`], Insomnia's strict
-/// syntax). Nothing is skipped and `/`, `?` and `#` do not stop the scan, so
-/// an `@` in a path or query is flagged too: over-warning is preferred to
-/// missing a credential. Linear: each scan ends at the next `://`.
+/// end of the text or (until a `{{` has been seen, since a spaced reference
+/// or an expression may hold it) the next whitespace, unless the text before
+/// that `@` is exactly variable references
+/// ([`anvil_domain::secret::is_plain_userinfo`], Insomnia's strict syntax).
+/// Quotes and an embedded `://` neither end nor restart the scan (a literal
+/// user name may hold an apostrophe, and a password expression a `://`), and
+/// `/`, `?` and `#` do not stop it, so an `@` in a path or query is flagged
+/// too: over-warning is preferred to missing a credential. A URL whose whole
+/// authority is one reference (`https://{{host}}/x?email=a@b`) is skipped.
+///
+/// Linear: a prefix holding an `@` is never plain, so a second `@` is
+/// flagged without checking, and a scan that flags nothing covers every
+/// later `://` it passed (their scans would end at the same place and see
+/// no `@` it did not), so the search resumes where it ended.
 fn has_url_password(s: &str) -> bool {
-    use anvil_domain::secret::{TemplateSyntax, is_plain_userinfo};
+    use anvil_domain::secret::{TemplateSyntax, authority_is_one_reference, is_plain_userinfo};
     let mut from = 0;
     while let Some(found) = s[from..].find("://") {
         let start = from + found;
@@ -127,30 +134,37 @@ fn has_url_password(s: &str) -> bool {
             continue;
         }
         let rest = &s[from..];
-        // `https://{{host}}/x?email=a@b`: the whole authority is one
-        // variable, so an `@` after it is in the path or query.
-        if anvil_domain::secret::authority_is_one_reference(rest) {
+        if authority_is_one_reference(rest) {
             continue;
         }
-        let limit = rest.find("://").unwrap_or(rest.len());
         let bytes = rest.as_bytes();
         let mut seen_template = false;
+        let mut first_at = None;
+        let mut end = bytes.len();
         let mut i = 0;
-        while i < limit {
+        while i < bytes.len() {
             if bytes[i..].starts_with(b"{{") {
                 seen_template = true;
                 i += 2;
                 continue;
             }
             let c = bytes[i];
-            if !seen_template && (c.is_ascii_whitespace() || c == b'"' || c == b'\'' || c == b'`') {
+            if !seen_template && c.is_ascii_whitespace() {
+                end = i;
                 break;
             }
-            if c == b'@' && !is_plain_userinfo(&rest[..i], TemplateSyntax::Nunjucks) {
-                return true;
+            if c == b'@' {
+                if first_at.is_some() {
+                    return true;
+                }
+                first_at = Some(i);
             }
             i += 1;
         }
+        if first_at.is_some_and(|at| !is_plain_userinfo(&rest[..at], TemplateSyntax::Nunjucks)) {
+            return true;
+        }
+        from += end;
     }
     false
 }
@@ -701,6 +715,11 @@ mod tests {
             "https://admin:{{password}}@api.example.com/v1",
             "https://tok-SENSITIVE-pw14@api.example.com/",
             "https://{{ 'https://admin:tok-SENSITIVE-pw15@api.example.test' | replace('https://', '') }}/v1",
+            // Round 3 of #575: an apostrophe in a literal user name, and a
+            // `://` inside a password expression, end no scan.
+            "https://o'brien:tok-SENSITIVE-pw19@api.example.test/",
+            "https://admin:{{ 'a://b' }}tok-SENSITIVE-pw20@api.example.test/",
+            "https://admin:{{ \"tok-SENSITIVE-pw21://x\" }}@api.example.test/",
         ] {
             let mut v = spec(loud);
             let s = sanitize(&mut v, &[]);
@@ -736,6 +755,8 @@ mod tests {
             "GET https://admin:{{ tenant }}-tok-SENSITIVE-pw17@api.example.test/v1",
             "GET https://admin:{{ 'tok-SENSITIVE-pw18/x' | urlencode }}@api.example.test/ trailing",
             "see \"https://admin:{{ 571571571 }}@api.example.test/\" here",
+            "curl 'https://o'brien:tok-SENSITIVE-pw22@api.example.test/'",
+            "GET https://admin:{{ 'x://y' }}-tok-SENSITIVE-pw23@api.example.test/v1",
         ] {
             let mut v =
                 serde_json::json!({"requests": [{"spec": {"url": "https://api.example.test/", "body": {"type": "raw", "text": text}}}]});
@@ -752,6 +773,14 @@ mod tests {
         let text = format!("https://{}", "{".repeat(4 << 20));
         assert!(!has_url_password(&text));
         let text = format!("https://user:{}tok-SENSITIVE-pw9@host.example/", "{{".repeat(1 << 20));
+        assert!(has_url_password(&text));
+        // Many `://` and many `@`: each byte is scanned a bounded number of
+        // times.
+        let text = "a://{{".repeat(1 << 18);
+        assert!(!has_url_password(&text));
+        let text = format!("https://{{{{u}}}}{}", "a://b ".repeat(1 << 18));
+        assert!(!has_url_password(&text));
+        let text = format!("https://{}", "@".repeat(1 << 20));
         assert!(has_url_password(&text));
     }
 

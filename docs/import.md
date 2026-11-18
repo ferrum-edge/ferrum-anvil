@@ -66,10 +66,14 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     or `#` after `://`, RFC 3986), the userinfo is everything before the
     authority's last `@`, so a password holding `@` is removed whole.
   - When a `{{` does and the URL holds an `@` anywhere, the URL is ambiguous:
-    it is not cut at all. The whole URL moves into a new secret workspace
-    variable (`{{request_url}}`, `request_url_2`, ...), which is required
-    unless `include_credentials` keeps the URL as its value
-    (`url_moved_to_variable`). The request's host can never change. Two
+    it is not cut at all but quarantined (`url_quarantined`: "this URL
+    mixes a template with a possible credential in its authority; re-enter
+    it"). By default the URL is not imported: the request's URL becomes a
+    fresh reference no variable defines (`{{url_needs_review}}`, never the
+    name of a variable the source uses), and the original text is stored
+    nowhere. With `include_credentials` it is kept exactly as written and
+    the same warning says it may hold a credential. The request's host can
+    never change. Two
     shapes are not ambiguous: an authority that is exactly one plain
     reference followed by `/`, `?`, `#` or the end (`{{baseUrl}}/x?email=a@b`,
     `https://{{host}}?q=a@b`), which holds no literal userinfo and is kept

@@ -85,12 +85,19 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     let mut auth = AuthConfig::Inherit;
     // Userinfo is never kept in the URL (the engine refuses it).
     // Userinfo first: a `#` inside a password expression is no fragment.
-    let url = take_url_credentials(b, raw_url, &mut auth, &uptr);
-    let url = crate::common::strip_fragment(&url).to_string();
-    let (base, pairs) = split_query(&url);
-    warn_query_conversions(b, !pairs.is_empty(), &url, &uptr);
-    let (base, verbatim_credentials) =
-        if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &uptr, "query parameter") } else { (base, vec![]) };
+    // A quarantined URL is stored as returned, fragment included, with no
+    // query parameters.
+    let (url, quarantined) = take_url_credentials(b, raw_url, &mut auth, &uptr);
+    let url = if quarantined { url } else { crate::common::strip_fragment(&url).to_string() };
+    let (base, pairs) = if quarantined { (url.clone(), vec![]) } else { split_query(&url) };
+    if !quarantined {
+        warn_query_conversions(b, !pairs.is_empty(), &url, &uptr);
+    }
+    let (base, verbatim_credentials) = if !quarantined && pairs.is_empty() && base.contains('?') {
+        redact_raw_query(b, &base, &uptr, "query parameter")
+    } else {
+        (base, vec![])
+    };
     let mut params: Vec<KeyValue> = pairs
         .into_iter()
         .enumerate()

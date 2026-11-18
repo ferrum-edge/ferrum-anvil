@@ -768,13 +768,17 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     // Credentials embedded in the URL become Basic auth, unless `-u` (or
     // another auth option) gave the request its own, which curl prefers.
     let mut auth = auth;
-    url = crate::common::take_url_credentials(b, &url, &mut auth, &url_at);
-    let (base, pairs) = split_query(&url);
-    crate::common::warn_query_conversions(b, !pairs.is_empty(), &url, &url_at);
+    let (taken, quarantined) = crate::common::take_url_credentials(b, &url, &mut auth, &url_at);
+    url = taken;
+    // A quarantined URL is stored as returned.
+    let (base, pairs) = if quarantined { (url.clone(), vec![]) } else { split_query(&url) };
+    if !quarantined {
+        crate::common::warn_query_conversions(b, !pairs.is_empty(), &url, &url_at);
+    }
     // A query that is not a plain list of pairs stays in the URL verbatim,
     // less its credential-named pairs, which become sensitive parameters.
     let (base, verbatim_credentials) =
-        if pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &url_at, "query") } else { (base, vec![]) };
+        if !quarantined && pairs.is_empty() && base.contains('?') { redact_raw_query(b, &base, &url_at, "query") } else { (base, vec![]) };
     let mut params: Vec<KeyValue> = pairs
         .into_iter()
         .enumerate()

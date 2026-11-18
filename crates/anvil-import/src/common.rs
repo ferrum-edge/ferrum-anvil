@@ -773,7 +773,7 @@ pub enum TakenUrl {
     Userinfo(String, Userinfo),
     /// The authority holds a `{{…}}` and the URL has an `@`: where the
     /// userinfo ends cannot be told without parsing the template, so the URL
-    /// is not cut at all ([`move_url_to_variable`]).
+    /// is not cut at all ([`quarantine_url`]).
     Ambiguous,
 }
 
@@ -822,49 +822,43 @@ pub fn take_userinfo(url: &str, syntax: anvil_domain::secret::TemplateSyntax) ->
 }
 
 /// [`take_userinfo`] applied to a request whose auth is `auth`: the URL to
-/// store. Userinfo goes through [`apply_userinfo`]; an ambiguous URL is moved
-/// into a variable ([`move_url_to_variable`]).
-pub fn take_url_credentials(b: &mut Builder, url: &str, auth: &mut AuthConfig, pointer: &str) -> String {
+/// store, and whether it was quarantined ([`quarantine_url`]), in which case
+/// it is stored as returned, with no query, fragment or other processing.
+/// Userinfo goes through [`apply_userinfo`].
+pub fn take_url_credentials(b: &mut Builder, url: &str, auth: &mut AuthConfig, pointer: &str) -> (String, bool) {
     match take_userinfo(url, b.template_syntax) {
-        TakenUrl::Plain(url) => url,
+        TakenUrl::Plain(url) => (url, false),
         TakenUrl::Userinfo(url, userinfo) => {
             apply_userinfo(b, auth, Some(userinfo), pointer);
-            url
+            (url, false)
         }
-        TakenUrl::Ambiguous => move_url_to_variable(b, url, pointer),
+        TakenUrl::Ambiguous => (quarantine_url(b, url, pointer), true),
     }
 }
 
-/// Move a whole ambiguous request URL ([`TakenUrl::Ambiguous`]) out of the
-/// request into a secret workspace variable with a fresh name (from the
-/// import's allocator: `request_url`, `request_url_2`, ...) and return the
-/// reference to put in its place. Unless `include_credentials`, the value is
-/// not imported: the variable is required and the URL is listed as
-/// redacted. Nothing in the URL is parsed or cut, so the request's host
-/// cannot change (`url_moved_to_variable`).
-pub fn move_url_to_variable(b: &mut Builder, url: &str, pointer: &str) -> String {
-    let name = b.env_names.name("request_url");
-    let reference = format!("{{{{{name}}}}}");
+/// An ambiguous request URL ([`TakenUrl::Ambiguous`]): a template before the
+/// end of its authority and an `@`, so where a credential in it ends cannot
+/// be told. Nothing in it is parsed or cut, so the request's host cannot
+/// change. Unless `include_credentials`, the URL is not imported at all: the
+/// request gets a fresh reference no variable defines (`url_needs_review`,
+/// from the import's allocator, so it never binds an existing variable) and
+/// the original text is stored nowhere. With `include_credentials`, the URL
+/// is kept exactly as written. Either way the request is reported
+/// (`url_quarantined`).
+pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str) -> String {
+    const WHY: &str = "this URL mixes a template with a possible credential in its authority";
     if b.opts.include_credentials {
-        b.url_variables.push(Variable {
-            name: name.clone(),
-            value: SensitiveValue::template(url),
-            secret: true,
-            enabled: true,
-            description: "Request URL moved out of the request on import: it has a template in its host part and an '@'".into(),
-        });
-    } else {
-        b.report.redacted(pointer, "request URL", &reference);
-        b.report.require_var(&name, true, "the request URL could hold credentials and was not imported", pointer);
+        b.report.warn(
+            "url_quarantined",
+            pointer,
+            format!("{WHY}; it was kept as written because credentials are included, and may contain a credential"),
+        );
+        return url.to_string();
     }
-    b.report.warn(
-        "url_moved_to_variable",
-        pointer,
-        format!(
-            "the URL has a template in its host part and an '@', so where its credentials end cannot be told; the whole URL \
-             was moved into the secret variable '{name}' and the request uses {reference}"
-        ),
-    );
+    let name = b.env_names.name("url_needs_review");
+    let reference = format!("{{{{{name}}}}}");
+    b.report.redacted(pointer, "request URL", &reference);
+    b.report.warn("url_quarantined", pointer, format!("{WHY}; it was not imported (the request uses {reference}): re-enter it"));
     reference
 }
 

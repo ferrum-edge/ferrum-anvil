@@ -10,7 +10,7 @@
 use crate::builder::Builder;
 use crate::common::{
     TakenUrl, apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type,
-    listed_query_param, maybe_redact, move_url_to_variable, parse_embedded_json, parse_form, redact_raw_query, render_json, scrub_body,
+    listed_query_param, maybe_redact, parse_embedded_json, parse_form, quarantine_url, redact_raw_query, render_json, scrub_body,
     scrub_graphql_variables, scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
 };
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
@@ -677,7 +677,7 @@ fn request(
     let method = str_of(r, "method").unwrap_or("GET").to_ascii_uppercase();
     let templated = template(b, str_of(r, "url").unwrap_or(""), &ptr(at, "url"));
     // Userinfo is never kept in the URL (the engine refuses it); an
-    // ambiguous URL moves into a variable whole.
+    // ambiguous URL is quarantined whole.
     let (raw_url, userinfo) = match take_userinfo(&templated, b.template_syntax) {
         TakenUrl::Plain(url) => (Some(url), None),
         TakenUrl::Userinfo(url, userinfo) => (Some(url), Some(userinfo)),
@@ -690,7 +690,7 @@ fn request(
             // credential-named pairs, which become sensitive parameters.
             if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { (url, vec![]) }
         }
-        None => (move_url_to_variable(b, &templated, &ptr(at, "url")), vec![]),
+        None => (quarantine_url(b, &templated, &ptr(at, "url")), vec![]),
     };
     params.extend(query_params(b, r.get("parameters"), &ptr(at, "parameters")));
     let mut spec = RequestSpec::http(&method, &url);

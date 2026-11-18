@@ -566,12 +566,13 @@ fn a_token_in_the_userinfo_is_a_credential() {
         assert!(has(&r, "url_userinfo_replaced"), "{url}");
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu7"), "{url}");
     }
-    // A template in the authority beside an `@` makes the URL ambiguous: the
-    // whole URL moves into a secret variable, uncut (round 3 of #575).
+    // A template in the authority beside an `@` makes the URL ambiguous: it
+    // is quarantined, not imported and stored nowhere (review of #575).
     let r = curl(r#"curl 'https://{{ "tok-SENSITIVE-cu7:rest" }}@api.example.test/v1'"#);
     let s = &r.requests[0].spec;
-    assert_eq!(s.url, "{{request_url}}");
-    assert!(has(&r, "url_moved_to_variable") && matches!(s.auth, AuthConfig::Inherit));
+    assert_eq!(s.url, "{{url_needs_review}}");
+    assert!(has(&r, "url_quarantined") && matches!(s.auth, AuthConfig::Inherit));
+    assert!(r.workspace.variables.is_empty());
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu7"));
     // References stay references, without a warning.
     let r = curl("curl 'https://{{api_token}}@api.example.test/v1'");

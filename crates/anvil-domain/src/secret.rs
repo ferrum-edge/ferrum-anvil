@@ -147,8 +147,12 @@ pub fn classify_template_value(value: &str, syntax: TemplateSyntax) -> TemplateK
 /// that variable, so no literal text in the URL is userinfo.
 pub fn authority_is_one_reference(after_scheme: &str) -> bool {
     let Some(inner) = after_scheme.strip_prefix("{{") else { return false };
-    let Some(close) = inner.find("}}") else { return false };
-    is_plain_reference_expr(&inner[..close], TemplateSyntax::Nunjucks)
+    // A plain reference holds only identifier characters, dots and spaces:
+    // stop at the first other one, so a caller scanning many URLs stays
+    // linear.
+    let close = inner.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c.is_whitespace())).unwrap_or(inner.len());
+    inner[close..].starts_with("}}")
+        && is_plain_reference_expr(&inner[..close], TemplateSyntax::Nunjucks)
         && inner[close + 2..].chars().next().is_none_or(|c| matches!(c, '/' | '?' | '#'))
 }
 
