@@ -14,8 +14,9 @@
 //!   depth/expansions, generated sample size and operation count are all
 //!   capped by [`ImportOptions`]; malformed input returns an error, never a
 //!   panic. XML is parsed with DTDs refused (DATA-013).
-//! * **Nothing becomes active by import.** Scripts are retained in the
-//!   report as disabled/untrusted; TLS-verification bypasses, callbacks and
+//! * **Nothing becomes active by import.** Scripts are not imported: the
+//!   report lists each one (where, its event and size) as disabled/untrusted,
+//!   never its body; TLS-verification bypasses, callbacks and
 //!   similar settings are reported, never applied (DATA-008). Imported
 //!   requests are never sent.
 //! * **No invented credentials.** Auth is imported as placeholders that
@@ -52,7 +53,8 @@ pub use reimport::{
     request_unit_hashes,
 };
 pub use report::{
-    ExternalRef, ExternalRefKind, Finding, ImportCounts, ImportReport, InactiveSetting, Redaction, RequiredVariable, RetainedScript,
+    ExternalRef, ExternalRefKind, Finding, ImportCounts, ImportReport, InactiveSetting, Message, Redaction, RequiredVariable,
+    RetainedScript, ScriptOwner,
 };
 pub use util::spec_hash;
 

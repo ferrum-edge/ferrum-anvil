@@ -3,6 +3,7 @@
 //! splitting and dynamic-variable checks.
 
 use crate::builder::Builder;
+use crate::report::Message;
 use crate::util::{
     has_literal_secret, is_credential_name, is_json_media, is_numeric_credential_name, is_xml_media, media_essence, sanitize_var,
 };
@@ -60,15 +61,24 @@ fn credential_placeholder(b: &mut Builder, value: &str, var: &str, pointer: &str
     let var = var.to_string();
     let placeholder = format!("{{{{{var}}}}}");
     if t.is_empty() {
-        b.report.require_var(&var, true, &format!("{field} has no value in the source"), pointer);
+        b.report.require_var(&var, true, "the credential has no value in the source", pointer);
         return placeholder;
     }
     if b.opts.include_credentials {
         return value.to_string();
     }
     b.report.redacted(pointer, field, &placeholder);
-    b.report.require_var(&var, true, &format!("{field} was redacted on import"), pointer);
+    b.report.require_var(&var, true, "the credential was redacted on import", pointer);
     placeholder
+}
+
+/// A fresh base for one auth config's credential placeholders
+/// (`auth_password`, then `auth_2_password`, …): one base per config, so
+/// configs never share a variable, and never derived from a source name
+/// (a request, folder or collection name can repeat a credential URL;
+/// review of #583, sol F1). Reserved, so no other placeholder takes it.
+pub fn auth_placeholder_base(b: &mut Builder) -> String {
+    b.env_names.name("auth")
 }
 
 /// Apply the credential policy to a variable definition. A secret literal
@@ -599,15 +609,15 @@ pub fn scrub_json_text(b: &mut Builder, text: &mut String, pointer: &str) -> boo
             true
         }
         Err(e) => {
-            let why = match e {
-                crate::ImportError::LimitExceeded { what, limit } => format!("it exceeds the import limit for {what} ({limit})"),
-                _ => "it could not be parsed".to_string(),
+            let message = match e {
+                crate::ImportError::LimitExceeded { limit, .. } => {
+                    Message::new("the JSON body was not scanned for credentials: it exceeds an import limit (")
+                        .num(limit)
+                        .text("); review it before sharing")
+                }
+                _ => Message::new("the JSON body was not scanned for credentials: it could not be parsed; review it before sharing"),
             };
-            b.report.warn(
-                "body_not_scanned",
-                pointer,
-                format!("JSON body was not scanned for credentials: {why}; review it before sharing"),
-            );
+            b.report.warn("body_not_scanned", pointer, message);
             false
         }
     }
@@ -983,7 +993,7 @@ pub const QUARANTINE_PLACEHOLDER: &str = "url-needs-review";
 /// and an ambiguous URL is quarantined ([`quarantine_url`]). With
 /// `include_credentials` a literal userinfo is kept, and a sanitized export
 /// extracts the whole URL.
-pub fn endpoint_url(b: &mut Builder, url: &str, pointer: &str, field: &str) -> String {
+pub fn endpoint_url(b: &mut Builder, url: &str, pointer: &str, field: &'static str) -> String {
     use anvil_domain::secret::{UrlUserinfo, is_plain_userinfo, url_userinfo};
     match url_userinfo(url, b.template_syntax) {
         UrlUserinfo::None => url.to_string(),
@@ -997,7 +1007,9 @@ pub fn endpoint_url(b: &mut Builder, url: &str, pointer: &str, field: &str) -> S
             b.report.warn(
                 "url_credentials_removed",
                 pointer,
-                format!("the {field} held credentials in its userinfo; they were not imported (supply them as the client credentials)"),
+                Message::new("the ")
+                    .text(field)
+                    .text(" held credentials in its userinfo; they were not imported (supply them as the client credentials)"),
             );
             format!("{}{}", &url[..start], &url[at + 1..])
         }
@@ -1023,7 +1035,7 @@ pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str) -> String {
         b.report.warn(
             "url_quarantined",
             pointer,
-            format!("{WHY}; it was kept as written because credentials are included, and may contain a credential"),
+            Message::new(WHY).text("; it was kept as written because credentials are included, and may contain a credential"),
         );
         return url.to_string();
     }
@@ -1033,7 +1045,12 @@ pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str) -> String {
     let name = b.env_names.name_verbatim(QUARANTINE_PLACEHOLDER);
     let reference = format!("{{{{{name}}}}}");
     b.report.redacted(pointer, "request URL", &reference);
-    b.report.warn("url_quarantined", pointer, format!("{WHY}; it was not imported (the request uses {reference}): re-enter it"));
+    // The placeholder is the import's own name, listed with the redaction.
+    b.report.warn(
+        "url_quarantined",
+        pointer,
+        Message::new(WHY).text("; it was not imported (the request uses the placeholder listed in the redactions): re-enter it"),
+    );
     reference
 }
 
@@ -1142,11 +1159,7 @@ pub fn check_dynamic_vars(b: &mut Builder, s: &str, pointer: &str) {
         let Some(end) = after.find("}}") else { break };
         let name = after[..end].split_whitespace().next().unwrap_or("");
         if !NATIVE_DYNAMIC.contains(&name) {
-            b.report.unsupported(
-                "dynamic_variable",
-                pointer,
-                format!("dynamic variable '{{{{${name}}}}}' has no Anvil equivalent; replace it before sending"),
-            );
+            b.report.unsupported("dynamic_variable", pointer, "a dynamic variable has no Anvil equivalent; replace it before sending");
         }
         rest = &after[end + 2..];
     }

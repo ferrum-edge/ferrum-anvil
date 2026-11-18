@@ -11,6 +11,7 @@
 
 use crate::builder::Builder;
 use crate::common::{body_from_text, credential, dedupe_content_type, maybe_redact, parse_form, redact_raw_query, split_query};
+use crate::report::Message;
 use crate::util::is_json_media;
 use crate::{Dialect, ImportError};
 use anvil_domain::auth::AuthConfig;
@@ -268,7 +269,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                         let k = k.trim().to_string();
                         let v = v.trim().to_string();
                         if v.is_empty() {
-                            b.report.warn("curl_header_removal", &at, format!("`-H \"{k}:\"` removes a default curl header; not represented"));
+                            b.report.warn("curl_header_removal", &at, "an empty `-H \"Name:\"` removes a default curl header; not represented");
                         } else {
                             let (value, sensitive) = maybe_redact(b, &k, &v, &at, "header");
                             headers.push(KeyValue { name: k, value, enabled: true, description: String::new(), sensitive });
@@ -344,7 +345,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                     let ctype = parts.find_map(|p| p.trim().strip_prefix("type=").map(str::to_string));
                     if content.starts_with('@') || content.starts_with('<') {
                         b.report.external_ref(&content[1..], &at);
-                        b.report.warn("file_part_requires_attachment", &at, format!("form part '{name}' reads a file: attach it before sending (imported disabled)"));
+                        b.report.warn("file_part_requires_attachment", &at, "a form part reads a file: attach it before sending (imported disabled)");
                         form.push(MultipartPart { name: name.into(), enabled: false, content: MultipartContent::Text { value: String::new() }, content_type: ctype });
                     } else {
                         let (value, _) = maybe_redact(b, name, &content, &at, "form field");
@@ -373,7 +374,12 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                 if opt == "--aws-sigv4" {
                     value(&mut i);
                 }
-                b.report.unsupported("curl_auth_scheme", &at, format!("`{opt}` authentication is not supported; imported without it"));
+                let word = option_word(&opt, &["--digest", "--ntlm", "--negotiate", "--anyauth", "--aws-sigv4"]);
+                b.report.unsupported(
+                    "curl_auth_scheme",
+                    &at,
+                    Message::new("`").text(word).text("` authentication is not supported; imported without it"),
+                );
             }
             "--basic" => {}
             "-A" | "--user-agent" => {
@@ -457,10 +463,13 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                 }
                 // The value is not echoed: a proxy URL or password may hold
                 // credentials; the pointer locates it.
+                let word = option_word(&opt, CONNECTION_OPTIONS);
                 b.report.unsupported(
                     "curl_connection_option",
                     &at,
-                    format!("`{opt}` and its value are not imported; configure a proxy/TLS profile or DNS override instead"),
+                    Message::new("`")
+                        .text(word)
+                        .text("` and its value are not imported; configure a proxy/TLS profile or DNS override instead"),
                 );
             }
             // Output/progress/verbosity flags do not change the request.
@@ -471,18 +480,21 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
             | "-c" | "--cookie-jar" | "-r" | "--range" | "-z" | "--time-cond" | "-C" | "--continue-at" | "--limit-rate" => {
                 value(&mut i);
                 if matches!(opt.as_str(), "--retry" | "-r" | "--range" | "-z" | "--time-cond" | "-C" | "--continue-at" | "--limit-rate") {
-                    b.report.unsupported("curl_option", &at, format!("`{opt}` is not imported"));
+                    let word = option_word(&opt, &["--retry", "-r", "--range", "-z", "--time-cond", "-C", "--continue-at", "--limit-rate"]);
+                    b.report.unsupported("curl_option", &at, Message::new("`").text(word).text("` is not imported"));
                 }
             }
             "-K" | "--config" => {
                 if let Some(f) = value(&mut i) {
                     b.report.external_ref(&f, &at);
-                    b.report.unsupported("curl_option", &at, format!("options read from a config file (`{opt}`) are not imported"));
+                    b.report.unsupported("curl_option", &at, "options read from a config file (`-K`, `--config`) are not imported");
                 }
             }
             s if IGNORED_LONG_WITH_VALUE.contains(&s) || IGNORED_SHORT_WITH_VALUE.contains(&s) => {
                 value(&mut i);
-                b.report.unsupported("curl_option", &at, format!("`{s}` is not imported"));
+                let word = option_word(s, IGNORED_LONG_WITH_VALUE);
+                let word = if word == UNNAMED_OPTION { option_word(s, IGNORED_SHORT_WITH_VALUE) } else { word };
+                b.report.unsupported("curl_option", &at, Message::new("`").text(word).text("` is not imported"));
             }
             s if s.starts_with('-') && s.len() > 1 => {
                 // An unknown option that takes a value would leave that value
@@ -496,9 +508,9 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                 let bare_value = args.get(i + 1).is_some_and(|(w, _)| !w.starts_with('-') && !w.contains("://")) && later_url;
                 if bare_value {
                     i += 1;
-                    b.report.unsupported("curl_option", &at, format!("unknown or unsupported curl option `{s}` and its value; ignored"));
+                    b.report.unsupported("curl_option", &at, "an unknown or unsupported curl option and its value are ignored");
                 } else {
-                    b.report.unsupported("curl_option", &at, format!("unknown or unsupported curl option `{s}`; ignored"));
+                    b.report.unsupported("curl_option", &at, "an unknown or unsupported curl option is ignored");
                 }
             }
             _ => urls.push((a.clone(), at.clone())),
@@ -647,6 +659,36 @@ const IGNORED_LONG_WITH_VALUE: &[&str] = &[
 
 /// Short options of the same kind (`-K`/`--config` is reported on its own).
 const IGNORED_SHORT_WITH_VALUE: &[&str] = &["-P", "-Q", "-t", "-Y", "-y"];
+
+/// Connection options (a proxy, TLS files, DNS overrides) that are reported
+/// and not imported.
+const CONNECTION_OPTIONS: &[&str] = &[
+    "-x",
+    "--proxy",
+    "--cacert",
+    "--capath",
+    "-E",
+    "--cert",
+    "--key",
+    "--cert-type",
+    "--key-type",
+    "--pass",
+    "--resolve",
+    "--connect-to",
+    "--interface",
+    "--dns-servers",
+    "--proxy-user",
+    "-U",
+];
+
+/// What a message says for an option [`option_word`] does not know.
+const UNNAMED_OPTION: &str = "this option";
+
+/// `opt` in the importer's own words: the entry of `known` it equals, so a
+/// message names a recognized curl option without quoting the command line.
+fn option_word(opt: &str, known: &[&'static str]) -> &'static str {
+    known.iter().copied().find(|k| *k == opt).unwrap_or(UNNAMED_OPTION)
+}
 
 /// Whether `flag` is an option this importer knows to consume the next
 /// argument.

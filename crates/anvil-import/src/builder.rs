@@ -202,10 +202,9 @@ impl<'o> Builder<'o> {
                 self.report.warn(
                     "operation_limit",
                     pointer,
-                    format!(
-                        "only the first {} operations were imported (max_operations); later ones are skipped",
-                        self.opts.max_operations
-                    ),
+                    crate::report::Message::new("only the first ")
+                        .num(self.opts.max_operations)
+                        .text(" operations were imported (max_operations); later ones are skipped"),
                 );
             }
             return false;
@@ -266,7 +265,7 @@ impl<'o> Builder<'o> {
             self.report.warn(
                 "duplicate_operation_key",
                 pointer,
-                format!("operation key '{operation_key}' is not unique; this one is linked as '{key}' for reimport"),
+                "the operation key is not unique; this operation is linked under the key with a `#n` suffix for reimport",
             );
         }
         self.op_keys.insert(key.clone());

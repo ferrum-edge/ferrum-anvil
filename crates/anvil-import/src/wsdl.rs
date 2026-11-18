@@ -9,7 +9,7 @@
 //! reported with its element path.
 
 use crate::builder::Builder;
-use crate::report::ImportReport;
+use crate::report::{ImportReport, Message};
 use crate::util::{SplitMix64, clip, fnv1a64, is_credential_name, sanitize_var};
 use crate::xml_limits::{XmlLimitExceeded, XmlLimits, check_xml_limits};
 use crate::{ImportError, SampleMode};
@@ -225,7 +225,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
             };
             let (_, blocal) = qname(port, bref);
             let Some(binding) = bindings.get(&blocal).copied() else {
-                b.report.warn("unresolved_binding", &path(port), format!("binding '{bref}' is not defined in this document"));
+                b.report.warn("unresolved_binding", &path(port), "the port's binding is not defined in this document");
                 continue;
             };
             used_bindings.insert(blocal.clone());
@@ -240,7 +240,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                 _ if !is_soap => {}
                 Some(a) => {
                     if !a.contains("://") {
-                        b.report.warn("relative_endpoint", &path(port), format!("endpoint address '{a}' is not an absolute URL"));
+                        b.report.warn("relative_endpoint", &path(port), "the endpoint address is not an absolute URL");
                     }
                     endpoint_vars.push(Variable::plain(&var, a));
                 }
@@ -264,7 +264,7 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
         b.report.warn(
             "binding_without_service",
             &path(*binding),
-            format!("binding '{bname}' has no service port; its endpoint is the variable {{{{{var}}}}}"),
+            "the binding has no service port; its endpoint is the required variable listed for it",
         );
         import_binding(b, &ctx, *binding, None, ("binding", bname), bname, &var);
     }
@@ -459,16 +459,18 @@ fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<
         b.report.counts.skipped_operations += ops.len();
         if first {
             let what = if matches!(info.kind, BindingKind::Http) { "HTTP GET/POST binding" } else { "non-SOAP binding" };
-            let msg = format!("{what} is not supported; only SOAP 1.1/1.2 bindings are imported");
-            b.report.unsupported("wsdl_binding_unsupported", &path(binding), msg);
+            b.report.unsupported(
+                "wsdl_binding_unsupported",
+                &path(binding),
+                Message::new(what).text(" is not supported; only SOAP 1.1/1.2 bindings are imported"),
+            );
         }
         return;
     };
     if first {
         let bpath = path(binding);
         if !info.transport.is_empty() && info.transport != SOAP_HTTP {
-            let msg = format!("SOAP transport '{}' is not supported; HTTP is assumed", clip(info.transport, 256));
-            b.report.unsupported("soap_transport", &bpath, msg);
+            b.report.unsupported("soap_transport", &bpath, "this SOAP transport is not supported; HTTP is assumed");
         }
         if info.port_type.is_none() {
             b.report.warn(
@@ -502,8 +504,7 @@ fn import_binding(b: &mut Builder, ctx: &WsdlCtx, binding: Node, parent: Option<
         let pt_op = info.port_type.and_then(|pt| ctx.port_type_ops.get(&pt.id())).and_then(|m| m.get(oname)).copied();
         let Some(pt_op) = pt_op else {
             if info.port_type.is_some() {
-                let msg = format!("operation '{}' is not declared in the portType", clip(oname, 256));
-                b.report.warn("unresolved_operation", &opath, msg);
+                b.report.warn("unresolved_operation", &opath, "the operation is not declared in the portType");
             }
             b.skipped();
             continue;
@@ -678,9 +679,11 @@ impl<'a, 'i> SchemaSet<'a, 'i> {
                         {
                             report.external_ref(loc, &path(c));
                         } else if !inline_ns.contains(&ns) && ns != SOAP_ENC && ns != XSD_NS && !ns.is_empty() {
-                            let ns = clip(ns, 128);
-                            let msg = format!("namespace '{ns}' is imported without an inline schema; its types cannot be generated");
-                            report.warn("unresolved_schema_import", &path(c), msg);
+                            report.warn(
+                                "unresolved_schema_import",
+                                &path(c),
+                                "a namespace is imported without an inline schema; its types cannot be generated",
+                            );
                         }
                     }
                     ("include" | "redefine" | "override", _) => {
@@ -689,10 +692,7 @@ impl<'a, 'i> SchemaSet<'a, 'i> {
                         }
                     }
                     ("annotation" | "notation", _) => {}
-                    (other, _) => {
-                        let msg = format!("top-level xsd:{} is not supported", clip(other, 128));
-                        report.unsupported("xsd_construct", &path(c), msg);
-                    }
+                    _ => report.unsupported("xsd_construct", &path(c), "this top-level XSD construct is not supported"),
                 }
             }
         }
@@ -833,13 +833,13 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
         }
     }
 
-    fn warn(&mut self, code: &'static str, n: Node, message: impl Into<String>) {
+    fn warn(&mut self, code: &'static str, n: Node, message: impl Into<Message>) {
         if self.noted.insert((code, n.id())) {
             self.report.warn(code, &path(n), message);
         }
     }
 
-    fn unsupported(&mut self, code: &'static str, n: Node, message: impl Into<String>) {
+    fn unsupported(&mut self, code: &'static str, n: Node, message: impl Into<Message>) {
         if self.noted.insert((code, n.id())) {
             self.report.unsupported(code, &path(n), message);
         }
@@ -860,7 +860,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             self.warn(
                 "sample_size_limit",
                 n,
-                format!("envelope reached {} generated nodes (max_sample_nodes); the rest was omitted", self.max_nodes),
+                Message::new("envelope reached ").num(self.max_nodes).text(" generated nodes (max_sample_nodes); the rest was omitted"),
             );
             return false;
         }
@@ -879,7 +879,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             self.warn(
                 "sample_size_limit",
                 n,
-                format!("envelope reached its size limit ({} generated bytes); the rest was omitted", self.max_bytes),
+                Message::new("envelope reached its size limit (").num(self.max_bytes).text(" generated bytes); the rest was omitted"),
             );
             return false;
         }
@@ -920,10 +920,9 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
 
     /// Enter a named group definition (already charged by the caller);
     /// `false` (reported) when it is already being expanded.
-    fn enter_group(&mut self, def: Node, name: &str) -> bool {
+    fn enter_group(&mut self, def: Node) -> bool {
         if self.group_stack.contains(&def.id()) {
-            let msg = format!("recursive group '{}': expansion stops at the first repetition", clip(name, 128));
-            self.warn("recursive_schema", def, msg);
+            self.warn("recursive_schema", def, "the group is recursive: expansion stops at the first repetition");
             return false;
         }
         self.group_stack.push(def.id());
@@ -962,11 +961,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             match self.set.elements.get(&q) {
                 Some(decl) => self.element(decl, indent, 0, out, true),
                 None => {
-                    self.warn(
-                        "unresolved_element",
-                        p,
-                        format!("element '{}' is not defined in an inline schema; an empty element is used", clip(e, 128)),
-                    );
+                    self.warn("unresolved_element", p, "the element is not defined in an inline schema; an empty element is used");
                     let pfx = self.prefix(p, &q.0);
                     if self.charge_bytes(p, 2 * indent + pfx.len() + q.1.len() + 5) {
                         out.push_str(&format!("{}<{pfx}:{}/>\n", "  ".repeat(indent), q.1));
@@ -996,7 +991,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
     /// as a message part.
     fn element(&mut self, decl: Node<'a, 'i>, indent: usize, depth: usize, out: &mut String, top: bool) {
         if depth > MAX_DEPTH {
-            self.warn("schema_depth_limit", decl, format!("XSD nesting deeper than {MAX_DEPTH} levels was not expanded"));
+            self.warn("schema_depth_limit", decl, Message::new("XSD nesting deeper than ").num(MAX_DEPTH).text(" levels was not expanded"));
             return;
         }
         let min: u64 = decl.attribute("minOccurs").and_then(|v| v.parse().ok()).unwrap_or(1);
@@ -1011,7 +1006,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                 match self.set.elements.get(&q) {
                     Some(g) => (g, true),
                     None => {
-                        self.warn("unresolved_element", decl, format!("element ref '{}' is not defined in an inline schema", clip(r, 128)));
+                        self.warn("unresolved_element", decl, "the element ref is not defined in an inline schema");
                         return;
                     }
                 }
@@ -1098,18 +1093,15 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             return Content { text: Some(esc(&v, false)), ..Default::default() };
         }
         if q.0 == SOAP_ENC {
-            let msg = format!("SOAP-encoding type soapenc:{} is not supported", clip(&q.1, 128));
-            self.unsupported("soap_encoded_type", at, msg);
+            self.unsupported("soap_encoded_type", at, "this SOAP-encoding type is not supported");
             return Content::default();
         }
         let Some(t) = self.set.types.get(q) else {
-            let msg = format!("type '{}' is not defined in an inline schema; left empty", clip(&q.1, 128));
-            self.warn("unresolved_type", at, msg);
+            self.warn("unresolved_type", at, "the type is not defined in an inline schema; left empty");
             return Content::default();
         };
         if self.type_stack.contains(q) {
-            let msg = format!("recursive type '{}': expansion stops at the first repetition", clip(&q.1, 128));
-            self.warn("recursive_schema", t, msg);
+            self.warn("recursive_schema", t, "the type is recursive: expansion stops at the first repetition");
             return Content::default();
         }
         self.type_stack.push(q.clone());
@@ -1160,10 +1152,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                                 self.complex_into(d, depth + 1, c);
                             }
                             "annotation" => {}
-                            other => {
-                                let msg = format!("xsd:{} in complexContent is not supported", clip(other, 128));
-                                self.unsupported("xsd_construct", d, msg);
-                            }
+                            _ => self.unsupported("xsd_construct", d, "this XSD construct in complexContent is not supported"),
                         }
                     }
                 }
@@ -1188,17 +1177,11 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                                 }
                             }
                             "annotation" => {}
-                            other => {
-                                let msg = format!("xsd:{} in simpleContent is not supported", clip(other, 128));
-                                self.unsupported("xsd_construct", d, msg);
-                            }
+                            _ => self.unsupported("xsd_construct", d, "this XSD construct in simpleContent is not supported"),
                         }
                     }
                 }
-                other => {
-                    let msg = format!("xsd:{} in a complexType is not supported", clip(other, 128));
-                    self.unsupported("xsd_construct", k, msg);
-                }
+                _ => self.unsupported("xsd_construct", k, "this XSD construct in a complexType is not supported"),
             }
         }
     }
@@ -1216,13 +1199,11 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             return;
         }
         let Some(t) = self.set.types.get(q) else {
-            let msg = format!("base type '{}' is not defined in an inline schema", clip(&q.1, 128));
-            self.warn("unresolved_type", at, msg);
+            self.warn("unresolved_type", at, "the base type is not defined in an inline schema");
             return;
         };
         if self.type_stack.contains(q) {
-            let msg = format!("recursive type '{}': expansion stops at the first repetition", clip(&q.1, 128));
-            self.warn("recursive_schema", t, msg);
+            self.warn("recursive_schema", t, "the type is recursive: expansion stops at the first repetition");
             return;
         }
         self.type_stack.push(q.clone());
@@ -1237,7 +1218,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
 
     fn particle(&mut self, p: Node<'a, 'i>, depth: usize, c: &mut Content) {
         if depth > MAX_DEPTH {
-            self.warn("schema_depth_limit", p, format!("XSD nesting deeper than {MAX_DEPTH} levels was not expanded"));
+            self.warn("schema_depth_limit", p, Message::new("XSD nesting deeper than ").num(MAX_DEPTH).text(" levels was not expanded"));
             return;
         }
         if self.exhausted || (p.attribute("minOccurs") == Some("0") && !self.include_optional) {
@@ -1249,7 +1230,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                 let q = qname(p, r);
                 match self.set.groups.get(&q) {
                     Some(g) => {
-                        if !self.enter_group(g, &q.1) {
+                        if !self.enter_group(g) {
                             return;
                         }
                         for k in self.kids(g) {
@@ -1260,15 +1241,18 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                         self.group_stack.pop();
                     }
                     None => {
-                        let msg = format!("group '{}' is not defined in an inline schema", clip(r, 128));
-                        self.warn("unresolved_group", p, msg);
+                        self.warn("unresolved_group", p, "the group is not defined in an inline schema");
                     }
                 }
             }
             "choice" => {
                 let branches: Vec<Node> = self.kids(p).into_iter().filter(|k| k.tag_name().name() != "annotation").collect();
                 if branches.len() > 1 {
-                    self.warn("xsd_choice_first", p, format!("xsd:choice has {} branches; the first one is generated", branches.len()));
+                    self.warn(
+                        "xsd_choice_first",
+                        p,
+                        Message::new("xsd:choice has ").num(branches.len()).text(" branches; the first one is generated"),
+                    );
                 }
                 if let Some(first) = branches.first() {
                     self.particle_item(*first, depth + 1, c);
@@ -1296,10 +1280,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                 }
             }
             "annotation" => {}
-            other => {
-                let msg = format!("xsd:{} in a content model is not supported", clip(other, 128));
-                self.unsupported("xsd_construct", k, msg);
-            }
+            _ => self.unsupported("xsd_construct", k, "this XSD construct in a content model is not supported"),
         }
     }
 
@@ -1311,8 +1292,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             Some(r) => match self.set.attributes.get(&qname(a, r)) {
                 Some(g) => g,
                 None => {
-                    let msg = format!("attribute ref '{}' is not defined in an inline schema", clip(r, 128));
-                    self.warn("unresolved_attribute", a, msg);
+                    self.warn("unresolved_attribute", a, "the attribute ref is not defined in an inline schema");
                     return;
                 }
             },
@@ -1367,11 +1347,10 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
         let Some(r) = g.attribute("ref") else { return };
         let q = qname(g, r);
         let Some(def) = self.set.attr_groups.get(&q) else {
-            let msg = format!("attributeGroup '{}' is not defined in an inline schema", clip(r, 128));
-            self.warn("unresolved_attribute_group", g, msg);
+            self.warn("unresolved_attribute_group", g, "the attributeGroup is not defined in an inline schema");
             return;
         };
-        if !self.enter_group(def, &q.1) {
+        if !self.enter_group(def) {
             return;
         }
         for a in self.kids(def) {
@@ -1392,8 +1371,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             Some(t) if t.tag_name().name() == "simpleType" && depth < MAX_DEPTH => self.simple_type(t, name, f, depth + 1),
             Some(_) => String::new(),
             None => {
-                let msg = format!("simple type '{}' is not defined in an inline schema", clip(&q.1, 128));
-                self.warn("unresolved_type", at, msg);
+                self.warn("unresolved_type", at, "the simple type is not defined in an inline schema");
                 String::new()
             }
         }
@@ -1419,9 +1397,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                         };
                     }
                     if let Some(p) = facet_nodes.iter().find(|e| is(e, XSD_NS, "pattern")) {
-                        let pattern = clip(p.attribute("value").unwrap_or(""), 200);
-                        let msg = format!("the sample is not guaranteed to match pattern `{pattern}`");
-                        self.warn("pattern_not_enforced", *p, msg);
+                        self.warn("pattern_not_enforced", *p, "the sample is not guaranteed to match the pattern");
                     }
                     let mut f = facets(k);
                     f.min = f.min.or(outer.min);
@@ -1475,7 +1451,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             (Some(lo), Some(hi)) => (lo, hi),
         };
         if lo > hi {
-            self.warn("contradictory_schema", at, format!("no integer of this type lies within [{lo}, {hi}]; minimum used"));
+            self.warn("contradictory_schema", at, "no integer of this type lies within the range; minimum used");
             return lo.to_string();
         }
         self.rng.range_i128(lo, hi).to_string()
@@ -1492,7 +1468,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             (Some(lo), Some(hi)) => (lo, hi),
         };
         if lo > hi {
-            self.warn("contradictory_schema", at, format!("no number lies within [{lo}, {hi}]; minimum used"));
+            self.warn("contradictory_schema", at, "no number lies within the range; minimum used");
             return format!("{lo}");
         }
         // Rounding may step just outside a narrow range: keep it inside.
@@ -1505,11 +1481,7 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             return String::new();
         }
         if is_credential_name(name) {
-            self.warn(
-                "credential_left_blank",
-                at,
-                format!("credential-like value '{name}' is never generated; left empty for you to supply"),
-            );
+            self.warn("credential_left_blank", at, "a credential-like value is never generated; left empty for you to supply");
             return String::new();
         }
         if let Some((bounds, default)) = int_type(t) {
@@ -1558,9 +1530,8 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
                 }
                 s
             }
-            other => {
-                let msg = format!("built-in type xsd:{} has no sample generator; left empty", clip(other, 128));
-                self.warn("unknown_xsd_type", at, msg);
+            _ => {
+                self.warn("unknown_xsd_type", at, "this built-in XSD type has no sample generator; left empty");
                 String::new()
             }
         }

@@ -13,6 +13,7 @@ use crate::common::{
     body_from_text, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, redact_raw_query, scrub_json_text,
     split_query, take_url_credentials, warn_query_conversions,
 };
+use crate::report::Message;
 use crate::util::{is_json_media, media_essence, ptr, scalar_text, str_of};
 use crate::{Dialect, ImportError};
 use anvil_domain::auth::AuthConfig;
@@ -35,14 +36,14 @@ pub(crate) fn import(root: &Value, b: &mut Builder) -> Result<(), ImportError> {
     })?;
     let version = log.get("version").map(scalar_text).unwrap_or_default();
     if !version.is_empty() && version != "1.2" && version != "1.1" {
-        b.report.warn("har_version", "/log/version", format!("HAR version '{version}' is not 1.1/1.2; imported with the 1.2 mapping"));
+        b.report.warn("har_version", "/log/version", "the HAR version is not 1.1 or 1.2; imported with the 1.2 mapping");
     }
     let creator = log.pointer("/creator/name").and_then(Value::as_str).unwrap_or("");
     b.workspace.name = if creator.is_empty() { "HAR import".into() } else { format!("HAR import ({creator})") };
     b.title = Some(b.workspace.name.clone());
     b.workspace.auth = AuthConfig::None;
     let entries = log.get("entries").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
-    let mut dropped: BTreeSet<String> = BTreeSet::new();
+    let mut dropped: BTreeSet<&'static str> = BTreeSet::new();
     for (i, e) in entries.iter().enumerate() {
         let at = format!("/log/entries/{i}");
         let Some(req) = e.get("request") else {
@@ -56,12 +57,7 @@ pub(crate) fn import(root: &Value, b: &mut Builder) -> Result<(), ImportError> {
         if !(lower.starts_with("http://") || lower.starts_with("https://")) {
             b.report.counts.operations_found += 1;
             b.skipped();
-            let scheme = raw_url.split(':').next().unwrap_or("");
-            b.report.unsupported(
-                "har_non_http",
-                &ptr(&rptr, "url"),
-                format!("'{scheme}:' entries are not imported (only http/https requests)"),
-            );
+            b.report.unsupported("har_non_http", &ptr(&rptr, "url"), "only http and https requests are imported; this entry is skipped");
             continue;
         }
         if !b.admit(&at) {
@@ -70,19 +66,17 @@ pub(crate) fn import(root: &Value, b: &mut Builder) -> Result<(), ImportError> {
         entry(b, req, &rptr, &method, &raw_url, i, &mut dropped);
     }
     if !dropped.is_empty() {
-        b.report.warn(
-            "har_headers_dropped",
-            "/log/entries",
-            format!(
-                "connection-specific headers are recomputed when sending and were not imported: {}",
-                dropped.into_iter().collect::<Vec<_>>().join(", ")
-            ),
-        );
+        // Named from DROPPED_HEADERS, never from the source's spelling.
+        let mut message = Message::new("connection-specific headers are recomputed when sending and were not imported: ");
+        for (k, name) in dropped.into_iter().enumerate() {
+            message = if k == 0 { message.text(name) } else { message.text(", ").text(name) };
+        }
+        b.report.warn("har_headers_dropped", "/log/entries", message);
     }
     Ok(())
 }
 
-fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, index: usize, dropped: &mut BTreeSet<String>) {
+fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, index: usize, dropped: &mut BTreeSet<&'static str>) {
     let uptr = ptr(rptr, "url");
     let mut auth = AuthConfig::Inherit;
     // Userinfo is never kept in the URL (the engine refuses it).
@@ -119,8 +113,8 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
             continue;
         }
         let lower = name.to_ascii_lowercase();
-        if DROPPED_HEADERS.contains(&lower.as_str()) {
-            dropped.insert(lower);
+        if let Some(known) = DROPPED_HEADERS.iter().copied().find(|h| *h == lower) {
+            dropped.insert(known);
             continue;
         }
         has_cookie |= lower == "cookie";
@@ -191,11 +185,11 @@ fn post_data(b: &mut Builder, pd: &Value, at: &str, declared: &mut Option<String
             let pp = format!("{}/{n}", ptr(at, "params"));
             let name = str_of(p, "name").unwrap_or("").to_string();
             let ct = str_of(p, "contentType").map(str::to_string);
-            if let Some(f) = str_of(p, "fileName") {
+            if str_of(p, "fileName").is_some() {
                 b.report.warn(
                     "file_part_requires_attachment",
                     &pp,
-                    format!("file part '{name}' ({f}) was not captured: attach the file before sending (imported disabled)"),
+                    "a file part was not captured: attach the file before sending (imported disabled)",
                 );
                 parts.push(MultipartPart {
                     name,
@@ -249,7 +243,7 @@ fn post_data(b: &mut Builder, pd: &Value, at: &str, declared: &mut Option<String
         b.report.warn(
             "body_not_scanned",
             at,
-            format!("'{mime}' body is imported verbatim; it was not scanned for credentials (review before sharing)"),
+            "a body of this media type is imported verbatim; it was not scanned for credentials (review before sharing)",
         );
     }
     let (body, ct) = body_from_text(if mime.is_empty() { None } else { Some(&mime) }, text);

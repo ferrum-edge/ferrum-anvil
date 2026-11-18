@@ -5,14 +5,16 @@
 //! flattened to dotted names). Nunjucks `{{ _.var }}` references become
 //! Anvil `{{var}}`; `{% uuid %}` / `{% now %}` tags map to dynamic
 //! variables; other template tags are reported and left in place. Scripts
-//! and unit tests are retained in the report, never executed.
+//! and unit tests are listed in the report by their metadata (not their
+//! bodies), never executed.
 
 use crate::builder::Builder;
 use crate::common::{
-    TakenUrl, apply_userinfo, body_from_text, credential, dedupe_content_type, env_var, header_content_type, keep_declared_content_type,
-    listed_query_param, maybe_redact, parse_embedded_json, parse_form, quarantine_url, redact_raw_query, render_json, scrub_body,
-    scrub_graphql_variables, scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
+    TakenUrl, apply_userinfo, auth_placeholder_base, body_from_text, credential, dedupe_content_type, env_var, header_content_type,
+    keep_declared_content_type, listed_query_param, maybe_redact, parse_embedded_json, parse_form, quarantine_url, redact_raw_query,
+    render_json, scrub_body, scrub_graphql_variables, scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
 };
+use crate::report::{Message, ScriptOwner};
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
 use anvil_domain::Id;
@@ -67,22 +69,14 @@ pub(crate) fn template(b: &mut Builder, s: &str, at: &str) -> String {
             match mapped {
                 Some(m) => out.push_str(m),
                 None => {
-                    b.report.unsupported(
-                        "template_tag",
-                        at,
-                        format!("Insomnia template tag `{{% {tag} … %}}` has no Anvil equivalent; replace it before sending"),
-                    );
+                    b.report.unsupported("template_tag", at, "an Insomnia template tag has no Anvil equivalent; replace it before sending");
                     out.push_str(&format!("{{%{}%}}", &after[..end]));
                 }
             }
         } else {
             let expr = inner.strip_prefix("_.").unwrap_or(inner);
             if expr.contains('|') || expr.contains('(') || expr.contains(' ') {
-                b.report.unsupported(
-                    "template_expression",
-                    at,
-                    format!("Nunjucks expression `{{{{ {inner} }}}}` is not supported; left as written"),
-                );
+                b.report.unsupported("template_expression", at, "a Nunjucks expression is not supported; left as written");
                 out.push_str(&format!("{{{{{}}}}}", &after[..end]));
             } else {
                 let expr = expr.strip_prefix("_['").and_then(|e| e.strip_suffix("']")).unwrap_or(expr);
@@ -245,7 +239,7 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
                 b.report.warn(
                     "duplicate_resource_id",
                     &format!("/resources/{i}"),
-                    format!("resource id is already used by /resources/{first}; this copy is skipped"),
+                    Message::new("the resource id is already used by /resources/").num(first).text("; this copy is skipped"),
                 );
                 seen.handled[i] = true;
             }
@@ -266,7 +260,7 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
         b.report.warn(
             "multiple_workspaces",
             "/resources",
-            format!("the export contains {} workspaces; each becomes a top-level folder", workspaces.len()),
+            Message::new("the export contains ").num(workspaces.len()).text(" workspaces; each becomes a top-level folder"),
         );
     }
     for &w in &workspaces {
@@ -342,9 +336,8 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
         let p = format!("/resources/{i}");
         match ty {
             "unit_test" => {
-                let owner = str_of(r, "name").unwrap_or("unit test");
                 if let Some(code) = str_of(r, "code") {
-                    b.report.script(&p, owner, "unit_test", "text/javascript", code.to_string());
+                    b.report.script(&p, ScriptOwner::TestSuite, "unit_test", "text/javascript", code);
                 }
             }
             "unit_test_suite" => {}
@@ -359,16 +352,25 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
                     b.report.counts.operations_found += 1;
                     b.skipped();
                 }
-                b.report.unsupported("insomnia_resource", &p, format!("Insomnia '{ty}' resources are not imported yet"))
+                let word = ["grpc_request", "websocket_request", "websocket_payload", "proto_file", "proto_directory"]
+                    .into_iter()
+                    .find(|t| *t == ty)
+                    .unwrap_or("these");
+                b.report.unsupported(
+                    "insomnia_resource",
+                    &p,
+                    Message::new("Insomnia '").text(word).text("' resources are not imported yet"),
+                )
             }
             "request" | "request_group" | "environment" => {
-                b.report.warn("orphan_resource", &p, format!("{ty} is not reachable from a workspace; skipped"));
+                let word = ["request", "request_group", "environment"].into_iter().find(|t| *t == ty).unwrap_or("resource");
+                b.report.warn("orphan_resource", &p, Message::new(word).text(" is not reachable from a workspace; skipped"));
                 if ty == "request" {
                     b.report.counts.operations_found += 1;
                     b.skipped();
                 }
             }
-            other => b.report.unsupported("insomnia_resource", &p, format!("Insomnia '{other}' resources are not imported")),
+            _ => b.report.unsupported("insomnia_resource", &p, "this Insomnia resource type is not imported"),
         }
     }
     Ok(())
@@ -410,7 +412,7 @@ fn walk_v4(
         b.report.warn(
             "folder_depth_limit",
             "/resources",
-            format!("request groups nested deeper than {MAX_DEPTH} levels were not imported"),
+            Message::new("request groups nested deeper than ").num(MAX_DEPTH).text(" levels were not imported"),
         );
         return;
     }
@@ -463,10 +465,10 @@ fn group(
 ) -> Id {
     let fid = b.folder(parent, &format!("insomnia:{id}"), name);
     let vars = env_vars(b, env, &ptr(at, "environment"));
-    let auth = r.get("authentication").map(|a| auth(b, a, &ptr(at, "authentication"), name));
+    let auth = r.get("authentication").map(|a| auth(b, a, &ptr(at, "authentication")));
     for (ev, s) in [("prerequest", pre), ("after_response", post)] {
         if let Some(src) = s.and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
-            b.report.script(at, name, ev, "text/javascript", src.to_string());
+            b.report.script(at, ScriptOwner::Folder, ev, "text/javascript", src);
         }
     }
     if r.get("headers").and_then(Value::as_array).is_some_and(|h| !h.is_empty()) {
@@ -564,7 +566,11 @@ pub(crate) fn import_v5(root: &Value, b: &mut Builder) -> Result<(), ImportError
 
 fn walk_v5(b: &mut Builder, items: &[Value], base: &str, folder: Option<Id>, depth: usize) {
     if depth > MAX_DEPTH {
-        b.report.warn("folder_depth_limit", base, format!("folders nested deeper than {MAX_DEPTH} levels were not imported"));
+        b.report.warn(
+            "folder_depth_limit",
+            base,
+            Message::new("folders nested deeper than ").num(MAX_DEPTH).text(" levels were not imported"),
+        );
         return;
     }
     let mut order: Vec<usize> = (0..items.len()).collect();
@@ -709,14 +715,14 @@ fn request(
     keep_declared_content_type(&mut spec.headers, declared);
     dedupe_content_type(&mut spec.headers, &spec.body);
     spec.auth = match r.get("authentication") {
-        Some(a) => auth(b, a, &ptr(at, "authentication"), &name),
+        Some(a) => auth(b, a, &ptr(at, "authentication")),
         None => AuthConfig::Inherit,
     };
     apply_userinfo(b, &mut spec.auth, userinfo, &ptr(at, "url"));
     spec.settings = settings;
     for (ev, s) in scripts {
         if let Some(src) = s.and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
-            b.report.script(at, &name, ev, "text/javascript", src.to_string());
+            b.report.script(at, ScriptOwner::Request, ev, "text/javascript", src);
         }
     }
     let desc = str_of(r, "description").or_else(|| r.pointer("/meta/description").and_then(Value::as_str)).unwrap_or("").to_string();
@@ -895,15 +901,15 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
                 // envelope is kept as raw JSON text, unscanned; anything else
                 // is the query itself.
                 Err(e) if json_looking => {
-                    let why = match e {
-                        ImportError::LimitExceeded { what, limit } => format!("exceeds the import limit for {what} ({limit})"),
-                        _ => "could not be parsed".to_string(),
+                    let message = match e {
+                        ImportError::LimitExceeded { limit, .. } => Message::new("the GraphQL JSON body exceeds an import limit (")
+                            .num(limit)
+                            .text("); imported as a raw JSON body and not scanned for credentials"),
+                        _ => Message::new(
+                            "the GraphQL JSON body could not be parsed; imported as a raw JSON body and not scanned for credentials",
+                        ),
                     };
-                    b.report.warn(
-                        "body_not_scanned",
-                        &ptr(at, "text"),
-                        format!("GraphQL JSON body {why}; imported as a raw JSON body and not scanned for credentials"),
-                    );
+                    b.report.warn("body_not_scanned", &ptr(at, "text"), message);
                     return Body::Raw { text, content_type: Some("application/json".into()) };
                 }
                 Err(_) => return bare(),
@@ -936,7 +942,10 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
     }
 }
 
-fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
+/// An auth config. Its credential placeholders are named by
+/// [`auth_placeholder_base`], never after the owner's name, which can repeat
+/// a credential (review of #583, sol F1).
+fn auth(b: &mut Builder, a: &Value, at: &str) -> AuthConfig {
     let Some(m) = a.as_object() else { return AuthConfig::Inherit };
     if m.is_empty() {
         return AuthConfig::Inherit;
@@ -945,12 +954,12 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
         return AuthConfig::None;
     }
     let ty = str_of(a, "type").unwrap_or("none");
-    let v = sanitize_var(if owner.is_empty() { "insomnia" } else { owner });
     let get = |b: &mut Builder, k: &str| template(b, &a.get(k).map(scalar_text).unwrap_or_default(), &ptr(at, k));
     match ty {
         "none" => AuthConfig::None,
         "inherit" => AuthConfig::Inherit,
         "basic" => {
+            let v = auth_placeholder_base(b);
             let username = get(b, "username");
             let pw = get(b, "password");
             AuthConfig::Basic {
@@ -959,11 +968,13 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
             }
         }
         "bearer" => {
+            let v = auth_placeholder_base(b);
             let t = get(b, "token");
             let prefix = str_of(a, "prefix").filter(|p| !p.is_empty()).unwrap_or("Bearer").to_string();
             AuthConfig::Bearer { token: credential(b, &t, &format!("{v}_token"), &ptr(at, "token"), "bearer token"), prefix }
         }
         "apikey" => {
+            let v = auth_placeholder_base(b);
             let name = get(b, "key");
             let val = get(b, "value");
             let location = match str_of(a, "addTo") {
@@ -974,6 +985,7 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
             AuthConfig::ApiKey { name, value: credential(b, &val, &format!("{v}_api_key"), &ptr(at, "value"), "API key"), location }
         }
         "oauth2" => {
+            let v = auth_placeholder_base(b);
             let grant = match str_of(a, "grantType") {
                 Some("client_credentials") => Some(OAuthGrant::ClientCredentials),
                 Some("authorization_code") => {
@@ -998,10 +1010,7 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
                 b.report.unsupported(
                     "oauth2_grant_unsupported",
                     at,
-                    format!(
-                        "OAuth 2 grant '{}' is not supported; imported as a bearer-token placeholder",
-                        str_of(a, "grantType").unwrap_or("")
-                    ),
+                    "this OAuth 2 grant is not supported; imported as a bearer-token placeholder",
                 );
                 return AuthConfig::Bearer { token: credential(b, "", &format!("{v}_token"), at, "bearer token"), prefix: "Bearer".into() };
             };
@@ -1036,11 +1045,11 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
                 },
             }
         }
-        other => {
+        _ => {
             b.report.unsupported(
                 "auth_unsupported",
                 at,
-                format!("Insomnia auth type '{other}' is not supported; the request is imported without credentials (auth: none)"),
+                "this Insomnia auth type is not supported; the request is imported without credentials (auth: none)",
             );
             AuthConfig::None
         }
