@@ -694,3 +694,70 @@ fn a_declined_conflict_still_takes_the_parts_the_user_did_not_edit() {
     let approval = ReimportApproval { overwrite: vec![health], ..Default::default() };
     assert_eq!(named(&plan.apply(&edited, &approval), health).spec, fresh.requests[0].spec);
 }
+
+// ------------------------------------------------------- auth placeholders
+
+/// The placeholder an auth config's secret `field` refers to, as stored.
+fn auth_reference(r: &RequestDefinition, field: &str) -> String {
+    serde_json::to_value(&r.spec.auth).unwrap()[field]["value"].as_str().unwrap_or_default().to_string()
+}
+
+/// Review of #586 (sol F1): an auth config's placeholders follow its owner's
+/// stable id, not the order the source lists items in, so reordering the
+/// source keeps every request on the variable the user filled for it, and
+/// never hands one host another's secret.
+#[test]
+fn reordering_items_keeps_each_auth_config_on_its_own_variables() {
+    let postman_item = |id: &str| {
+        serde_json::json!({ "id": id, "name": id, "request": { "method": "GET", "url": format!("https://{id}.example.invalid/v1"),
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": format!("tok-SENSITIVE-{id}") }] } } })
+    };
+    let postman = |items: [&str; 2]| {
+        serde_json::json!({
+            "info": { "name": "Two", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+            "item": items.map(postman_item)
+        })
+        .to_string()
+    };
+    let insomnia_request = |id: &str, sort: f64| {
+        serde_json::json!({ "_id": id, "_type": "request", "parentId": "wrk_1", "name": id, "method": "GET", "metaSortKey": sort,
+            "url": format!("https://{id}.example.invalid/v1"),
+            "authentication": { "type": "basic", "username": "u", "password": format!("tok-SENSITIVE-{id}") } })
+    };
+    let insomnia = |a: f64, b: f64| {
+        serde_json::json!({ "_type": "export", "__export_format": 4, "resources": [
+            { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+            insomnia_request("req_a", a), insomnia_request("req_b", b)
+        ] })
+        .to_string()
+    };
+    let cases = [
+        ("Postman", postman(["req-a", "req-b"]), postman(["req-b", "req-a"]), ["postman:req-a", "postman:req-b"], "token"),
+        ("Insomnia", insomnia(1.0, 2.0), insomnia(2.0, 1.0), ["insomnia:req_a", "insomnia:req_b"], "password"),
+    ];
+    for (importer, before, after, keys, field) in cases {
+        let first = import(before.as_bytes(), &opts()).unwrap();
+        // The variables the user filled after the first import: each
+        // request's own secret under the placeholder it was given.
+        let filled: BTreeMap<String, String> =
+            keys.iter().map(|k| (auth_reference(req(&first, k), field), format!("secret for {k}"))).collect();
+        assert_eq!(filled.len(), 2, "{importer}: the two auth configs share a placeholder");
+        assert!(filled.keys().all(|p| p.starts_with("{{auth_")), "{importer}: {filled:?}");
+
+        let fresh = reimport(&first, &after);
+        for k in keys {
+            assert_eq!(auth_reference(req(&fresh, k), field), auth_reference(req(&first, k), field), "{importer}: {k} changed placeholder");
+        }
+        let plan = diff(&first, &first.requests, &fresh);
+        assert!(plan.conflicts.is_empty(), "{importer}: {:?}", plan.conflicts);
+        let applied = plan.apply(&first.requests, &ReimportApproval::default());
+        for k in keys {
+            let request = applied.iter().find(|q| q.spec.source.as_ref().is_some_and(|s| s.operation_key == k)).expect("the request");
+            assert_eq!(
+                filled.get(&auth_reference(request, field)),
+                Some(&format!("secret for {k}")),
+                "{importer}: {k} took another's secret"
+            );
+        }
+    }
+}

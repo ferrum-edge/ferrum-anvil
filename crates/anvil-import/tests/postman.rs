@@ -419,3 +419,44 @@ fn userinfo_placeholders_never_take_a_path_variable_name() {
         _ => panic!("expected Basic auth"),
     }
 }
+
+/// Review of #586 (sol F3): an auth secret's placeholder is reserved whole,
+/// so a credential header that already took that name (here: one named
+/// after it, before the auth config) or that comes after it never shares
+/// one variable with the auth secret.
+#[test]
+fn auth_placeholders_never_alias_field_placeholders() {
+    let doc = |headers: serde_json::Value| {
+        serde_json::json!({
+            "info": { "name": "c", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "tok-SENSITIVE-pm-col" }] },
+            "item": [{ "id": "r1", "name": "r", "request": { "method": "GET", "url": "https://api.example.test/", "header": headers,
+                "auth": { "type": "basic", "basic": [{ "key": "username", "value": "u" }, { "key": "password", "value": "tok-SENSITIVE-pm-req" }] } } }]
+        })
+        .to_string()
+    };
+    let reference = |v: &serde_json::Value, field: &str| v[field]["value"].as_str().unwrap().trim_matches(['{', '}']).to_string();
+    let plain = import(doc(serde_json::json!([])).as_bytes(), &opts()).unwrap();
+    let request_secret = reference(&serde_json::to_value(&plain.requests[0].spec.auth).unwrap(), "password");
+    let collection_secret = reference(&serde_json::to_value(&plain.workspace.auth).unwrap(), "token");
+    assert!(request_secret.starts_with("auth_") && collection_secret.starts_with("auth_") && request_secret != collection_secret);
+
+    // Headers named exactly like both auth secrets: the request's header comes
+    // before its auth config, the collection's auth before every header.
+    let headers = serde_json::json!([
+        { "key": request_secret, "value": "tok-SENSITIVE-pm-h1" },
+        { "key": collection_secret, "value": "tok-SENSITIVE-pm-h2" }
+    ]);
+    let r = import(doc(headers).as_bytes(), &opts()).unwrap();
+    let spec = &r.requests[0].spec;
+    let auth_secret = format!("{{{{{}}}}}", reference(&serde_json::to_value(&spec.auth).unwrap(), "password"));
+    let col_secret = format!("{{{{{}}}}}", reference(&serde_json::to_value(&r.workspace.auth).unwrap(), "token"));
+    let h1 = &header(spec, &request_secret).unwrap().value;
+    let h2 = &header(spec, &collection_secret).unwrap().value;
+    let all = [&auth_secret, &col_secret, h1, h2];
+    for (i, a) in all.iter().enumerate() {
+        assert!(a.starts_with("{{") && all.iter().skip(i + 1).all(|b| b != a), "two credentials share a placeholder: {all:?}");
+    }
+    let required: std::collections::HashSet<&str> = r.report.required_variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(required.len(), 4, "{required:?}");
+}

@@ -72,13 +72,31 @@ fn credential_placeholder(b: &mut Builder, value: &str, var: &str, pointer: &str
     placeholder
 }
 
-/// A fresh base for one auth config's credential placeholders
-/// (`auth_password`, then `auth_2_password`, …): one base per config, so
-/// configs never share a variable, and never derived from a source name
-/// (a request, folder or collection name can repeat a credential URL;
-/// review of #583, sol F1). Reserved, so no other placeholder takes it.
-pub fn auth_placeholder_base(b: &mut Builder) -> String {
-    b.env_names.name("auth")
+/// The placeholder name for secret `field` (`password`, `token`, …) of the
+/// auth config whose stable identity is `identity`: the key the import gives
+/// its owner (a request's operation key, a folder's or the collection's
+/// key, the source's own id where it has one).
+///
+/// - Opaque (`auth_<8 hex digits of a digest of the identity>_<field>`): no
+///   collection, folder or request name, which can repeat a credential URL,
+///   reaches it (review of #583, sol F1).
+/// - Stable across reimports whatever the order of the items, so a variable
+///   the user filled stays with the same auth config (review of #586, sol
+///   F1).
+/// - Reserved whole, outside the shared field-name cache, so no header,
+///   query or body placeholder aliases it, nor it one of theirs: a name
+///   already taken gets the next free suffix (review of #586, sol F3).
+pub fn auth_secret_name(b: &mut Builder, identity: &str, field: &str) -> String {
+    let name = format!("auth_{:08x}_{field}", crate::util::fnv1a64(identity) as u32);
+    b.env_names.name_verbatim(&name)
+}
+
+/// [`credential`] for secret `field` of the auth config `identity`, named by
+/// [`auth_secret_name`].
+pub fn auth_credential(b: &mut Builder, value: &str, identity: &str, field: &str, pointer: &str, label: &str) -> SensitiveValue {
+    let var = auth_secret_name(b, identity, field);
+    let literal = has_literal_secret(value.trim(), b.template_syntax);
+    SensitiveValue::template(credential_text_named(b, value, literal, &var, pointer, label))
 }
 
 /// Apply the credential policy to a variable definition. A secret literal

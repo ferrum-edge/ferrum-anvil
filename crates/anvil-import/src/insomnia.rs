@@ -10,7 +10,7 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    TakenUrl, apply_userinfo, auth_placeholder_base, body_from_text, credential, dedupe_content_type, env_var, header_content_type,
+    TakenUrl, apply_userinfo, auth_credential, body_from_text, dedupe_content_type, env_var, header_content_type,
     keep_declared_content_type, listed_query_param, maybe_redact, parse_embedded_json, parse_form, quarantine_url, redact_raw_query,
     render_json, scrub_body, scrub_graphql_variables, scrub_json, scrub_stored_json, take_userinfo, warn_unscanned,
 };
@@ -465,7 +465,7 @@ fn group(
 ) -> Id {
     let fid = b.folder(parent, &format!("insomnia:{id}"), name);
     let vars = env_vars(b, env, &ptr(at, "environment"));
-    let auth = r.get("authentication").map(|a| auth(b, a, &ptr(at, "authentication")));
+    let auth = r.get("authentication").map(|a| auth(b, a, &ptr(at, "authentication"), &format!("insomnia:{id}")));
     for (ev, s) in [("prerequest", pre), ("after_response", post)] {
         if let Some(src) = s.and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
             b.report.script(at, ScriptOwner::Folder, ev, "text/javascript", src);
@@ -715,7 +715,7 @@ fn request(
     keep_declared_content_type(&mut spec.headers, declared);
     dedupe_content_type(&mut spec.headers, &spec.body);
     spec.auth = match r.get("authentication") {
-        Some(a) => auth(b, a, &ptr(at, "authentication")),
+        Some(a) => auth(b, a, &ptr(at, "authentication"), key),
         None => AuthConfig::Inherit,
     };
     apply_userinfo(b, &mut spec.auth, userinfo, &ptr(at, "url"));
@@ -942,10 +942,10 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
     }
 }
 
-/// An auth config. Its credential placeholders are named by
-/// [`auth_placeholder_base`], never after the owner's name, which can repeat
-/// a credential (review of #583, sol F1).
-fn auth(b: &mut Builder, a: &Value, at: &str) -> AuthConfig {
+/// An auth config whose owner the import knows as `identity`. Its credential
+/// placeholders are named by [`crate::common::auth_secret_name`]: opaque,
+/// stable across reimports and never after the owner's name.
+fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
     let Some(m) = a.as_object() else { return AuthConfig::Inherit };
     if m.is_empty() {
         return AuthConfig::Inherit;
@@ -959,22 +959,19 @@ fn auth(b: &mut Builder, a: &Value, at: &str) -> AuthConfig {
         "none" => AuthConfig::None,
         "inherit" => AuthConfig::Inherit,
         "basic" => {
-            let v = auth_placeholder_base(b);
             let username = get(b, "username");
             let pw = get(b, "password");
             AuthConfig::Basic {
                 username,
-                password: credential(b, &pw, &format!("{v}_password"), &ptr(at, "password"), "Basic auth password"),
+                password: auth_credential(b, &pw, identity, "password", &ptr(at, "password"), "Basic auth password"),
             }
         }
         "bearer" => {
-            let v = auth_placeholder_base(b);
             let t = get(b, "token");
             let prefix = str_of(a, "prefix").filter(|p| !p.is_empty()).unwrap_or("Bearer").to_string();
-            AuthConfig::Bearer { token: credential(b, &t, &format!("{v}_token"), &ptr(at, "token"), "bearer token"), prefix }
+            AuthConfig::Bearer { token: auth_credential(b, &t, identity, "token", &ptr(at, "token"), "bearer token"), prefix }
         }
         "apikey" => {
-            let v = auth_placeholder_base(b);
             let name = get(b, "key");
             let val = get(b, "value");
             let location = match str_of(a, "addTo") {
@@ -982,10 +979,9 @@ fn auth(b: &mut Builder, a: &Value, at: &str) -> AuthConfig {
                 Some("cookie") => KeyLocation::Cookie,
                 _ => KeyLocation::Header,
             };
-            AuthConfig::ApiKey { name, value: credential(b, &val, &format!("{v}_api_key"), &ptr(at, "value"), "API key"), location }
+            AuthConfig::ApiKey { name, value: auth_credential(b, &val, identity, "api_key", &ptr(at, "value"), "API key"), location }
         }
         "oauth2" => {
-            let v = auth_placeholder_base(b);
             let grant = match str_of(a, "grantType") {
                 Some("client_credentials") => Some(OAuthGrant::ClientCredentials),
                 Some("authorization_code") => {
@@ -1012,11 +1008,14 @@ fn auth(b: &mut Builder, a: &Value, at: &str) -> AuthConfig {
                     at,
                     "this OAuth 2 grant is not supported; imported as a bearer-token placeholder",
                 );
-                return AuthConfig::Bearer { token: credential(b, "", &format!("{v}_token"), at, "bearer token"), prefix: "Bearer".into() };
+                return AuthConfig::Bearer {
+                    token: auth_credential(b, "", identity, "token", at, "bearer token"),
+                    prefix: "Bearer".into(),
+                };
             };
             let secret_raw = get(b, "clientSecret");
             let client_secret = if grant == OAuthGrant::ClientCredentials || !secret_raw.is_empty() {
-                credential(b, &secret_raw, &format!("{v}_client_secret"), &ptr(at, "clientSecret"), "OAuth 2 client secret")
+                auth_credential(b, &secret_raw, identity, "client_secret", &ptr(at, "clientSecret"), "OAuth 2 client secret")
             } else {
                 SensitiveValue::default()
             };

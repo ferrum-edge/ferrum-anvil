@@ -9,9 +9,9 @@
 
 use crate::builder::Builder;
 use crate::common::{
-    TakenUrl, apply_userinfo, auth_placeholder_base, body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var,
-    header_content_type, listed_query_param, maybe_redact, quarantine_url, redact_raw_query, scrub_body, scrub_graphql_variables,
-    split_query, take_userinfo, warn_query_conversions,
+    TakenUrl, apply_userinfo, auth_credential, body_from_text, check_dynamic_vars, dedupe_content_type, env_var, header_content_type,
+    listed_query_param, maybe_redact, quarantine_url, redact_raw_query, scrub_body, scrub_graphql_variables, split_query, take_userinfo,
+    warn_query_conversions,
 };
 use crate::report::{Message, ScriptOwner};
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
@@ -51,7 +51,7 @@ pub(crate) fn import_collection(root: &Value, dialect: Dialect, b: &mut Builder)
     crate::common::reserve_implicit_names(b, root);
     b.workspace.variables = variables(b, root.get("variable"), "/variable");
     b.workspace.auth = match root.get("auth") {
-        Some(a) => auth(b, a, "/auth"),
+        Some(a) => auth(b, a, "/auth", "postman:collection"),
         None => AuthConfig::None,
     };
     events(b, root.get("event"), "/event", ScriptOwner::Collection);
@@ -94,7 +94,9 @@ fn walk_items(b: &mut Builder, items: &[Value], base: &str, parent: Option<Id>, 
             let key = format!("pm:{at}");
             let fid = b.folder(parent, &key, if name.is_empty() { "Folder" } else { &name });
             let vars = variables(b, it.get("variable"), &ptr(&at, "variable"));
-            let fauth = it.get("auth").map(|a| auth(b, a, &ptr(&at, "auth")));
+            // A folder's auth is known by the folder's own id where it has one.
+            let identity = str_of(it, "id").map_or_else(|| key.clone(), |id| format!("postman:{id}"));
+            let fauth = it.get("auth").map(|a| auth(b, a, &ptr(&at, "auth"), &identity));
             if let Some(f) = b.folder_mut(fid) {
                 f.description = description(it.get("description"));
                 f.variables = vars;
@@ -116,6 +118,7 @@ fn walk_items(b: &mut Builder, items: &[Value], base: &str, parent: Option<Id>, 
 }
 
 fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str) {
+    let key = str_of(it, "id").map(|id| format!("postman:{id}")).unwrap_or_else(|| format!("postman:{at}"));
     let rptr = ptr(at, "request");
     let req = &it["request"];
     let (method, url_v, header_v, body_v, auth_v, desc) = match req {
@@ -140,7 +143,7 @@ fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str
     };
     dedupe_content_type(&mut spec.headers, &spec.body);
     spec.auth = match auth_v {
-        Some(a) => auth(b, a, &ptr(&rptr, "auth")),
+        Some(a) => auth(b, a, &ptr(&rptr, "auth"), &key),
         None => AuthConfig::Inherit,
     };
     apply_userinfo(b, &mut spec.auth, userinfo, &ptr(&rptr, "url"));
@@ -162,7 +165,6 @@ fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str
             Message::new("").num(r.len()).text(" saved example response(s) are not imported"),
         );
     }
-    let key = str_of(it, "id").map(|id| format!("postman:{id}")).unwrap_or_else(|| format!("postman:{at}"));
     let r = b.add_request(folder, name, &key, spec, at);
     r.description = desc;
 }
@@ -527,10 +529,10 @@ fn param(a: &Value, ty: &str, key: &str) -> Option<String> {
     }
 }
 
-/// An auth config. Its credential placeholders are named by
-/// [`auth_placeholder_base`], never after the owner's name, which can repeat
-/// a credential (review of #583, sol F1).
-fn auth(b: &mut Builder, a: &Value, at: &str) -> AuthConfig {
+/// An auth config whose owner the import knows as `identity`. Its credential
+/// placeholders are named by [`crate::common::auth_secret_name`]: opaque,
+/// stable across reimports and never after the owner's name.
+fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
     let ty = str_of(a, "type").unwrap_or("noauth");
     let p = |k: &str| param(a, ty, k).unwrap_or_default();
     let fp = |k: &str| ptr(&ptr(at, ty), k);
@@ -538,29 +540,23 @@ fn auth(b: &mut Builder, a: &Value, at: &str) -> AuthConfig {
         "noauth" => AuthConfig::None,
         "inherit" => AuthConfig::Inherit,
         "basic" => {
-            let v = auth_placeholder_base(b);
             let username = p("username");
-            let password = credential(b, &p("password"), &format!("{v}_password"), &fp("password"), "Basic auth password");
+            let password = auth_credential(b, &p("password"), identity, "password", &fp("password"), "Basic auth password");
             AuthConfig::Basic { username, password }
         }
-        "bearer" => {
-            let v = auth_placeholder_base(b);
-            AuthConfig::Bearer {
-                token: credential(b, &p("token"), &format!("{v}_token"), &fp("token"), "bearer token"),
-                prefix: "Bearer".into(),
-            }
-        }
+        "bearer" => AuthConfig::Bearer {
+            token: auth_credential(b, &p("token"), identity, "token", &fp("token"), "bearer token"),
+            prefix: "Bearer".into(),
+        },
         "apikey" => {
-            let v = auth_placeholder_base(b);
             let name = param(a, ty, "key").unwrap_or_else(|| "X-API-Key".into());
             let location = match p("in").as_str() {
                 "query" => KeyLocation::Query,
                 _ => KeyLocation::Header,
             };
-            AuthConfig::ApiKey { name, value: credential(b, &p("value"), &format!("{v}_api_key"), &fp("value"), "API key"), location }
+            AuthConfig::ApiKey { name, value: auth_credential(b, &p("value"), identity, "api_key", &fp("value"), "API key"), location }
         }
         "oauth2" => {
-            let v = auth_placeholder_base(b);
             let access = p("accessToken");
             if crate::util::has_literal_secret(&access, b.template_syntax) {
                 b.report.redacted(&fp("accessToken"), "cached OAuth 2 access token", "(dropped)");
@@ -580,10 +576,13 @@ fn auth(b: &mut Builder, a: &Value, at: &str) -> AuthConfig {
                     at,
                     "this OAuth 2 grant is not supported; imported as a bearer-token placeholder",
                 );
-                return AuthConfig::Bearer { token: credential(b, "", &format!("{v}_token"), at, "bearer token"), prefix: "Bearer".into() };
+                return AuthConfig::Bearer {
+                    token: auth_credential(b, "", identity, "token", at, "bearer token"),
+                    prefix: "Bearer".into(),
+                };
             };
             let client_secret = if grant == OAuthGrant::ClientCredentials || !p("clientSecret").is_empty() {
-                credential(b, &p("clientSecret"), &format!("{v}_client_secret"), &fp("clientSecret"), "OAuth 2 client secret")
+                auth_credential(b, &p("clientSecret"), identity, "client_secret", &fp("clientSecret"), "OAuth 2 client secret")
             } else {
                 SensitiveValue::default()
             };
