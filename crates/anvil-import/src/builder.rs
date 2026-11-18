@@ -164,7 +164,9 @@ impl<'o> Builder<'o> {
             meta,
             workspace_id: self.workspace.meta.id,
             parent_id: parent,
-            name: name.to_string(),
+            // Names are stored and exported as written: one that repeats a
+            // credential URL or literal is redacted like report text.
+            name: crate::report::redact_for_report(name),
             description: String::new(),
             sort_key,
             settings: SettingsOverrides::default(),
@@ -277,7 +279,7 @@ impl<'o> Builder<'o> {
             meta,
             workspace_id: self.workspace.meta.id,
             folder_id: folder,
-            name: if name.trim().is_empty() { key.clone() } else { name.to_string() },
+            name: if name.trim().is_empty() { key.clone() } else { crate::report::redact_for_report(name) },
             description: String::new(),
             tags: vec![],
             favorite: false,
@@ -291,14 +293,17 @@ impl<'o> Builder<'o> {
     pub fn add_environment(&mut self, key: &str, name: &str, variables: Vec<Variable>) -> Id {
         let meta = self.meta("environment", key);
         let id = meta.id;
-        self.environments.push(Environment { meta, workspace_id: self.workspace.meta.id, name: name.to_string(), variables });
+        let name = crate::report::redact_for_report(name);
+        self.environments.push(Environment { meta, workspace_id: self.workspace.meta.id, name, variables });
         id
     }
 
     pub fn finish(mut self, detected: &Detected, sha: String, size: usize) -> ImportResult {
+        self.title = self.title.as_deref().map(crate::report::redact_for_report);
         if self.workspace.name.trim().is_empty() {
             self.workspace.name = self.title.clone().unwrap_or_else(|| format!("Imported {}", detected.dialect.label()));
         }
+        self.workspace.name = crate::report::redact_for_report(&self.workspace.name);
         self.report.counts.requests = self.requests.len();
         self.report.counts.folders = self.folders.len();
         self.report.counts.environments = self.environments.len();
