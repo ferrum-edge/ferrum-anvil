@@ -163,35 +163,71 @@
   a datagram over 2 KiB is sent and received: one to send was silently never sent, and a larger
   answer was never read and blocked every later one, so the exchange recorded "no response
   observed" (`datagrams_received: 0`) although the answer had arrived (GHSA-62g8-g8px-5xm3).
-- The default Postman and Insomnia import no longer keeps a literal credential as plaintext. - A URL
-  with userinfo (`https://user:password@host/`) loses it on import, in Postman's string, raw or
-  rebuilt object form and in an Insomnia request URL. It gets Basic auth with a `{{password}}`
-  placeholder, as the cURL and HAR importers already did. - In all four importers the userinfo now
-  ends at the last `@` of the authority, so a password holding `@` is removed whole. - Auth of the
-  request's own (a cURL `-u`, a Postman or Insomnia auth helper) or auth explicitly off now wins
-  over URL userinfo, which is dropped (`url_credentials_dropped`). cURL URL userinfo used to replace
-  `-u`. - A user name or password whose decoding would make or change a `{{reference}}`, or is not
-  UTF-8, is never decoded into one; such a password becomes a required `{{password}}`. -
-  Credential-named Postman path variables and Insomnia path parameters (`:webhook_token`) become
-  placeholders. - So does every value (string, number or boolean) under a credential-named member of
-  an Insomnia environment array (`{"accounts": [{"api_key": "…"}]}`). Only a plain reference or an
-  argument-free helper is kept there, so a helper with arguments or a quoted Nunjucks expression
-  (`{{ 'key' }}`) is redacted. Placeholder names never take a variable name of any environment of
-  the import. - Whether a credential-named value is a reference to keep or a literal to redact
-  follows one rule on import and export: only a plain reference (`{{ name }}`, `{{ _.name }}`) is a
-  reference, so a quoted string (`{{ 'key' }}`), a number, a filter or a dynamic helper inside
-  `{{…}}` is literal. A dynamic helper such as `{{$guid}}` under a credential name is now redacted
-  on import and extracted on export. - A credential moved out of a query kept in the URL keeps an
-  escaped name encoded, and its placeholder is named after the name as written, so escaped braces
-  never make it read an existing variable. - Each is listed in `report.redactions` unless
-  `include_credentials` is set. - Before, such a password or key was stored in the request and left
-  the machine in share-safely and encrypted-transfer exports. Re-import affected collections, and
-  treat a credential of this kind in a workspace or bundle made by an earlier build as disclosed
-  (GHSA-c236-7r9g-c9p2).
-- Share-safely and encrypted-transfer exports warn in the preview about a URL password in
-  `user:password@` that is not exactly one `{{reference}}`. That includes one mixing a reference
-  with literal text, a helper with arguments, or a password holding a brace or an `@`. Free text is
-  still exported as written (GHSA-c236-7r9g-c9p2).
+- The default Postman, Insomnia, cURL and HAR import no longer keeps a literal credential as
+  plaintext, and no import report or imported name shows one (GHSA-c236-7r9g-c9p2):
+  - URL userinfo (`https://user:password@host/`) is found without parsing templates. When no `{{`
+    (in Insomnia also no `{%` tag) comes before the end of the authority (the first `/`, `?` or `#`
+    after `://`), the userinfo is everything before the authority's last `@`, so a password holding
+    `@` is removed whole. A userinfo of exactly variable references (`{{user}}:{{password}}`) is
+    kept as Basic auth. Anything else, a literal user name or a token alone included, becomes Basic
+    auth with fresh `{{username}}` and `{{password}}` placeholders (`url_userinfo_replaced`); with
+    `include_credentials`, only the password keeps the literal. This now covers Postman's string,
+    raw and rebuilt URL forms and Insomnia request URLs, as it did cURL and HAR.
+  - A URL with a template before the end of its authority and an `@` anywhere cannot be split safely
+    and is quarantined (`url_quarantined`). By default it is not imported: the request's URL becomes
+    `{{url-needs-review}}`, a reference no variable defines, and the original text is stored
+    nowhere. With `include_credentials` it is kept as written. Its host never changes, and its
+    request name, folder and operation key never come from its text. A URL whose whole authority is
+    one reference (`{{baseUrl}}/x?email=a@b`) is kept as written.
+  - Auth of the request's own (a cURL `-u`, a Postman or Insomnia auth helper) or auth explicitly
+    off now wins over URL userinfo, which is dropped (`url_credentials_dropped`). cURL URL userinfo
+    used to replace `-u`.
+  - Postman and Insomnia OAuth 2 token and authorization URLs, and OpenAPI and Swagger OAuth flow
+    URLs, follow the same rule: a userinfo that is not exactly references is removed and reported
+    (`url_credentials_removed`), and an ambiguous URL is quarantined.
+  - Credential-named Postman path variables and Insomnia path parameters (`:webhook_token`) become
+    placeholders, and so does every value (string, number or boolean) under a credential-named
+    member of an Insomnia environment array (`{"accounts": [{"api_key": "…"}]}`).
+  - Whether a credential-named value is a reference to keep or a literal to redact follows the
+    source's own template syntax, on import and export alike. In Postman, cURL and HAR, which never
+    evaluate `{{…}}`, any brace-free name is a reference; only a dynamic helper with arguments
+    (`{{$randomFrom a|b}}`) is literal. In Insomnia (Nunjucks) and on export, a reference is only an
+    identifier or a dotted path of them, optionally after `_.`; a quoted string (`{{ 'key' }}`), a
+    number, an operator such as `-`, a filter or a helper inside `{{…}}` is literal.
+  - A placeholder the import makes never takes a name the source defines, references or derives:
+    collection, folder and environment variables, `{{…}}` references (also when a JSON or YAML
+    escape, shell quoting or percent-encoding hides them), path parameters and cURL `$NAME`
+    variables. It takes a suffix instead (`{{password_2}}`), so a source variable can never fill a
+    redacted credential. One field name still gets one placeholder across the import.
+  - A credential moved out of a query kept in the URL keeps an escaped name encoded, and its
+    placeholder is named after the name as written, so escaped braces never make it read an existing
+    variable.
+  - Every string in the import report (messages, each pointer token, inactive settings, redactions,
+    required-variable reasons, external references, and retained scripts with their metadata) and
+    every imported request, folder, environment and workspace name and operation key is redacted: a
+    URL userinfo that is not exactly references becomes `<redacted>`, an ambiguous URL `<url
+    redacted>`, a `{{…}}` that is not a plain name `{{…}}`, and the value of a credential-named
+    `name=value` or `name: value` pair, the token after `Bearer`, `Basic`, `Token` or `Digest`, and
+    a JWT become `<redacted>`. cURL diagnostics no longer echo an ignored URL, a connection option's
+    value (a proxy password) or the rest of the command line.
+  - Each redaction is listed in `report.redactions` unless `include_credentials` is set.
+  - Before, such a password, key or token was stored in the request or shown in the report, and left
+    the machine in share-safely and encrypted-transfer exports. Re-import affected collections, and
+    treat a credential of this kind in a workspace, bundle or import report made by an earlier build
+    as disclosed.
+- Share-safely and encrypted-transfer exports no longer leave a URL credential readable in
+  `workspace/objects.json` (GHSA-c236-7r9g-c9p2):
+  - A URL field (`url`, or any `*_url` such as an OAuth `token_url` or `authorization_url`) whose
+    userinfo is not exactly references, or whose authority mixes a template with an `@` (an import
+    kept it as written), is extracted whole: the exported field reads `{{secret_url}}`
+    (`{{secret_token_url}}`, …), an encrypted-transfer import restores it, and a share-safely
+    recipient re-enters it.
+  - A literal Basic user name whose password is empty (a token in the user name) is extracted and
+    restored.
+  - Free text (a body, a non-secret variable) is still exported as written, with a preview warning
+    for URL userinfo that is not exactly references: any `@` after `://` is flagged, an email in a
+    query included, and quotes or an embedded `://` do not end the scan. A variable whose JSON text
+    holds a literal under a credential-named member is warned about too.
 
 ### Changed
 
@@ -278,6 +314,13 @@
   and no user name or password; any other link is refused when the profile is saved (#567).
 - BREAKING: `anvil load run` can now exit 2 where it exited 1 (chained plans), and the summary CSV
   writes empty cells instead of `0` for unmeasured values (#565, #566).
+- Import placeholders and report text (#575, #583): a credential placeholder whose natural name the
+  source already uses gets a suffix (`{{password_2}}`); an ambiguous request URL imports as
+  `{{url-needs-review}}` (with `{{url-needs-review_2}}` when the source uses that name, a
+  `:url-needs-review` path segment included); and report messages, pointers, retained scripts and
+  imported names show `<redacted>`, `<url redacted>` or `{{…}}` where the source had credential
+  material. A changed pointer token carries a `#` and a digest of the original. See the Security
+  entries.
 
 ### Removed
 
@@ -560,13 +603,14 @@
   text, where a supplied value was sent unencoded (an `&` in it added a parameter), and a literal
   kept with `include_credentials` was neither marked sensitive nor extracted on export.
 - A Postman `query` list value or Insomnia parameter with percent escapes was stored as written and
-  encoded again when sent, so `redirect_uri=https%3A%2F%2F…` went out as `%253A…`. - It is now
-  stored decoded when encoding the decoded text gives back exactly the source and decoding adds no
-  `{{reference}}`. - Any other value with escapes is kept as written and reported
-  (`query_value_not_decoded`). - For a cURL, HAR or Postman raw URL query, a `+` (sent as `%2B`
-  where the source sends `+`) and an escape that is not UTF-8 (replaced by U+FFFD) are now reported
-  (`query_plus_sent_encoded`, `query_not_utf8`). - A URL query whose decoding would make or change a
-  `{{reference}}` stays in the URL as written (#563).
+  encoded again when sent, so `redirect_uri=https%3A%2F%2F…` went out as `%253A…` (#563):
+  - It is now stored decoded when encoding the decoded text gives back exactly the source and
+    decoding adds no `{{reference}}`.
+  - Any other value with escapes is kept as written and reported (`query_value_not_decoded`).
+  - For a cURL, HAR or Postman raw URL query, a `+` (sent as `%2B` where the source sends `+`) and
+    an escape that is not UTF-8 (replaced by U+FFFD) are now reported (`query_plus_sent_encoded`,
+    `query_not_utf8`).
+  - A URL query whose decoding would make or change a `{{reference}}` stays in the URL as written.
 - A cURL command whose data is read from a file (`-d @order.json`, `--json @order.json`,
   `--data-urlencode comment@notes.txt`) imports as POST, as curl sends it, instead of GET. The file
   is still not read (`curl_data_file`); `-G`, `-I` and an explicit `-X` keep precedence (#564).

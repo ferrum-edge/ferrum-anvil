@@ -34,12 +34,24 @@ now fires for a token on a 4xx, beside grpc-status 0, or
 findings by owner or code should account for these. The findings catalog
 version is `2026.11.17-1`.
 
-### Import behaviour changes (#563, #564, GHSA-c236-7r9g-c9p2)
+### Import behaviour changes (#563, #564, #575, #583, GHSA-c236-7r9g-c9p2)
 
 - Imports from Postman, Insomnia, cURL and HAR can produce different requests
   than before:
-  - Postman and Insomnia URLs with `user:password@` import with Basic auth and
-    a required `{{password}}` variable.
+  - A URL with `user:password@` imports with Basic auth. A userinfo of exactly
+    variable references is kept; anything else, a literal user name included,
+    becomes required `{{username}}` and `{{password}}` variables.
+  - A URL with a template before the end of its host part and an `@` anywhere
+    (`https://{{tenant}}.example.com/x?to=a@b`) imports as
+    `{{url-needs-review}}` with a `url_quarantined` warning: re-enter it. With
+    credentials included it is kept as written. `{{baseUrl}}/x?email=a@b` is
+    kept as written.
+  - An OAuth 2 token or authorization URL with credentials in it (Postman,
+    Insomnia, OpenAPI, Swagger) imports without them; supply them as the
+    client credentials.
+  - A redacted credential whose natural placeholder name the source already
+    uses (a variable, a reference, a path parameter) imports as `{{name_2}}`;
+    supply that variable.
   - A cURL `-u`, or a request's own or disabled auth, wins over URL userinfo.
   - Credential-named path variables and credential members of Insomnia
     environment arrays become required `{{placeholders}}` unless credentials
@@ -47,6 +59,16 @@ version is `2026.11.17-1`.
   - Postman and Insomnia query values with exactly re-encodable escapes are
     stored decoded.
   - cURL `-d @file` imports as POST.
+- Import reports and imported names no longer carry credential material:
+  tooling that reads report messages, pointers or retained script sources sees
+  `<redacted>`, `<url redacted>` or `{{…}}` there, and a pointer token that
+  was redacted ends in `#` and a digest. cURL diagnostics no longer quote the
+  ignored URL, option value or command tail; use the pointer.
+- Share-safely and encrypted-transfer exports extract a URL field (`url`,
+  `token_url`, `authorization_url`, any `*_url`) whose userinfo is not exactly
+  references or whose host part mixes a template with an `@`: share-safely
+  recipients see `{{secret_url}}` (or `{{secret_<field>}}`) and supply the
+  URL; an encrypted-transfer import restores it.
 - Requests imported by an earlier build are not changed. Re-import a
   collection to pick these up; **Reimport a changed spec…** / `anvil
   reimport-spec` shows the differences before applying them.
