@@ -337,6 +337,57 @@ pub fn reserve_source_references(b: &mut Builder, text: &str) {
     }
 }
 
+/// Reserve every name a request can define implicitly, before any
+/// placeholder is made, so a fresh placeholder (`{{username}}`,
+/// `{{password}}`, a path-named environment leaf) never names one:
+/// - every path parameter, written as a `:name` segment at the start of a
+///   string or after a `/` (a Postman or Insomnia URL, a Postman `path`
+///   element), up to the next `/`, `?` or `#`; a valueless one becomes
+///   `{{name}}` (sanitized);
+/// - every `key` (or `id`) of a `variable` list (Postman collection, folder
+///   and `url.variable`) and every `name` of an Insomnia `pathParameters`
+///   list.
+///
+/// Over-reserving only makes a placeholder take a suffix. One pass over the
+/// parsed document, without recursion.
+pub fn reserve_implicit_names(b: &mut Builder, root: &Value) {
+    let mut stack = vec![root];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::String(s) => reserve_path_segments(b, s),
+            Value::Array(a) => stack.extend(a.iter()),
+            Value::Object(m) => {
+                for (list, field) in [("variable", "key"), ("variable", "id"), ("pathParameters", "name")] {
+                    for entry in m.get(list).and_then(Value::as_array).into_iter().flatten() {
+                        if let Some(name) = entry.get(field).and_then(Value::as_str).filter(|n| !n.is_empty() && n.len() <= 256) {
+                            b.env_names.reserve(name);
+                        }
+                    }
+                }
+                stack.extend(m.values());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// [`reserve_implicit_names`] for the `:name` segments of one string.
+fn reserve_path_segments(b: &mut Builder, s: &str) {
+    let mut from = 0;
+    while let Some(found) = s[from..].find(':') {
+        let colon = from + found;
+        from = colon + 1;
+        if colon > 0 && s.as_bytes()[colon - 1] != b'/' {
+            continue;
+        }
+        let rest = &s[colon + 1..];
+        let name = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+        if !name.is_empty() && name.len() <= 256 {
+            b.env_names.reserve(name);
+        }
+    }
+}
+
 /// Apply the credential policy to a JSON value that is stored as text (an
 /// Insomnia environment value named `name` that is an array): every scalar
 /// under a credential-named member, whatever it is called and whatever its

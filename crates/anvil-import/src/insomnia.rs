@@ -210,8 +210,10 @@ pub(crate) fn import_v4(root: &Value, b: &mut Builder) -> Result<(), ImportError
         });
     };
     let mut seen = Visited { handled: vec![false; resources.len()], walked: HashSet::new() };
-    // Every environment's variable names are reserved before any
-    // placeholder is made ([`reserve_env_names`]).
+    // Every environment's variable names and every path parameter name are
+    // reserved before any placeholder is made ([`reserve_env_names`],
+    // [`crate::common::reserve_implicit_names`]).
+    crate::common::reserve_implicit_names(b, root);
     for r in resources {
         match str_of(r, "_type") {
             Some("environment") => reserve_env_names(b, r.get("data")),
@@ -537,6 +539,7 @@ pub(crate) fn import_v5(root: &Value, b: &mut Builder) -> Result<(), ImportError
     if let Some(items) = root.get("collection").and_then(Value::as_array) {
         reserve_v5_folder_env_names(b, items, 0);
     }
+    crate::common::reserve_implicit_names(b, root);
     if let Some(envs) = root.get("environments") {
         let base_vars = env_vars(b, envs.get("data"), "/environments/data");
         b.workspace.variables = base_vars;

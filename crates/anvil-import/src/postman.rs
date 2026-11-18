@@ -46,6 +46,7 @@ pub(crate) fn import_collection(root: &Value, dialect: Dialect, b: &mut Builder)
         );
     }
     reserve_variable_keys(b, root, 0);
+    crate::common::reserve_implicit_names(b, root);
     b.workspace.variables = variables(b, root.get("variable"), "/variable");
     b.workspace.auth = match root.get("auth") {
         Some(a) => auth(b, a, "/auth", &name),

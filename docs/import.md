@@ -94,7 +94,9 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     password keeps the literal (the part after the first `:`, or the whole
     userinfo when it has no password), a secret field.
   - Fresh placeholders never take a name the source defines or references,
-    cURL `$NAME` shell variables included (`username_2` then).
+    including cURL `$NAME` shell variables, Postman path variables and
+    `url.variable` keys, and Insomnia path parameters, in any request of the
+    import (`username_2` then).
   - A request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a
     Postman or Insomnia auth helper) or with auth explicitly off keeps
     that, and the userinfo is dropped (`url_credentials_dropped`).

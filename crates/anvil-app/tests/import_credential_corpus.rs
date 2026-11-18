@@ -544,6 +544,50 @@ fn header_value<'r>(r: &'r ImportResult, name: &str) -> Option<&'r str> {
     r.requests[0].spec.headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.as_str())
 }
 
+/// Final gate of #575: the userinfo placeholders never take a path
+/// parameter's name (Postman path variables, Insomnia path parameters), in
+/// the same request or another one, in either mode.
+#[test]
+fn userinfo_placeholders_never_take_a_path_parameter_name() {
+    let userinfo_url = "https://admin:tok-SENSITIVE-c67@api.example.test/items/:username";
+    let other_url = "https://api.example.test/accounts/:password";
+    let postman_source = postman_doc_items(json!([
+        { "name": "a", "request": { "method": "GET", "url": { "raw": userinfo_url } } },
+        { "name": "b", "request": { "method": "GET", "url": { "raw": other_url } } },
+    ]));
+    let mut a = insomnia_request(userinfo_url);
+    a["pathParameters"] = json!([{ "name": "username", "value": "" }]);
+    let mut other = insomnia_request(other_url);
+    other["_id"] = json!("req_2");
+    other["name"] = json!("R2");
+    other["pathParameters"] = json!([{ "name": "password", "value": "" }]);
+    let insomnia_source = json!({
+        "_type": "export",
+        "__export_format": 4,
+        "resources": [
+            { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+            a,
+            other
+        ]
+    })
+    .to_string()
+    .into_bytes();
+    for (importer, source) in [("Postman", postman_source), ("Insomnia", insomnia_source)] {
+        for include_credentials in [false, true] {
+            let r = import(&source, &ImportOptions { include_credentials, ..ImportOptions::default() }).unwrap();
+            let with_userinfo = r.requests.iter().find(|q| q.spec.url.contains("/items/")).expect("the userinfo request");
+            let auth = serde_json::to_string(&with_userinfo.spec.auth).unwrap();
+            assert!(with_userinfo.spec.url.ends_with("/items/{{username}}"), "{importer}: the path parameter changed");
+            assert!(auth.contains("{{username_2}}"), "{importer}: the user name placeholder took a path parameter's name");
+            if !include_credentials {
+                assert!(auth.contains("{{password_2}}"), "{importer}: the password placeholder took a path parameter's name");
+                assert!(!leaks(&stored(&r).to_string()), "{importer}: a literal credential survived");
+            }
+            assert!(r.requests.iter().any(|q| q.spec.url.ends_with("/accounts/{{password}}")), "{importer}: the other path changed");
+        }
+    }
+}
+
 /// A URL whose whole authority is one plain reference (`{{baseUrl}}/x`) has
 /// no literal userinfo and is kept as written; any other template before
 /// the authority's end beside an `@` still quarantines the URL.

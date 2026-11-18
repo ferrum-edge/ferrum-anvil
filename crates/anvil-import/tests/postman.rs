@@ -390,3 +390,27 @@ fn userinfo_placeholders_never_take_a_collection_variable_name() {
     }
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-pm5"));
 }
+
+/// Final gate of #575: the userinfo placeholders never take the name of a
+/// path variable, in the same request or another one, so supplying the path
+/// value never fills the credential.
+#[test]
+fn userinfo_placeholders_never_take_a_path_variable_name() {
+    let doc = serde_json::json!({
+        "info": {"name": "c", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+        "item": [
+            {"name": "a", "request": {"method": "GET", "url": {"raw": "https://admin:tok-SENSITIVE-pm6@api.example.test/items/:username"}}},
+            {"name": "b", "request": {"method": "GET", "url": {"raw": "https://api.example.test/accounts/:password", "variable": [{"key": "password"}]}}}
+        ]
+    });
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    assert_eq!(r.requests[0].spec.url, "https://api.example.test/items/{{username}}");
+    assert_eq!(r.requests[1].spec.url, "https://api.example.test/accounts/{{password}}");
+    match &r.requests[0].spec.auth {
+        AuthConfig::Basic { username, password } => {
+            assert_eq!(username, "{{username_2}}");
+            assert_eq!(password, &SensitiveValue::template("{{password_2}}"));
+        }
+        _ => panic!("expected Basic auth"),
+    }
+}

@@ -567,6 +567,28 @@ fn template_text(v: &SensitiveValue) -> String {
     }
 }
 
+/// Final gate of #575: the userinfo placeholders never take the name of a
+/// path parameter, so supplying the path value never fills the credential.
+#[test]
+fn userinfo_placeholders_never_take_a_path_parameter_name() {
+    let request = serde_json::json!({
+        "url": "https://admin:tok-SENSITIVE-in15@api.example.test/items/:username/:password",
+        "pathParameters": [{ "name": "username", "value": "" }, { "name": "password", "value": "" }],
+    });
+    for r in both(request, serde_json::json!({}), &opts()) {
+        let s = &r.requests[0].spec;
+        assert_eq!(s.url, "https://api.example.test/items/{{username}}/{{password}}");
+        match &s.auth {
+            AuthConfig::Basic { username, password } => {
+                assert_eq!(username, "{{username_2}}");
+                assert_eq!(template_text(password), "{{password_2}}");
+            }
+            _ => panic!("expected Basic auth"),
+        }
+        assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-in15"));
+    }
+}
+
 /// #563: a parameter's escapes are stored decoded only when the engine's
 /// one encoding sends exactly what Insomnia sends; anything else is kept as
 /// written and reported.
