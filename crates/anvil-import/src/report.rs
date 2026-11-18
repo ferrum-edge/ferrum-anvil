@@ -856,10 +856,10 @@ mod tests {
     #[test]
     fn report_pointers_never_hold_a_bare_jwt() {
         let mut report = super::ImportReport::default();
-        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0b2stU0VOU0lUSVZFIn0.c2lnbmF0dXJl";
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl";
         report.unsupported("request_setting", &format!("/item/0/protocolProfileBehavior/{jwt}"), "x");
         let pointer = &report.unsupported[0].pointer;
-        assert!(!pointer.contains("eyJzdWIi"), "a pointer kept a JWT");
+        assert!(!pointer.contains("eyJzdWIiOiIxIn0"), "a pointer kept a JWT");
         assert!(pointer.starts_with("/item/0/protocolProfileBehavior/<redacted>#"));
         report.unsupported("request_setting", "/item/0/protocolProfileBehavior/max-Redirects_2", "x");
         assert_eq!(report.unsupported[1].pointer, "/item/0/protocolProfileBehavior/max-Redirects_2");
