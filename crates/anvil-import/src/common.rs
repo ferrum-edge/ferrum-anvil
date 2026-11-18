@@ -281,6 +281,25 @@ impl PlaceholderNames {
         self.used.insert(sanitize_var(name));
     }
 
+    /// A free name for `base` as written (not sanitized), now reserved: for
+    /// a name that must not be one an import derives from the source, since
+    /// every derived name is sanitized ([`sanitize_var`]: letters, digits
+    /// and `_`) and every explicit one is reserved.
+    pub fn name_verbatim(&mut self, base: &str) -> String {
+        if self.used.insert(base.to_string()) {
+            return base.to_string();
+        }
+        let mut n = self.next.get(base).copied().unwrap_or(2);
+        loop {
+            let candidate = format!("{base}_{n}");
+            n += 1;
+            if self.used.insert(candidate.clone()) {
+                self.next.insert(base.to_string(), n);
+                return candidate;
+            }
+        }
+    }
+
     /// A free placeholder name for `readable` (sanitized and bounded), now
     /// reserved.
     pub fn name(&mut self, readable: &str) -> String {
@@ -777,47 +796,24 @@ pub enum TakenUrl {
     Ambiguous,
 }
 
-/// Find URL userinfo without parsing templates. The authority runs from
-/// after `scheme://` (or the start, for `user:pw@host/path`) to the first
-/// `/`, `?` or `#` (RFC 3986), and the userinfo is everything before its
-/// last `@`. When a `{{` comes before that end and the URL holds an `@`
-/// anywhere, the URL is ambiguous (a cut could keep part of a credential or
-/// move the request to another host), unless the only templates there are a
-/// userinfo of exactly variable references in `syntax` before a literal
-/// host ([`anvil_domain::secret::is_plain_userinfo`]).
+/// Find URL userinfo without parsing templates, by the shared rule
+/// ([`anvil_domain::secret::url_userinfo`]): the authority ends at the first
+/// `/`, `?` or `#` after `scheme://` (RFC 3986) and the userinfo is
+/// everything before its last `@`; a template before that end beside an `@`
+/// anywhere makes the URL ambiguous, so it is not cut at all.
 pub fn take_userinfo(url: &str, syntax: anvil_domain::secret::TemplateSyntax) -> TakenUrl {
-    let (prefix, rest) = match url.split_once("://") {
-        Some((scheme, rest)) if !scheme.is_empty() && !scheme.contains(['/', '?', '#', '@']) => (&url[..scheme.len() + 3], rest),
-        _ => ("", url),
-    };
-    // `{{baseUrl}}/x?email=a@b`: the whole authority is one variable, so the
-    // URL has no literal userinfo and is kept as written.
-    if !prefix.contains("{{") && anvil_domain::secret::authority_is_one_reference(rest) {
-        return TakenUrl::Plain(url.to_string());
-    }
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    if url[..prefix.len() + end].contains("{{") {
-        if !url.contains('@') {
-            return TakenUrl::Plain(url.to_string());
-        }
-        return match rest[..end].rfind('@') {
-            // A schemeless URL (`{{baseUrl}}@host/x`) may hold its scheme and
-            // host in the reference: always ambiguous.
-            Some(at)
-                if !prefix.is_empty()
-                    && !prefix.contains("{{")
-                    && !rest[at + 1..end].contains("{{")
-                    && anvil_domain::secret::is_plain_userinfo(&rest[..at], syntax) =>
-            {
-                TakenUrl::Userinfo(format!("{prefix}{}", &rest[at + 1..]), rest[..at].to_string())
+    use anvil_domain::secret::UrlUserinfo;
+    match anvil_domain::secret::url_userinfo(url, syntax) {
+        UrlUserinfo::None => TakenUrl::Plain(url.to_string()),
+        UrlUserinfo::Ambiguous => TakenUrl::Ambiguous,
+        UrlUserinfo::Userinfo { start, at } => {
+            let stripped = format!("{}{}", &url[..start], &url[at + 1..]);
+            if url[start..at].trim().is_empty() {
+                TakenUrl::Plain(stripped)
+            } else {
+                TakenUrl::Userinfo(stripped, url[start..at].to_string())
             }
-            _ => TakenUrl::Ambiguous,
-        };
-    }
-    match rest[..end].rfind('@') {
-        Some(at) if rest[..at].trim().is_empty() => TakenUrl::Plain(format!("{prefix}{}", &rest[at + 1..])),
-        Some(at) => TakenUrl::Userinfo(format!("{prefix}{}", &rest[at + 1..]), rest[..at].to_string()),
-        None => TakenUrl::Plain(url.to_string()),
+        }
     }
 }
 
@@ -836,11 +832,18 @@ pub fn take_url_credentials(b: &mut Builder, url: &str, auth: &mut AuthConfig, p
     }
 }
 
+/// The reference a quarantined URL is replaced by ([`quarantine_url`]).
+pub const QUARANTINE_PLACEHOLDER: &str = "url-needs-review";
+
+/// What a name, folder or operation key derived from a quarantined URL
+/// shows instead of its text ([`quarantine_url`]).
+pub const QUARANTINED_URL_NAME: &str = "<url redacted>";
+
 /// An ambiguous request URL ([`TakenUrl::Ambiguous`]): a template before the
 /// end of its authority and an `@`, so where a credential in it ends cannot
 /// be told. Nothing in it is parsed or cut, so the request's host cannot
 /// change. Unless `include_credentials`, the URL is not imported at all: the
-/// request gets a fresh reference no variable defines (`url_needs_review`,
+/// request gets a fresh reference no variable defines (`url-needs-review`,
 /// from the import's allocator, so it never binds an existing variable) and
 /// the original text is stored nowhere. With `include_credentials`, the URL
 /// is kept exactly as written. Either way the request is reported
@@ -855,7 +858,10 @@ pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str) -> String {
         );
         return url.to_string();
     }
-    let name = b.env_names.name("url_needs_review");
+    // Hyphenated, so no name the import derives from the source (Postman
+    // and Insomnia path parameters, cURL `$NAME`, sanitized keys) can be it,
+    // and explicit `{{…}}` references and declared variables are reserved.
+    let name = b.env_names.name_verbatim(QUARANTINE_PLACEHOLDER);
     let reference = format!("{{{{{name}}}}}");
     b.report.redacted(pointer, "request URL", &reference);
     b.report.warn("url_quarantined", pointer, format!("{WHY}; it was not imported (the request uses {reference}): re-enter it"));

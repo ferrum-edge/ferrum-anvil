@@ -156,6 +156,68 @@ pub fn authority_is_one_reference(after_scheme: &str) -> bool {
         && inner[close + 2..].chars().next().is_none_or(|c| matches!(c, '/' | '?' | '#'))
 }
 
+/// Where a URL's userinfo is, found without parsing templates
+/// ([`url_userinfo`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlUserinfo {
+    /// No userinfo.
+    None,
+    /// The userinfo is `url[start..at]`, before the `@` at byte `at`.
+    Userinfo { start: usize, at: usize },
+    /// A template comes before the end of the authority and the URL holds an
+    /// `@`: where a credential in it ends cannot be told, so no part of the
+    /// URL may be trusted to be free of one.
+    Ambiguous,
+}
+
+/// Find a URL's userinfo without parsing templates: one rule for the
+/// importers (which take it off or quarantine the URL) and the export and
+/// report redaction (which extract or hide it).
+///
+/// The authority runs from after `scheme://` (or the start, for
+/// `user:pw@host/path`) to the first `/`, `?` or `#` (RFC 3986), and the
+/// userinfo is everything before its last `@`. When a template (`{{`, and for
+/// [`TemplateSyntax::Nunjucks`] a `{%` tag) comes before that end and the URL
+/// holds an `@` anywhere, the URL is [`UrlUserinfo::Ambiguous`], except:
+/// - the whole authority is one plain reference
+///   ([`authority_is_one_reference`]: `{{baseUrl}}/x?email=a@b`), so no
+///   literal text is userinfo;
+/// - with a scheme, the only templates there are a userinfo of exactly
+///   variable references in `syntax` before a literal host
+///   ([`is_plain_userinfo`]).
+pub fn url_userinfo(url: &str, syntax: TemplateSyntax) -> UrlUserinfo {
+    let templated = |t: &str| t.contains("{{") || (syntax == TemplateSyntax::Nunjucks && t.contains("{%"));
+    let (prefix_len, rest) = match url.split_once("://") {
+        Some((scheme, rest)) if !scheme.is_empty() && !scheme.contains(['/', '?', '#', '@']) => (scheme.len() + 3, rest),
+        _ => (0, url),
+    };
+    let prefix = &url[..prefix_len];
+    if !templated(prefix) && authority_is_one_reference(rest) {
+        return UrlUserinfo::None;
+    }
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let at = rest[..end].rfind('@');
+    if templated(&url[..prefix_len + end]) {
+        if !url.contains('@') {
+            return UrlUserinfo::None;
+        }
+        return match at {
+            // A schemeless URL (`{{baseUrl}}@host/x`) may hold its scheme and
+            // host in the reference: always ambiguous.
+            Some(at)
+                if prefix_len > 0 && !templated(prefix) && !templated(&rest[at + 1..end]) && is_plain_userinfo(&rest[..at], syntax) =>
+            {
+                UrlUserinfo::Userinfo { start: prefix_len, at: prefix_len + at }
+            }
+            _ => UrlUserinfo::Ambiguous,
+        };
+    }
+    match at {
+        Some(at) => UrlUserinfo::Userinfo { start: prefix_len, at: prefix_len + at },
+        None => UrlUserinfo::None,
+    }
+}
+
 /// Whether a URL userinfo is exactly variable references in `syntax`:
 /// `{{user}}`, `{{user}}:` or `{{user}}:{{password}}`. Anything else (a
 /// literal user name or password, an expression, a token) is credential
@@ -311,6 +373,36 @@ mod template_kind_tests {
         for not in ["{{baseUrl}}@evil/x", "{{ base Url }}/x@y", "{{a}}{{b}}/x@y", "pre{{a}}/x@y", "{{a-b}}/x", "{{unterminated/x"] {
             assert!(!authority_is_one_reference(not), "{not:?}");
         }
+    }
+
+    #[test]
+    fn url_userinfo_is_found_without_parsing_templates() {
+        use TemplateSyntax::{Name, Nunjucks};
+        let userinfo = |url: &str, syntax| match url_userinfo(url, syntax) {
+            UrlUserinfo::Userinfo { start, at } => Some(url[start..at].to_string()),
+            _ => None,
+        };
+        assert_eq!(url_userinfo("https://api.example.test/x?email=a@b", Nunjucks), UrlUserinfo::None);
+        assert_eq!(userinfo("https://admin:p@w@api.example.test/x", Nunjucks).as_deref(), Some("admin:p@w"));
+        assert_eq!(userinfo("admin:pw@api.example.test/x", Nunjucks).as_deref(), Some("admin:pw"));
+        assert_eq!(userinfo("https://{{u}}:{{p}}@api.example.test/", Nunjucks).as_deref(), Some("{{u}}:{{p}}"));
+        assert_eq!(userinfo("https://{{ my user }}@api.example.test/", Name).as_deref(), Some("{{ my user }}"));
+        for kept in ["https://{{baseUrl}}/x?email=a@b", "{{baseUrl}}?q=a@b", "https://{{host}}/x"] {
+            assert_eq!(url_userinfo(kept, Nunjucks), UrlUserinfo::None, "{kept:?}");
+        }
+        for ambiguous in [
+            "{{baseUrl}}@evil/x",
+            "https://{{ base Url }}/x@y",
+            "https://pre{{a}}/x@y",
+            "https://admin:{{ 'tok/x' }}@api.example.test/",
+            "{{scheme}}://admin:pw@api.example.test/",
+            "https://{{ my user }}@api.example.test/",
+            "https://u:{% uuid 'v4' %}x@api.example.test/",
+        ] {
+            assert_eq!(url_userinfo(ambiguous, Nunjucks), UrlUserinfo::Ambiguous, "{ambiguous:?}");
+        }
+        // A `{%` tag is text outside Insomnia's syntax.
+        assert_eq!(userinfo("https://u:{% x %}@api.example.test/", Name).as_deref(), Some("u:{% x %}"));
     }
 
     #[test]

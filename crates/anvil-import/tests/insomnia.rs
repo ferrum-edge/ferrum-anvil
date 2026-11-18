@@ -759,11 +759,15 @@ fn nunjucks_expressions_and_delimiters_in_passwords_are_redacted() {
         let s = &r.requests[0].spec;
         // A template in the authority beside an `@`: the URL is quarantined
         // (not imported; review of #575).
-        assert_eq!(s.url, "{{url_needs_review}}");
+        assert_eq!(s.url, "{{url-needs-review}}");
         assert!(has(&r, "url_quarantined"));
         assert_eq!(header(s, "X-Api-Key").unwrap().value, "{{X_Api_Key}}");
         let accounts = r.workspace.variables.iter().find(|v| v.name == "accounts").map(|v| template_text(&v.value)).unwrap();
         let text = serde_json::to_string(&r.requests).unwrap();
         assert!(!text.contains("tok-SENSITIVE-in14") && !text.contains("57157157") && !accounts.contains("57157157"), "a literal stayed");
+        // Final gate of #575 (sol F2, dsf F3): no template diagnostic echoes
+        // the quarantined URL's or the header's expression.
+        let report = serde_json::to_string(&r.report).unwrap();
+        assert!(!report.contains("tok-SENSITIVE-in14") && !report.contains("57157157"), "the report holds a literal");
     }
 }

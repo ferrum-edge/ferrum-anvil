@@ -675,10 +675,14 @@ fn request(
 ) {
     let name = str_of(r, "name").unwrap_or("").to_string();
     let method = str_of(r, "method").unwrap_or("GET").to_ascii_uppercase();
-    let templated = template(b, str_of(r, "url").unwrap_or(""), &ptr(at, "url"));
     // Userinfo is never kept in the URL (the engine refuses it); an
-    // ambiguous URL is quarantined whole.
-    let (raw_url, userinfo) = match take_userinfo(&templated, b.template_syntax) {
+    // ambiguous URL is quarantined whole. The URL as written is judged first,
+    // so a quarantined URL's expressions reach no template diagnostic unless
+    // the user included credentials (the report redacts them either way).
+    let source_url = str_of(r, "url").unwrap_or("");
+    let quarantined = matches!(take_userinfo(source_url, b.template_syntax), TakenUrl::Ambiguous);
+    let templated = if quarantined && !b.opts.include_credentials { String::new() } else { template(b, source_url, &ptr(at, "url")) };
+    let (raw_url, userinfo) = match if quarantined { TakenUrl::Ambiguous } else { take_userinfo(&templated, b.template_syntax) } {
         TakenUrl::Plain(url) => (Some(url), None),
         TakenUrl::Userinfo(url, userinfo) => (Some(url), Some(userinfo)),
         TakenUrl::Ambiguous => (None, None),

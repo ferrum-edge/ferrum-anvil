@@ -24,12 +24,6 @@ const MAX_POINTER_CHARS: usize = 512;
 /// Characters kept of a stored message or value.
 const MAX_TEXT_CHARS: usize = 2_048;
 
-/// `s` as stored in a report: whole when short, clipped otherwise (the
-/// clip looks at no more than `max` characters).
-fn bounded(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() } else { clip(s, max) }
-}
-
 /// A pointer as stored in a report: whole when short; otherwise clipped and
 /// suffixed with a hash of the whole pointer, so distinct long pointers stay
 /// distinct (for de-duplication too).
@@ -37,9 +31,110 @@ fn bounded_pointer(p: &str) -> String {
     if p.len() <= MAX_POINTER_CHARS { p.to_string() } else { format!("{}#{:016x}", clip(p, MAX_POINTER_CHARS), fnv1a64(p)) }
 }
 
-/// [`bounded`] for text that is already owned.
+/// `s` as stored in a report: whole when short, clipped otherwise (the
+/// clip looks at no more than `max` characters).
 fn bounded_owned(s: String, max: usize) -> String {
     if s.len() <= max { s } else { clip(&s, max) }
+}
+
+/// Text as it may appear in a report: every string an importer puts in a
+/// finding, inactive setting, redaction, required variable or external
+/// reference goes through this first (the report is shown in the preview
+/// and may be logged, whatever `include_credentials` says).
+///
+/// - URL userinfo, by the importers' rule
+///   ([`anvil_domain::secret::url_userinfo`], strict syntax), at every
+///   `://`: a userinfo that is not exactly references becomes `<redacted>`,
+///   and an ambiguous URL (a template before the end of its authority and an
+///   `@` after it) is replaced, through the word holding the text's last
+///   `@`, by `<url redacted>`.
+/// - Template expressions: a `{{…}}` that is not a plain name (an
+///   identifier or dotted path, or an argument-free `$helper`) is literal
+///   text, possibly a credential, and is replaced, through the text's last
+///   `}}` (a quoted `}}` cannot end it early), by `{{…}}`; an unterminated
+///   `{{` hides the rest of the text.
+///
+/// Over-redaction is preferred: the finding's pointer locates the source.
+/// Linear in the text.
+pub fn redact_for_report(text: &str) -> String {
+    redact_expressions(&redact_urls(text))
+}
+
+fn redact_urls(text: &str) -> String {
+    use anvil_domain::secret::{TemplateSyntax, UrlUserinfo, is_plain_userinfo, url_userinfo};
+    let Some(last_at) = text.rfind('@') else { return text.to_string() };
+    let word_end =
+        |from: usize| text[from..].find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '`')).map_or(text.len(), |e| from + e);
+    let scheme_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-' | '_' | '{' | '}' | '$');
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut from = 0;
+    while let Some(found) = text[from..].find("://") {
+        let sep = from + found;
+        if sep >= last_at {
+            break;
+        }
+        let start = text[copied..sep].char_indices().rev().take_while(|&(_, c)| scheme_char(c)).last().map_or(sep, |(i, _)| copied + i);
+        let url = &text[start..];
+        match url_userinfo(url, TemplateSyntax::Nunjucks) {
+            UrlUserinfo::None => from = sep + 3,
+            UrlUserinfo::Userinfo { start: u, at } => {
+                let userinfo = &url[u..at];
+                if !userinfo.trim().is_empty() && !is_plain_userinfo(userinfo, TemplateSyntax::Nunjucks) {
+                    out.push_str(&text[copied..start + u]);
+                    out.push_str("<redacted>");
+                    copied = start + at;
+                }
+                from = start + at + 1;
+            }
+            UrlUserinfo::Ambiguous => {
+                out.push_str(&text[copied..start]);
+                out.push_str("<url redacted>");
+                copied = word_end(last_at + 1);
+                break;
+            }
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+fn redact_expressions(text: &str) -> String {
+    let plain = |inner: &str| {
+        let e = inner.trim();
+        let e = e.strip_prefix("_.").or_else(|| e.strip_prefix('$')).unwrap_or(e);
+        let mut chars = e.chars();
+        chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    };
+    if !text.contains("{{") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find("{{") {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        match after.find("}}") {
+            Some(close) if plain(&after[..close]) => {
+                out.push_str(&rest[open..open + 2 + close + 2]);
+                rest = &after[close + 2..];
+            }
+            Some(_) => {
+                out.push_str("{{…}}");
+                // Through the last `}}`: a quoted `}}` inside the expression
+                // cannot end the redaction early.
+                let last = after.rfind("}}").unwrap_or(0);
+                rest = &after[last + 2..];
+            }
+            None => {
+                out.push_str("{{…");
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A located observation about the source.
@@ -222,7 +317,7 @@ impl ImportReport {
         let pointer = bounded_pointer(pointer);
         match self.seen.admit(code, &pointer) {
             Admit::Keep => {
-                let message = bounded_owned(message.into(), MAX_TEXT_CHARS);
+                let message = bounded_owned(redact_for_report(&Into::<String>::into(message)), MAX_TEXT_CHARS);
                 self.warnings.push(Finding { code: code.into(), pointer, message });
             }
             Admit::Truncate => self.truncated(code),
@@ -235,7 +330,7 @@ impl ImportReport {
         let pointer = bounded_pointer(pointer);
         match self.seen.admit(&format!("u:{code}"), &pointer) {
             Admit::Keep => {
-                let message = bounded_owned(message.into(), MAX_TEXT_CHARS);
+                let message = bounded_owned(redact_for_report(&Into::<String>::into(message)), MAX_TEXT_CHARS);
                 self.unsupported.push(Finding { code: code.into(), pointer, message });
             }
             Admit::Truncate => self.truncated(code),
@@ -256,6 +351,7 @@ impl ImportReport {
     }
 
     pub fn external_ref(&mut self, reference: &str, pointer: &str) {
+        let reference = &redact_for_report(reference);
         let pointer = bounded_pointer(pointer);
         if let Some((i, seen)) = self.seen.refs.get_mut(reference) {
             let e = &mut self.external_refs[*i];
@@ -297,9 +393,9 @@ impl ImportReport {
         }
         self.inactive_settings.push(InactiveSetting {
             pointer: bounded_pointer(pointer),
-            setting: bounded(setting, MAX_TEXT_CHARS),
-            value: bounded(value, MAX_TEXT_CHARS),
-            reason: bounded_owned(reason.into(), MAX_TEXT_CHARS),
+            setting: bounded_owned(redact_for_report(setting), MAX_TEXT_CHARS),
+            value: bounded_owned(redact_for_report(value), MAX_TEXT_CHARS),
+            reason: bounded_owned(redact_for_report(&Into::<String>::into(reason)), MAX_TEXT_CHARS),
         });
     }
 
@@ -308,7 +404,8 @@ impl ImportReport {
         if self.redactions.len() >= MAX_ENTRIES {
             return self.truncated("redaction");
         }
-        self.redactions.push(Redaction { pointer: bounded_pointer(pointer), field: field.into(), placeholder: placeholder.into() });
+        let field = bounded_owned(redact_for_report(&Into::<String>::into(field)), MAX_TEXT_CHARS);
+        self.redactions.push(Redaction { pointer: bounded_pointer(pointer), field, placeholder: placeholder.into() });
     }
 
     /// Declare a variable that must be supplied by the user.
@@ -323,7 +420,12 @@ impl ImportReport {
             return;
         }
         self.seen.vars.insert(name.to_string(), (self.required_variables.len(), HashSet::from([pointer.clone()])));
-        self.required_variables.push(RequiredVariable { name: name.into(), secret, reason: reason.into(), pointers: vec![pointer] });
+        self.required_variables.push(RequiredVariable {
+            name: name.into(),
+            secret,
+            reason: redact_for_report(reason),
+            pointers: vec![pointer],
+        });
     }
 
     /// Redactions made so far, however many the list keeps: what an importer
@@ -345,5 +447,49 @@ impl ImportReport {
         c.inactive_settings = self.inactive_settings.len();
         c.redactions = self.seen.redactions;
         c.required_variables = self.required_variables.len();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_for_report;
+
+    #[test]
+    fn report_text_never_holds_url_credentials_or_literal_expressions() {
+        for (text, expected) in [
+            ("ignored 'https://admin:tok-SENSITIVE-r1@api.example.test/v1'", "ignored 'https://<redacted>@api.example.test/v1'"),
+            ("proxy http://{{u}}:{{p}}@proxy.example.test", "proxy http://{{u}}:{{p}}@proxy.example.test"),
+            ("see https://api.example.test/x?email=a@b", "see https://api.example.test/x?email=a@b"),
+            ("see https://{{host}}/x?email=a@b ok", "see https://{{host}}/x?email=a@b ok"),
+            ("url https://api.{{region}}.example.test/v1?to=a:tok-SENSITIVE-r2@b ignored", "url <url redacted> ignored"),
+            ("url https://admin:{{ 'tok-SENSITIVE-r3 x' }}@api.example.test/ ignored", "url <url redacted> ignored"),
+            ("url https://o'brien:tok-SENSITIVE-r4@api.example.test/", "url https://<redacted>@api.example.test/"),
+            (
+                "Nunjucks expression `{{ 'tok-SENSITIVE-r5}}x' | urlencode }}` is not supported",
+                "Nunjucks expression `{{…}}` is not supported",
+            ),
+            (
+                "dynamic variable '{{$guid}}' and {{ _.base }} and {{origin}}",
+                "dynamic variable '{{$guid}}' and {{ _.base }} and {{origin}}",
+            ),
+            ("value {{ _.zero--571571570 }} here", "value {{…}} here"),
+            ("unterminated {{ tok-SENSITIVE-r6", "unterminated {{…"),
+            ("no credentials here", "no credentials here"),
+        ] {
+            assert_eq!(redact_for_report(text), expected, "{expected:?}");
+        }
+    }
+
+    #[test]
+    fn report_redaction_is_linear() {
+        // Over-redaction is fine: without a `/` the authority runs on.
+        let text = "a://b ".repeat(1 << 16) + "x@y";
+        assert!(redact_for_report(&text).ends_with("a://<redacted>@y"));
+        let text = format!("{}@", "https://{{a}}/ ".repeat(1 << 16));
+        assert_eq!(redact_for_report(&text), text, "a reference authority holds no userinfo");
+        let text = format!("{}@", "https://x{{a}}/ ".repeat(1 << 16));
+        assert_eq!(redact_for_report(&text), "<url redacted>");
+        let text = "{{a}} {{".repeat(1 << 16);
+        assert!(redact_for_report(&text).ends_with("{{…"));
     }
 }

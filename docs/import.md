@@ -65,15 +65,20 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   - When no `{{` comes before the end of the authority (the first `/`, `?`
     or `#` after `://`, RFC 3986), the userinfo is everything before the
     authority's last `@`, so a password holding `@` is removed whole.
-  - When a `{{` does and the URL holds an `@` anywhere, the URL is ambiguous:
+  - When a `{{` (in Insomnia also a `{%` tag) does and the URL holds an `@`
+    anywhere, the URL is ambiguous:
     it is not cut at all but quarantined (`url_quarantined`: "this URL
     mixes a template with a possible credential in its authority; re-enter
     it"). By default the URL is not imported: the request's URL becomes a
-    fresh reference no variable defines (`{{url_needs_review}}`, never the
-    name of a variable the source uses), and the original text is stored
-    nowhere. With `include_credentials` it is kept exactly as written and
-    the same warning says it may hold a credential. The request's host can
-    never change. Two
+    fresh reference no variable defines (`{{url-needs-review}}`: hyphenated,
+    so no path parameter, shell variable or other name the import derives
+    can be it, and never a name the source references), and the original
+    text is stored nowhere. With `include_credentials` it is kept exactly as
+    written and the same warning says it may hold a credential; a sanitized
+    export extracts it whole. Either way the request's name, folder and
+    operation key never come from its text (`<url redacted>`), and an
+    Insomnia URL is judged before its expressions are converted, so no
+    template diagnostic sees it. The request's host can never change. Two
     shapes are not ambiguous: an authority that is exactly one plain
     reference followed by `/`, `?`, `#` or the end (`{{baseUrl}}/x?email=a@b`,
     `https://{{host}}?q=a@b`), which holds no literal userinfo and is kept
@@ -88,8 +93,8 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     placeholder (`url_userinfo_replaced`). With `include_credentials`, the
     password keeps the literal (the part after the first `:`, or the whole
     userinfo when it has no password), a secret field.
-  - Fresh placeholders and URL variables never take a name the source
-    defines or references (`username_2` then).
+  - Fresh placeholders never take a name the source defines or references,
+    cURL `$NAME` shell variables included (`username_2` then).
   - A request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a
     Postman or Insomnia auth helper) or with auth explicitly off keeps
     that, and the userinfo is dropped (`url_credentials_dropped`).
@@ -183,6 +188,16 @@ characters is clipped and suffixed with a hash of the whole pointer (so
 distinct locations stay distinct), messages and values are clipped to 2048, an external reference or
 required variable keeps at most 1000 locations, and at most 10,000 inactive
 settings, redactions and scripts are kept.
+
+Report text never carries a credential, in either mode: every message,
+inactive setting, redaction field, required-variable reason, external
+reference and operation key goes through one redaction first. A URL
+userinfo that is not exactly references becomes `<redacted>` (by the rule
+above), an ambiguous URL becomes `<url redacted>`, and a `{{…}}` that is not
+a plain name (an identifier, a dotted path or an argument-free `$helper`)
+becomes `{{…}}`. cURL diagnostics do not echo an ignored URL, a connection
+option's value or the rest of a command line; the pointer locates them.
+Retained scripts are kept verbatim.
 
 Codes are stable strings (for example `recursive_schema`,
 `composition_first_branch`, `contradictory_schema`, `openapi32_construct`,

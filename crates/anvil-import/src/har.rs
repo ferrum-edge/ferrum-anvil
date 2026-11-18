@@ -149,11 +149,14 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     spec.headers = headers;
     spec.body = body;
     spec.auth = auth;
-    let host = base.split("://").nth(1).and_then(|r| r.split(['/', '?']).next()).unwrap_or("").to_string();
-    let path = base.split("://").nth(1).and_then(|r| r.find('/').map(|p| r[p..].to_string())).unwrap_or_else(|| "/".into());
+    // Names, the folder and the operation key never come from a quarantined
+    // URL's text (with include_credentials it is kept as written).
+    let shown = if quarantined { crate::common::QUARANTINED_URL_NAME.to_string() } else { base };
+    let host = shown.split("://").nth(1).and_then(|r| r.split(['/', '?']).next()).unwrap_or("").to_string();
+    let path = shown.split("://").nth(1).and_then(|r| r.find('/').map(|p| r[p..].to_string())).unwrap_or_else(|| "/".into());
     let folder = if host.is_empty() { None } else { Some(b.folder(None, &format!("har:{host}"), &host)) };
     let name = format!("{method} {}", path.split('?').next().unwrap_or(&path));
-    let key = format!("har:{index}:{method} {}", base.split('?').next().unwrap_or(&base));
+    let key = format!("har:{index}:{method} {}", shown.split('?').next().unwrap_or(&shown));
     b.add_request(folder, &name, &key, spec, rptr);
 }
 

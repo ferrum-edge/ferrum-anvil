@@ -303,11 +303,14 @@ fn check(source: &[u8], export: Export, label: &str) {
     assert!(!redacted.requests.is_empty(), "{label}: no request imported");
     let mut objects = stored(&redacted);
     assert!(!leaks(&objects.to_string()), "{label}: a literal credential survived the default import");
+    // The report is shown in the preview and may be logged, in either mode.
+    assert!(!leaks(&serde_json::to_string(&redacted.report).unwrap()), "{label}: the default import's report holds a literal credential");
     anvil_portability::sanitize::sanitize(&mut objects, &[]);
     assert!(!leaks(&objects.to_string()), "{label}: a literal credential survived the export");
 
     let kept = import(source, &ImportOptions { include_credentials: true, ..ImportOptions::default() })
         .unwrap_or_else(|e| panic!("{label}: import failed: {e}"));
+    assert!(!leaks(&serde_json::to_string(&kept.report).unwrap()), "{label}: the include_credentials report holds a literal credential");
     let mut objects = stored(&kept);
     match export {
         Export::Extract => {
@@ -447,7 +450,7 @@ fn an_ambiguous_url_never_changes_host() {
         assert!(r.requests[0].spec.url.starts_with("https://{{baseUrl}}/items"), "{importer}: the host changed");
         assert!(!r.report.has_code("url_quarantined"), "{importer}: a reference authority was quarantined");
         let r = import(&build(&shape(quarantined_url)), &ImportOptions::default()).unwrap_or_else(|e| panic!("{importer}: {e}"));
-        assert_eq!(r.requests[0].spec.url, "{{url_needs_review}}", "{importer}: the URL was imported");
+        assert_eq!(r.requests[0].spec.url, "{{url-needs-review}}", "{importer}: the URL was imported");
         assert!(r.report.has_code("url_quarantined"), "{importer}: no quarantine warning");
         let text = format!("{}{}", stored(&r), serde_json::to_string(&r.report).unwrap());
         assert!(!text.contains("example.test") && !text.contains("user@example.com"), "{importer}: the URL text was stored");
@@ -460,7 +463,85 @@ fn an_ambiguous_url_never_changes_host() {
         );
         assert!(kept.report.has_code("url_quarantined"), "{importer}: no quarantine warning with credentials");
         assert!(kept.workspace.variables.is_empty(), "{importer}: a variable was created");
+        // Final gate of #575 (sol F3): names, folders and provenance never
+        // come from the kept URL's text, and a sanitized export extracts the
+        // URL whole and restores it.
+        let request = &kept.requests[0];
+        let source = serde_json::to_string(&request.spec.source).unwrap();
+        let folders = serde_json::to_string(&kept.folders).unwrap();
+        assert!(
+            !request.name.contains("example") && !source.contains("example") && !folders.contains("example"),
+            "{importer}: a name or the provenance came from the kept URL"
+        );
+        let mut objects = stored(&kept);
+        let before = objects.clone();
+        let s = anvil_portability::sanitize::sanitize(&mut objects, &[]);
+        let text = objects.to_string();
+        assert!(!text.contains("example.test") && !text.contains("user@example.com"), "{importer}: the export kept the URL readable");
+        assert!(s.extracted.iter().any(|e| e.pointer == "/requests/0/spec/url"), "{importer}: the URL was not extracted");
+        anvil_portability::sanitize::restore(&mut objects, &s.extracted).unwrap();
+        assert_eq!(objects, before, "{importer}: the URL was not restored");
     }
+}
+
+/// Final gate of #575 (sol F1, dsf F2): cURL diagnostics never echo an
+/// ignored URL, a connection option's value or the rest of a command line.
+#[test]
+fn curl_diagnostics_never_echo_credentials() {
+    for cmd in [
+        "curl https://safe.example.test/ 'https://admin:tok-SENSITIVE-c60@api.example.test/v1'",
+        "curl https://safe.example.test/ 'admin:tok-SENSITIVE-c61@api.example.test/v1'",
+        "curl https://safe.example.test/ 'https://api.{{region}}.example.test/v1?to=a:tok-SENSITIVE-c62@b'",
+        "curl --proxy 'http://u:tok-SENSITIVE-c63@proxy.example.test' https://safe.example.test/",
+        "curl https://safe.example.test/ ; curl 'https://u:tok-SENSITIVE-c64@h.example.test/'",
+        "curl https://safe.example.test/ && curl -H 'Authorization: Bearer tok-SENSITIVE-c65' https://h.example.test/",
+        "curl --frobnicate=https://u:tok-SENSITIVE-c66@h.example.test/ https://safe.example.test/",
+    ] {
+        for include_credentials in [false, true] {
+            let r = import(cmd.as_bytes(), &ImportOptions { include_credentials, ..ImportOptions::default() }).unwrap();
+            assert!(!leaks(&serde_json::to_string(&r.report).unwrap()), "a cURL diagnostic echoed a credential ({include_credentials})");
+            assert!(!leaks(&stored(&r).to_string()), "a cURL diagnostic credential was stored ({include_credentials})");
+        }
+    }
+}
+
+/// Final gate of #575 (dsf F4): the quarantine placeholder never takes a
+/// name the source references or derives (a path parameter, a cURL shell
+/// variable, an explicit reference), so it cannot bind another request's
+/// variable.
+#[test]
+fn the_quarantine_placeholder_never_binds_a_source_name() {
+    let quarantined = "https://api.{{region}}.example.test/v1?to=a@b";
+    let doc = postman_doc_items(json!([
+        { "name": "a", "request": { "method": "GET", "url": { "raw": "https://api.example.test/items/:url_needs_review/:url-needs-review" } } },
+        { "name": "b", "request": { "method": "GET", "url": quarantined } },
+    ]));
+    let r = import(&doc, &ImportOptions::default()).unwrap();
+    let a = &r.requests[0].spec.url;
+    assert_eq!(r.requests[1].spec.url, "{{url-needs-review}}");
+    assert!(!a.contains("{{url-needs-review}}"), "a path parameter took the quarantine placeholder");
+    let doc = postman_doc_items(json!([
+        { "name": "a", "request": { "method": "GET", "url": "https://api.example.test/", "header": [{ "key": "X-Id", "value": "{{url-needs-review}}" }] } },
+        { "name": "b", "request": { "method": "GET", "url": quarantined } },
+    ]));
+    let r = import(&doc, &ImportOptions::default()).unwrap();
+    assert_eq!(r.requests[1].spec.url, "{{url-needs-review_2}}", "an explicit reference was not reserved");
+    let r = import(format!("curl -H \"X-Id: $url_needs_review\" '{quarantined}'").as_bytes(), &ImportOptions::default()).unwrap();
+    assert_eq!(r.requests[0].spec.url, "{{url-needs-review}}");
+    assert_eq!(header_value(&r, "X-Id"), Some("{{url_needs_review}}"));
+}
+
+fn postman_doc_items(items: Value) -> Vec<u8> {
+    json!({
+        "info": { "name": "c", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+        "item": items
+    })
+    .to_string()
+    .into_bytes()
+}
+
+fn header_value<'r>(r: &'r ImportResult, name: &str) -> Option<&'r str> {
+    r.requests[0].spec.headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.as_str())
 }
 
 /// A URL whose whole authority is one plain reference (`{{baseUrl}}/x`) has
@@ -474,7 +555,7 @@ fn a_reference_authority_keeps_the_url() {
         |build: Build, url: &'static str| import(&build(&shape(url)), &ImportOptions::default()).unwrap().requests[0].spec.url.clone();
     // Kept: not quarantined and not cut (its query may still become
     // parameters).
-    let kept = |stored: &str, url: &str| stored != "{{url_needs_review}}" && stored.starts_with(url.split('?').next().unwrap_or(url));
+    let kept = |stored: &str, url: &str| stored != "{{url-needs-review}}" && stored.starts_with(url.split('?').next().unwrap_or(url));
     for (importer, build) in importers {
         // HAR imports only `http(s)` URLs.
         let schemeless = importer != "HAR";
@@ -486,11 +567,11 @@ fn a_reference_authority_keeps_the_url() {
                 assert!(kept(&stored(build, url), url), "{importer}: {url}");
             }
             for url in ["{{baseUrl}}@evil/x", "{{ base Url }}/x@y", "{{a}}{{b}}/x@y"] {
-                assert_eq!(stored(build, url), "{{url_needs_review}}", "{importer}: {url}");
+                assert_eq!(stored(build, url), "{{url-needs-review}}", "{importer}: {url}");
             }
         }
         for url in ["https://{{ base Url }}/x@y", "https://{{a}}{{b}}/x@y", "https://pre{{a}}/x@y"] {
-            assert_eq!(stored(build, url), "{{url_needs_review}}", "{importer}: {url}");
+            assert_eq!(stored(build, url), "{{url-needs-review}}", "{importer}: {url}");
         }
     }
 }

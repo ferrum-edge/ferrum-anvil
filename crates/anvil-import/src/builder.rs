@@ -246,6 +246,9 @@ impl<'o> Builder<'o> {
         mut spec: RequestSpec,
         pointer: &str,
     ) -> &mut RequestDefinition {
+        // Provenance is stored and exported as written: a key derived from a
+        // URL never carries its credentials ([`crate::report::redact_for_report`]).
+        let operation_key = &crate::report::redact_for_report(operation_key);
         let text = operation_key.len().saturating_add(name.len()).saturating_add(spec.url.len()).saturating_add(pointer.len());
         self.charge_text(pointer, text);
         let mut key = operation_key.to_string();

@@ -279,7 +279,11 @@ never appear in them, but a credential typed into a body or URL is exported
 as written, with a warning in the preview (a JWT, a bearer token, an AWS
 access key id, a private key, a credential-named JSON member, a variable
 whose JSON text holds a literal under a credential-named member, or a URL
-userinfo (`user:password@`) that is not exactly variable references).
+userinfo (`user:password@`) that is not exactly variable references). A URL
+*field* whose userinfo is not exactly references, or whose authority mixes a
+template with an `@` (an import kept it as written), is extracted whole:
+the exported request reads `{{secret_url}}`, an encrypted-transfer import
+restores it, and a share-safely recipient re-enters it.
 
 A literal secret is a value that is not exactly one plain `{{variable}}`
 reference spanning the whole value (`{{ name }}`, `{{ _.name }}`, a dotted
