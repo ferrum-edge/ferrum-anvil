@@ -279,7 +279,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         }
         for (k, why) in UNENFORCED {
             if obj.contains_key(*k) {
-                self.report.warn("schema_keyword_not_enforced", &ptr(at, k), Message::new(*why).text("; the sample may not satisfy it"));
+                self.report.warn("schema_keyword_not_enforced", &ptr(at, k), Message::new(why).text("; the sample may not satisfy it"));
             }
         }
         if obj.contains_key("$schema") {
