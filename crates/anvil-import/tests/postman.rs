@@ -144,8 +144,13 @@ fn scripts_are_retained_disabled_and_untrusted() {
         assert!(!s.enabled && !s.trusted);
     }
     let test = r.report.scripts.iter().find(|s| s.event == "test").unwrap();
-    assert_eq!(test.owner, "List products");
-    assert!(test.source.contains("pm.environment.set('first'"));
+    assert_eq!(test.owner, anvil_import::ScriptOwner::Request);
+    assert_eq!(test.language, "javascript");
+    assert!(test.bytes > 0 && test.lines > 0);
+    // #584: the report describes a script by its metadata; the body and the
+    // owner's name are not copied into it.
+    let report = serde_json::to_string(&r.report).unwrap();
+    assert!(!report.contains("pm.environment.set") && !report.contains("List products"));
     assert_eq!(test.pointer, "/item/0/item/0/item/0/event/0");
     // Scripts never reach request specs.
     let all = serde_json::to_string(&r.requests).unwrap();

@@ -796,7 +796,9 @@ fn retained_scripts_hold_no_credential_literal() {
         "request": { "method": "GET", "url": "https://api.example.test/" } }]));
     let r = import(&source, &ImportOptions::default()).unwrap();
     assert_eq!(r.report.scripts.len(), 1);
-    assert!(r.report.scripts[0].source.contains("pm.request.headers.add"), "the script was not retained");
+    assert!(r.report.scripts[0].bytes > 0, "the script was not described");
+    // #584: the body is not copied into the report at all.
+    assert!(!serde_json::to_string(&r.report).unwrap().contains("pm.request.headers.add"), "the script body reached the report");
     assert_nothing_readable(&source, "Postman script");
 }
 
@@ -865,4 +867,239 @@ fn openapi_oauth_endpoint_urls_never_keep_a_credential() {
     assert!(text.contains("\"https://issuer.example.test/token\""), "the token URL lost more than its userinfo");
     assert!(text.contains("\"https://issuer.example.test/authorize\""), "the authorization URL lost more than its userinfo");
     assert_nothing_readable(&source, "OpenAPI OAuth endpoints");
+}
+
+// #584: report messages carry field names, locations and placeholders, never
+// source values, so the free-text redaction is only a last line of defence.
+
+/// Neither report holds a canary, in either mode. For rows whose stored
+/// objects keep the source text on purpose (a media type, a template left as
+/// written, a relative server URL): only the report is checked.
+fn assert_report_clean(source: &[u8], label: &str) {
+    for include_credentials in [false, true] {
+        let r = import(source, &with_credentials(include_credentials)).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(!leaks(&serde_json::to_string(&r.report).unwrap()), "{label}: the report holds a source value ({include_credentials})");
+    }
+}
+
+fn openapi_doc(extra: Value) -> Vec<u8> {
+    let mut doc = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "t", "version": "1" },
+        "servers": [{ "url": "https://api.example.test" }],
+        "paths": { "/a": { "get": { "responses": { "200": { "description": "ok" } } } } }
+    });
+    if let (Some(d), Some(e)) = (doc.as_object_mut(), extra.as_object()) {
+        for (k, v) in e {
+            d.insert(k.clone(), v.clone());
+        }
+    }
+    doc.to_string().into_bytes()
+}
+
+/// Every importer message that used to quote a source value (an option, a
+/// version, a scheme, a media type, a mode, an auth type, a grant, a resource
+/// type, a template, a dialect, a server URL, an HTTP scheme, a scheme type,
+/// a pattern, a `$ref`, a callback expression, a default, a parameter
+/// location) now says what it is about in the importer's words, and the
+/// pointer locates it. None of these canaries has a credential name or
+/// shape, so the free-text heuristics alone would have kept them.
+#[test]
+fn importer_messages_never_quote_a_source_value() {
+    let har = |request: Value, version: &str| {
+        json!({ "log": { "version": version, "entries": [{ "request": request }] } }).to_string().into_bytes()
+    };
+    let insomnia_resource = |resource: Value| {
+        json!({
+            "_type": "export",
+            "__export_format": 4,
+            "resources": [
+                { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+                { "_id": "req_1", "_type": "request", "parentId": "wrk_1", "name": "R", "method": "GET", "url": "https://api.example.test/" },
+                resource
+            ]
+        })
+        .to_string()
+        .into_bytes()
+    };
+    let mut insomnia_auth = insomnia_request("https://api.example.test/");
+    insomnia_auth["authentication"] = json!({ "type": "tok-SENSITIVE-c105" });
+    let mut insomnia_grant = insomnia_request("https://api.example.test/");
+    insomnia_grant["authentication"] = json!({ "type": "oauth2", "grantType": "tok-SENSITIVE-c106" });
+    let mut insomnia_expression = insomnia_request("https://api.example.test/");
+    insomnia_expression["headers"] = json!([{ "name": "X-Note", "value": "{{ 'a' | tok-SENSITIVE-c108 }}" }]);
+    let schema_body = |schema: Value| {
+        json!({ "paths": { "/a": { "post": {
+            "requestBody": { "content": { "application/json": { "schema": schema } } },
+            "responses": { "200": { "description": "ok" } }
+        } } } })
+    };
+    let rows: Vec<(&str, Vec<u8>)> = vec![
+        ("cURL, unknown option", b"curl --frobnicate-tok-SENSITIVE-c90 https://safe.example.test/".to_vec()),
+        ("cURL, header removal", b"curl -H 'X-tok-SENSITIVE-c91:' https://safe.example.test/".to_vec()),
+        ("HAR, version", har(json!({ "method": "GET", "url": "https://api.example.test/" }), "tok-SENSITIVE-c92")),
+        ("HAR, non-HTTP scheme", har(json!({ "method": "GET", "url": "tok-SENSITIVE-c93:opaque" }), "1.2")),
+        (
+            "HAR, unscanned media type",
+            har(
+                json!({ "method": "POST", "url": "https://api.example.test/",
+                    "postData": { "mimeType": "text/x-tok-SENSITIVE-c94", "text": "hello" } }),
+                "1.2",
+            ),
+        ),
+        (
+            "HAR, uncaptured file part",
+            har(
+                json!({ "method": "POST", "url": "https://api.example.test/", "postData": { "mimeType": "multipart/form-data",
+                    "params": [{ "name": "upload", "fileName": "tok-SENSITIVE-c95.bin" }] } }),
+                "1.2",
+            ),
+        ),
+        (
+            "Postman, body mode",
+            postman_doc(json!({ "method": "POST", "url": "https://api.example.test/", "body": { "mode": "tok-SENSITIVE-c96" } })),
+        ),
+        (
+            "Postman, auth type",
+            postman_doc(json!({ "method": "GET", "url": "https://api.example.test/", "auth": { "type": "tok-SENSITIVE-c97" } })),
+        ),
+        (
+            "Postman, OAuth 2 grant",
+            postman_doc(json!({ "method": "GET", "url": "https://api.example.test/", "auth": { "type": "oauth2",
+                "oauth2": [{ "key": "grant_type", "value": "tok-SENSITIVE-c98" }] } })),
+        ),
+        (
+            "Postman, dynamic variable",
+            postman_doc(json!({ "method": "GET", "url": "https://api.example.test/",
+                "header": [{ "key": "X-Note", "value": "{{$tok-SENSITIVE-c103}}" }] })),
+        ),
+        (
+            "Postman, script event, type and body",
+            postman_doc_items(json!([{ "name": "r",
+                "event": [{ "listen": "tok-SENSITIVE-c100", "script": { "type": "tok-SENSITIVE-c101",
+                    "exec": ["const note = 'tok-SENSITIVE-c102';"] } }],
+                "request": { "method": "GET", "url": "https://api.example.test/" } }])),
+        ),
+        ("Insomnia, resource type", insomnia_resource(json!({ "_id": "x_1", "_type": "tok-SENSITIVE-c104", "parentId": "wrk_1" }))),
+        ("Insomnia, auth type", insomnia_doc(insomnia_auth, json!({}))),
+        ("Insomnia, OAuth 2 grant", insomnia_doc(insomnia_grant, json!({}))),
+        ("Insomnia, template tag", insomnia_doc(insomnia_request("https://api.example.test/{% tok-SENSITIVE-c107 %}"), json!({}))),
+        ("Insomnia, Nunjucks expression", insomnia_doc(insomnia_expression, json!({}))),
+        (
+            "Insomnia, unit test",
+            insomnia_resource(json!({ "_id": "ut_1", "_type": "unit_test", "parentId": "uts_1",
+                "name": "tok-SENSITIVE-c109", "code": "expect('tok-SENSITIVE-c109b').to.equal(1);" })),
+        ),
+        ("OpenAPI, JSON Schema dialect", openapi_doc(json!({ "jsonSchemaDialect": "https://example.test/tok-SENSITIVE-c110" }))),
+        ("OpenAPI, relative server URL", openapi_doc(json!({ "servers": [{ "url": "/tok-SENSITIVE-c111" }] }))),
+        (
+            "OpenAPI, HTTP auth scheme and scheme type",
+            openapi_doc(json!({
+                "components": { "securitySchemes": {
+                    "h": { "type": "http", "scheme": "tok-SENSITIVE-c112" },
+                    "u": { "type": "tok-SENSITIVE-c113" }
+                } },
+                "paths": { "/a": { "get": { "security": [{ "h": [] }, { "u": [] }], "responses": { "200": { "description": "ok" } } } } }
+            })),
+        ),
+        (
+            "OpenAPI, pattern",
+            openapi_doc(schema_body(json!({ "type": "object", "required": ["n"],
+                "properties": { "n": { "type": "string", "pattern": "^tok-SENSITIVE-c114$" } } }))),
+        ),
+        ("OpenAPI, dangling $ref", openapi_doc(schema_body(json!({ "$ref": "#/components/schemas/tok-SENSITIVE-c115" })))),
+        (
+            "OpenAPI, alternative media types",
+            openapi_doc(json!({ "paths": { "/a": { "post": {
+                "requestBody": { "content": { "application/json": { "schema": { "type": "object" } },
+                    "application/x-tok-SENSITIVE-c116": { "schema": { "type": "object" } } } },
+                "responses": { "200": { "description": "ok" } }
+            } } } })),
+        ),
+        (
+            "OpenAPI, callback expression",
+            openapi_doc(json!({ "paths": { "/a": { "post": {
+                "callbacks": { "onEvent": { "https://tok-SENSITIVE-c117.example.test/cb": { "post": {
+                    "responses": { "200": { "description": "ok" } } } } } },
+                "responses": { "200": { "description": "ok" } }
+            } } } })),
+        ),
+        (
+            "OpenAPI, server variable default outside its enum",
+            openapi_doc(json!({ "servers": [{ "url": "https://{env}.example.test",
+                "variables": { "env": { "default": "tok-SENSITIVE-c118", "enum": ["prod"] } } }] })),
+        ),
+        (
+            "OpenAPI, parameter location",
+            openapi_doc(json!({ "paths": { "/a": { "get": {
+                "parameters": [{ "name": "q", "in": "tok-SENSITIVE-c119", "schema": { "type": "string" } }],
+                "responses": { "200": { "description": "ok" } }
+            } } } })),
+        ),
+    ];
+    for (label, source) in rows {
+        let r = import(&source, &ImportOptions::default()).unwrap_or_else(|e| panic!("{label}: {e}"));
+        let reported = r.report.warnings.len() + r.report.unsupported.len() + r.report.scripts.len() + r.report.inactive_settings.len();
+        assert!(reported > 0, "{label}: nothing was reported");
+        assert_report_clean(&source, label);
+    }
+}
+
+/// #584 (review of #583, sol F1): an auth placeholder is never named after
+/// its owner, so a collection, folder or request name that repeats a
+/// credential URL leaves no part of it in a placeholder, a required variable
+/// or the report. The digits survive sanitizing (`a-b` becomes `a_b`), so the
+/// numeric canary catches a sanitized copy.
+#[test]
+fn auth_placeholders_never_carry_an_owner_name() {
+    let name = "https://admin:571571571@api.example.test/v1";
+    let basic =
+        json!({ "type": "basic", "basic": [{ "key": "username", "value": "u" }, { "key": "password", "value": "tok-SENSITIVE-c120" }] });
+    let bearer = json!({ "type": "bearer", "bearer": [{ "key": "token", "value": "" }] });
+    let postman = json!({
+        "info": { "name": name, "schema": POSTMAN_SCHEMA },
+        "auth": basic,
+        "item": [{ "name": name, "auth": bearer,
+            "item": [{ "name": name, "request": { "method": "GET", "url": "https://api.example.test/", "auth": basic } }] }]
+    })
+    .to_string()
+    .into_bytes();
+    let mut request = insomnia_request("https://api.example.test/");
+    request["name"] = json!(name);
+    request["authentication"] = json!({ "type": "basic", "username": "u", "password": "tok-SENSITIVE-c121" });
+    let insomnia = insomnia_doc(request, json!({}));
+    for (importer, source) in [("Postman", postman), ("Insomnia", insomnia)] {
+        let r = import(&source, &ImportOptions::default()).unwrap();
+        assert!(
+            r.report.required_variables.iter().any(|v| v.name.starts_with("auth") && v.secret),
+            "{importer}: the auth placeholder was not named by the import"
+        );
+        assert_nothing_readable(&source, importer);
+    }
+}
+
+/// #584: the free-text shapes the last line of defence must still catch
+/// (whitespace around a separator, escaped quotes, a reference beside a
+/// literal, a bare JWT key) in a retained script, which is no longer copied
+/// at all, and in a settings key, which only the pointer quotes.
+#[test]
+fn free_text_edge_cases_leave_nothing_readable() {
+    let script = postman_doc_items(json!([{ "name": "r",
+        "event": [{ "listen": "prerequest", "script": { "type": "text/javascript", "exec": [
+            "const password =\n\"tok-SENSITIVE-c122\";",
+            "const secret\t=\t'tok-SENSITIVE-c123';",
+            "const api_key = \"\\\"tok-SENSITIVE-c124\";",
+            "const token = \"{{tenant}}-tok-SENSITIVE-c125\";",
+            "headers.Authorization = 'Bearer  tok-SENSITIVE-c126abcdef';"
+        ] } }],
+        "request": { "method": "GET", "url": "https://api.example.test/" } }]));
+    assert_nothing_readable(&script, "script edge cases");
+    let jwt_key = postman_doc_items(json!([{
+        "name": "r",
+        "protocolProfileBehavior": { "eyJhbGciOiJIUzI1NiJ9.tok-SENSITIVE-c127.c2lnbmF0dXJl": true },
+        "request": { "method": "GET", "url": "https://api.example.test/" }
+    }]));
+    let r = import(&jwt_key, &ImportOptions::default()).unwrap();
+    assert!(r.report.unsupported.iter().any(|f| f.code == "request_setting"), "the setting was not reported");
+    assert_nothing_readable(&jwt_key, "JWT settings key");
 }
