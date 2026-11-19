@@ -51,7 +51,7 @@ pub fn gateway_env(admin_secret: &str) -> Vec<(&'static str, String)> {
 /// claims (`None` leaves the claim out).
 fn token(env: &Env, sub: &str, scope: Option<&str>, ns: Option<&str>) -> String {
     let secret = env.admin_secret.as_str();
-    let now = chrono::Utc::now().timestamp();
+    let now = anvil_domain::Timestamp::now().unix_seconds();
     let mut claims = serde_json::json!({
         "iss": "ferrum-edge",
         "sub": sub,

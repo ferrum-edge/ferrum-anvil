@@ -108,8 +108,8 @@ pub fn request(t: &Target, trusted: bool, method: &str, path: &str) -> Execution
                 detail: None,
                 console_url: None,
             },
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         });
     }
     c

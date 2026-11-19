@@ -90,8 +90,8 @@ pub(crate) fn ferrum_profile() -> IntegrationProfile {
             detail: None,
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -108,8 +108,8 @@ fn tls_profile(root_pem: &str) -> TlsProfile {
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 

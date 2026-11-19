@@ -97,8 +97,8 @@ pub fn request(mesh: &MeshInstance, lane: &Target, trusted: bool, path: &str) ->
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let o = SettingsOverrides {
         tls_profile_id: Some(profile.id),
@@ -124,8 +124,8 @@ pub fn request(mesh: &MeshInstance, lane: &Target, trusted: bool, path: &str) ->
                 detail: None,
                 console_url: None,
             },
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         });
     }
     c

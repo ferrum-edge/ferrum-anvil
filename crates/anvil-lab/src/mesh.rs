@@ -143,8 +143,8 @@ pub(crate) fn ferrum_profile() -> IntegrationProfile {
             detail: None,
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -190,8 +190,8 @@ impl Env {
             min_version: TlsMinVersion::Tls12,
             server_name_override: sni.map(String::from),
             server_spiffe: Some(ServerSpiffeIdentity { expected_server_spiffe_id: Some(expect_id.into()), trust_domain: None }),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         }
     }
 
@@ -241,8 +241,8 @@ impl Env {
             no_proxy: String::new(),
             tls_profile_id: Some(tls.id),
             hbone: Some(HboneOptions { marker, baggage: None, extra_headers: vec![] }),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         };
         o.proxy_profile_id = Some(ProxySelection::Profile { id: proxy.id });
         c.proxy_profiles.push(proxy);
@@ -285,8 +285,8 @@ impl Env {
             no_proxy: String::new(),
             tls_profile_id: Some(tls.id),
             hbone: Some(HboneOptions { marker, baggage: None, extra_headers: vec![] }),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         };
         o.proxy_profile_id = Some(ProxySelection::Profile { id: proxy.id });
         c.proxy_profiles.push(proxy);
