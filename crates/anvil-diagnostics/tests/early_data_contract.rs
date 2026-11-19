@@ -38,7 +38,7 @@ fn attempt(index: u32, reason: AttemptReason, status: u16, e: Option<EarlyDataOb
         reason,
         method: "PUT".into(),
         url: "https://127.0.0.1:17243/early/echo".into(),
-        started_at: chrono::Utc::now(),
+        started_at: anvil_domain::Timestamp::now(),
         connection: None,
         phases: vec![],
         dispatch: DispatchState::Sent,

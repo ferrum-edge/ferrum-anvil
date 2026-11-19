@@ -236,7 +236,7 @@ mod tests {
             reason: AttemptReason::Initial,
             method: "TCP".into(),
             url: "tcp://127.0.0.1:18901".into(),
-            started_at: chrono::Utc::now(),
+            started_at: anvil_domain::Timestamp::now(),
             connection: Some(c),
             phases: vec![],
             dispatch: DispatchState::Sent,

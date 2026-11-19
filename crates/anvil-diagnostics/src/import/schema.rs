@@ -175,7 +175,7 @@ pub(super) fn rfc3339(text: &str) -> bool {
         Regex::new(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$")
             .expect("RFC 3339 pattern")
     });
-    syntax.is_match(text) && chrono::DateTime::parse_from_rfc3339(text).is_ok()
+    syntax.is_match(text) && anvil_domain::Timestamp::parse_rfc3339(text).is_ok()
 }
 
 pub(super) fn validate(value: &Value, kind: ImportedDiagnosticKind) -> Result<(), ImportError> {

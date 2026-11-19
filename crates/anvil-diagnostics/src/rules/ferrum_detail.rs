@@ -359,7 +359,7 @@ mod tests {
             reason: AttemptReason::Initial,
             method: "GET".into(),
             url: "http://gateway.example/orders".into(),
-            started_at: chrono::Utc::now(),
+            started_at: anvil_domain::Timestamp::now(),
             connection: Some(ConnectionObservation {
                 id: 1,
                 reused: false,
@@ -423,7 +423,7 @@ mod tests {
     }
 
     fn refused_record() -> String {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = anvil_domain::Timestamp::now().to_rfc3339();
         format!(
             r#"{{"schema_version":"ferrum.diagnostic_ref.v1","ref":"{REF}","namespace":"ferrum","created_at":"{now}","expires_at":"2099-01-01T00:00:00Z","protocol":"http1","status":502,"gateway_error":"connection_failure","detail_available":true,"detail":{{"error_class":"tls_error","body_error_class":null,"rejection_phase":null,"route_timeout_phase":null,"backend_dispatch":"pre_wire_failure","proxy_id":"orders","backend_target":"https://orders.internal:8443","duration_bucket":"lt_1s","attempts":[{{"attempt":1,"backend_dispatch":"backend_response","status":503}},{{"attempt":2,"backend_dispatch":"pre_wire_failure","error_class":"tls_error","tls":{{"failure":"certificate_verification","reason":"expired"}}}}]}}}}"#
         )
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn a_rejection_record_names_the_refusing_policy() {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = anvil_domain::Timestamp::now().to_rfc3339();
         let body = format!(
             r#"{{"schema_version":"ferrum.diagnostic_ref.v1","ref":"{REF}","namespace":"ferrum","created_at":"{now}","expires_at":"2099-01-01T00:00:00Z","protocol":"http1","status":401,"gateway_error":null,"detail_available":true,"detail":{{"error_class":null,"body_error_class":null,"rejection_phase":null,"route_timeout_phase":null,"backend_dispatch":"not_dispatched","proxy_id":"orders","backend_target":null,"duration_bucket":"lt_10ms","rejection":{{"source":"plugin","phase":"authenticate","plugin":"key_auth"}}}}}}"#
         );

@@ -69,7 +69,7 @@ fn attempt(s: &Shape) -> AttemptObservation {
         reason: AttemptReason::Initial,
         method: "POST".into(),
         url: format!("http://{AUTHORITY}/orders"),
-        started_at: chrono::Utc::now(),
+        started_at: anvil_domain::Timestamp::now(),
         connection: Some(ConnectionObservation {
             id: 1,
             reused: false,
