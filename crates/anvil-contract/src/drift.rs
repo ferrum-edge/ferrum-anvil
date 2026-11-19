@@ -43,8 +43,8 @@ use crate::route::{Route, Router};
 use crate::ruleset::Severity;
 use crate::schema::{self, Scanned};
 use crate::spec::{Meter, Spec};
+use anvil_domain::Timestamp;
 use anvil_import::Dialect;
-use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -271,9 +271,9 @@ pub struct DriftReport {
     /// CORS preflights (`OPTIONS` without a declared operation), not checked.
     pub ignored: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<DateTime<Utc>>,
+    pub from: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub to: Option<DateTime<Utc>>,
+    pub to: Option<Timestamp>,
     /// Most severe first, then most frequent.
     pub findings: Vec<DriftFinding>,
     /// Every declared operation, exercised or not.
@@ -448,8 +448,8 @@ struct State<'a> {
     matched: usize,
     without_response: usize,
     ignored: usize,
-    from: Option<DateTime<Utc>>,
-    to: Option<DateTime<Utc>>,
+    from: Option<Timestamp>,
+    to: Option<Timestamp>,
     /// Schema findings by (operation, status, place in the body, error
     /// category; see [`describe`]).
     schema_places: HashMap<(String, String, String, String), BTreeSet<Rc<str>>>,
