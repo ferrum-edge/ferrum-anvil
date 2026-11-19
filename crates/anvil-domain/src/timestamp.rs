@@ -166,6 +166,22 @@ impl Timestamp {
         out
     }
 
+    /// `YYYY-MM-DDThh:mm:ss`, no fraction or zone (strftime `%Y-%m-%dT%H:%M:%S`).
+    pub fn format_iso_seconds(self) -> String {
+        let mut out = String::with_capacity(19);
+        let _ = self.write_date(&mut out, "-");
+        out.push('T');
+        let _ = self.write_time(&mut out, ":");
+        out
+    }
+
+    /// `hh:mm:ss`, no fraction or zone (strftime `%H:%M:%S`).
+    pub fn format_time(self) -> String {
+        let mut out = String::with_capacity(8);
+        let _ = self.write_time(&mut out, ":");
+        out
+    }
+
     /// Basic ISO 8601 `YYYYMMDDThhmmssZ` for file names (strftime
     /// `%Y%m%dT%H%M%SZ`).
     pub fn format_basic(self) -> String {
