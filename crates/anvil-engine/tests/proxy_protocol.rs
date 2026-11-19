@@ -65,8 +65,8 @@ fn trust_profile() -> TlsProfile {
         bindings: vec![],
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -390,8 +390,8 @@ async fn impossible_headers_are_refused_before_any_traffic() {
         username: None,
         password: None,
         no_proxy: String::new(),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let mut c = ctx(tcp_spec(&url, "x", Some(header(ProxyHeaderVersion::V2))), false);
     c.settings_layers

@@ -20,6 +20,7 @@ use crate::{Engine, ExecutionOutput, SensitiveEpoch};
 use anvil_auth::ResolvedAuth;
 use anvil_diagnostics::{Draft, FerrumTrust};
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::diagnostics::{Confidence, EvidenceSource, Owner, Remediation, Severity, SourceScope};
 use anvil_domain::events::SessionCommand;
 use anvil_domain::execution::*;
@@ -33,7 +34,6 @@ use anvil_transport::session::{CommandRx, RedactFn, SessionFacts, SessionOutput,
 use anvil_transport::tls::{ClientIdentityMaterial, PreparedTls};
 use anvil_transport::{dtls, grpc, hbone_udp, masque, rawtcp, sse, udp, ws, ws_deflate};
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
 use http::{HeaderName, HeaderValue};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -315,7 +315,7 @@ struct Authorized {
 /// ([`Prepared::auth_hidden`]), hidden in the refusals.
 fn sign_request(auth: &ResolvedAuth, hidden: &[String], req: &SessionRequest) -> Result<anvil_auth::Applied, TransportFailure> {
     let signable = http_exec::signable_request(&req.method, &http_target(&req.target), &req.headers, &req.body);
-    let applied = anvil_auth::apply_hiding(auth, &signable, Utc::now(), hidden)
+    let applied = anvil_auth::apply_hiding(auth, &signable, Timestamp::now(), hidden)
         .map_err(|e| local(FailureKind::AuthPreparationFailed, e.to_string(), "auth"))?;
     http_exec::check_auth_headers(&applied)?;
     if let Some(why) = auth_refusal(&applied, req.path_only) {
@@ -1914,7 +1914,7 @@ async fn run_prepared(
     prep: SessionPrep,
     ctx: &ExecutionContext,
     resolver: &Resolver,
-    started_at: DateTime<Utc>,
+    started_at: Timestamp,
     events: EventCtx,
     cancel: CancellationToken,
     commands: Option<CommandRx>,
@@ -2023,7 +2023,7 @@ async fn run_prepared(
 
 /// Automation execution for WebSocket, gRPC, SSE, TCP/TLS and UDP/DTLS.
 pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
-    let started_at = Utc::now();
+    let started_at = Timestamp::now();
     // Taken first, or when the context was built (`ExecutionContext::epoch`):
     // TLS material prepared after a lock or a workspace delete is not cached,
     // and handshake cookies received after either are not kept.
@@ -2193,7 +2193,7 @@ impl SessionHandle {
             }
             Err(e) => TransportFailure::new(Phase::Session, FailureKind::Internal, format!("the session task ended unexpectedly: {e}")),
         };
-        record::local_failure(&self.fallback, &Resolver::new(vec![], None), Utc::now(), f)
+        record::local_failure(&self.fallback, &Resolver::new(vec![], None), Timestamp::now(), f)
     }
 }
 
@@ -2205,7 +2205,7 @@ impl Engine {
     /// Scripted messages in the spec are sent first; the total deadline and
     /// idle auto-close do not apply to interactive sessions.
     pub async fn open_session(&self, ctx: ExecutionContext, events: EventCtx) -> SessionHandle {
-        let started_at = Utc::now();
+        let started_at = Timestamp::now();
         // Taken first, or when the context was built
         // (`ExecutionContext::epoch`): TLS material prepared after a lock or
         // a workspace delete is not cached, and handshake cookies received
@@ -2376,7 +2376,7 @@ mod tests {
         let task = tokio::spawn(async move {
             c2.cancelled().await;
             let f = TransportFailure::new(Phase::Session, FailureKind::Canceled, "ended by the session itself");
-            record::local_failure(&context(), &Resolver::new(vec![], None), Utc::now(), f)
+            record::local_failure(&context(), &Resolver::new(vec![], None), Timestamp::now(), f)
         });
         let h = handle(task, cancel, CANCEL_GRACE);
         h.cancel();

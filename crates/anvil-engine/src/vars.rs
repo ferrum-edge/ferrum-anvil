@@ -338,12 +338,12 @@ impl Resolver {
         let mut parts = expr.split_whitespace();
         let name = parts.next().unwrap_or("");
         let args: Vec<&str> = parts.collect();
-        let now = chrono::Utc::now();
+        let now = anvil_domain::Timestamp::now();
         Ok(match name {
             "uuid" | "randomUUID" | "guid" => uuid::Uuid::new_v4().to_string(),
-            "timestamp" => now.timestamp().to_string(),
-            "timestampMs" => now.timestamp_millis().to_string(),
-            "isoTimestamp" => now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "timestamp" => now.unix_seconds().to_string(),
+            "timestampMs" => now.unix_millis().to_string(),
+            "isoTimestamp" => now.to_rfc3339_opts(anvil_domain::SecondsFormat::Millis, true),
             "counter" => (self.counter.fetch_add(1, Ordering::Relaxed) + 1).to_string(),
             "randomInt" => {
                 let (lo, hi) = match args.as_slice() {

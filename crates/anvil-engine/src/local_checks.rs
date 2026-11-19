@@ -8,7 +8,7 @@ fn check_token(token: &str, out: &mut Vec<Draft>) {
     if token.split('.').count() != 3 {
         return;
     }
-    let Ok(i) = anvil_auth::jwt::inspect(token, chrono::Utc::now(), 0) else { return };
+    let Ok(i) = anvil_auth::jwt::inspect(token, anvil_domain::Timestamp::now(), 0) else { return };
     let exp = i.claims.get("exp").and_then(|v| v.as_i64());
     let nbf = i.claims.get("nbf").and_then(|v| v.as_i64());
     match i.time_status {
@@ -22,7 +22,7 @@ fn check_token(token: &str, out: &mut Vec<Draft>) {
                 Severity::Warning,
             )
             .ev(EvidenceSource::LocalValidation, "jwt.exp", exp.map(|e| e.to_string()).unwrap_or_default())
-            .var("when", exp.and_then(|e| chrono::DateTime::from_timestamp(e, 0)).map(|d| d.to_rfc3339()).unwrap_or_default()),
+            .var("when", exp.and_then(anvil_domain::Timestamp::from_unix_seconds).map(|d| d.to_rfc3339()).unwrap_or_default()),
         ),
         anvil_auth::jwt::TimeStatus::NotYetValid => out.push(
             Draft::new(
@@ -34,7 +34,7 @@ fn check_token(token: &str, out: &mut Vec<Draft>) {
                 Severity::Warning,
             )
             .ev(EvidenceSource::LocalValidation, "jwt.nbf", nbf.map(|e| e.to_string()).unwrap_or_default())
-            .var("when", nbf.and_then(|e| chrono::DateTime::from_timestamp(e, 0)).map(|d| d.to_rfc3339()).unwrap_or_default()),
+            .var("when", nbf.and_then(anvil_domain::Timestamp::from_unix_seconds).map(|d| d.to_rfc3339()).unwrap_or_default()),
         ),
         _ => {}
     }

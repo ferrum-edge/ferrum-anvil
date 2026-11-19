@@ -76,7 +76,7 @@ impl Admin {
 /// A `ferrum.diagnostic_ref.v1` record of a `502 connection_failure` response
 /// over HTTP/1.1, created now.
 fn record(reference: &str, status: u16, namespace: &str) -> String {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = anvil_domain::Timestamp::now().to_rfc3339();
     serde_json::json!({
         "schema_version": "ferrum.diagnostic_ref.v1",
         "ref": reference,
@@ -125,8 +125,8 @@ fn ctx(url: &str, lookup: Option<DiagnosticDetailAccess>, secret: &SecretRef) ->
             detail: lookup,
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     });
     let mut vault = std::collections::HashMap::new();
     vault.insert(secret.id, zeroize::Zeroizing::new(TOKEN.to_string()));
@@ -379,8 +379,8 @@ async fn g01_an_https_lookup_never_inherits_a_verification_bypass() {
         min_version: Default::default(),
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let id = bypass.id;
     c.tls_profiles.push(bypass);

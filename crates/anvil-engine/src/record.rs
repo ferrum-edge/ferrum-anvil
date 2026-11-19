@@ -8,6 +8,7 @@ use crate::redact::Redactor;
 use crate::vars::Resolver;
 use anvil_diagnostics::{DiagnosticInput, FerrumTrust};
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::execution::*;
 use anvil_domain::outcome::*;
 use anvil_domain::request::Body;
@@ -16,11 +17,10 @@ use anvil_domain::workload::WorkloadApiEvidence;
 use anvil_transport::decode::{self, DecodeOutcome};
 use anvil_transport::http::AttemptOutput;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
 
 pub struct Assembly<'a> {
     pub ctx: &'a ExecutionContext,
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
     pub prepared_method: String,
     pub prepared_url: String,
     pub prepared_headers: Vec<(String, String)>,
@@ -436,7 +436,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         revision_id: ctx.revision_id,
         environment_id: ctx.environment_id,
         started_at,
-        finished_at: Utc::now(),
+        finished_at: Timestamp::now(),
         prepared: PreparedSummary {
             protocol: ctx.spec.protocol,
             method: a.prepared_method.clone(),
@@ -536,7 +536,7 @@ fn redact_workload(mut w: WorkloadApiEvidence, r: &Redactor) -> WorkloadApiEvide
 }
 
 /// Record for a local preparation failure (nothing was sent).
-pub fn local_failure(ctx: &ExecutionContext, resolver: &Resolver, started_at: DateTime<Utc>, f: TransportFailure) -> ExecutionOutput {
+pub fn local_failure(ctx: &ExecutionContext, resolver: &Resolver, started_at: Timestamp, f: TransportFailure) -> ExecutionOutput {
     local_failure_with(ctx, resolver, started_at, f, None)
 }
 
@@ -544,7 +544,7 @@ pub fn local_failure(ctx: &ExecutionContext, resolver: &Resolver, started_at: Da
 pub fn local_failure_with(
     ctx: &ExecutionContext,
     resolver: &Resolver,
-    started_at: DateTime<Utc>,
+    started_at: Timestamp,
     f: TransportFailure,
     workload: Option<WorkloadApiEvidence>,
 ) -> ExecutionOutput {
@@ -583,7 +583,7 @@ pub fn local_failure_with(
         revision_id: ctx.revision_id,
         environment_id: ctx.environment_id,
         started_at,
-        finished_at: Utc::now(),
+        finished_at: Timestamp::now(),
         prepared: PreparedSummary {
             protocol: ctx.spec.protocol,
             method: ctx.spec.method.clone(),
@@ -738,7 +738,7 @@ mod tests {
         };
         let ctx = ExecutionContext::standalone(spec);
         let redactor = Redactor::new(vec![secret.into()], vec![]);
-        let started_at = Utc::now();
+        let started_at = Timestamp::now();
         let response = ResponseRecord {
             status: 200,
             reason: None,

@@ -98,8 +98,8 @@ fn tls_profile(name: &str, identity: Option<(&Pem, &Pem)>) -> TlsProfile {
             expected_server_spiffe_id: Some(mesh_pki::ZTUNNEL_SPIFFE_ID.into()),
             trust_domain: None,
         }),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -130,8 +130,8 @@ fn proxy_profile(kind: ProxyKind, address: &str, tls: Option<&TlsProfile>, optio
         no_proxy: String::new(),
         tls_profile_id: tls.map(|t| t.id),
         hbone: (kind == ProxyKind::Hbone).then_some(options),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 

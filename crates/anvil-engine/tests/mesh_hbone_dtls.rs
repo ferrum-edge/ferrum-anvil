@@ -147,8 +147,8 @@ fn svid_profile(with_svid: bool) -> TlsProfile {
             expected_server_spiffe_id: Some(mesh_pki::ZTUNNEL_SPIFFE_ID.into()),
             trust_domain: None,
         }),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -168,8 +168,8 @@ fn dtls_profile(identity: Option<&Pem>) -> TlsProfile {
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -215,8 +215,8 @@ fn via_hbone(
             baggage: Some(format!("source.principal={}", mesh_pki::CLIENT_SPIFFE_ID)),
             extra_headers: vec![],
         }),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     c.settings_layers.push((
         "run".into(),

@@ -81,8 +81,8 @@ fn tls_profile(name: &str, roots: Vec<String>, verify: bool) -> TlsProfile {
         min_version: Default::default(),
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -129,8 +129,8 @@ async fn local_006_invalid_proxy_configuration_is_explained_locally() {
         no_proxy: String::new(),
         tls_profile_id: None,
         hbone: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let pid = p.id;
     let mut c = ctx(RequestSpec::http("GET", &f.url("/")));
@@ -323,8 +323,8 @@ async fn tls_017_https_through_a_rejecting_proxy_is_attributed_to_the_proxy_leg(
         no_proxy: String::new(),
         tls_profile_id: None,
         hbone: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let pid = p.id;
     let mut c = ctx(RequestSpec::http("GET", "https://api.example.com/v1/x"));
@@ -366,8 +366,8 @@ fn trust(c: &mut ExecutionContext, port: u16) {
             detail: None,
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     });
 }
 

@@ -178,8 +178,8 @@ fn with_proxy(mut c: ExecutionContext, proxy: SocketAddr, no_proxy: &str) -> Exe
         no_proxy: no_proxy.into(),
         tls_profile_id: None,
         hbone: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let selection = anvil_domain::settings::ProxySelection::Profile { id: p.id };
     c.proxy_profiles.push(p);
@@ -256,8 +256,8 @@ async fn https_issuer_acquisition_still_uses_configured_trust_and_delivers_a_tok
         min_version: anvil_domain::tls::TlsMinVersion::Tls12,
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     c.settings_layers.push((
         "test".into(),
@@ -293,7 +293,7 @@ fn token(access: &str, refresh: &str, expires_in_secs: i64) -> CachedToken {
     CachedToken {
         access_token: Zeroizing::new(access.into()),
         token_type: "Bearer".into(),
-        expires_at: Some(chrono::Utc::now() + chrono::Duration::seconds(expires_in_secs)),
+        expires_at: Some(anvil_domain::Timestamp::now() + anvil_domain::TimeDelta::seconds(expires_in_secs)),
         refresh_token: Some(Zeroizing::new(refresh.into())),
     }
 }
@@ -910,8 +910,8 @@ mod preparation_order {
             min_version: Default::default(),
             server_name_override: None,
             server_spiffe: Some(ServerSpiffeIdentity { expected_server_spiffe_id, trust_domain: None }),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         }
     }
 

@@ -34,6 +34,7 @@ use crate::redact::Redactor;
 use crate::vars::Resolver;
 use crate::{Engine, ExecutionOutput, http_exec};
 use anvil_diagnostics::facts::MAX_PARSE;
+use anvil_domain::Timestamp;
 use anvil_domain::execution::{FailureKind, Phase, ResponseRecord, TransportFailure};
 use anvil_domain::outcome::{ApplicationState, OutcomeWarning, WarningCode};
 use anvil_domain::request::{Body, KeyValue, McpOperation, McpSpec, Protocol};
@@ -42,7 +43,6 @@ use anvil_transport::recorder::EventCtx;
 use anvil_transport::session::{REDACT_LOOKAHEAD_BYTES, redact_then_cut};
 use anvil_transport::sse::SseParser;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::time::Duration;
@@ -415,7 +415,7 @@ fn close_note(out: &ExecutionOutput) -> String {
     }
 }
 
-fn not_sent(ctx: &ExecutionContext, started_at: DateTime<Utc>, why: &str, field: &str, kind: FailureKind) -> ExecutionOutput {
+fn not_sent(ctx: &ExecutionContext, started_at: Timestamp, why: &str, field: &str, kind: FailureKind) -> ExecutionOutput {
     let resolver = Resolver::new(ctx.var_layers.clone(), ctx.seed);
     record::local_failure(ctx, &resolver, started_at, TransportFailure::new(Phase::Prepare, kind, why).with_field(field))
 }
@@ -597,7 +597,7 @@ fn finish(
 
 /// Run one MCP request (see the module documentation).
 pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
-    let started_at = Utc::now();
+    let started_at = Timestamp::now();
     let Some(spec) = ctx.spec.mcp.as_ref() else {
         let why = format!("{NO_MCP_SETTINGS}; nothing was sent");
         return not_sent(ctx, started_at, &why, "mcp", FailureKind::UnsupportedCombination);

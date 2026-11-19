@@ -44,8 +44,8 @@ fn trusted(ctx: &mut ExecutionContext, host: &str) {
             detail: None,
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     });
 }
 

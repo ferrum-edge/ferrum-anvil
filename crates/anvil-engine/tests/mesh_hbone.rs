@@ -68,8 +68,8 @@ fn tls_profile(name: &str, identity: Option<(&Pem, &Pem)>, spiffe: Option<Server
         min_version: Default::default(),
         server_name_override: None,
         server_spiffe: spiffe,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -108,8 +108,8 @@ fn via_hbone(spec: RequestSpec, endpoint: &str, tls: Option<TlsProfile>, marker:
             baggage: Some(format!("source.principal={}", mesh_pki::CLIENT_SPIFFE_ID)),
             extra_headers: vec![],
         }),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let mut o = fast();
     o.proxy_profile_id = Some(ProxySelection::Profile { id: proxy.id });
