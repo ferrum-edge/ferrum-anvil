@@ -100,8 +100,8 @@ fn sample() -> PortableGraph {
         min_version: Default::default(),
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let mut g = PortableGraph {
         workspaces: vec![ws.clone()],
@@ -372,8 +372,8 @@ fn data_008_imports_never_activate_bypass_or_trust() {
             detail: None,
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     });
     g.requests[0].spec.settings.redirects =
         Some(anvil_domain::settings::RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
@@ -739,7 +739,7 @@ fn with_revision(g: &mut PortableGraph) -> RequestRevision {
     let rev = RequestRevision {
         id: Id::new(),
         request_id: r.meta.id,
-        created_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
         spec_sha256: "0".repeat(64),
         spec: r.spec.clone(),
     };
@@ -969,8 +969,8 @@ fn proxy(workspace_id: Id) -> anvil_domain::tls::ProxyProfile {
         no_proxy: String::new(),
         tls_profile_id: None,
         hbone: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -986,8 +986,8 @@ fn integration(workspace_id: Id) -> anvil_domain::integration::IntegrationProfil
             detail: None,
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -1023,8 +1023,8 @@ fn load_plan(workspace_id: Id, chain: &[Id]) -> anvil_domain::load::LoadPlan {
         "name": "soak",
         "workload": { "model": "iterations", "iterations": 1, "concurrency": 1 },
         "chain": chain,
-        "created_at": chrono::Utc::now(),
-        "updated_at": chrono::Utc::now(),
+        "created_at": anvil_domain::Timestamp::now(),
+        "updated_at": anvil_domain::Timestamp::now(),
     }))
     .unwrap()
 }
@@ -1444,7 +1444,7 @@ fn format_1_vaults_are_refused_and_nothing_of_them_is_restored() {
 fn execution_record(workspace_id: Option<Id>) -> ExecutionRecord {
     use anvil_domain::execution::{DispatchState, PreparedSummary};
     use anvil_domain::outcome::{ApplicationState, AssertionState, ExecutionOutcome, ProtocolStatus, TransportState};
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     let prepared = PreparedSummary {
         protocol: Protocol::Http,
         method: "GET".into(),
@@ -1653,8 +1653,8 @@ fn g01_bundles_never_import_a_gateway_lookup() {
             detail: Some(lookup.clone()),
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     });
     for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some("correct horse battery"))] {
         let (bytes, _) = bundle::write_redacting(&g, &opts(mode, pass), &[]).unwrap();
