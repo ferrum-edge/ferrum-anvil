@@ -588,8 +588,9 @@ fn detail_diff(
 }
 
 /// Three-way comparison of every scope unit: as stored, as generated last
-/// time and as generated now.
-fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>, generated: &HashSet<String>) {
+/// time and as generated now. `made` holds the placeholders the fresh import
+/// made ([`generated_references`]).
+fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>, made: &HashSet<String>) {
     let current_units = scope_units(scope.current);
     let fresh_units = scope_units(scope.fresh);
     let current: BTreeMap<String, String> = current_units.iter().map(|(k, v)| (k.clone(), unit_hash(v))).collect();
@@ -660,7 +661,7 @@ fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>, generated: &HashSet
         // own where the stored one has something else.
         let moves_credentials = (key == "auth" || key.ends_with("/auth")) && {
             let (stored, fresh_refs) = (references(current_values.get(key.as_str())), references(fresh_values.get(key.as_str())));
-            fresh_refs.iter().any(|(path, new)| generated.contains(new) && stored.get(path) != Some(new))
+            fresh_refs.iter().any(|(path, new)| made.contains(new) && stored.get(path) != Some(new))
         };
         if f.is_none() {
             plan.scope_removed.push(change);
