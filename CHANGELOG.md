@@ -71,6 +71,20 @@
 
 ### Security
 
+- Import report text and imported names no longer leak a credential through the free-text
+  redaction's edge cases (#584). Report entries no longer quote source values at all. The redaction
+  that remains for pointer tokens, external references, redaction field names and imported names
+  now:
+  - treats any whitespace (`char::is_whitespace`, vertical tabs and Unicode spaces included) around
+    a separator or after `Bearer`/`Basic`/`Token`/`Digest` as part of the pair;
+  - follows a quoted value past escaped quotes to its real end, or to the end of the text;
+  - keeps a value only when it is exactly plain references, exactly a redaction marker with nothing
+    attached, or a plain word;
+  - counts `==`, `!=`, `:=` and `+=` as separators;
+  - redacts a pointer token that is a bare JWT.
+
+  It stays linear. Auth placeholder names no longer carry any part of a collection, folder or
+  request name, which could repeat a credential URL.
 - RUSTSEC-2026-0543 marks `chrono` unmaintained (all versions, no patched release; not a known
   vulnerability). `deny.toml` ignores it with an exit condition, because chrono is a direct
   dependency of 16 workspace crates and also comes in through `schemars` and `serde_with`.
@@ -231,6 +245,33 @@
 
 ### Changed
 
+- BREAKING: import reports are structured (#584). Messages, required-variable reasons and
+  inactive-setting values are the importer's own words plus the counts and limits it computed. They
+  never quote a source value: no option, header or setting name, media type, body mode, auth type,
+  grant, resource type, template, version, scheme, `$ref`, pattern, constraint, default, location or
+  URL. The entry's pointer locates what it is about, and codes and pointers are unchanged. A
+  callback's inactive-setting value is now a count of its URL expressions. `report.scripts[]` no
+  longer carries the script body (`source`) or the owner's name. It has `owner` (`collection`,
+  `folder`, `request`, `test_suite`), `event` and `language` from a fixed vocabulary (`other`
+  otherwise), `bytes` and `lines`.
+- BREAKING: every credential placeholder an import makes is bound to the literal it replaced (#584).
+  Sensitive header, query, form, body, path and environment values import as `{{secret_<16 hex
+  digits>}}` instead of a name taken from the field (`{{Authorization}}`, `{{api_key}}`, `{{pin}}`,
+  `_2`, …). Postman and Insomnia auth secrets, URL userinfo (every importer) and cURL `-u` /
+  `--oauth2-bearer` import as `{{auth_<16 hex digits>_<field>}}` instead of `{{<owner
+  name>_password}}`, `{{username}}` and `{{password}}`. Quarantined URLs import as `{{url_<16 hex
+  digits>}}` instead of `{{url-needs-review}}`. The digits are the start of HMAC-SHA256 over the
+  kind, the field and the literal, keyed by a key derived from the profile's data key. That key is
+  never stored in workspace files or exports. The same secret in the same field shares one variable
+  across the import and every reimport; a changed secret gets a new variable to fill in. Empty
+  secrets are left empty. `ImportResult::credential_names` lists the names the import made.
+- Reimport keeps every filled credential with the secret it was filled for, whatever the source
+  reordered, inserted, repeated or moved, with or without item ids (#584). A request imported by an
+  earlier build moves to the new names and asks for its credentials again. So does every request
+  after a reimport in another profile, or after a library import with no `credential_key`.
+- BREAKING: importing a source that itself uses a variable or reference named `auth_`, `secret_` or
+  `url_` followed by 16 hex digits now fails with an invalid-document error asking to rename it
+  (#584).
 - New Ferrum gateway profiles and the lab default to Ferrum Edge v0.9.20
   (`ferrum-edge-0.9.20`); existing profiles keep the release they declare.
 - `auth.browser_session_required` fires on a 401 only when every `WWW-Authenticate` challenge it
