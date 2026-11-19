@@ -65,7 +65,7 @@ fn wsse() -> ResolvedAuth {
 }
 
 fn apply(auth: ResolvedAuth, req: &SignableRequest) -> Result<Applied, String> {
-    anvil_auth::apply(&auth, req, chrono::Utc::now()).map_err(|e| e.to_string())
+    anvil_auth::apply(&auth, req, anvil_domain::Timestamp::now()).map_err(|e| e.to_string())
 }
 
 fn multi(parts: Vec<ResolvedAuth>, req: &SignableRequest) -> Result<Applied, String> {

@@ -15,10 +15,10 @@ pub mod jwt_svid;
 pub mod oauth;
 pub mod wsse;
 
+use anvil_domain::Timestamp;
 use anvil_domain::auth::{BodyDigestHeader, HmacAlgorithm, HmacProfile, JwtAlgorithm, JwtClaims, KeyLocation, WssePasswordType};
 use anvil_domain::secret::REDACTED;
 use base64::Engine;
-use chrono::{DateTime, Utc};
 use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -242,7 +242,7 @@ pub fn encode_query_component(s: &str) -> String {
 /// - A set holds at most one HMAC profile and one DPoP profile.
 /// - A cookie API key's name must be an RFC 6265 token and its value
 ///   cookie-octets, so it cannot add or change another cookie.
-pub fn apply(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>) -> Result<Applied, AuthError> {
+pub fn apply(auth: &ResolvedAuth, req: &SignableRequest, now: Timestamp) -> Result<Applied, AuthError> {
     apply_hiding(auth, req, now, &[])
 }
 
@@ -250,7 +250,7 @@ pub fn apply(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>) -> 
 /// that came from a secret: the label and every refusal show [`REDACTED`]
 /// in their place (see [`ResolvedAuth::label_hiding`]). The credential sent
 /// is the same.
-pub fn apply_hiding(auth: &ResolvedAuth, req: &SignableRequest, now: DateTime<Utc>, hidden: &[String]) -> Result<Applied, AuthError> {
+pub fn apply_hiding(auth: &ResolvedAuth, req: &SignableRequest, now: Timestamp, hidden: &[String]) -> Result<Applied, AuthError> {
     let mut steps = Vec::new();
     flatten(auth, &mut steps);
     let hmac = steps.iter().filter(|s| matches!(s, ResolvedAuth::Hmac(_))).count();
@@ -438,13 +438,7 @@ fn with_cookie(req: &SignableRequest, name: &str, value: &str, hidden: &[String]
     Ok(pairs.join("; "))
 }
 
-fn apply_step(
-    auth: &ResolvedAuth,
-    req: &SignableRequest,
-    now: DateTime<Utc>,
-    out: &mut Applied,
-    hidden: &[String],
-) -> Result<(), AuthError> {
+fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: Timestamp, out: &mut Applied, hidden: &[String]) -> Result<(), AuthError> {
     match auth {
         // `apply` flattens a multi-auth set into its profiles.
         ResolvedAuth::None | ResolvedAuth::Multi(_) => {}
@@ -584,12 +578,12 @@ mod tests {
             headers: vec![],
             body: vec![],
         };
-        let applied = apply_hiding(&basic, &req, Utc::now(), &hidden).unwrap();
+        let applied = apply_hiding(&basic, &req, Timestamp::now(), &hidden).unwrap();
         assert_eq!(applied.label, format!("basic(user {REDACTED})"));
-        assert_eq!(applied.set_headers, apply(&basic, &req, Utc::now()).unwrap().set_headers);
+        assert_eq!(applied.set_headers, apply(&basic, &req, Timestamp::now()).unwrap().set_headers);
         // Two profiles set the header named by the hidden key name.
         let multi = ResolvedAuth::Multi(vec![key("bo"), key("bo")]);
-        let AuthError::Invalid(message) = apply_hiding(&multi, &req, Utc::now(), &hidden).unwrap_err() else { panic!("not refused") };
+        let AuthError::Invalid(message) = apply_hiding(&multi, &req, Timestamp::now(), &hidden).unwrap_err() else { panic!("not refused") };
         assert!(message.contains(&format!("set the {REDACTED} header (api_key(Header {REDACTED})")), "{message}");
         assert!(!message.contains("bo header") && !message.contains(" bo)"), "{message}");
     }
@@ -615,7 +609,7 @@ mod tests {
             headers: vec![],
             body: envelope.as_bytes().to_vec(),
         };
-        let applied = apply(&auth, &req, Utc::now()).unwrap();
+        let applied = apply(&auth, &req, Timestamp::now()).unwrap();
         let body = String::from_utf8(applied.body.clone().expect("a WS-Security body")).unwrap();
         // What is sent: the trimmed assertion and the escaped password.
         let escaped = wsse::xml_escape(password);
@@ -640,7 +634,7 @@ mod tests {
             timestamp_ttl_secs: Some(300),
             saml_assertion: None,
         };
-        let applied = apply(&auth, &req, Utc::now()).unwrap();
+        let applied = apply(&auth, &req, Timestamp::now()).unwrap();
         let body = String::from_utf8(applied.body.expect("a WS-Security body")).unwrap();
         let secrets = applied.secrets;
         assert_eq!(secrets.len(), 3, "the password, the digest and the nonce are registered, nothing more");

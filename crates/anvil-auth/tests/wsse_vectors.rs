@@ -3,9 +3,9 @@
 //! C14N vector there is not exercised: Anvil does not produce XML signatures.
 
 use anvil_auth::wsse::{password_digest, security_header};
+use anvil_domain::Timestamp;
 use anvil_domain::auth::WssePasswordType;
 use base64::Engine;
-use chrono::{DateTime, Utc};
 
 fn vectors() -> Vec<serde_json::Value> {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/auth-vectors/soap-usernametoken.json");
@@ -73,7 +73,7 @@ fn generated_security_header_matches_the_whole_second_vector() {
         .find(|v| v["inputs"]["created"] == "2026-01-01T00:00:00Z" && v["inputs"]["nonce_base64"] == "dGVzdC1ub25jZS0xMjM0NQ==");
     let vec = vec.expect("PasswordDigest V2");
     let i = &vec["inputs"];
-    let now: DateTime<Utc> = s(i, "created").parse().unwrap();
+    let now: Timestamp = s(i, "created").parse().unwrap();
     let nonce = hex::decode(s(i, "nonce_bytes_hex")).unwrap();
     let header = security_header(s(i, "username"), s(i, "password"), WssePasswordType::PasswordDigest, None, None, now, &nonce);
     assert!(

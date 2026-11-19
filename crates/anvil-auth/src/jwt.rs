@@ -3,9 +3,9 @@
 //! against the local clock and says explicitly that the signature is unverified.
 
 use crate::AuthError;
+use anvil_domain::Timestamp;
 use anvil_domain::auth::{JwtAlgorithm, JwtClaims};
 use base64::Engine;
-use chrono::{DateTime, Utc};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 
@@ -25,7 +25,7 @@ pub fn sign(
     claims: &JwtClaims,
     extra: &serde_json::Value,
     kid: Option<&str>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<String, AuthError> {
     let mut body = serde_json::Map::new();
     if let Some(obj) = extra.as_object() {
@@ -35,7 +35,7 @@ pub fn sign(
     } else if !extra.is_null() {
         return Err(AuthError::Invalid("additional JWT claims must be a JSON object".into()));
     }
-    let ts = now.timestamp();
+    let ts = now.unix_seconds();
     body.insert("iat".into(), ts.into());
     if let Some(v) = &claims.iss {
         body.insert("iss".into(), v.clone().into());
@@ -95,7 +95,7 @@ pub struct Inspection {
 }
 
 /// Decode a JWT for display. Never treats the token as verified.
-pub fn inspect(token: &str, now: DateTime<Utc>, leeway_secs: i64) -> Result<Inspection, AuthError> {
+pub fn inspect(token: &str, now: Timestamp, leeway_secs: i64) -> Result<Inspection, AuthError> {
     let parts: Vec<&str> = token.trim().split('.').collect();
     if parts.len() != 3 {
         return Err(AuthError::Invalid("not a compact JWS (expected three dot-separated parts)".into()));
@@ -108,17 +108,20 @@ pub fn inspect(token: &str, now: DateTime<Utc>, leeway_secs: i64) -> Result<Insp
     };
     let header = dec(parts[0])?;
     let claims = dec(parts[1])?;
-    let ts = now.timestamp();
+    let ts = now.unix_seconds();
     let exp = claims.get("exp").and_then(|v| v.as_i64());
     let nbf = claims.get("nbf").and_then(|v| v.as_i64());
     let mut notes = vec!["Decoded only: the signature has not been verified.".to_string()];
     let time_status = if let Some(n) = nbf.filter(|n| ts + leeway_secs < *n) {
-        notes
-            .push(format!("Not valid until {} (local clock).", DateTime::from_timestamp(n, 0).map(|d| d.to_rfc3339()).unwrap_or_default()));
+        notes.push(format!(
+            "Not valid until {} (local clock).",
+            Timestamp::from_unix_seconds(n).map(|d| d.to_rfc3339()).unwrap_or_default()
+        ));
         TimeStatus::NotYetValid
     } else if let Some(e) = exp {
         if ts - leeway_secs >= e {
-            notes.push(format!("Expired at {} (local clock).", DateTime::from_timestamp(e, 0).map(|d| d.to_rfc3339()).unwrap_or_default()));
+            notes
+                .push(format!("Expired at {} (local clock).", Timestamp::from_unix_seconds(e).map(|d| d.to_rfc3339()).unwrap_or_default()));
             TimeStatus::Expired
         } else {
             TimeStatus::Valid
@@ -140,13 +143,13 @@ mod tests {
 
     #[test]
     fn hs256_sign_then_inspect_times() {
-        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let now = Timestamp::from_unix_seconds(1_800_000_000).unwrap();
         let claims = JwtClaims { sub: Some("bob".into()), expires_in_secs: Some(60), ..Default::default() };
         let t = sign(JwtAlgorithm::HS256, "bob-jwt-secret-key-12345678901234", &claims, &serde_json::Value::Null, None, now).unwrap();
         let i = inspect(&t, now, 0).unwrap();
         assert_eq!(i.time_status, TimeStatus::Valid);
         assert!(!i.signature_verified);
-        let later = DateTime::from_timestamp(1_800_000_061, 0).unwrap();
+        let later = Timestamp::from_unix_seconds(1_800_000_061).unwrap();
         assert_eq!(inspect(&t, later, 0).unwrap().time_status, TimeStatus::Expired);
         // Independent verification with the same secret.
         let mut v = jsonwebtoken::Validation::new(Algorithm::HS256);
@@ -158,7 +161,7 @@ mod tests {
 
     #[test]
     fn time_offsets_out_of_range_are_refused() {
-        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let now = Timestamp::from_unix_seconds(1_800_000_000).unwrap();
         // The offsets are refused before the key is read.
         let key = "tok-SENSITIVE-jwt-hmac-test-key";
         let exp = JwtClaims { expires_in_secs: Some(i64::MAX), ..Default::default() };
@@ -172,7 +175,7 @@ mod tests {
     #[test]
     fn unsigned_token_is_flagged() {
         let t = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.";
-        let i = inspect(t, Utc::now(), 0).unwrap();
+        let i = inspect(t, Timestamp::now(), 0).unwrap();
         assert!(i.notes.iter().any(|n| n.contains("unsigned")));
     }
 }

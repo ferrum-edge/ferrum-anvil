@@ -5,8 +5,8 @@
 //! A new proof is generated for every send (proofs are single-use).
 
 use crate::AuthError;
+use anvil_domain::Timestamp;
 use base64::Engine;
-use chrono::{DateTime, Utc};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use sha2::{Digest, Sha256};
 
@@ -81,7 +81,7 @@ pub fn proof(
     htu: &str,
     access_token: Option<&str>,
     nonce: Option<&str>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<Proof, AuthError> {
     let (x, y) = public_jwk(private_key_pem)?;
     let jkt = thumbprint(&x, &y);
@@ -89,7 +89,7 @@ pub fn proof(
     let mut claims = serde_json::json!({
         "htm": method.to_ascii_uppercase(),
         "htu": htu,
-        "iat": now.timestamp(),
+        "iat": now.unix_seconds(),
         "jti": jti,
     });
     if let Some(t) = access_token {
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn proofs_are_fresh_and_bound() {
         let pem = generate_key_pem().unwrap();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let a = proof(&pem, "post", "https://api.anvil.test/orders", Some("tok"), None, now).unwrap();
         let b = proof(&pem, "post", "https://api.anvil.test/orders", Some("tok"), None, now).unwrap();
         assert_ne!(a.jti, b.jti, "each send needs a new jti");

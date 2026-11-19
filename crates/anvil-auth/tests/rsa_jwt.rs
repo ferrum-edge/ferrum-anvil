@@ -20,8 +20,8 @@
 //! -verify` against that key.
 
 use anvil_auth::{jwt, jwt_svid};
+use anvil_domain::Timestamp;
 use anvil_domain::auth::{JwtAlgorithm, JwtClaims};
-use chrono::DateTime;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde_json::{Value, json};
 
@@ -50,7 +50,7 @@ fn claims() -> JwtClaims {
 
 #[test]
 fn rs256_signs_with_pkcs1_and_pkcs8_keys_and_verifies_against_the_rsa_jwk() {
-    let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+    let now = Timestamp::from_unix_seconds(1_800_000_000).unwrap();
     let jwks = bundle(json!([jwk(RSA_2048_JWK, "rsa-2048", "RS256")]));
     let public: Value = serde_json::from_str(RSA_2048_JWK).unwrap();
     let decoding = DecodingKey::from_rsa_components(public["n"].as_str().unwrap(), public["e"].as_str().unwrap()).unwrap();
@@ -84,7 +84,7 @@ fn ps256_jwt_svid_verifies_against_the_rsa_jwk_and_another_key_does_not() {
 
 #[test]
 fn rsa_keys_below_2048_bits_neither_sign_nor_verify() {
-    let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+    let now = Timestamp::from_unix_seconds(1_800_000_000).unwrap();
     // Signing: the PEM parses, but AWS-LC refuses the key when signing.
     let err = jwt::sign(JwtAlgorithm::RS256, RSA_1024_PKCS8, &claims(), &Value::Null, None, now).unwrap_err();
     assert!(err.to_string().contains("JWT signing failed"), "unexpected error: {err}");

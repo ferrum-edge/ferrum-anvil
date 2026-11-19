@@ -8,9 +8,9 @@
 
 use crate::digest::{self, DigestAlg};
 use crate::{AuthError, HmacParams, SignableRequest};
+use anvil_domain::Timestamp;
 use anvil_domain::auth::{HmacAlgorithm, HmacProfile};
 use base64::Engine;
-use chrono::{DateTime, Utc};
 use hmac::{KeyInit, Mac};
 
 pub struct Signed {
@@ -87,7 +87,7 @@ pub fn signing_string(
 }
 
 /// Sign one send. `now` supplies the Date header.
-pub fn sign(p: &HmacParams, req: &SignableRequest, now: DateTime<Utc>) -> Result<Signed, AuthError> {
+pub fn sign(p: &HmacParams, req: &SignableRequest, now: Timestamp) -> Result<Signed, AuthError> {
     sign_with(p, req, &httpdate::fmt_http_date(now.into()), fresh_nonce())
 }
 
