@@ -10,8 +10,8 @@ use crate::job::WorkerJob;
 use crate::report::{self, RunMeta};
 use crate::worker::{MAX_MESSAGE_BYTES, WorkerMessage};
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::load::{LoadPlan, LoadReport, LoadUnitKind, RunCompletion, TimeBucket};
-use chrono::Utc;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -177,7 +177,7 @@ fn crash_report(
         plan: plan.clone(),
         request_revisions: vec![],
         dataset_sha256: None,
-        started_at: Utc::now(),
+        started_at: Timestamp::now(),
         unit,
     });
     let (snap, at) = match last {
@@ -192,7 +192,7 @@ fn crash_report(
         unit = crate::protocol::semantics(meta.unit, plan.connection_mode).unit_singular
     )];
     notes.push("This is an incomplete report: do not read it as a full-duration result.".into());
-    report::assemble(&meta, snap, timeline, RunCompletion::WorkerCrashed, Utc::now(), notes)
+    report::assemble(&meta, snap, timeline, RunCompletion::WorkerCrashed, Timestamp::now(), notes)
 }
 
 async fn supervise(

@@ -5,6 +5,7 @@
 //! the server actually received) is used to verify conditions were reached.
 
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::assertions::{Assertion, AssertionKind, Extraction, ExtractionSource};
 use anvil_domain::auth::{AuthConfig, HmacConfig, KeyLocation, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::load::*;
@@ -22,7 +23,6 @@ use anvil_load::worker::WorkerMessage;
 use anvil_load::{Dataset, DatasetFormat, LoadController, LoadJob, LoadRun, RunOptions, WorkerJob};
 use anvil_transport::recorder::EventCtx;
 use base64::Engine as _;
-use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,8 +59,8 @@ fn plan(workload: Workload, chain: Vec<Id>) -> LoadPlan {
         abort: None,
         seed: 1,
         trusted: false,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 
@@ -358,8 +358,8 @@ async fn load_008_load_sends_the_same_request_as_manual_send() {
         min_version: Default::default(),
         server_name_override: None,
         server_spiffe: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let mut trusted = strict.clone();
     trusted.settings_layers.push(("workspace".into(), SettingsOverrides { tls_profile_id: Some(profile.id), ..Default::default() }));

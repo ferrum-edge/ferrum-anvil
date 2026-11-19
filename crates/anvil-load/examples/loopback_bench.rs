@@ -11,11 +11,11 @@
 //! ```
 
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::load::*;
 use anvil_domain::request::RequestSpec;
 use anvil_engine::ExecutionContext;
 use anvil_load::{LoadController, LoadJob, RunOptions, WorkerJob};
-use chrono::Utc;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -37,8 +37,8 @@ fn plan(workload: Workload, id: Id, mode: ConnectionMode) -> LoadPlan {
         abort: None,
         seed: 1,
         trusted: true,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 

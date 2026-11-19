@@ -7,6 +7,7 @@
 //! reached the wire.
 
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::auth::{AuthConfig, WsseConfig, WssePasswordType};
 use anvil_domain::load::*;
 use anvil_domain::request::{Body, RequestSpec, SoapVersion};
@@ -15,7 +16,6 @@ use anvil_engine::ExecutionContext;
 use anvil_load::report::{check_balance, check_request_balance};
 use anvil_load::{LoadJob, LoadRun, RunOptions};
 use base64::Engine as _;
-use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ const PASSWORD: &str = "fixture-wsse-password";
 const ENVELOPE: &str = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><m:Ping xmlns:m="urn:anvil:lab">1</m:Ping></soap:Body></soap:Envelope>"#;
 
 /// (receive time, body) for every request.
-type Captured = Arc<Mutex<Vec<(DateTime<Utc>, String)>>>;
+type Captured = Arc<Mutex<Vec<(Timestamp, String)>>>;
 
 async fn capture_server() -> (String, Captured) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -63,7 +63,7 @@ async fn capture_server() -> (String, Captured) {
                         }
                     }
                     let body = String::from_utf8_lossy(&buf[head_end..head_end + len]).into_owned();
-                    seen.lock().push((Utc::now(), body));
+                    seen.lock().push((Timestamp::now(), body));
                     buf.drain(..head_end + len);
                     let reply = b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n\r\nok";
                     if sock.write_all(reply).await.is_err() {
@@ -120,8 +120,8 @@ async fn auth_029_load_sends_fresh_wsse_nonce_and_created_per_iteration() {
         abort: None,
         seed: 7,
         trusted: false,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let opts =
         RunOptions { acknowledged: true, graceful_stop_ms: 3_000, cancel_drain_ms: 1_000, progress_interval_ms: 250, ..Default::default() };
@@ -151,8 +151,8 @@ async fn auth_029_load_sends_fresh_wsse_nonce_and_created_per_iteration() {
         );
         let ts_created = between(body, "<wsu:Timestamp", "</wsu:Created>").and_then(|t| t.rsplit('>').next()).expect("timestamp");
         assert_eq!(ts_created, created, "Timestamp and UsernameToken share the send time");
-        let c: DateTime<Utc> = created.parse().expect("RFC 3339 Created");
-        let age = (*received_at - c).num_milliseconds();
+        let c: Timestamp = created.parse().expect("RFC 3339 Created");
+        let age = (*received_at - c).whole_milliseconds();
         assert!((-1_000..=2_000).contains(&age), "Created is taken at send time, not at preparation (age {age} ms)");
         nonces.insert(nonce_b64.to_string());
         createds.insert(created.to_string());

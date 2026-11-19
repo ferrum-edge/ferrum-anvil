@@ -5,8 +5,8 @@
 use crate::LoadError;
 use crate::executor::MetricsSnapshot;
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::load::*;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -32,7 +32,7 @@ pub struct RunMeta {
     pub plan: LoadPlan,
     pub request_revisions: Vec<Id>,
     pub dataset_sha256: Option<String>,
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
     /// The plan's unit kind (known before traffic starts).
     #[serde(default)]
     pub unit: LoadUnitKind,
@@ -106,7 +106,7 @@ pub fn assemble(
     snap: MetricsSnapshot,
     timeline: Vec<TimeBucket>,
     completion: RunCompletion,
-    finished_at: DateTime<Utc>,
+    finished_at: Timestamp,
     extra_notes: Vec<String>,
 ) -> LoadReport {
     let plan = &meta.plan;
@@ -827,7 +827,7 @@ pub(crate) mod tests {
 
     pub fn sample_report() -> LoadReport {
         let (meta, snap, timeline) = sample_parts();
-        assemble(&meta, snap, timeline, RunCompletion::Completed, Utc::now(), vec![])
+        assemble(&meta, snap, timeline, RunCompletion::Completed, Timestamp::now(), vec![])
     }
 
     pub fn sample_parts() -> (RunMeta, MetricsSnapshot, Vec<TimeBucket>) {
@@ -848,8 +848,8 @@ pub(crate) mod tests {
             abort: None,
             seed: 42,
             trusted: false,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         };
         let meta = RunMeta {
             run_id: Id::new(),
@@ -858,7 +858,7 @@ pub(crate) mod tests {
             plan,
             request_revisions: vec![Id::new()],
             dataset_sha256: Some("ab".repeat(32)),
-            started_at: Utc::now(),
+            started_at: Timestamp::now(),
             unit: LoadUnitKind::HttpRequest,
         };
         let mut m = crate::metrics::Metrics::new();
@@ -930,14 +930,14 @@ pub(crate) mod tests {
             count: 7,
             examples: vec![],
         });
-        let r = assemble(&meta, snap, timeline.clone(), RunCompletion::Completed, Utc::now(), vec![]);
+        let r = assemble(&meta, snap, timeline.clone(), RunCompletion::Completed, Timestamp::now(), vec![]);
         assert!(r.generator.notes.iter().any(|n| n.starts_with("7 send(s) failed because this machine ran out of local ports")));
 
         let (mut meta, mut snap, _) = sample_parts();
         meta.plan.warmup_secs = 1;
         snap.counts = LoadCounts::default();
         snap.warmup_iterations_excluded = 30;
-        let r = assemble(&meta, snap, vec![], RunCompletion::Completed, Utc::now(), vec![]);
+        let r = assemble(&meta, snap, vec![], RunCompletion::Completed, Timestamp::now(), vec![]);
         assert!(r.notes.iter().any(|n| n.starts_with("Nothing was measured: all 30 iteration(s)")), "{:?}", r.notes);
     }
 
@@ -947,11 +947,11 @@ pub(crate) mod tests {
         snap.counts.dropped = 0;
         snap.counts.scheduled = snap.counts.started;
         snap.achieved_rate_per_sec = 10.0;
-        let ok = assemble(&meta, snap.clone(), timeline.clone(), RunCompletion::Completed, Utc::now(), vec![]);
+        let ok = assemble(&meta, snap.clone(), timeline.clone(), RunCompletion::Completed, Timestamp::now(), vec![]);
         assert!(!ok.generator.target_not_achieved);
         snap.generator.p99_schedule_lag_us = 221_000;
         snap.generator.max_schedule_lag_us = 268_000;
-        let late = assemble(&meta, snap, timeline, RunCompletion::Completed, Utc::now(), vec![]);
+        let late = assemble(&meta, snap, timeline, RunCompletion::Completed, Timestamp::now(), vec![]);
         assert!(late.generator.target_not_achieved);
         assert!(
             late.generator.notes.iter().any(|n| n.contains("arrivals started late (p99 start lag 221.0 ms")),
