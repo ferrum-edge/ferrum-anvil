@@ -7,6 +7,7 @@
 //! are percent-encoded here (the URL is used as written), with the style's
 //! own delimiters (`.`, `;`, `=`, `,`) left literal.
 
+use crate::report::Message;
 use crate::util::scalar_text;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::Value;
@@ -68,7 +69,7 @@ fn compact(v: &Value) -> String {
 
 /// Serialize a path parameter value. Returns the text to substitute for
 /// `{name}` and an optional warning.
-pub(crate) fn path_value(name: &str, style: &str, explode: bool, v: &Value) -> (String, Option<String>) {
+pub(crate) fn path_value(name: &str, style: &str, explode: bool, v: &Value) -> (String, Option<Message>) {
     let join_obj = |pairs: Vec<(String, String)>, kv: &str, sep: &str| -> String {
         pairs
             .iter()
@@ -103,15 +104,15 @@ pub(crate) fn path_value(name: &str, style: &str, explode: bool, v: &Value) -> (
             };
             (s, None)
         }
-        other => {
+        _ => {
             let (s, _) = path_value(name, "simple", explode, v);
-            (s, Some(format!("style '{other}' is not valid for path parameters; 'simple' used")))
+            (s, Some(Message::new("the style is not valid for path parameters; 'simple' used")))
         }
     }
 }
 
 /// Serialize a query (or cookie) parameter into decoded name/value pairs.
-pub(crate) fn query_pairs(name: &str, style: &str, explode: bool, v: &Value) -> (Vec<(String, String)>, Option<String>) {
+pub(crate) fn query_pairs(name: &str, style: &str, explode: bool, v: &Value) -> (Vec<(String, String)>, Option<Message>) {
     let arr_join = |sep: &str| prims(v).join(sep);
     match (style, v) {
         ("form" | "cookie", Value::Array(_)) if explode => (prims(v).into_iter().map(|x| (name.to_string(), x)).collect(), None),
@@ -151,16 +152,25 @@ pub(crate) fn query_pairs(name: &str, style: &str, explode: bool, v: &Value) -> 
                 }
             }
             let warn = nested
-                .then(|| "deepObject serialization of nested objects/arrays is undefined by OpenAPI; bracket nesting used".to_string());
+                .then(|| Message::new("deepObject serialization of nested objects/arrays is undefined by OpenAPI; bracket nesting used"));
             (out, warn)
         }
-        (s @ ("spaceDelimited" | "pipeDelimited" | "deepObject"), other) => (
-            vec![(name.to_string(), compact(other))],
-            Some(format!("style '{s}' does not apply to a {} value; 'form' used", crate::util::json_type(other))),
-        ),
-        (other, val) => {
+        (s @ ("spaceDelimited" | "pipeDelimited" | "deepObject"), other) => {
+            let s = match s {
+                "spaceDelimited" => "spaceDelimited",
+                "pipeDelimited" => "pipeDelimited",
+                _ => "deepObject",
+            };
+            let message = Message::new("style '")
+                .text(s)
+                .text("' does not apply to a ")
+                .text(crate::util::json_type(other))
+                .text(" value; 'form' used");
+            (vec![(name.to_string(), compact(other))], Some(message))
+        }
+        (_, val) => {
             let (p, _) = query_pairs(name, "form", explode, val);
-            (p, Some(format!("style '{other}' is not valid for query parameters; 'form' used")))
+            (p, Some(Message::new("the style is not valid for query parameters; 'form' used")))
         }
     }
 }

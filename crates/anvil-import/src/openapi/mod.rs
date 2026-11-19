@@ -17,7 +17,8 @@ mod schema;
 mod security;
 
 use crate::builder::Builder;
-use crate::util::{clip, fnv1a64, is_credential_name, ptr, sanitize_var, scalar_text, str_of};
+use crate::report::Message;
+use crate::util::{fnv1a64, is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, GroupBy, ImportError, SampleMode};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
@@ -82,11 +83,11 @@ fn is_32(d: Dialect) -> bool {
     d == Dialect::OpenApi32
 }
 
-fn only_32(ctx: &Ctx, b: &mut Builder, at: &str, what: &str) {
+fn only_32(ctx: &Ctx, b: &mut Builder, at: &str, what: &'static str) {
     b.report.warn(
         "openapi32_construct",
         at,
-        format!("{what} is an OpenAPI 3.2 construct; it is ignored in a {} document", ctx.dialect.label()),
+        Message::new(what).text(" is an OpenAPI 3.2 construct; it is ignored in a ").text(ctx.dialect.label()).text(" document"),
     );
 }
 
@@ -143,14 +144,14 @@ pub(crate) fn import(root: &Value, dialect: Dialect, b: &mut Builder) -> Result<
                     continue;
                 }
                 if !path.starts_with('/') {
-                    b.report.warn("path_not_absolute", &pptr, format!("path '{path}' does not start with '/'; used as written"));
+                    b.report.warn("path_not_absolute", &pptr, "the path does not start with '/'; used as written");
                 }
                 import_path_item(&ctx, b, path, item, &pptr, global_sec.as_ref(), &tags, &mut folder_order);
             }
         }
         Some(_) => b.report.warn("invalid_paths", "/paths", "`paths` is not an object; no operations imported"),
         None if matches!(dialect, Dialect::Swagger20 | Dialect::OpenApi30) => {
-            b.report.warn("missing_paths", "/paths", format!("{} requires `paths`; no operations imported", dialect.label()))
+            b.report.warn("missing_paths", "/paths", Message::new(dialect.label()).text(" requires `paths`; no operations imported"))
         }
         None => {}
     }
@@ -175,13 +176,11 @@ pub(crate) fn import(root: &Value, dialect: Dialect, b: &mut Builder) -> Result<
 
 fn dialect_checks(ctx: &Ctx, b: &mut Builder) {
     let root = ctx.root;
-    if let Some(d) = str_of(root, "jsonSchemaDialect")
-        && !d.starts_with("https://spec.openapis.org/oas/3.")
-    {
+    if str_of(root, "jsonSchemaDialect").is_some_and(|d| !d.starts_with("https://spec.openapis.org/oas/3.")) {
         b.report.warn(
             "json_schema_dialect",
             "/jsonSchemaDialect",
-            format!("custom JSON Schema dialect '{d}' is not implemented; schemas are interpreted with OpenAPI base semantics"),
+            "a custom JSON Schema dialect is not implemented; schemas are interpreted with OpenAPI base semantics",
         );
     }
     if root.get("$self").is_some() {
@@ -266,7 +265,11 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
             b.report.warn(
                 "server_index_out_of_range",
                 "/servers",
-                format!("server_index {} is out of range ({} servers); the first server is active", b.opts.server_index, ids.len()),
+                Message::new("server_index ")
+                    .num(b.opts.server_index)
+                    .text(" is out of range (")
+                    .num(ids.len())
+                    .text(" servers); the first server is active"),
             );
             0
         };
@@ -319,11 +322,7 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
             "server URL is relative to the document location; set scheme://host of the API",
             &ptr(sptr, "url"),
         );
-        b.report.warn(
-            "relative_server_url",
-            &ptr(sptr, "url"),
-            format!("server URL '{}' is relative; it is prefixed with {{{{origin}}}}", clip(&crate::report::redact_for_report(raw), 256)),
-        );
+        b.report.warn("relative_server_url", &ptr(sptr, "url"), "the server URL is relative; it is prefixed with {{origin}}");
         url = origin.trim_end_matches('/').to_string();
     }
     (url, vars)
@@ -336,8 +335,7 @@ fn server_variable(b: &mut Builder, decl: &Map<String, Value>, name: &str, sptr:
     let vptr = ptr(&ptr(sptr, "variables"), name);
     let d = decl.get(name);
     if d.is_none() {
-        let msg = format!("server URL uses '{{{}}}' but does not declare it", clip(name, 256));
-        b.report.warn("undeclared_server_variable", sptr, msg);
+        b.report.warn("undeclared_server_variable", sptr, "the server URL uses a variable it does not declare");
     }
     let def = d.and_then(|d| d.get("default")).map(scalar_text);
     let def = def.filter(|t| b.charge_text(&vptr, t.len()));
@@ -356,8 +354,7 @@ fn server_variable(b: &mut Builder, decl: &Map<String, Value>, name: &str, sptr:
             }
         }
         if found == Some(false) {
-            let msg = format!("default '{}' is not one of the server variable's enum values", clip(dv, 256));
-            b.report.warn("contradictory_schema", &vptr, msg);
+            b.report.warn("contradictory_schema", &vptr, "the default is not one of the server variable's enum values");
         }
     }
     if inline && let Some(dv) = def {
@@ -434,7 +431,7 @@ impl TagIndex {
         let parent = match self.parent.get(tag) {
             Some(p) if depth < 16 && p != tag => Some(self.folder(b, p, order, depth + 1)),
             Some(_) => {
-                b.report.warn("tag_parent_cycle", "/tags", format!("tag '{tag}' has a cyclic or too deep `parent` chain"));
+                b.report.warn("tag_parent_cycle", "/tags", "a tag has a cyclic or too deep `parent` chain");
                 None
             }
             None => None,
@@ -501,11 +498,11 @@ fn import_path_item(
                 let upper = m.to_ascii_uppercase();
                 let aptr = ptr(&abase, m);
                 if !upper.bytes().all(|c| c.is_ascii_alphabetic() || c == b'-' || c == b'_') {
-                    b.report.warn("invalid_method", &aptr, format!("'{m}' is not a valid HTTP method token; skipped"));
+                    b.report.warn("invalid_method", &aptr, "this is not a valid HTTP method token; skipped");
                     continue;
                 }
                 if METHODS.contains(&m.to_ascii_lowercase().as_str()) || upper == "QUERY" {
-                    b.report.warn("invalid_method", &aptr, format!("'{m}' must use its fixed Path Item field; skipped"));
+                    b.report.warn("invalid_method", &aptr, "this method must use its fixed Path Item field; skipped");
                     continue;
                 }
                 ops.push((upper, op, aptr));
@@ -652,14 +649,14 @@ fn process_params(ctx: &Ctx, sg: &mut SampleGen, params: &[(Value, String)], bla
             }
         }
         let Some(loc) = Location::parse(raw_loc) else {
-            sg.report.warn("invalid_parameter_location", pp, format!("parameter location '{raw_loc}' is not valid; parameter skipped"));
+            sg.report.warn("invalid_parameter_location", pp, "the parameter location is not valid; parameter skipped");
             continue;
         };
         if loc == Location::QueryString && !is_32(ctx.dialect) {
             sg.report.warn(
                 "openapi32_construct",
                 pp,
-                format!("`in: querystring` is an OpenAPI 3.2 construct; ignored in a {} document", ctx.dialect.label()),
+                Message::new("`in: querystring` is an OpenAPI 3.2 construct; ignored in a ").text(ctx.dialect.label()).text(" document"),
             );
             continue;
         }
@@ -694,18 +691,28 @@ fn process_params(ctx: &Ctx, sg: &mut SampleGen, params: &[(Value, String)], bla
         }
         let credential = is_credential_name(&name) && loc != Location::Path;
         // Header names the OpenAPI spec says to ignore.
-        if loc == Location::Header && ["accept", "content-type", "authorization"].contains(&name.to_ascii_lowercase().as_str()) {
+        let ignored = match name.to_ascii_lowercase().as_str() {
+            "accept" => Some("Accept"),
+            "content-type" => Some("Content-Type"),
+            "authorization" => Some("Authorization"),
+            _ => None,
+        };
+        if loc == Location::Header
+            && let Some(header) = ignored
+        {
             sg.report.warn(
                 "ignored_header_parameter",
                 pp,
-                format!("header parameter '{name}' is ignored per the OpenAPI specification (use media types / security schemes)"),
+                Message::new("header parameter '")
+                    .text(header)
+                    .text("' is ignored per the OpenAPI specification (use media types / security schemes)"),
             );
             continue;
         }
 
         let value = if credential {
             let v = sanitize_var(&name);
-            sg.report.require_var(&v, true, &format!("credential-like {raw_loc} parameter '{name}'"), pp);
+            sg.report.require_var(&v, true, "credential-like parameter", pp);
             Some(Value::String(format!("{{{{{v}}}}}")))
         } else if sg.mode == SampleMode::Blank {
             None
@@ -804,7 +811,7 @@ fn fill_path(path: &str, values: &HashMap<String, String>, b: &mut Builder, optr
         match values.get(name) {
             Some(v) => out.push_str(v),
             None => {
-                b.report.warn("undeclared_path_parameter", optr, format!("path template '{{{name}}}' has no parameter definition"));
+                b.report.warn("undeclared_path_parameter", optr, "a path template variable has no parameter definition");
                 let v = sanitize_var(name);
                 blank_vars.push((v.clone(), optr.to_string()));
                 out.push_str(&format!("{{{{{v}}}}}"));
@@ -815,8 +822,11 @@ fn fill_path(path: &str, values: &HashMap<String, String>, b: &mut Builder, optr
     let mut unused: Vec<&String> = values.keys().filter(|k| !used.contains(k)).collect();
     unused.sort();
     if !unused.is_empty() {
-        let names = unused.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(", ");
-        b.report.warn("unused_path_parameter", optr, format!("path parameter(s) {names} do not appear in the path template"));
+        b.report.warn(
+            "unused_path_parameter",
+            optr,
+            Message::new("").num(unused.len()).text(" path parameter(s) do not appear in the path template"),
+        );
     }
     out
 }
@@ -912,11 +922,12 @@ fn import_operation(
     // ---- callbacks (never registered) ----
     if let Some(Value::Object(cbs)) = op.get("callbacks") {
         for (name, cb) in cbs {
-            let exprs = cb.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default();
+            // The callback URL expressions are counted, not quoted.
+            let exprs = cb.as_object().map_or(0, Map::len);
             b.report.inactive(
                 &ptr(&ptr(optr, "callbacks"), name),
                 "callback",
-                &exprs,
+                Message::new("").num(exprs).text(" callback URL expression(s)"),
                 "callback URLs are server-initiated; they are represented in the report only and never registered or called",
             );
         }
@@ -1011,11 +1022,12 @@ fn request_body(ctx: &Ctx, sg: &mut SampleGen, op: &Value, optr: &str, pout: &Pa
     let keys: Vec<&str> = content.keys().map(String::as_str).collect();
     let Some(i) = body::choose_media(&keys) else { return none };
     if keys.len() > 1 {
-        let others: Vec<&str> = keys.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, k)| *k).collect();
         sg.report.warn(
             "alternative_media_types",
             &ptr(&rptr, "content"),
-            format!("request body also accepts [{}]; only '{}' was generated", others.join(", "), keys[i]),
+            Message::new("the request body also accepts ")
+                .num(keys.len() - 1)
+                .text(" other media type(s); only the preferred one was generated"),
         );
     }
     let mt = keys[i];

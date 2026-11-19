@@ -24,7 +24,7 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
 |---|---|
 | No network or file I/O during import | The crate has no I/O code paths. External `$ref`s, `wsdl:import`, `xsd:import`/`include`/`redefine` with `schemaLocation`, `externalValue` examples, OpenID Connect discovery URLs, `oauth2MetadataUrl`, Postman/Insomnia/cURL file references are listed in `report.external_refs` with every location that uses them and `requires_approval: true`. Resolving one is a separate, explicit, per-reference user action outside this crate. |
 | Safe XML | WSDL is parsed with `roxmltree` with DTDs refused (`allow_dtd: false`): internal/external entity declarations fail the import with `ImportError::UnsafeXml`; undeclared entities are syntax errors. Node count is bounded. |
-| Nothing becomes active by import | Pre-request/test/after-response scripts and Insomnia unit tests are copied verbatim into `report.scripts` with `enabled: false, trusted: false` and never attached to requests. TLS-verification bypass (`curl -k`, Postman `strictSSL: false`), credential forwarding across redirects (`--location-trusted`, `followAuthorizationHeader`) and OpenAPI callbacks are listed in `report.inactive_settings` and never applied. Imported requests are never sent. |
+| Nothing becomes active by import | Pre-request/test/after-response scripts and Insomnia unit tests are not imported: `report.scripts` lists each one by its location, owner kind (`collection`, `folder`, `request`, `test_suite`), event, language and size, with `enabled: false, trusted: false`, never its body or its owner's name. TLS-verification bypass (`curl -k`, Postman `strictSSL: false`), credential forwarding across redirects (`--location-trusted`, `followAuthorizationHeader`) and OpenAPI callbacks are listed in `report.inactive_settings` and never applied. Imported requests are never sent. |
 | No invented credentials | Auth is imported as configs whose secrets are `{{variable}}` references, listed in `report.required_variables` and deliberately *not* defined, so a request fails validation (unresolved variable) until the user supplies a value. Credential-like body fields and parameters are never generated in samples. |
 | Credential redaction (migrations) | Literal credentials in migrated input become `{{placeholder}}` variables; see [Credential redaction](#credential-redaction). |
 | Bounded work | Inputs and generated output are bounded; see [Limits](#limits). Malformed input yields an `ImportError`, never a panic (property-tested). |
@@ -55,8 +55,9 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   its placeholder would resolve without percent-encoding and a kept literal
   would not be extracted on export. A moved name whose decoding would make a
   `{{reference}}` keeps its encoded spelling (the engine resolves parameter
-  names), and its placeholder is named after the name as written, never a
-  decoded one (so `%7B%7Bapi_key%7D%7D` cannot read a variable `api_key`).
+  names), and its placeholder is bound to its literal like every other
+  (below), never named after the name (so `%7B%7Bapi_key%7D%7D` cannot read
+  a variable `api_key`).
   A value that decodes to whitespace only stays in the query, and a `+` or
   an escape that is not UTF-8 in a moved pair is reported.
 - URL userinfo (`https://user:password@host/`) is taken off the URL in every
@@ -70,10 +71,9 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     it is not cut at all but quarantined (`url_quarantined`: "this URL
     mixes a template with a possible credential in its authority; re-enter
     it"). By default the URL is not imported: the request's URL becomes a
-    fresh reference no variable defines (`{{url-needs-review}}`: hyphenated,
-    so no path parameter, shell variable or other name the import derives
-    can be it, and never a name the source references), and the original
-    text is stored nowhere. With `include_credentials` it is kept exactly as
+    fresh reference no variable defines, bound to the URL's text
+    (`{{url_<16 hex digits>}}`, see below), and the original text is
+    stored nowhere. With `include_credentials` it is kept exactly as
     written and the same warning says it may hold a credential; a sanitized
     export extracts it whole. Either way the request's name, folder and
     operation key never come from its text (`<url redacted>`), and an
@@ -88,21 +88,19 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   - A userinfo that is exactly variable references (`{{user}}`,
     `{{user}}:`, `{{user}}:{{password}}`) keeps them. Anything else (a
     literal user name or password, a token) is credential material, and no
-    part of it is kept as a user name or in the URL: the user name becomes a
-    fresh `{{username}}` placeholder and the password a fresh `{{password}}`
-    placeholder (`url_userinfo_replaced`). With `include_credentials`, the
-    password keeps the literal (the part after the first `:`, or the whole
-    userinfo when it has no password), a secret field.
-  - Fresh placeholders never take a name the source defines or references,
-    including cURL `$NAME` shell variables, Postman path variables and
-    `url.variable` keys, and Insomnia path parameters, in any request of the
-    import (`username_2` then). References are reserved as they decode too:
-    a JSON or YAML escape (`\u007b\u007bname\u007d\u007d`), shell
-    quoting, or percent-encoding in the name (`{{url%2Dneeds%2Dreview}}`
-    reserves `url-needs-review`). A path parameter is reserved by its raw
-    spelling as well as the sanitized one its placeholder takes, which is
-    fail-safe (`:url-needs-review` makes a quarantined URL
-    `{{url-needs-review_2}}`).
+    part of it is kept as a user name or in the URL: the user name and the
+    password become placeholders bound to their literals like auth secrets
+    (`{{auth_<16 hex digits>_username}}`, `{{auth_<16 hex digits>_password}}`,
+    see below; `url_userinfo_replaced`), and an empty password stays empty.
+    With `include_credentials`, the password keeps the literal (the part
+    after the first `:`, or the whole userinfo when it has no password), a
+    secret field.
+  - A name of the shape placeholders take (below) that the source uses
+    itself is refused wherever it ends up in the import, however it was
+    spelled: as written, in a JSON or YAML escape
+    (`\u007b\u007bname\u007d\u007d`), shell-quoted, percent-encoded in
+    the name (`{{url%5F…}}`), as a path parameter in its raw or its
+    sanitized spelling, or assembled from several source fragments.
   - A request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a
     Postman or Insomnia auth helper) or with auth explicitly off keeps
     that, and the userinfo is dropped (`url_credentials_dropped`).
@@ -111,23 +109,73 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     reported (`url_credentials_removed`; with `include_credentials` it is
     kept and a sanitized export extracts the whole URL), and an ambiguous
     one is quarantined.
-  - Every other credential placeholder (a header, query, form or body
-    field, an auth secret) is named through the same allocator: one name
-    per field name, never a name the source defines, references or derives
-    (`r_password_2` when the source defines `r_password`). A path
-    parameter keeps its own name.
+  - Every credential placeholder the import makes (a header, query, form,
+    body, path or environment value, an auth secret, URL userinfo, a
+    quarantined URL) is bound to the literal it replaces (#584):
+    `<kind>_<16 hex digits>`, where the kind is `secret` (a field's value),
+    `auth` (an auth secret or URL userinfo, followed by `_<field>`:
+    `auth_3f9a0c12d4e5b6a7_password`) or `url` (a quarantined URL), and
+    the digits are the start of HMAC-SHA256(key, kind | field | literal),
+    each part length-prefixed (so no field and literal run together), the
+    field being the auth field or the source field's name, lowercased.
+    So the same literal in the same field gets the same name in every
+    request of the import and in every reimport, and another literal gets
+    another name. No owner (no collection, folder or request name or key),
+    no position and no source field name is part of a name, so a name never
+    carries source text, and a variable you fill resolves only where the
+    source holds exactly the secret it replaced. The import records each
+    name with its kind and field (`ImportResult::credential_names`). Two
+    literals whose digits agree (64 bits) get a `_2` suffix.
+  - The key (`ImportOptions::credential_key`, a `CredentialKey`) is never
+    serialized and never stored with the import. The app derives one per
+    profile from the profile's data key (HKDF-SHA256 under its own label),
+    so it lives where the profile's other secrets do (the OS keychain or a
+    passphrase-wrapped key), never in workspace files or exports, and a
+    preview, the import it previews and every reimport agree. Keyed, a name
+    cannot be tested against guessed passwords. Without the key (`None`,
+    as for a library caller; another profile; a new data key) a random one
+    is used: every name is new, nothing you filled resolves, and every
+    credential is asked for again (fail-safe).
+  - An empty secret stays empty: there is no literal to bind a name to.
+    Fill it in on the request.
+  - The names have a reserved shape: `auth_`, `secret_` or `url_`, then 16
+    hex digits, then `_` or the end. A source that uses a name of that
+    shape itself, in a reference or as a variable, is refused
+    (`ImportError::Invalid`: rename it; see above for the spellings
+    covered), so a source can never point a request at a value filled for
+    a placeholder. The check is closed by construction. While importing,
+    every placeholder is written as a sentinel, `anvil<nonce>n<index>e`:
+    a plain identifier with 128 random bits drawn per import, which the
+    source cannot write. Copies and clones of a sentinel are fine, and one
+    left in a discarded alternative never reaches the output. Then one
+    pass over every imported object (workspace, folders, requests,
+    environments, report) does three things:
+    1. It refuses any string or object key that is a reserved-shape name,
+       or holds one as a `{{…}}` reference, also percent-decoded. However
+       the import derived it (decoded from an embedded body, concatenated
+       from fragments, copied from an XML namespace), such a name can only
+       be the source's.
+    2. It refuses sentinel-shaped text with another nonce or an unknown
+       index.
+    3. It replaces each sentinel with its name and recomputes the
+       requests' generated hashes.
+
+    Text that only mentions the shape is not refused when it reaches the
+    output as something other than a name: a description holding
+    `secret-<16 hex>`, or a reference kept percent-encoded in a URL. No
+    importer reads Anvil's own export format (bundles are restored by
+    `anvil-portability`, without this check), so no legitimate source
+    carries such names.
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia
   environment value that is an array (`{"accounts": [{"api_key": "…"}]}`,
-  `"tokens": ["…"]`), each with its own placeholder named by its path
-  (bounded, and never the name of a variable or placeholder of any
-  environment of the import); as everywhere, only a plain reference is
-  kept.
+  `"tokens": ["…"]`), each with its own placeholder bound to its literal
+  (bounded); as everywhere, only a plain reference is kept.
 - JSON bodies and GraphQL variables are scanned recursively: string members
   with credential-like names, and numbers under such names (`pin`, `otp`, …;
   not names recognized only by `token`, such as `max_tokens`), whose
-  placeholder is written unquoted (`"pin": {{pin}}`) so the value supplied
+  placeholder is written unquoted (`"pin": {{secret_<16 hex digits>}}`) so the value supplied
   later is sent as a number.
 - A JSON body that repeats a member name is rewritten keeping the last value of
   each member (`json_duplicate_member`), so an earlier value that was never
@@ -203,30 +251,43 @@ argument index for cURL (`/args/7`).
 The report is bounded: at most 1000 findings of one code are kept (one
 `report_truncated` warning notes the rest), a stored pointer longer than 512
 characters is clipped and suffixed with a hash of the whole pointer (so
-distinct locations stay distinct), messages and values are clipped to 2048, an external reference or
+distinct locations stay distinct), redaction field names are clipped to 2048, an external reference or
 required variable keeps at most 1000 locations, and at most 10,000 inactive
 settings, redactions and scripts are kept.
 
-Report text never carries a credential, in either mode: every message,
-pointer (each RFC 6901 token, which can be a source key; a changed token
-keeps a digest so locations stay distinct), inactive setting, redaction
-field, required-variable reason, external reference, retained script and
-operation key goes through one redaction first, and so do imported
-request, folder, environment and workspace names. That redaction:
+Report text never carries a credential, in either mode (#584):
 
-- replaces a URL userinfo that is not exactly references with `<redacted>`
-  (by the rule above), and an ambiguous URL with `<url redacted>`;
-- replaces a `{{…}}` that is not a plain name (an identifier, a dotted path
-  or an argument-free `$helper`) with `{{…}}`;
-- by credential-name heuristics, replaces with `<redacted>` the value of a
-  `name=value` or `name: value` pair whose name is a credential name
-  (quoted or not; a reference or a plain word such as `none` is kept), the
-  token after `Bearer`, `Basic`, `Token` or `Digest` when it looks like one,
-  and a JWT.
-
-cURL diagnostics do not echo an ignored URL, a connection option's value or
-the rest of a command line; the pointer locates them. A retained script is
-otherwise kept as written.
+- Messages, required-variable reasons and inactive-setting values are the
+  importer's own words and the numbers it computed (counts, configured
+  limits). They never quote a source value: not an option, a header or
+  setting name, a media type, an auth type, a version, a `$ref`, a pattern,
+  a constraint or a URL. The entry's pointer locates what it is about. In
+  the code this is a type (`Message`), which cannot be built from a
+  `String`.
+- Scripts are listed by metadata only (see above).
+- Credential placeholders and required variables are named by the import,
+  bound to the literal they replace (`{{secret_<16 hex digits>}}`,
+  `{{auth_<16 hex digits>_<field>}}`, `{{url_<16 hex digits>}}`, see
+  above), never derived from a collection, folder, request or field name.
+- What must quote the source goes through one redaction as a last line of
+  defence: pointer tokens (source keys; a changed token keeps a digest so
+  locations stay distinct), external references (shown for approval),
+  redaction field names, and imported request, folder, environment and
+  workspace names and operation keys. That redaction:
+  - replaces a URL userinfo that is not exactly references with
+    `<redacted>` (by the rule above), and an ambiguous URL with
+    `<url redacted>`;
+  - replaces a `{{…}}` that is not a plain name (an identifier, a dotted
+    path or an argument-free `$helper`) with `{{…}}`;
+  - by credential-name heuristics, replaces with `<redacted>` the value of a
+    `name=value` or `name: value` pair whose name is a credential name
+    (`==`, `!=`, `:=` and `+=` count, any whitespace, Unicode spaces and
+    vertical tabs included, may surround the separator, a quoted value
+    runs to its unescaped closing quote or the end of the text, and only a
+    value that is exactly references, exactly a redaction marker with
+    nothing attached, or a plain word such as `none` is kept), the token
+    after `Bearer`, `Basic`, `Token` or `Digest` when it looks like one, and
+    a JWT, including a bare JWT pointer token. It is linear in the text.
 
 Codes are stable strings (for example `recursive_schema`,
 `composition_first_branch`, `contradictory_schema`, `openapi32_construct`,
@@ -495,6 +556,27 @@ moves added requests into the existing workspace. A request whose spec is
 updated loses its `revision_id`, since that revision holds the old spec.
 Changing the sample mode or seed between imports changes generated hashes;
 every operation then shows up as changed upstream.
+
+A credential placeholder is bound to the literal it replaced (#584, see
+[Credential redaction](#credential-redaction)), so reimport needs no special
+case for it: a request, folder or scope unit takes the fresh import's
+references with the rest of its update.
+
+- A literal the source still holds keeps its name, wherever its request
+  moved and whatever was inserted, reordered or repeated. A request known
+  only by its position (an item without an id, with an empty or repeated
+  id, any HAR entry) takes the URL and the names of whichever request is
+  now at that position, together.
+- A changed literal gets a new name, which you are asked to fill in. So a
+  value you filled resolves only where the source sends exactly the secret
+  it replaced.
+- The same literal sent to a new host (a request that moved, a new request
+  holding it) keeps its name: the source itself sends that secret there.
+- A request imported by an earlier build under another naming moves to the
+  literal-bound name and is asked for again. So is everything after a
+  reimport without the first import's key (in another profile).
+- A reference the source wrote, or a name it designates (an OpenAPI security
+  scheme's variable), follows the source like any other change.
 
 ### Renames
 
@@ -860,7 +942,7 @@ globals exports. `protocolProfileBehavior.followRedirects`/`maxRedirects`/
 `$randomUUID`, `$timestamp`, `$isoTimestamp`, `$randomInt`) are kept;
 the faker family (`$randomAlphaNumeric`, …) is reported per location.
 
-Reported: pre-request/test scripts (retained, disabled), auth types digest,
+Reported: pre-request/test scripts (listed by metadata, never imported), auth types digest,
 hawk, awsv4, ntlm, edgegrid, oauth1, akamai, jwt, asap (request imported with
 auth `none`), OAuth 2 password/implicit grants (bearer placeholder), cached
 OAuth tokens (dropped), saved example responses, per-request proxy and
@@ -870,7 +952,7 @@ collection v1 (refused).
 ## Insomnia (v4 JSON export, v5 YAML)
 
 Request groups → folders (environment → folder variables, folder auth,
-scripts retained), requests (URL, parameters, headers, path parameters, body
+scripts listed by metadata), requests (URL, parameters, headers, path parameters, body
 by MIME type: JSON, XML, form-urlencoded, multipart with file placeholders,
 GraphQL, other text), auth (basic, bearer with prefix, API key
 header/query/cookie, OAuth 2 client credentials/authorization code/refresh
@@ -895,7 +977,7 @@ Reported: other template tags (`{% response %}`, `{% base64 %}`, …) and
 Nunjucks filters (left in place), digest/NTLM/Hawk/IAM/netrc/ASAP auth,
 cookie jars, embedded API specs, gRPC and WebSocket requests, folder-level
 headers, `settingEncodeUrl: false`, disabled body rendering, private
-environments (imported with a warning), unit tests (retained as scripts).
+environments (imported with a warning), unit tests (listed by metadata like scripts).
 
 ## cURL
 

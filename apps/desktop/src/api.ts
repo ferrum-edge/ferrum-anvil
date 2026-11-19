@@ -505,7 +505,7 @@ export interface SpecImportReport {
   warnings: SpecFinding[];
   unsupported: SpecFinding[];
   external_refs: { reference: string; kind: string; pointers: string[]; requires_approval: boolean }[];
-  scripts: { pointer: string; owner: string; event: string; language: string }[];
+  scripts: { pointer: string; owner: string; event: string; language: string; bytes: number; lines: number }[];
   inactive_settings: { pointer: string; setting: string; value: string; reason: string }[];
   redactions: { pointer: string; field: string; placeholder: string }[];
   required_variables: { name: string; secret: boolean; reason: string; pointers: string[] }[];

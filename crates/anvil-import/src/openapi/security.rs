@@ -8,12 +8,15 @@
 
 use super::Ctx;
 use crate::builder::Builder;
+use crate::report::Message;
 use crate::util::{ptr, sanitize_var, str_of};
 use anvil_domain::auth::{AuthConfig, KeyLocation, OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::secret::SensitiveValue;
 use serde_json::Value;
 
-fn var(b: &mut Builder, name: &str, secret: bool, reason: &str, at: &str) -> String {
+/// A required variable named after the scheme key (sanitized); `reason` is
+/// the importer's words and the pointer locates the scheme.
+fn var(b: &mut Builder, name: &str, secret: bool, reason: &'static str, at: &str) -> String {
     b.report.require_var(name, secret, reason, at);
     format!("{{{{{name}}}}}")
 }
@@ -43,13 +46,13 @@ fn locate_scheme<'a>(ctx: &Ctx<'a>, b: &mut Builder, key: &str, at: &str) -> Opt
             if let Some(s) = ctx.root.pointer(&decoded) {
                 return ctx.refs.resolve(s, &decoded, &mut b.report);
             }
-            b.report.warn("undefined_security_scheme", at, format!("security requirement '{key}' does not point to a scheme"));
+            b.report.warn("undefined_security_scheme", at, "the security requirement does not point to a scheme");
             return None;
         }
         b.report.external_ref(key, at);
         return None;
     }
-    b.report.warn("undefined_security_scheme", at, format!("security requirement names '{key}', which is not defined"));
+    b.report.warn("undefined_security_scheme", at, "the security requirement names a scheme that is not defined");
     None
 }
 
@@ -57,7 +60,7 @@ fn locate_scheme<'a>(ctx: &Ctx<'a>, b: &mut Builder, key: &str, at: &str) -> Opt
 fn scheme_auth(ctx: &Ctx, b: &mut Builder, key: &str, scheme: &Value, sptr: &str, scopes: &[String]) -> Option<AuthConfig> {
     let v = sanitize_var(key);
     if scheme.get("deprecated").and_then(Value::as_bool) == Some(true) {
-        b.report.warn("deprecated_security_scheme", sptr, format!("security scheme '{key}' is marked deprecated"));
+        b.report.warn("deprecated_security_scheme", sptr, "the security scheme is marked deprecated");
     }
     let ty = str_of(scheme, "type").unwrap_or("");
     match ty {
@@ -68,27 +71,27 @@ fn scheme_auth(ctx: &Ctx, b: &mut Builder, key: &str, scheme: &Value, sptr: &str
                 Some("cookie") => KeyLocation::Cookie,
                 _ => KeyLocation::Header,
             };
-            let value = var(b, &v, true, &format!("API key for security scheme '{key}'"), sptr);
+            let value = var(b, &v, true, "API key for the security scheme", sptr);
             Some(AuthConfig::ApiKey { name, value: SensitiveValue::template(value), location })
         }
-        "basic" => Some(basic(b, &v, key, sptr)),
+        "basic" => Some(basic(b, &v, sptr)),
         "http" => match str_of(scheme, "scheme").map(str::to_ascii_lowercase).as_deref() {
-            Some("basic") => Some(basic(b, &v, key, sptr)),
-            Some("bearer") => Some(bearer(b, &v, key, sptr)),
-            Some(other) => {
+            Some("basic") => Some(basic(b, &v, sptr)),
+            Some("bearer") => Some(bearer(b, &v, sptr)),
+            Some(_) => {
                 b.report.unsupported(
                     "unsupported_http_auth",
                     sptr,
-                    format!("HTTP authentication scheme '{other}' (security scheme '{key}') is not supported; requests using it carry no credentials"),
+                    "this HTTP authentication scheme is not supported; requests using it carry no credentials",
                 );
                 None
             }
             None => {
-                b.report.warn("invalid_security_scheme", sptr, format!("http security scheme '{key}' has no `scheme`"));
+                b.report.warn("invalid_security_scheme", sptr, "the http security scheme has no `scheme`");
                 None
             }
         },
-        "oauth2" => Some(oauth2(ctx, b, &v, key, scheme, sptr, scopes)),
+        "oauth2" => Some(oauth2(ctx, b, &v, scheme, sptr, scopes)),
         "openIdConnect" => {
             if let Some(u) = str_of(scheme, "openIdConnectUrl") {
                 b.report.external_ref(u, &ptr(sptr, "openIdConnectUrl"));
@@ -96,42 +99,43 @@ fn scheme_auth(ctx: &Ctx, b: &mut Builder, key: &str, scheme: &Value, sptr: &str
             b.report.unsupported(
                 "openid_connect_discovery",
                 sptr,
-                format!("OpenID Connect discovery for '{key}' is not fetched during import; imported as a bearer-token placeholder"),
+                "OpenID Connect discovery is not fetched during import; imported as a bearer-token placeholder",
             );
-            Some(bearer(b, &v, key, sptr))
+            Some(bearer(b, &v, sptr))
         }
         "mutualTLS" => {
             b.report.unsupported(
                 "mutual_tls_scheme",
                 sptr,
-                format!("security scheme '{key}' requires a client certificate: select a TLS profile with a client identity (not an auth setting)"),
+                "the security scheme requires a client certificate: select a TLS profile with a client identity (not an auth setting)",
             );
             None
         }
-        other => {
-            b.report.unsupported("unknown_security_scheme", sptr, format!("security scheme type '{other}' is not supported"));
+        _ => {
+            b.report.unsupported("unknown_security_scheme", sptr, "this security scheme type is not supported");
             None
         }
     }
 }
 
-fn basic(b: &mut Builder, v: &str, key: &str, at: &str) -> AuthConfig {
-    let username = var(b, &format!("{v}_username"), false, &format!("Basic auth user for security scheme '{key}'"), at);
-    let password = var(b, &format!("{v}_password"), true, &format!("Basic auth password for security scheme '{key}'"), at);
+fn basic(b: &mut Builder, v: &str, at: &str) -> AuthConfig {
+    let username = var(b, &format!("{v}_username"), false, "Basic auth user for the security scheme", at);
+    let password = var(b, &format!("{v}_password"), true, "Basic auth password for the security scheme", at);
     AuthConfig::Basic { username, password: SensitiveValue::template(password) }
 }
 
-fn bearer(b: &mut Builder, v: &str, key: &str, at: &str) -> AuthConfig {
-    let token = var(b, v, true, &format!("bearer token for security scheme '{key}'"), at);
+fn bearer(b: &mut Builder, v: &str, at: &str) -> AuthConfig {
+    let token = var(b, v, true, "bearer token for the security scheme", at);
     AuthConfig::Bearer { token: SensitiveValue::template(token), prefix: "Bearer".into() }
 }
 
-fn oauth2(ctx: &Ctx, b: &mut Builder, v: &str, key: &str, scheme: &Value, sptr: &str, scopes: &[String]) -> AuthConfig {
+fn oauth2(ctx: &Ctx, b: &mut Builder, v: &str, scheme: &Value, sptr: &str, scopes: &[String]) -> AuthConfig {
     if let Some(u) = str_of(scheme, "oauth2MetadataUrl") {
         b.report.external_ref(u, &ptr(sptr, "oauth2MetadataUrl"));
     }
     // Normalize Swagger 2.0 `flow` and OpenAPI 3 `flows`.
-    let mut flows: Vec<(&str, &Value, String)> = vec![];
+    // Flow names are the importer's own words, matched from the source.
+    let mut flows: Vec<(&'static str, &Value, String)> = vec![];
     if ctx.dialect == crate::Dialect::Swagger20 {
         let f = match str_of(scheme, "flow") {
             Some("application") => "clientCredentials",
@@ -156,24 +160,27 @@ fn oauth2(ctx: &Ctx, b: &mut Builder, v: &str, key: &str, scheme: &Value, sptr: 
     }
     let pick = flows.iter().find(|f| f.0 == "clientCredentials").or_else(|| flows.iter().find(|f| f.0 == "authorizationCode"));
     if flows.len() > 1 {
-        b.report.warn(
-            "oauth2_flow_choice",
-            sptr,
-            format!(
-                "security scheme '{key}' offers flows [{}]; {}",
-                flows.iter().map(|f| f.0).collect::<Vec<_>>().join(", "),
-                pick.map(|p| format!("'{}' was imported", p.0)).unwrap_or_else(|| "none is supported".into())
-            ),
-        );
+        let mut message = Message::new("the security scheme offers flows [");
+        for (k, f) in flows.iter().enumerate() {
+            message = if k == 0 { message.text(f.0) } else { message.text(", ").text(f.0) };
+        }
+        message = match pick {
+            Some(p) => message.text("]; '").text(p.0).text("' was imported"),
+            None => message.text("]; none is supported"),
+        };
+        b.report.warn("oauth2_flow_choice", sptr, message);
     }
     let Some((flow, f, fptr)) = pick else {
-        let names = flows.iter().map(|f| f.0).filter(|n| !n.is_empty()).collect::<Vec<_>>().join(", ");
+        let mut message = Message::new("OAuth 2 flow(s) [");
+        for (k, name) in flows.iter().map(|f| f.0).filter(|n| !n.is_empty()).enumerate() {
+            message = if k == 0 { message.text(name) } else { message.text(", ").text(name) };
+        }
         b.report.unsupported(
             "oauth2_flow_unsupported",
             sptr,
-            format!("OAuth 2 flow(s) [{names}] of '{key}' are not supported; imported as a bearer-token placeholder"),
+            message.text("] of the security scheme are not supported; imported as a bearer-token placeholder"),
         );
-        return bearer(b, v, key, sptr);
+        return bearer(b, v, sptr);
     };
     let grant = if *flow == "clientCredentials" { OAuthGrant::ClientCredentials } else { OAuthGrant::AuthorizationCodePkce };
     let raw_token_url = str_of(f, "tokenUrl").unwrap_or("");
@@ -187,11 +194,11 @@ fn oauth2(ctx: &Ctx, b: &mut Builder, v: &str, key: &str, scheme: &Value, sptr: 
         "OAuth 2 authorization URL",
     );
     if raw_token_url.is_empty() {
-        b.report.warn("oauth2_missing_token_url", fptr, format!("OAuth 2 flow of '{key}' has no tokenUrl"));
+        b.report.warn("oauth2_missing_token_url", fptr, "the OAuth 2 flow has no tokenUrl");
     }
-    let client_id = var(b, &format!("{v}_client_id"), false, &format!("OAuth 2 client id for '{key}'"), sptr);
+    let client_id = var(b, &format!("{v}_client_id"), false, "OAuth 2 client id for the security scheme", sptr);
     let client_secret = if grant == OAuthGrant::ClientCredentials {
-        SensitiveValue::template(var(b, &format!("{v}_client_secret"), true, &format!("OAuth 2 client secret for '{key}'"), sptr))
+        SensitiveValue::template(var(b, &format!("{v}_client_secret"), true, "OAuth 2 client secret for the security scheme", sptr))
     } else {
         SensitiveValue::default()
     };
@@ -263,7 +270,11 @@ pub(crate) fn requirement_auth(ctx: &Ctx, b: &mut Builder, req: &Value, at: &str
         b.report.warn(
             "security_alternatives",
             at,
-            format!("{} alternative security requirements; alternative #{i} was applied, the others are not represented", alts.len()),
+            Message::new("")
+                .num(alts.len())
+                .text(" alternative security requirements; alternative #")
+                .num(*i)
+                .text(" was applied, the others are not represented"),
         );
     }
     match chosen {

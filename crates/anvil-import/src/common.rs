@@ -3,6 +3,7 @@
 //! splitting and dynamic-variable checks.
 
 use crate::builder::Builder;
+use crate::report::Message;
 use crate::util::{
     has_literal_secret, is_credential_name, is_json_media, is_numeric_credential_name, is_xml_media, media_essence, sanitize_var,
 };
@@ -12,63 +13,306 @@ use anvil_domain::secret::SensitiveValue;
 use anvil_domain::workspace::Variable;
 use serde_json::Value;
 
-/// Apply the credential policy to a sensitive auth field.
+/// Credential placeholders are bound to the literal they replace (#584): a
+/// literal of a field becomes `{{<kind>_<16 hex>}}` (`{{auth_<16 hex>_<field>}}`
+/// for an auth secret), the digits from
+/// HMAC-SHA256(this import's key, kind | field | literal), each part
+/// length-prefixed so no two tuples encode alike ([`crate::CredentialKey`]). Equal names therefore mean the same source
+/// literal: a variable the user filled resolves only where the source holds
+/// exactly the secret it replaced, whatever moved, was inserted, repeated or
+/// rotated, and a different literal gets a new, unfilled name. No owner, no
+/// position and no raw source field name is part of a name. The name is
+/// recorded in [`crate::ImportResult::credential_names`].
 ///
-/// * a pure `{{variable}}` reference is kept as-is;
-/// * an empty value becomes a `{{var}}` placeholder the user must supply;
+/// What is returned, and written into the imported objects, is not the name
+/// but this import's sentinel for it ([`sentinel`]). [`finalize`] replaces
+/// each sentinel with its name only after refusing any reserved-shape name
+/// in the output. At that point every such name came from the source,
+/// however the import derived it.
+pub fn literal_name(b: &mut Builder, kind: &'static str, field: &str, suffix: Option<&'static str>, literal: &str) -> String {
+    let field = field.to_ascii_lowercase();
+    let mac = hex::encode(crate::util::hmac_sha256(&b.credential_key, &hmac_input(&[kind, &field, literal])));
+    if let Some(token) = b.literal_names.get(&mac) {
+        return token.clone();
+    }
+    let base = match suffix {
+        Some(f) => format!("{kind}_{}_{f}", &mac[..16]),
+        None => format!("{kind}_{}", &mac[..16]),
+    };
+    // Taken only by another literal whose digest shares 64 bits with this
+    // one: the next free suffix.
+    let name = b.env_names.name_verbatim(&base);
+    let token = sentinel(&b.sentinel_nonce, b.placeholder_names.len());
+    b.placeholder_names.push(name.clone());
+    b.literal_names.insert(mac, token.clone());
+    b.credential_names.insert(name, crate::CredentialName { kind: kind.to_string(), field });
+    token
+}
+
+/// The sentinel for placeholder `index` of an import with `nonce` (32 hex
+/// digits, 128 random bits drawn per import): `anvil<nonce>n<index>e`.
+/// It is a plain identifier, so every path a name takes (percent-encoding,
+/// sanitizing, a template or credential classifier, a renderer) keeps it as
+/// it keeps a name. The source cannot write one, because it cannot know the
+/// nonce.
+pub fn sentinel(nonce: &str, index: usize) -> String {
+    format!("anvil{nonce}n{index}e")
+}
+
+/// Finalize an import's objects (#584), in one pass over each:
+///
+/// 1. Refuse any string or object key that is, or holds as a `{{…}}`
+///    reference (also percent-decoded), a name of [`generated_shape`].
+///    The import has written only sentinels so far, so every such name came
+///    from the source, however the import derived it: decoded, embedded,
+///    concatenated or copied from an XML namespace.
+/// 2. Refuse any sentinel-shaped text that is not one of this import's own:
+///    another nonce, or an index it never issued.
+/// 3. Replace each sentinel with its name, then recompute each request's
+///    generated hash, which was computed over the sentinel.
+///
+/// Objects without a sentinel are left untouched.
+pub fn finalize(result: &mut crate::ImportResult, nonce: &str, names: &[String]) -> Result<(), crate::ImportError> {
+    let dialect = result.source.dialect;
+    let refused = || reserved_name_error(dialect);
+    let check = |v: &Value| walk_strings(v, &mut |s: &str| holds_reserved_name(s) || foreign_sentinel(s, nonce, names.len()));
+    let to_json = |v: serde_json::Result<Value>| v.unwrap_or(Value::Null);
+    let workspace = to_json(serde_json::to_value(&result.workspace));
+    let folders: Vec<Value> = result.folders.iter().map(|f| to_json(serde_json::to_value(f))).collect();
+    let requests: Vec<Value> = result.requests.iter().map(|q| to_json(serde_json::to_value(q))).collect();
+    let environments: Vec<Value> = result.environments.iter().map(|e| to_json(serde_json::to_value(e))).collect();
+    let report = to_json(serde_json::to_value(&result.report));
+    if check(&workspace) || folders.iter().any(&check) || requests.iter().any(&check) || environments.iter().any(&check) || check(&report) {
+        return Err(refused());
+    }
+    if names.is_empty() {
+        return Ok(());
+    }
+    let prefix = format!("anvil{nonce}n");
+    let replace = |v: Value| -> Option<Value> { contains_text(&v, &prefix).then(|| substitute(v, &prefix, names)) };
+    let invalid = |what: &str| crate::ImportError::Invalid {
+        dialect,
+        pointer: "/".into(),
+        message: format!("the imported {what} could not be finalized"),
+    };
+    if let Some(v) = replace(workspace) {
+        result.workspace = serde_json::from_value(v).map_err(|_| invalid("workspace"))?;
+    }
+    for (f, v) in result.folders.iter_mut().zip(folders) {
+        if let Some(v) = replace(v) {
+            *f = serde_json::from_value(v).map_err(|_| invalid("folder"))?;
+        }
+    }
+    for (q, v) in result.requests.iter_mut().zip(requests) {
+        if let Some(v) = replace(v) {
+            *q = serde_json::from_value(v).map_err(|_| invalid("request"))?;
+            let source = q.spec.source.take();
+            let hash = crate::spec_hash(&q.spec);
+            q.spec.source = source.map(|s| anvil_domain::request::ImportSource { generated_hash: hash, ..s });
+        }
+    }
+    for (e, v) in result.environments.iter_mut().zip(environments) {
+        if let Some(v) = replace(v) {
+            *e = serde_json::from_value(v).map_err(|_| invalid("environment"))?;
+        }
+    }
+    for r in &mut result.report.redactions {
+        r.placeholder = substitute_text(&r.placeholder, &prefix, names);
+    }
+    for v in &mut result.report.required_variables {
+        v.name = substitute_text(&v.name, &prefix, names);
+    }
+    Ok(())
+}
+
+/// Call `f` on every string and object key of `v` until it returns true.
+/// One pass, without recursion.
+fn walk_strings(v: &Value, f: &mut dyn FnMut(&str) -> bool) -> bool {
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::String(s) if f(s) => return true,
+            Value::Array(items) => stack.extend(items),
+            Value::Object(m) => {
+                for (k, x) in m {
+                    if f(k) {
+                        return true;
+                    }
+                    stack.push(x);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn contains_text(v: &Value, needle: &str) -> bool {
+    walk_strings(v, &mut |s: &str| s.contains(needle))
+}
+
+/// Whether `s` is a name of [`generated_shape`], or holds one as a `{{…}}`
+/// reference (Insomnia's `{{ _.name }}` too), as written or percent-decoded.
+fn holds_reserved_name(s: &str) -> bool {
+    let shaped = |n: &str| {
+        generated_shape(n) || (n.contains('%') && percent_encoding::percent_decode_str(n).decode_utf8().is_ok_and(|d| generated_shape(&d)))
+    };
+    if shaped(s.trim()) {
+        return true;
+    }
+    let mut rest = s;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        let inner = after[..close].trim();
+        if shaped(inner.strip_prefix("_.").unwrap_or(inner)) {
+            return true;
+        }
+        rest = &after[close + 2..];
+    }
+    false
+}
+
+/// Whether `s` holds sentinel-shaped text (`anvil<32 hex>n<digits>e`) that is
+/// not one of this import's: another nonce, or an index past `issued`.
+fn foreign_sentinel(s: &str, nonce: &str, issued: usize) -> bool {
+    let mut rest = s;
+    while let Some(at) = rest.find("anvil") {
+        let tail = &rest[at + 5..];
+        rest = tail;
+        let b = tail.as_bytes();
+        if b.len() < 34 || !b[..32].iter().all(u8::is_ascii_hexdigit) || b[32] != b'n' {
+            continue;
+        }
+        let digits = b[33..].iter().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 || b.get(33 + digits) != Some(&b'e') {
+            continue;
+        }
+        let index = std::str::from_utf8(&b[33..33 + digits]).ok().and_then(|d| d.parse::<usize>().ok());
+        if &tail[..32] != nonce || index.is_none_or(|i| i >= issued) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `s` with each of this import's sentinels replaced by its name.
+fn substitute_text(s: &str, prefix: &str, names: &[String]) -> String {
+    if !s.contains(prefix) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find(prefix) {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + prefix.len()..];
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        let name = tail[..digits].parse::<usize>().ok().and_then(|i| names.get(i)).filter(|_| tail.as_bytes().get(digits) == Some(&b'e'));
+        match name {
+            Some(name) => {
+                out.push_str(name);
+                rest = &tail[digits + 1..];
+            }
+            // Not a sentinel after all (checked before): kept as written.
+            None => {
+                out.push_str(prefix);
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `v` with every string and object key passed through [`substitute_text`].
+fn substitute(v: Value, prefix: &str, names: &[String]) -> Value {
+    match v {
+        Value::String(s) => Value::String(substitute_text(&s, prefix, names)),
+        Value::Array(items) => Value::Array(items.into_iter().map(|x| substitute(x, prefix, names)).collect()),
+        Value::Object(m) => {
+            Value::Object(m.into_iter().map(|(k, x)| (substitute_text(&k, prefix, names), substitute(x, prefix, names))).collect())
+        }
+        other => other,
+    }
+}
+
+/// The HMAC input for `parts`: each part's byte length (8 bytes, big
+/// endian), then its bytes. Unambiguous whatever the parts hold (a NUL
+/// included), unlike joining them with a separator.
+pub fn hmac_input(parts: &[&str]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(parts.iter().map(|p| p.len() + 8).sum());
+    for part in parts {
+        out.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        out.extend_from_slice(part.as_bytes());
+    }
+    out
+}
+
+/// Whether `name` has the shape of a placeholder [`literal_name`] makes
+/// (`auth_<16 hex>…`, `secret_<16 hex>…`, `url_<16 hex>…`). A source that
+/// uses such a name itself is refused ([`finalize`]), so a source can never
+/// point a request at a variable filled for one of these.
+pub fn generated_shape(name: &str) -> bool {
+    let Some((kind, rest)) = name.split_once('_') else { return false };
+    // Bytes, not a string split: byte 16 may fall inside a character.
+    let rest = rest.as_bytes();
+    matches!(kind, "auth" | "secret" | "url")
+        && rest.len() >= 16
+        && rest[..16].iter().all(u8::is_ascii_hexdigit)
+        && rest.get(16).is_none_or(|&c| c == b'_')
+}
+
+/// The refusal for a source that uses a reserved-shape name ([`finalize`]).
+pub fn reserved_name_error(dialect: crate::Dialect) -> crate::ImportError {
+    crate::ImportError::Invalid {
+        dialect,
+        pointer: "/".into(),
+        message: "the source uses a variable name in the shape Anvil reserves for credential placeholders \
+                  (`auth_`, `secret_` or `url_` followed by 16 hex digits): rename it"
+            .into(),
+    }
+}
+
+/// The policy for a credential `value` of field `field`:
+///
+/// * a value that is not literal material (a reference) is kept;
+/// * an empty value is kept: there is no literal to bind a placeholder to
+///   (fill it in on the request);
 /// * a literal is kept only with `include_credentials`; otherwise it is
-///   replaced by `{{var}}` and recorded as a redaction.
-pub fn credential(b: &mut Builder, value: &str, var: &str, pointer: &str, field: &str) -> SensitiveValue {
-    SensitiveValue::template(credential_text(b, value, var, pointer, field))
-}
-
-/// Same policy as [`credential`] for values stored as plain text (header,
-/// query and body fields).
-pub fn credential_text(b: &mut Builder, value: &str, var: &str, pointer: &str, field: &str) -> String {
-    let literal = has_literal_secret(value.trim(), b.template_syntax);
-    credential_text_with(b, value, literal, var, pointer, field)
-}
-
-/// [`credential_text`] with the caller's judgement of whether a non-empty
-/// `value` is literal material (`literal`); a value that is not is kept.
-/// The placeholder is named after `var` through the shared allocator
-/// ([`PlaceholderNames::shared`]): never a name the source defines,
-/// references or derives (a variable that could resolve it to another
-/// value), and the same name for every field of the same base.
-fn credential_text_with(b: &mut Builder, value: &str, literal: bool, var: &str, pointer: &str, field: &str) -> String {
+///   replaced by its literal-bound placeholder ([`literal_name`]), recorded
+///   as a redaction and listed as a required variable.
+fn credential_placeholder(
+    b: &mut Builder,
+    value: &str,
+    literal: bool,
+    (kind, field, suffix): (&'static str, &str, Option<&'static str>),
+    pointer: &str,
+    label: &str,
+) -> String {
     let t = value.trim();
-    if !t.is_empty() && !literal {
+    if t.is_empty() || !literal || b.opts.include_credentials {
         return value.to_string();
     }
-    let var = b.env_names.shared(var);
-    credential_placeholder(b, value, &var, pointer, field)
-}
-
-/// [`credential_text_with`] for a non-reference value and a placeholder name
-/// the caller already owns: a path parameter's own name, or one allocated by
-/// the caller ([`scrub_stored_json`]).
-pub fn credential_text_named(b: &mut Builder, value: &str, literal: bool, var: &str, pointer: &str, field: &str) -> String {
-    let t = value.trim();
-    if !t.is_empty() && !literal {
-        return value.to_string();
-    }
-    credential_placeholder(b, value, &sanitize_var(var), pointer, field)
-}
-
-fn credential_placeholder(b: &mut Builder, value: &str, var: &str, pointer: &str, field: &str) -> String {
-    let t = value.trim();
-    let var = var.to_string();
+    let var = literal_name(b, kind, field, suffix, value);
     let placeholder = format!("{{{{{var}}}}}");
-    if t.is_empty() {
-        b.report.require_var(&var, true, &format!("{field} has no value in the source"), pointer);
-        return placeholder;
-    }
-    if b.opts.include_credentials {
-        return value.to_string();
-    }
-    b.report.redacted(pointer, field, &placeholder);
-    b.report.require_var(&var, true, &format!("{field} was redacted on import"), pointer);
+    b.report.redacted(pointer, label, &placeholder);
+    b.report.require_var(&var, true, "the credential was redacted on import", pointer);
     placeholder
+}
+
+/// [`credential_placeholder`] for a value stored as plain text (a header,
+/// query, form, body, path or environment value) of the field named
+/// `field`.
+pub fn credential_text(b: &mut Builder, value: &str, field: &str, pointer: &str, label: &str) -> String {
+    let literal = has_literal_secret(value.trim(), b.template_syntax);
+    credential_placeholder(b, value, literal, ("secret", field, None), pointer, label)
+}
+
+/// [`credential_placeholder`] for secret `field` of an auth config
+/// (`password`, `token`, `api_key`, `client_secret`).
+pub fn auth_credential(b: &mut Builder, value: &str, field: &'static str, pointer: &str, label: &str) -> SensitiveValue {
+    let literal = has_literal_secret(value.trim(), b.template_syntax);
+    SensitiveValue::template(credential_placeholder(b, value, literal, ("auth", field, Some(field)), pointer, label))
 }
 
 /// Apply the credential policy to a variable definition. A secret literal
@@ -93,16 +337,15 @@ pub fn maybe_redact(b: &mut Builder, name: &str, value: &str, pointer: &str, wha
     (credential_text(b, value, name, pointer, &format!("{what} {name}")), true)
 }
 
-/// [`maybe_redact`] for a path parameter, whose placeholder keeps the
-/// parameter's own name (`:api_key` becomes `{{api_key}}` whether or not
-/// the source gave it a value): the name is the parameter's, reserved
-/// against every other placeholder ([`reserve_implicit_names`]).
+/// [`maybe_redact`] for a path parameter's value. A valueless parameter
+/// keeps its own name (`:api_key` becomes `{{api_key}}`, the source's own
+/// variable); a literal value becomes a literal-bound placeholder like any
+/// other ([`literal_name`]).
 pub fn maybe_redact_path(b: &mut Builder, name: &str, value: &str, pointer: &str, what: &str) -> (String, bool) {
     if !is_credential_name(name) || value.trim().is_empty() {
         return (value.to_string(), false);
     }
-    let literal = has_literal_secret(value.trim(), b.template_syntax);
-    (credential_text_named(b, value, literal, name, pointer, &format!("{what} {name}")), true)
+    (credential_text(b, value, name, pointer, &format!("{what} {name}")), true)
 }
 
 /// Replace credential-looking string members of a JSON body (recursively),
@@ -292,27 +535,21 @@ fn scrub_json_at(b: &mut Builder, v: &mut Value, pointer: &str, path: &mut Vec<S
     }
 }
 
-/// Bytes of the readable part of a placeholder name made from a JSON path.
-const PATH_NAME_BYTES: usize = 48;
-
-/// Placeholder names for the credential leaves of one environment's JSON
-/// values: readable (`accounts_0_api_key`, bounded to [`PATH_NAME_BYTES`]),
-/// and distinct from each other and from the environment's own variable
-/// names, which are reserved first. A name already taken gets the next free
-/// `_2`, `_3`, … suffix (found in amortized constant time).
+/// The names in use in an import's scope: every name the source defines,
+/// references or derives, reserved first, and every placeholder the import
+/// made ([`literal_name`]), so a placeholder never takes one of the
+/// source's names (a name already taken gets the next free `_2`, `_3`, …
+/// suffix, found in amortized constant time).
 #[derive(Default)]
 pub struct PlaceholderNames {
     used: std::collections::HashSet<String>,
     next: std::collections::HashMap<String, usize>,
-    /// The name [`PlaceholderNames::shared`] gave each base.
-    shared: std::collections::HashMap<String, String>,
 }
 
 impl PlaceholderNames {
     /// Reserve a name that exists in the scope (a variable name), as written
     /// and as a placeholder would spell it, and by its percent-decoded
-    /// spelling too (`{{url%2Dneeds%2Dreview}}` may be read as
-    /// `url-needs-review`).
+    /// spelling too (`{{a%2Db}}` may be read as `a-b`).
     pub fn reserve(&mut self, name: &str) {
         self.used.insert(name.to_string());
         self.used.insert(sanitize_var(name));
@@ -323,33 +560,6 @@ impl PlaceholderNames {
             self.used.insert(sanitize_var(&decoded));
             self.used.insert(decoded.into_owned());
         }
-    }
-
-    /// The placeholder name for an ordinary credential field named
-    /// `readable` (sanitized, not bounded): the same name for every field of
-    /// the same base, so one variable fills them all, and never a reserved
-    /// name (the source's variables, references and implicit names, or a
-    /// name another placeholder took), which gets the next free suffix.
-    pub fn shared(&mut self, readable: &str) -> String {
-        let base = sanitize_var(readable);
-        if let Some(name) = self.shared.get(&base) {
-            return name.clone();
-        }
-        let name = if self.used.insert(base.clone()) {
-            base.clone()
-        } else {
-            let mut n = self.next.get(&base).copied().unwrap_or(2);
-            loop {
-                let candidate = format!("{base}_{n}");
-                n += 1;
-                if self.used.insert(candidate.clone()) {
-                    self.next.insert(base.clone(), n);
-                    break candidate;
-                }
-            }
-        };
-        self.shared.insert(base, name.clone());
-        name
     }
 
     /// A free name for `base` as written (not sanitized), now reserved: for
@@ -366,25 +576,6 @@ impl PlaceholderNames {
             n += 1;
             if self.used.insert(candidate.clone()) {
                 self.next.insert(base.to_string(), n);
-                return candidate;
-            }
-        }
-    }
-
-    /// A free placeholder name for `readable` (sanitized and bounded), now
-    /// reserved.
-    pub fn name(&mut self, readable: &str) -> String {
-        let mut base = sanitize_var(readable);
-        base.truncate(PATH_NAME_BYTES);
-        if self.used.insert(base.clone()) {
-            return base;
-        }
-        let mut n = self.next.get(&base).copied().unwrap_or(2);
-        loop {
-            let candidate = format!("{base}_{n}");
-            n += 1;
-            if self.used.insert(candidate.clone()) {
-                self.next.insert(base, n);
                 return candidate;
             }
         }
@@ -409,8 +600,8 @@ pub fn reserve_source_references(b: &mut Builder, text: &str) {
 }
 
 /// Reserve every name a request can define implicitly, before any
-/// placeholder is made, so a fresh placeholder (`{{username}}`,
-/// `{{password}}`, a path-named environment leaf) never names one:
+/// placeholder is made, so a fresh placeholder (an auth secret, a
+/// credential field, a path-named environment leaf) never names one:
 /// - every path parameter, written as a `:name` segment at the start of a
 ///   string or after a `/` (a Postman or Insomnia URL, a Postman `path`
 ///   element), up to the next `/`, `?` or `#`; a valueless one becomes
@@ -421,9 +612,9 @@ pub fn reserve_source_references(b: &mut Builder, text: &str) {
 /// - every `{{name}}` reference in a decoded string, which escapes can hide
 ///   from the raw-text pass ([`reserve_string_references`]).
 ///
-/// A path parameter is reserved by its raw spelling too (`:url-needs-review`
-/// reserves `url-needs-review`), which no placeholder it makes can take;
-/// that is fail-safe: a placeholder then takes a suffix.
+/// A path parameter is reserved by its raw spelling too (`:a-b` reserves
+/// `a-b` as well as `a_b`); that is fail-safe: a placeholder then takes a
+/// suffix.
 ///
 /// Over-reserving only makes a placeholder take a suffix. One pass over the
 /// parsed document, without recursion.
@@ -481,33 +672,26 @@ fn reserve_path_segments(b: &mut Builder, s: &str) {
 /// Apply the credential policy to a JSON value that is stored as text (an
 /// Insomnia environment value named `name` that is an array): every scalar
 /// under a credential-named member, whatever it is called and whatever its
-/// type (string, number or boolean), becomes a placeholder named by its path
-/// ([`PlaceholderNames`]). Numbers and booleans keep an unquoted placeholder
+/// type (string, number or boolean), becomes a literal-bound placeholder
+/// ([`literal_name`], the field being the nearest member name). Numbers and
+/// booleans keep an unquoted placeholder
 /// ([`render_json`]). As in [`scrub_json`], a node's report pointer and name
 /// are built, bounded, only for a leaf that is redacted, so the walk costs no
 /// more than the value. Returns whether anything was redacted.
-pub fn scrub_stored_json(b: &mut Builder, v: &mut Value, name: &str, pointer: &str, names: &mut PlaceholderNames) -> bool {
+pub fn scrub_stored_json(b: &mut Builder, v: &mut Value, name: &str, pointer: &str) -> bool {
     let before = b.report.redactions_made();
-    scrub_stored_at(b, v, names, name, pointer, &mut Vec::new(), false);
+    scrub_stored_at(b, v, name, pointer, &mut Vec::new(), false);
     b.report.redactions_made() > before
 }
 
-fn scrub_stored_at(
-    b: &mut Builder,
-    v: &mut Value,
-    names: &mut PlaceholderNames,
-    root: &str,
-    pointer: &str,
-    path: &mut Vec<String>,
-    credential: bool,
-) {
+fn scrub_stored_at(b: &mut Builder, v: &mut Value, root: &str, pointer: &str, path: &mut Vec<String>, credential: bool) {
     match v {
         Value::Object(m) => {
             for (k, child) in m.iter_mut() {
                 let under = credential || is_credential_name(k);
                 if under || child.is_object() || child.is_array() {
                     path.push(segment(k));
-                    scrub_stored_at(b, child, names, root, pointer, path, under);
+                    scrub_stored_at(b, child, root, pointer, path, under);
                     path.pop();
                 }
             }
@@ -516,20 +700,20 @@ fn scrub_stored_at(
             for (i, child) in a.iter_mut().enumerate() {
                 if credential || child.is_object() || child.is_array() {
                     path.push(i.to_string());
-                    scrub_stored_at(b, child, names, root, pointer, path, credential);
+                    scrub_stored_at(b, child, root, pointer, path, credential);
                     path.pop();
                 }
             }
         }
         Value::String(s) if credential => {
-            let (var, p) = leaf_names(names, root, pointer, path);
+            let (field, p) = leaf_names(root, pointer, path);
             let literal = has_literal_secret(s.trim(), b.template_syntax);
-            *s = credential_text_named(b, s, literal, &var, &p, &format!("environment value {var}"));
+            *s = credential_placeholder(b, s, literal, ("secret", field, None), &p, &format!("environment value {root}"));
         }
         Value::Number(_) | Value::Bool(_) if credential => {
-            let (var, p) = leaf_names(names, root, pointer, path);
+            let (field, p) = leaf_names(root, pointer, path);
             let literal = v.to_string();
-            let new = credential_text_named(b, &literal, true, &var, &p, &format!("environment value {var}"));
+            let new = credential_placeholder(b, &literal, true, ("secret", field, None), &p, &format!("environment value {root}"));
             if new != literal {
                 *v = Value::String(format!("{NUMERIC_PLACEHOLDER}{new}{NUMERIC_PLACEHOLDER}"));
             }
@@ -538,22 +722,15 @@ fn scrub_stored_at(
     }
 }
 
-/// The placeholder name and report pointer for the leaf at `path` (bounded
-/// segments) under the value named `root`, each built with bounded work.
-fn leaf_names(names: &mut PlaceholderNames, root: &str, pointer: &str, path: &[String]) -> (String, String) {
-    let mut readable = crate::util::clip(root, PATH_NAME_BYTES);
-    for seg in path {
-        if readable.len() > PATH_NAME_BYTES * 2 {
-            break;
-        }
-        readable.push('_');
-        readable.push_str(seg);
-    }
+/// The field name a leaf at `path` under the value named `root` fills (its
+/// nearest member name), and its report pointer, built with bounded work.
+fn leaf_names<'p>(root: &'p str, pointer: &str, path: &'p [String]) -> (&'p str, String) {
+    let field = path.iter().rev().find(|seg| !seg.bytes().all(|c| c.is_ascii_digit())).map_or(root, String::as_str);
     let p = match path.split_last() {
         Some((last, parents)) => pointer_at(pointer, parents, last),
         None => pointer.to_string(),
     };
-    (names.name(&readable), p)
+    (field, p)
 }
 
 /// Parse a JSON document embedded in a string field of the source (a request
@@ -599,15 +776,15 @@ pub fn scrub_json_text(b: &mut Builder, text: &mut String, pointer: &str) -> boo
             true
         }
         Err(e) => {
-            let why = match e {
-                crate::ImportError::LimitExceeded { what, limit } => format!("it exceeds the import limit for {what} ({limit})"),
-                _ => "it could not be parsed".to_string(),
+            let message = match e {
+                crate::ImportError::LimitExceeded { limit, .. } => {
+                    Message::new("the JSON body was not scanned for credentials: it exceeds an import limit (")
+                        .num(limit)
+                        .text("); review it before sharing")
+                }
+                _ => Message::new("the JSON body was not scanned for credentials: it could not be parsed; review it before sharing"),
             };
-            b.report.warn(
-                "body_not_scanned",
-                pointer,
-                format!("JSON body was not scanned for credentials: {why}; review it before sharing"),
-            );
+            b.report.warn("body_not_scanned", pointer, message);
             false
         }
     }
@@ -704,17 +881,17 @@ pub fn redact_raw_query(b: &mut Builder, url: &str, pointer: &str, what: &str) -
         };
         // Matched by its decoded spelling, but stored decoded only when that
         // makes or changes no `{{reference}}`: the engine resolves names
-        // too. The placeholder is named after the source spelling as written
-        // (sanitized to `[A-Za-z0-9_]`), never after a decoded name: decoded
-        // escaped braces (`%7B%7Bapi_key%7D%7D`) would otherwise name an
-        // existing variable (`{{api_key}}`) the source never read.
+        // too. The placeholder is bound to the literal ([`literal_name`]),
+        // never named after the name, so decoded escaped braces
+        // (`%7B%7Bapi_key%7D%7D`) cannot name an existing variable
+        // (`{{api_key}}`) the source never read.
         let var = k.to_string();
         let name = decode_keeping_references(k).unwrap_or_else(|| k.to_string());
         let decoded = query_decode(v);
         let value = if same_references(v, &decoded) {
             credential_text(b, &decoded, &var, pointer, &format!("{what} {var}"))
         } else {
-            credential_text_with(b, v, true, &var, pointer, &format!("{what} {var}"))
+            credential_placeholder(b, v, true, ("secret", &var, None), pointer, &format!("{what} {var}"))
         };
         if seg.contains('+') {
             b.report.warn(
@@ -958,24 +1135,6 @@ pub fn take_userinfo(url: &str, syntax: anvil_domain::secret::TemplateSyntax) ->
     }
 }
 
-/// [`take_userinfo`] applied to a request whose auth is `auth`: the URL to
-/// store, and whether it was quarantined ([`quarantine_url`]), in which case
-/// it is stored as returned, with no query, fragment or other processing.
-/// Userinfo goes through [`apply_userinfo`].
-pub fn take_url_credentials(b: &mut Builder, url: &str, auth: &mut AuthConfig, pointer: &str) -> (String, bool) {
-    match take_userinfo(url, b.template_syntax) {
-        TakenUrl::Plain(url) => (url, false),
-        TakenUrl::Userinfo(url, userinfo) => {
-            apply_userinfo(b, auth, Some(userinfo), pointer);
-            (url, false)
-        }
-        TakenUrl::Ambiguous => (quarantine_url(b, url, pointer), true),
-    }
-}
-
-/// The reference a quarantined URL is replaced by ([`quarantine_url`]).
-pub const QUARANTINE_PLACEHOLDER: &str = "url-needs-review";
-
 /// An endpoint URL other than the request's (an OAuth token or
 /// authorization URL), by the request URL's rule
 /// ([`anvil_domain::secret::url_userinfo`]): a userinfo that is not exactly
@@ -983,7 +1142,7 @@ pub const QUARANTINE_PLACEHOLDER: &str = "url-needs-review";
 /// and an ambiguous URL is quarantined ([`quarantine_url`]). With
 /// `include_credentials` a literal userinfo is kept, and a sanitized export
 /// extracts the whole URL.
-pub fn endpoint_url(b: &mut Builder, url: &str, pointer: &str, field: &str) -> String {
+pub fn endpoint_url(b: &mut Builder, url: &str, pointer: &str, field: &'static str) -> String {
     use anvil_domain::secret::{UrlUserinfo, is_plain_userinfo, url_userinfo};
     match url_userinfo(url, b.template_syntax) {
         UrlUserinfo::None => url.to_string(),
@@ -997,7 +1156,9 @@ pub fn endpoint_url(b: &mut Builder, url: &str, pointer: &str, field: &str) -> S
             b.report.warn(
                 "url_credentials_removed",
                 pointer,
-                format!("the {field} held credentials in its userinfo; they were not imported (supply them as the client credentials)"),
+                Message::new("the ")
+                    .text(field)
+                    .text(" held credentials in its userinfo; they were not imported (supply them as the client credentials)"),
             );
             format!("{}{}", &url[..start], &url[at + 1..])
         }
@@ -1012,10 +1173,9 @@ pub const QUARANTINED_URL_NAME: &str = "<url redacted>";
 /// end of its authority and an `@`, so where a credential in it ends cannot
 /// be told. Nothing in it is parsed or cut, so the request's host cannot
 /// change. Unless `include_credentials`, the URL is not imported at all: the
-/// request gets a fresh reference no variable defines (`url-needs-review`,
-/// from the import's allocator, so it never binds an existing variable) and
-/// the original text is stored nowhere. With `include_credentials`, the URL
-/// is kept exactly as written. Either way the request is reported
+/// request gets a reference bound to the URL's text (`url_<16 hex digits>`,
+/// [`literal_name`]), and the original text is stored nowhere. With
+/// `include_credentials`, the URL is kept exactly as written. Either way the request is reported
 /// (`url_quarantined`).
 pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str) -> String {
     const WHY: &str = "this URL mixes a template with a possible credential in its authority";
@@ -1023,17 +1183,19 @@ pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str) -> String {
         b.report.warn(
             "url_quarantined",
             pointer,
-            format!("{WHY}; it was kept as written because credentials are included, and may contain a credential"),
+            Message::new(WHY).text("; it was kept as written because credentials are included, and may contain a credential"),
         );
         return url.to_string();
     }
-    // Hyphenated, so no name the import derives from the source (Postman
-    // and Insomnia path parameters, cURL `$NAME`, sanitized keys) can be it,
-    // and explicit `{{…}}` references and declared variables are reserved.
-    let name = b.env_names.name_verbatim(QUARANTINE_PLACEHOLDER);
+    let name = literal_name(b, "url", "url", None, url);
     let reference = format!("{{{{{name}}}}}");
     b.report.redacted(pointer, "request URL", &reference);
-    b.report.warn("url_quarantined", pointer, format!("{WHY}; it was not imported (the request uses {reference}): re-enter it"));
+    // The placeholder is the import's own name, listed with the redaction.
+    b.report.warn(
+        "url_quarantined",
+        pointer,
+        Message::new(WHY).text("; it was not imported (the request uses the placeholder listed in the redactions): re-enter it"),
+    );
     reference
 }
 
@@ -1044,20 +1206,25 @@ pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str) -> String {
 /// `{{user}}:`, `{{user}}:{{password}}`, in the source's syntax;
 /// [`anvil_domain::secret::is_plain_userinfo`]) keeps them. Anything else is
 /// credential material, and no part of it is kept as a user name or in the
-/// URL: the user name becomes a fresh placeholder, and the password a fresh
-/// placeholder too (with a redaction), or, with `include_credentials`, the
-/// literal after the first `:` (the whole userinfo when there is none),
-/// kept only in the password, a secret field. Fresh placeholders come from
-/// the import's name allocator, so they never name a variable the source
-/// defines or references (`url_userinfo_replaced`).
+/// URL: the user name becomes a placeholder bound to it, and the password
+/// one too (with a redaction; an empty password stays empty), or, with
+/// `include_credentials`, the literal after the first `:` (the whole
+/// userinfo when there is none), kept only in the password, a secret field
+/// (`url_userinfo_replaced`).
 pub fn userinfo_auth(b: &mut Builder, userinfo: &str, pointer: &str) -> AuthConfig {
+    let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
     if anvil_domain::secret::is_plain_userinfo(userinfo, b.template_syntax) {
-        let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
         return AuthConfig::Basic { username: user.to_string(), password: SensitiveValue::template(pass) };
     }
-    let user_var = b.env_names.name("username");
-    let username = format!("{{{{{user_var}}}}}");
-    b.report.require_var(&user_var, true, "the user name in the URL is not imported", pointer);
+    // Each part is bound to its literal ([`literal_name`]), as an auth
+    // secret is.
+    let username = if user.is_empty() {
+        String::new()
+    } else {
+        let user_var = literal_name(b, "auth", "username", Some("username"), user);
+        b.report.require_var(&user_var, true, "the user name in the URL is not imported", pointer);
+        format!("{{{{{user_var}}}}}")
+    };
     let password = if b.opts.include_credentials {
         // The password part, or the whole userinfo when it holds an
         // expression or has no (or an empty) password: no part is dropped.
@@ -1066,8 +1233,11 @@ pub fn userinfo_auth(b: &mut Builder, userinfo: &str, pointer: &str) -> AuthConf
             _ => userinfo,
         };
         SensitiveValue::template(decode_keeping_references(literal).unwrap_or_else(|| literal.to_string()))
+    } else if pass.is_empty() {
+        // Nothing to bind a placeholder to.
+        SensitiveValue::default()
     } else {
-        let pass_var = b.env_names.name("password");
+        let pass_var = literal_name(b, "auth", "password", Some("password"), pass);
         let placeholder = format!("{{{{{pass_var}}}}}");
         b.report.redacted(pointer, "credentials in the URL", &placeholder);
         b.report.require_var(&pass_var, true, "the credentials in the URL were redacted on import", pointer);
@@ -1142,11 +1312,7 @@ pub fn check_dynamic_vars(b: &mut Builder, s: &str, pointer: &str) {
         let Some(end) = after.find("}}") else { break };
         let name = after[..end].split_whitespace().next().unwrap_or("");
         if !NATIVE_DYNAMIC.contains(&name) {
-            b.report.unsupported(
-                "dynamic_variable",
-                pointer,
-                format!("dynamic variable '{{{{${name}}}}}' has no Anvil equivalent; replace it before sending"),
-            );
+            b.report.unsupported("dynamic_variable", pointer, "a dynamic variable has no Anvil equivalent; replace it before sending");
         }
         rest = &after[end + 2..];
     }

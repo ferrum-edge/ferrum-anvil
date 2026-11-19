@@ -3,7 +3,7 @@
 use crate::detect::Detected;
 use crate::report::ImportReport;
 use crate::util::{spec_hash, text_size_within};
-use crate::{ImportOptions, ImportResult, ImportedSource};
+use crate::{CredentialName, ImportOptions, ImportResult, ImportedSource};
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::{ImportSource, RequestSpec};
@@ -53,6 +53,19 @@ pub(crate) struct Builder<'o> {
     /// How the source reads `{{…}}` when a credential value is judged
     /// literal or a reference (Insomnia sets Nunjucks).
     pub template_syntax: anvil_domain::secret::TemplateSyntax,
+    /// [`ImportResult::credential_names`].
+    pub credential_names: std::collections::BTreeMap<String, CredentialName>,
+    /// The key credential placeholder names are made with
+    /// ([`crate::CredentialKey`]): the caller's, or a random one.
+    pub credential_key: [u8; 32],
+    /// The sentinel each literal got (by its full HMAC), so equal literals
+    /// share one placeholder ([`crate::common::literal_name`]).
+    pub literal_names: HashMap<String, String>,
+    /// 32 hex digits drawn at random for this import: the sentinels' nonce
+    /// ([`crate::common::sentinel`]).
+    pub sentinel_nonce: String,
+    /// The name of each sentinel, by index ([`crate::common::finalize`]).
+    pub placeholder_names: Vec<String>,
 }
 
 impl<'o> Builder<'o> {
@@ -64,6 +77,7 @@ impl<'o> Builder<'o> {
         };
         let import_id = Id(Uuid::new_v5(&ANVIL_IMPORT_NAMESPACE, format!("import|{sha}|{fp}|{ns}").as_bytes()));
         let now = opts.imported_at.unwrap_or_else(Utc::now);
+        let credential_key = *opts.credential_key.clone().unwrap_or_else(crate::CredentialKey::random).as_bytes();
         let ws_id = Id(Uuid::new_v5(&ns, b"workspace"));
         let workspace = Workspace {
             meta: Meta { id: ws_id, schema_version: anvil_domain::SCHEMA_VERSION, created_at: now, updated_at: now },
@@ -95,6 +109,16 @@ impl<'o> Builder<'o> {
             limit_warned: false,
             env_names: Default::default(),
             template_syntax: Default::default(),
+            credential_names: Default::default(),
+            credential_key,
+            literal_names: HashMap::new(),
+            sentinel_nonce: {
+                let mut bytes = [0u8; 16];
+                bytes[..8].copy_from_slice(&Uuid::new_v4().as_bytes()[..8]);
+                bytes[8..].copy_from_slice(&Uuid::new_v4().as_bytes()[8..]);
+                hex::encode(bytes)
+            },
+            placeholder_names: vec![],
         }
     }
 
@@ -202,10 +226,9 @@ impl<'o> Builder<'o> {
                 self.report.warn(
                     "operation_limit",
                     pointer,
-                    format!(
-                        "only the first {} operations were imported (max_operations); later ones are skipped",
-                        self.opts.max_operations
-                    ),
+                    crate::report::Message::new("only the first ")
+                        .num(self.opts.max_operations)
+                        .text(" operations were imported (max_operations); later ones are skipped"),
                 );
             }
             return false;
@@ -266,7 +289,7 @@ impl<'o> Builder<'o> {
             self.report.warn(
                 "duplicate_operation_key",
                 pointer,
-                format!("operation key '{operation_key}' is not unique; this one is linked as '{key}' for reimport"),
+                "the operation key is not unique; this operation is linked under the key with a `#n` suffix for reimport",
             );
         }
         self.op_keys.insert(key.clone());
@@ -319,7 +342,8 @@ impl<'o> Builder<'o> {
             sha256: sha,
             size_bytes: size as u64,
             imported_at: self.now,
-            options: self.opts.clone(),
+            // The credential key stays with the caller.
+            options: ImportOptions { credential_key: None, ..self.opts.clone() },
         };
         ImportResult {
             workspace: self.workspace,
@@ -328,6 +352,7 @@ impl<'o> Builder<'o> {
             environments: self.environments,
             source,
             report: self.report,
+            credential_names: self.credential_names,
         }
     }
 }

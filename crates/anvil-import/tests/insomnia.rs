@@ -66,7 +66,7 @@ fn v4_bodies_auth_and_unsupported_resources() {
     assert_eq!(req(&r, "insomnia:req_gql").spec.auth, AuthConfig::None);
     assert!(has(&r, "auth_unsupported"));
     match &req(&r, "insomnia:req_login").spec.body {
-        Body::FormUrlEncoded { fields } => assert_eq!(fields[1].value, "{{password}}"),
+        Body::FormUrlEncoded { fields } => assert!(is_secret_ref(&fields[1].value)),
         other => panic!("{other:?}"),
     }
     match &req(&r, "insomnia:req_upload").spec.auth {
@@ -106,7 +106,7 @@ fn v5_collection() {
     let in_folder: Vec<&str> = r.requests.iter().filter(|q| q.folder_id == Some(folder.meta.id)).map(|q| q.name.as_str()).collect();
     assert_eq!(in_folder, vec!["List tasks", "Create task"]);
     let list = &req(&r, "insomnia:req_list").spec;
-    assert_eq!(header(list, "Authorization").unwrap().value, "{{Authorization}}", "literal bearer header redacted");
+    assert!(is_secret_ref(&header(list, "Authorization").unwrap().value), "literal bearer header redacted");
     assert_eq!(list.settings.cookies, Some(false));
     assert_eq!(list.settings.redirects.map(|p| p.follow), Some(true));
     assert!(matches!(req(&r, "insomnia:req_create").spec.body, Body::Xml { .. }));
@@ -346,9 +346,9 @@ fn raw_json_bodies_and_url_queries_are_redacted() {
         })),
     ] {
         let s = &r.requests[0].spec;
-        assert_eq!(json_body(s)["password"], "{{password}}");
+        assert!(json_body(s)["password"].as_str().is_some_and(is_secret_ref));
         assert_eq!(s.url, "https://example.test/x?flag");
-        assert!(param(s, "api_key").is_some_and(|p| p.value == "{{api_key}}" && p.sensitive));
+        assert!(param(s, "api_key").is_some_and(|p| is_secret_ref(&p.value) && p.sensitive));
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
         assert_eq!(r.report.redactions.len(), 2);
     }
@@ -406,7 +406,7 @@ fn graphql_variables_and_numeric_credentials_are_redacted() {
             Body::GraphQl { variables, .. } => {
                 // The number is a placeholder again once the user supplies it.
                 let v = substituted(variables, &[("pin", "123456")]);
-                assert_eq!(v["password"], "{{password}}");
+                assert!(v["password"].as_str().is_some_and(is_secret_ref));
                 assert_eq!(v["pin"], 123456);
                 assert_eq!(v["user"], "u");
             }
@@ -580,8 +580,8 @@ fn userinfo_placeholders_never_take_a_path_parameter_name() {
         assert_eq!(s.url, "https://api.example.test/items/{{username}}/{{password}}");
         match &s.auth {
             AuthConfig::Basic { username, password } => {
-                assert_eq!(username, "{{username_2}}");
-                assert_eq!(template_text(password), "{{password_2}}");
+                assert!(is_auth_ref(username, "username"), "the user name is not an auth placeholder");
+                assert!(is_auth_ref(&template_text(password), "password"));
             }
             _ => panic!("expected Basic auth"),
         }
@@ -617,7 +617,7 @@ fn url_userinfo_becomes_basic_auth_unless_auth_is_disabled() {
         let s = &r.requests[0].spec;
         assert_eq!(s.url, "https://api.example.com/v1/status");
         assert!(
-            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password == &SensitiveValue::template("{{password}}")),
+            matches!(&s.auth, AuthConfig::Basic { username, password } if is_auth_ref(username, "username") && is_auth_ref(template_of(password), "password")),
             "expected Basic auth with a placeholder password"
         );
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-in1"));
@@ -673,11 +673,26 @@ fn credential_named_path_parameters_are_redacted() {
         { "name": "webhook_token", "value": "tok-SENSITIVE-in7" }, { "name": "id", "value": "42" },
     ]});
     for r in both(request.clone(), serde_json::json!({}), &opts()) {
-        assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/{{webhook_token}}/42");
+        let url = &r.requests[0].spec.url;
+        assert!(url.strip_prefix("https://hooks.example.com/").and_then(|u| u.strip_suffix("/42")).is_some_and(is_secret_ref), "{url}");
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-in7"));
     }
     for r in both(request, serde_json::json!({}), &keep()) {
         assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/tok-SENSITIVE-in7/42");
+    }
+}
+
+/// Round 6 of #586 (sol F2): a credential path parameter used twice gets
+/// one placeholder, written twice, and imports cleanly (v4 and v5).
+#[test]
+fn a_repeated_credential_path_parameter_imports() {
+    let request = serde_json::json!({ "url": "https://api.example.test/:api_key/items/:api_key", "pathParameters": [
+        { "name": "api_key", "value": "tok-SENSITIVE-in9" },
+    ]});
+    for r in both(request, serde_json::json!({}), &opts()) {
+        let url = &r.requests[0].spec.url;
+        let parts: Vec<&str> = url.strip_prefix("https://api.example.test/").unwrap_or_default().split("/items/").collect();
+        assert!(parts.len() == 2 && is_secret_ref(parts[0]) && parts[0] == parts[1], "{url}");
     }
 }
 
@@ -781,9 +796,9 @@ fn nunjucks_expressions_and_delimiters_in_passwords_are_redacted() {
         let s = &r.requests[0].spec;
         // A template in the authority beside an `@`: the URL is quarantined
         // (not imported; review of #575).
-        assert_eq!(s.url, "{{url-needs-review}}");
+        assert!(is_quarantined(&s.url), "not quarantined");
         assert!(has(&r, "url_quarantined"));
-        assert_eq!(header(s, "X-Api-Key").unwrap().value, "{{X_Api_Key}}");
+        assert!(is_secret_ref(&header(s, "X-Api-Key").unwrap().value));
         let accounts = r.workspace.variables.iter().find(|v| v.name == "accounts").map(|v| template_text(&v.value)).unwrap();
         let text = serde_json::to_string(&r.requests).unwrap();
         assert!(!text.contains("tok-SENSITIVE-in14") && !text.contains("57157157") && !accounts.contains("57157157"), "a literal stayed");

@@ -25,11 +25,11 @@ fn credentials_are_redacted_by_default() {
     let r = run(HAR, &opts());
     let me = &by_name(&r, "GET /v1/me").spec;
     assert_eq!(me.url, "https://api.example.com/v1/me");
-    assert_eq!(param(me, "api_key").unwrap().value, "{{api_key}}");
+    assert!(is_secret_ref(&param(me, "api_key").unwrap().value));
     assert_eq!(param(me, "lang").unwrap().value, "en");
-    assert_eq!(header(me, "Authorization").unwrap().value, "{{Authorization}}");
-    assert_eq!(header(me, "Cookie").unwrap().value, "{{Cookie}}");
-    assert_eq!(header(me, "X-Api-Key").unwrap().value, "{{X_Api_Key}}");
+    assert!(is_secret_ref(&header(me, "Authorization").unwrap().value));
+    assert!(is_secret_ref(&header(me, "Cookie").unwrap().value));
+    assert!(is_secret_ref(&header(me, "X-Api-Key").unwrap().value));
     assert!(header(me, "Authorization").unwrap().sensitive);
     // HTTP/2 pseudo-headers and connection headers dropped.
     assert!(me.headers.iter().all(|h| !h.name.starts_with(':') && !h.name.eq_ignore_ascii_case("host")));
@@ -38,15 +38,15 @@ fn credentials_are_redacted_by_default() {
     let login = &by_name(&r, "POST /v1/login").spec;
     let body = json_body(login);
     assert_eq!(body["username"], "alice");
-    assert_eq!(body["password"], "{{password}}");
-    assert_eq!(body["profile"]["refresh_token"], "{{refresh_token}}");
+    assert!(body["password"].as_str().is_some_and(is_secret_ref));
+    assert!(body["profile"]["refresh_token"].as_str().is_some_and(is_secret_ref));
     assert_eq!(body["profile"]["name"], "A");
     assert!(header(login, "Content-Length").is_none());
 
     match &by_name(&r, "POST /oauth/token").spec.body {
         Body::FormUrlEncoded { fields } => {
             assert_eq!(fields[1].value, "app");
-            assert_eq!(fields[2].value, "{{client_secret}}");
+            assert!(is_secret_ref(&fields[2].value));
         }
         other => panic!("{other:?}"),
     }
@@ -107,7 +107,7 @@ fn url_userinfo_becomes_basic_auth_only_inside_the_authority() {
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "https://example.test/x");
     assert!(
-        matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password.is_pure_reference()),
+        matches!(&s.auth, AuthConfig::Basic { username, password } if is_auth_ref(username, "username") && password.is_pure_reference()),
         "the userinfo becomes Basic auth with the password redacted"
     );
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("pw-secret"));
@@ -179,7 +179,7 @@ fn bodies_are_scrubbed_after_the_redaction_list_is_full() {
     let r = anvil_import::import(doc.to_string().as_bytes(), &opts()).unwrap();
     assert_eq!(r.report.redactions.len(), 10_000);
     let login = by_name(&r, "POST /login");
-    assert_eq!(json_body(&login.spec)["password"], "{{password}}");
+    assert!(json_body(&login.spec)["password"].as_str().is_some_and(is_secret_ref));
     let all = serde_json::to_string(&r.requests).unwrap();
     assert!(!all.contains("hunter2-late") && !all.contains("bulk-secret-"), "a secret was kept");
 }

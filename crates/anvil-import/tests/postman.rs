@@ -65,7 +65,7 @@ fn bodies() {
     assert_eq!(r.report.external_refs[0].reference, "/Users/alice/invoices/inv-1.pdf");
     match &by_name(&r, "Login form").spec.body {
         Body::FormUrlEncoded { fields } => {
-            assert_eq!(fields[1].value, "{{password}}");
+            assert!(is_secret_ref(&fields[1].value));
             assert!(fields[1].sensitive);
             assert!(!fields[2].enabled);
         }
@@ -144,8 +144,13 @@ fn scripts_are_retained_disabled_and_untrusted() {
         assert!(!s.enabled && !s.trusted);
     }
     let test = r.report.scripts.iter().find(|s| s.event == "test").unwrap();
-    assert_eq!(test.owner, "List products");
-    assert!(test.source.contains("pm.environment.set('first'"));
+    assert_eq!(test.owner, anvil_import::ScriptOwner::Request);
+    assert_eq!(test.language, "javascript");
+    assert!(test.bytes > 0 && test.lines > 0);
+    // #584: the report describes a script by its metadata; the body and the
+    // owner's name are not copied into it.
+    let report = serde_json::to_string(&r.report).unwrap();
+    assert!(!report.contains("pm.environment.set") && !report.contains("List products"));
     assert_eq!(test.pointer, "/item/0/item/0/item/0/event/0");
     // Scripts never reach request specs.
     let all = serde_json::to_string(&r.requests).unwrap();
@@ -207,9 +212,9 @@ fn raw_json_bodies_and_mixed_raw_queries_are_redacted() {
     });
     let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
     let s = &r.requests[0].spec;
-    assert_eq!(json_body(s)["password"], "{{password}}");
+    assert!(json_body(s)["password"].as_str().is_some_and(is_secret_ref));
     assert_eq!(s.url, "https://x.example.com/a?flag");
-    assert!(param(s, "api_key").is_some_and(|p| p.value == "{{api_key}}" && p.sensitive));
+    assert!(param(s, "api_key").is_some_and(|p| is_secret_ref(&p.value) && p.sensitive));
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
     assert_eq!(r.report.redactions.len(), 2);
 }
@@ -229,7 +234,8 @@ fn graphql_variables_numeric_credentials_and_unscannable_bodies() {
     match &r.requests[0].spec.body {
         Body::GraphQl { variables, .. } => {
             let v = substituted(variables, &[("pin", "123456")]);
-            assert_eq!((v["password"].as_str(), v["pin"].as_u64()), (Some("{{password}}"), Some(123456)));
+            assert!(v["password"].as_str().is_some_and(is_secret_ref));
+            assert_eq!(v["pin"].as_u64(), Some(123456));
         }
         other => panic!("{other:?}"),
     }
@@ -304,12 +310,12 @@ fn an_escaped_credential_name_in_a_query_list_is_redacted() {
     let r = postman_request(with_query(serde_json::json!([{"key": "%70assword", "value": "tok-SENSITIVE-pm1"}])), &opts());
     let p = &r.requests[0].spec.params[0];
     // The placeholder is named after the spelling as written.
-    assert!(p.sensitive && p.value == "{{_70assword}}");
+    assert!(p.sensitive && is_secret_ref(&p.value));
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-pm1"));
 }
 
-/// GHSA-c236-7r9g-c9p2: URL userinfo becomes Basic auth with a
-/// `{{password}}` placeholder for the string, raw and rebuilt URL forms; the
+/// GHSA-c236-7r9g-c9p2: URL userinfo becomes Basic auth with a password
+/// placeholder for the string, raw and rebuilt URL forms; the
 /// userinfo ends at the last `@` of the authority.
 #[test]
 fn url_userinfo_becomes_basic_auth_and_its_password_is_redacted() {
@@ -322,7 +328,7 @@ fn url_userinfo_becomes_basic_auth_and_its_password_is_redacted() {
         let s = &r.requests[0].spec;
         assert_eq!(s.url, "https://api.example.com/v1/status");
         assert!(
-            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password == &SensitiveValue::template("{{password}}")),
+            matches!(&s.auth, AuthConfig::Basic { username, password } if is_auth_ref(username, "username") && is_auth_ref(template_of(password), "password")),
             "expected Basic auth with a placeholder password"
         );
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-pm2"));
@@ -363,9 +369,10 @@ fn credential_named_path_variables_are_redacted() {
         "variable": [{"key": "webhook_token", "value": "tok-SENSITIVE-pm4"}, {"key": "id", "value": "42"}]
     }});
     let r = postman_request(request.clone(), &opts());
-    assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/{{webhook_token}}/orders/42");
+    let url = &r.requests[0].spec.url;
+    assert!(url.strip_prefix("https://hooks.example.com/").and_then(|u| u.strip_suffix("/orders/42")).is_some_and(is_secret_ref), "{url}");
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-pm4"));
-    assert!(r.report.required_variables.iter().any(|v| v.name == "webhook_token" && v.secret));
+    assert!(r.report.required_variables.iter().any(|v| is_secret_ref(&format!("{{{{{}}}}}", v.name)) && v.secret));
     let r = postman_request(request, &ImportOptions { include_credentials: true, ..opts() });
     assert_eq!(r.requests[0].spec.url, "https://hooks.example.com/tok-SENSITIVE-pm4/orders/42");
 }
@@ -383,8 +390,9 @@ fn userinfo_placeholders_never_take_a_collection_variable_name() {
     let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
     match &r.requests[0].spec.auth {
         AuthConfig::Basic { username, password } => {
-            assert_eq!(username, "{{username_2}}");
-            assert_eq!(password, &SensitiveValue::template("{{password_2}}"));
+            assert!(is_auth_ref(username, "username"), "the user name is not an auth placeholder");
+            // No password in the URL: nothing to bind a placeholder to.
+            assert_eq!(template_of(password), "");
         }
         _ => panic!("expected Basic auth"),
     }
@@ -408,9 +416,44 @@ fn userinfo_placeholders_never_take_a_path_variable_name() {
     assert_eq!(r.requests[1].spec.url, "https://api.example.test/accounts/{{password}}");
     match &r.requests[0].spec.auth {
         AuthConfig::Basic { username, password } => {
-            assert_eq!(username, "{{username_2}}");
-            assert_eq!(password, &SensitiveValue::template("{{password_2}}"));
+            assert!(is_auth_ref(username, "username"), "the user name is not an auth placeholder");
+            assert!(is_auth_ref(template_of(password), "password"));
         }
         _ => panic!("expected Basic auth"),
     }
+}
+
+/// Review of #586 (sol F3): an auth secret's placeholder never shares a
+/// variable with a field placeholder. Field and auth placeholders are bound
+/// to different literals and kinds, and a source that names a field like an
+/// auth placeholder is refused (#584, round 5).
+#[test]
+fn auth_placeholders_never_alias_field_placeholders() {
+    let doc = |headers: serde_json::Value| {
+        serde_json::json!({
+            "info": { "name": "c", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "tok-SENSITIVE-pm-col" }] },
+            "item": [{ "id": "r1", "name": "r", "request": { "method": "GET", "url": "https://api.example.test/", "header": headers,
+                "auth": { "type": "basic", "basic": [{ "key": "username", "value": "u" }, { "key": "password", "value": "tok-SENSITIVE-pm-req" }] } } }]
+        })
+        .to_string()
+    };
+    let reference = |v: &serde_json::Value, field: &str| v[field]["value"].as_str().unwrap().trim_matches(['{', '}']).to_string();
+    // A credential header holding the same literal as the request's auth.
+    let headers = serde_json::json!([{ "key": "X-Api-Key", "value": "tok-SENSITIVE-pm-req" }]);
+    let r = import(doc(headers).as_bytes(), &opts()).unwrap();
+    let spec = &r.requests[0].spec;
+    let request_secret = reference(&serde_json::to_value(&spec.auth).unwrap(), "password");
+    let collection_secret = reference(&serde_json::to_value(&r.workspace.auth).unwrap(), "token");
+    let field = header(spec, "X-Api-Key").unwrap().value.trim_matches(['{', '}']).to_string();
+    assert!(request_secret.starts_with("auth_") && collection_secret.starts_with("auth_") && field.starts_with("secret_"));
+    assert!(request_secret != collection_secret && request_secret != field, "two credentials share a placeholder");
+
+    // Headers named exactly like both auth secrets are the source's own use of
+    // the reserved shape.
+    let headers = serde_json::json!([
+        { "key": request_secret, "value": "tok-SENSITIVE-pm-h1" },
+        { "key": collection_secret, "value": "tok-SENSITIVE-pm-h2" }
+    ]);
+    assert!(import(doc(headers).as_bytes(), &opts()).is_err(), "a header named like a placeholder was accepted");
 }

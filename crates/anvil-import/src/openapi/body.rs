@@ -6,6 +6,7 @@ use super::params;
 use super::refs::{Refs, ref_name};
 use super::schema::SampleGen;
 use crate::SampleMode;
+use crate::report::Message;
 use crate::util::{is_json_media, is_xml_media, media_essence, ptr, scalar_text, str_of};
 use anvil_domain::request::{Body, KeyValue, MultipartContent, MultipartPart};
 use serde_json::{Map, Value};
@@ -92,7 +93,11 @@ pub(crate) fn from_media(sg: &mut SampleGen, mt: &str, media: &Value, mptr: &str
     let (media, mptr) = sg.refs.resolve_or_self(media, mptr, sg.report);
     for k in ["prefixEncoding", "itemEncoding"] {
         if media.get(k).is_some() {
-            sg.report.unsupported("sequential_encoding", &ptr(&mptr, k), format!("OpenAPI 3.2 `{k}` is not supported; parts use defaults"));
+            sg.report.unsupported(
+                "sequential_encoding",
+                &ptr(&mptr, k),
+                Message::new("OpenAPI 3.2 `").text(k).text("` is not supported; parts use defaults"),
+            );
         }
     }
     let schema = media.get("schema");
@@ -176,7 +181,7 @@ pub(crate) fn from_media(sg: &mut SampleGen, mt: &str, media: &Value, mptr: &str
             sg.report.unsupported(
                 "binary_body",
                 &mptr,
-                format!("'{mt}' request bodies need a file attachment; the request is imported without a body"),
+                "request bodies of this media type need a file attachment; the request is imported without a body",
             );
             GeneratedBody { body: Body::None, content_type: raw_type }
         }
@@ -409,7 +414,7 @@ fn multipart_parts(sg: &mut SampleGen, schema: &Value, sptr: &str, v: &Value, en
             sg.report.warn(
                 "file_part_requires_attachment",
                 &pptr,
-                format!("multipart part '{k}' is a file: attach one before sending (imported as a disabled placeholder)"),
+                "this multipart part is a file: attach one before sending (imported as a disabled placeholder)",
             );
             let media = ct.clone().or_else(|| str_of(&ps, "contentMediaType").map(str::to_string));
             parts.push(MultipartPart {

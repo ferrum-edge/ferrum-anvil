@@ -1,17 +1,19 @@
 //! Postman collection v2.0/v2.1 and environment/globals exports.
 //!
-//! Scripts (`event` pre-request/test) are retained verbatim in the report as
-//! disabled/untrusted and never executed. Auth helpers become Anvil auth
+//! Scripts (`event` pre-request/test) are never executed or imported: the
+//! report lists each one by its metadata (location, event, size), not its
+//! body. Auth helpers become Anvil auth
 //! configs whose secrets are `{{placeholders}}` (literal credentials are
 //! redacted unless `include_credentials`). File references (form-data
 //! files, binary bodies) are reported, never read.
 
 use crate::builder::Builder;
 use crate::common::{
-    TakenUrl, apply_userinfo, body_from_text, check_dynamic_vars, credential, dedupe_content_type, env_var, header_content_type,
+    TakenUrl, apply_userinfo, auth_credential, body_from_text, check_dynamic_vars, dedupe_content_type, env_var, header_content_type,
     listed_query_param, maybe_redact, quarantine_url, redact_raw_query, scrub_body, scrub_graphql_variables, split_query, take_userinfo,
     warn_query_conversions,
 };
+use crate::report::{Message, ScriptOwner};
 use crate::util::{is_credential_name, ptr, sanitize_var, scalar_text, str_of};
 use crate::{Dialect, ImportError};
 use anvil_domain::Id;
@@ -49,10 +51,10 @@ pub(crate) fn import_collection(root: &Value, dialect: Dialect, b: &mut Builder)
     crate::common::reserve_implicit_names(b, root);
     b.workspace.variables = variables(b, root.get("variable"), "/variable");
     b.workspace.auth = match root.get("auth") {
-        Some(a) => auth(b, a, "/auth", &name),
+        Some(a) => auth(b, a, "/auth"),
         None => AuthConfig::None,
     };
-    events(b, root.get("event"), "/event", &name);
+    events(b, root.get("event"), "/event", ScriptOwner::Collection);
     if let Some(items) = root.get("item").and_then(Value::as_array) {
         walk_items(b, items, "/item", None, 0);
     } else {
@@ -82,13 +84,17 @@ fn walk_items(b: &mut Builder, items: &[Value], base: &str, parent: Option<Id>, 
         let name = str_of(it, "name").unwrap_or("").to_string();
         if let Some(children) = it.get("item").and_then(Value::as_array) {
             if depth >= MAX_FOLDER_DEPTH {
-                b.report.warn("folder_depth_limit", &at, format!("folders nested deeper than {MAX_FOLDER_DEPTH} levels were not imported"));
+                b.report.warn(
+                    "folder_depth_limit",
+                    &at,
+                    Message::new("folders nested deeper than ").num(MAX_FOLDER_DEPTH).text(" levels were not imported"),
+                );
                 continue;
             }
             let key = format!("pm:{at}");
             let fid = b.folder(parent, &key, if name.is_empty() { "Folder" } else { &name });
             let vars = variables(b, it.get("variable"), &ptr(&at, "variable"));
-            let fauth = it.get("auth").map(|a| auth(b, a, &ptr(&at, "auth"), &name));
+            let fauth = it.get("auth").map(|a| auth(b, a, &ptr(&at, "auth")));
             if let Some(f) = b.folder_mut(fid) {
                 f.description = description(it.get("description"));
                 f.variables = vars;
@@ -96,7 +102,7 @@ fn walk_items(b: &mut Builder, items: &[Value], base: &str, parent: Option<Id>, 
                     f.auth = a;
                 }
             }
-            events(b, it.get("event"), &ptr(&at, "event"), &name);
+            events(b, it.get("event"), &ptr(&at, "event"), ScriptOwner::Folder);
             walk_items(b, children, &ptr(&at, "item"), Some(fid), depth + 1);
         } else if it.get("request").is_some() {
             if !b.admit(&at) {
@@ -110,6 +116,8 @@ fn walk_items(b: &mut Builder, items: &[Value], base: &str, parent: Option<Id>, 
 }
 
 fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str) {
+    // An empty id is no id: the item is known by its position.
+    let key = str_of(it, "id").filter(|id| !id.is_empty()).map(|id| format!("postman:{id}")).unwrap_or_else(|| format!("postman:{at}"));
     let rptr = ptr(at, "request");
     let req = &it["request"];
     let (method, url_v, header_v, body_v, auth_v, desc) = match req {
@@ -134,7 +142,7 @@ fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str
     };
     dedupe_content_type(&mut spec.headers, &spec.body);
     spec.auth = match auth_v {
-        Some(a) => auth(b, a, &ptr(&rptr, "auth"), name),
+        Some(a) => auth(b, a, &ptr(&rptr, "auth")),
         None => AuthConfig::Inherit,
     };
     apply_userinfo(b, &mut spec.auth, userinfo, &ptr(&rptr, "url"));
@@ -143,16 +151,19 @@ fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str
             b.report.unsupported(
                 "request_setting",
                 &ptr(&rptr, k),
-                format!("per-request `{k}` settings are not imported; use a proxy/TLS profile"),
+                Message::new("per-request `").text(k).text("` settings are not imported; use a proxy/TLS profile"),
             );
         }
     }
     spec.settings = behavior(b, it.get("protocolProfileBehavior"), &ptr(at, "protocolProfileBehavior"));
-    events(b, it.get("event"), &ptr(at, "event"), name);
+    events(b, it.get("event"), &ptr(at, "event"), ScriptOwner::Request);
     if let Some(r) = it.get("response").and_then(Value::as_array).filter(|r| !r.is_empty()) {
-        b.report.unsupported("saved_responses", &ptr(at, "response"), format!("{} saved example response(s) are not imported", r.len()));
+        b.report.unsupported(
+            "saved_responses",
+            &ptr(at, "response"),
+            Message::new("").num(r.len()).text(" saved example response(s) are not imported"),
+        );
     }
-    let key = str_of(it, "id").map(|id| format!("postman:{id}")).unwrap_or_else(|| format!("postman:{at}"));
     let r = b.add_request(folder, name, &key, spec, at);
     r.description = desc;
 }
@@ -190,13 +201,15 @@ fn behavior(b: &mut Builder, v: Option<&Value>, at: &str) -> SettingsOverrides {
             ),
             ("disableCookies", Value::Bool(d)) => s.cookies = Some(!*d),
             ("disableBodyPruning" | "followOriginalHttpMethod" | "followAuthorizationHeader", _) => {}
-            (other, _) => b.report.unsupported("request_setting", &p, format!("Postman setting `{other}` is not imported")),
+            // The key is not echoed (it can be anything, a credential
+            // included); the pointer locates it.
+            _ => b.report.unsupported("request_setting", &p, "this Postman setting is not imported"),
         }
     }
     s
 }
 
-fn events(b: &mut Builder, v: Option<&Value>, at: &str, owner: &str) {
+fn events(b: &mut Builder, v: Option<&Value>, at: &str, owner: ScriptOwner) {
     let Some(list) = v.and_then(Value::as_array) else { return };
     for (i, e) in list.iter().enumerate() {
         let p = format!("{at}/{i}");
@@ -214,7 +227,7 @@ fn events(b: &mut Builder, v: Option<&Value>, at: &str, owner: &str) {
             continue;
         }
         let lang = str_of(&script, "type").unwrap_or("text/javascript");
-        b.report.script(&p, owner, listen, lang, src);
+        b.report.script(&p, owner, listen, lang, &src);
     }
 }
 
@@ -482,8 +495,8 @@ fn body(b: &mut Builder, v: &Value, at: &str, header_ct: Option<&str>) -> Body {
             Body::GraphQl { query, variables, operation_name: None }
         }
         "" => Body::None,
-        other => {
-            b.report.unsupported("body_mode", at, format!("Postman body mode '{other}' is not supported"));
+        _ => {
+            b.report.unsupported("body_mode", at, "this Postman body mode is not supported");
             Body::None
         }
     }
@@ -515,9 +528,11 @@ fn param(a: &Value, ty: &str, key: &str) -> Option<String> {
     }
 }
 
-fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
+/// An auth config. Its credential placeholders are bound to the literals
+/// they replace ([`crate::common::literal_name`]), never named after the
+/// owner, which can repeat a credential.
+fn auth(b: &mut Builder, a: &Value, at: &str) -> AuthConfig {
     let ty = str_of(a, "type").unwrap_or("noauth");
-    let v = sanitize_var(owner);
     let p = |k: &str| param(a, ty, k).unwrap_or_default();
     let fp = |k: &str| ptr(&ptr(at, ty), k);
     match ty {
@@ -525,20 +540,19 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
         "inherit" => AuthConfig::Inherit,
         "basic" => {
             let username = p("username");
-            let password = credential(b, &p("password"), &format!("{v}_password"), &fp("password"), "Basic auth password");
+            let password = auth_credential(b, &p("password"), "password", &fp("password"), "Basic auth password");
             AuthConfig::Basic { username, password }
         }
-        "bearer" => AuthConfig::Bearer {
-            token: credential(b, &p("token"), &format!("{v}_token"), &fp("token"), "bearer token"),
-            prefix: "Bearer".into(),
-        },
+        "bearer" => {
+            AuthConfig::Bearer { token: auth_credential(b, &p("token"), "token", &fp("token"), "bearer token"), prefix: "Bearer".into() }
+        }
         "apikey" => {
             let name = param(a, ty, "key").unwrap_or_else(|| "X-API-Key".into());
             let location = match p("in").as_str() {
                 "query" => KeyLocation::Query,
                 _ => KeyLocation::Header,
             };
-            AuthConfig::ApiKey { name, value: credential(b, &p("value"), &format!("{v}_api_key"), &fp("value"), "API key"), location }
+            AuthConfig::ApiKey { name, value: auth_credential(b, &p("value"), "api_key", &fp("value"), "API key"), location }
         }
         "oauth2" => {
             let access = p("accessToken");
@@ -558,12 +572,12 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
                 b.report.unsupported(
                     "oauth2_grant_unsupported",
                     at,
-                    format!("OAuth 2 grant '{}' is not supported; imported as a bearer-token placeholder", p("grant_type")),
+                    "this OAuth 2 grant is not supported; imported as a bearer-token placeholder",
                 );
-                return AuthConfig::Bearer { token: credential(b, "", &format!("{v}_token"), at, "bearer token"), prefix: "Bearer".into() };
+                return AuthConfig::Bearer { token: auth_credential(b, "", "token", at, "bearer token"), prefix: "Bearer".into() };
             };
             let client_secret = if grant == OAuthGrant::ClientCredentials || !p("clientSecret").is_empty() {
-                credential(b, &p("clientSecret"), &format!("{v}_client_secret"), &fp("clientSecret"), "OAuth 2 client secret")
+                auth_credential(b, &p("clientSecret"), "client_secret", &fp("clientSecret"), "OAuth 2 client secret")
             } else {
                 SensitiveValue::default()
             };
@@ -586,11 +600,11 @@ fn auth(b: &mut Builder, a: &Value, at: &str, owner: &str) -> AuthConfig {
                 },
             }
         }
-        other => {
+        _ => {
             b.report.unsupported(
                 "auth_unsupported",
                 at,
-                format!("Postman auth type '{other}' is not supported; the request is imported without credentials (auth: none)"),
+                "this Postman auth type is not supported; the request is imported without credentials (auth: none)",
             );
             AuthConfig::None
         }

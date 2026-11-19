@@ -12,8 +12,7 @@
 //!   one resolution step costs at most that much (decoding, lookup and the
 //!   cycle check).
 
-use crate::report::ImportReport;
-use crate::util::clip;
+use crate::report::{ImportReport, Message};
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -68,25 +67,24 @@ impl<'a> Refs<'a> {
                 return Some((cur, cur_ptr));
             };
             if r.len() > MAX_REF_LEN {
-                let msg = format!(
-                    "$ref '{}' is longer than {MAX_REF_LEN} bytes and was not followed",
-                    clip(&crate::report::redact_for_report(r), 64)
+                report.warn(
+                    "ref_too_long",
+                    &cur_ptr,
+                    Message::new("the $ref is longer than ").num(MAX_REF_LEN).text(" bytes and was not followed"),
                 );
-                report.warn("ref_too_long", &cur_ptr, msg);
                 return None;
             }
             if chain.len() >= self.max_depth {
-                report.warn("ref_depth_limit", at, format!("$ref chain longer than {} was not followed", self.max_depth));
+                report.warn("ref_depth_limit", at, Message::new("a $ref chain longer than ").num(self.max_depth).text(" was not followed"));
                 return None;
             }
             if report.counts.refs_resolved >= self.max_expansions {
                 report.warn(
                     "ref_budget_exhausted",
                     at,
-                    format!(
-                        "the import reached its limit of {} $ref resolutions; remaining references were not expanded",
-                        self.max_expansions
-                    ),
+                    Message::new("the import reached its limit of ")
+                        .num(self.max_expansions)
+                        .text(" $ref resolutions; remaining references were not expanded"),
                 );
                 return None;
             }
@@ -94,11 +92,11 @@ impl<'a> Refs<'a> {
             match classify(r) {
                 Target::Internal(p) => {
                     if chain.contains(&p) {
-                        report.warn("ref_cycle", &cur_ptr, format!("$ref '{r}' forms a reference-only cycle"));
+                        report.warn("ref_cycle", &cur_ptr, "the $ref forms a reference-only cycle");
                         return None;
                     }
                     let Some(target) = self.root.pointer(&p) else {
-                        report.warn("dangling_ref", &cur_ptr, format!("$ref '{r}' does not point to anything in the document"));
+                        report.warn("dangling_ref", &cur_ptr, "the $ref does not point to anything in the document");
                         return None;
                     };
                     chain.insert(p.clone());
@@ -113,7 +111,7 @@ impl<'a> Refs<'a> {
                     report.unsupported(
                         "ref_anchor",
                         &cur_ptr,
-                        format!("$ref '{r}' uses a plain-name fragment ($anchor/$id resolution is not supported)"),
+                        "the $ref uses a plain-name fragment ($anchor/$id resolution is not supported)",
                     );
                     return None;
                 }

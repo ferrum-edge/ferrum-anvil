@@ -20,7 +20,7 @@ fn fixture_command() {
     assert_eq!(s.method, "POST");
     assert_eq!(s.url, "https://shop.example.com/api/orders");
     assert_eq!(param(s, "dry_run").unwrap().value, "true");
-    assert_eq!(param(s, "token").unwrap().value, "{{token}}", "credential-like query value redacted");
+    assert!(is_secret_ref(&param(s, "token").unwrap().value), "credential-like query value redacted");
     // `$SHOP_TOKEN` becomes a variable, which is not a literal secret.
     assert_eq!(header(s, "Authorization").unwrap().value, "Bearer {{SHOP_TOKEN}}");
     assert!(r.report.required_variables.iter().any(|v| v.name == "SHOP_TOKEN" && v.secret));
@@ -32,7 +32,7 @@ fn fixture_command() {
     match &s.auth {
         AuthConfig::Basic { username, password } => {
             assert_eq!(username, "shop-bot");
-            assert_eq!(password, &SensitiveValue::template("{{password}}"));
+            assert!(is_auth_ref(template_of(password), "password"));
         }
         other => panic!("{other:?}"),
     }
@@ -87,7 +87,7 @@ fn form_data_and_defaults() {
     match &s.body {
         Body::FormUrlEncoded { fields } => {
             assert_eq!(fields[0].name, "user");
-            assert_eq!(fields[1].value, "{{password}}");
+            assert!(is_secret_ref(&fields[1].value));
             assert_eq!(fields[2].value, "a b&c");
         }
         other => panic!("{other:?}"),
@@ -134,7 +134,7 @@ fn methods_head_and_misc_flags() {
     assert_eq!(s.method, "DELETE");
     assert_eq!(header(s, "User-Agent").unwrap().value, "agent/1");
     assert_eq!(header(s, "Referer").unwrap().value, "https://ref.example.com");
-    assert_eq!(header(s, "Cookie").unwrap().value, "{{Cookie}}");
+    assert!(is_secret_ref(&header(s, "Cookie").unwrap().value));
     let r = curl("curl --http3-only --location-trusted --digest -u a:b --proxy http://p:8080 https://example.com");
     let s = &r.requests[0].spec;
     assert_eq!(s.settings.http_version, Some(HttpVersionPolicy::Http3Only));
@@ -200,7 +200,9 @@ fn url_credentials_and_scheme_default() {
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "http://example.com/x");
     // A literal userinfo is replaced by placeholders, user name included.
-    assert!(matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password.is_pure_reference()));
+    assert!(
+        matches!(&s.auth, AuthConfig::Basic { username, password } if is_auth_ref(username, "username") && password.is_pure_reference())
+    );
     let r = curl("curl example.com/x");
     assert_eq!(r.requests[0].spec.url, "http://example.com/x");
     assert!(has(&r, "curl_default_scheme"));
@@ -364,7 +366,7 @@ fn credentials_in_a_verbatim_query_become_sensitive_parameters() {
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "https://example.test/a?flag&page=2");
     let p = param(s, "api_key").unwrap();
-    assert!(p.value == "{{api_key}}" && p.sensitive);
+    assert!(is_secret_ref(&p.value) && p.sensitive);
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
     assert_eq!(r.report.redactions.len(), 1);
     // Kept with include_credentials, decoded and marked sensitive.
@@ -393,7 +395,7 @@ fn json_data_is_scanned_under_the_node_budget() {
     assert!(has_at(&r, "body_not_scanned", "/args#json"));
     // Within the budget, credential members are still redacted.
     let r = import(br#"curl --json '{"password":"placeholder-secret"}' https://example.test"#, &o).unwrap();
-    assert_eq!(json_body(&r.requests[0].spec)["password"], "{{password}}");
+    assert!(json_body(&r.requests[0].spec)["password"].as_str().is_some_and(is_secret_ref));
 }
 
 #[test]
@@ -429,7 +431,7 @@ fn numeric_credentials_and_unscannable_data() {
 fn get_data_with_a_bare_flag_keeps_the_credential_policy() {
     let r = curl("curl -G -d 'flag&api_key=placeholder-secret' https://example.test");
     let s = &r.requests[0].spec;
-    assert_eq!(param(s, "api_key").map(|p| p.value.as_str()), Some("{{api_key}}"));
+    assert!(param(s, "api_key").is_some_and(|p| is_secret_ref(&p.value)));
     assert!(param(s, "flag").is_some());
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
 }
@@ -469,20 +471,20 @@ fn literal_userinfo_is_replaced_by_placeholders() {
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "https://api.example.com/v1");
     assert!(
-        matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password == &SensitiveValue::template("{{password}}"))
+        matches!(&s.auth, AuthConfig::Basic { username, password } if is_auth_ref(username, "username") && is_auth_ref(template_of(password), "password"))
     );
     assert!(has(&r, "url_userinfo_replaced"));
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu1"));
     let keep = ImportOptions { include_credentials: true, ..opts() };
     let r = import(b"curl 'https://admin:p@tok-SENSITIVE-cu1@api.example.com/v1'", &keep).unwrap();
     assert!(
-        matches!(&r.requests[0].spec.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password == &SensitiveValue::template("p@tok-SENSITIVE-cu1"))
+        matches!(&r.requests[0].spec.auth, AuthConfig::Basic { username, password } if is_auth_ref(username, "username") && password == &SensitiveValue::template("p@tok-SENSITIVE-cu1"))
     );
     for options in [opts(), keep] {
         let r = import(b"curl 'https://%7B%7Bu%7D%7D:%7B%7Bid%7D%7D@example.test/'", &options).unwrap();
         match &r.requests[0].spec.auth {
             AuthConfig::Basic { username, password } => {
-                assert_eq!(username, "{{username}}");
+                assert!(is_auth_ref(username, "username"), "the user name is not an auth placeholder");
                 assert!(!matches!(password, SensitiveValue::Template { value } if value == "{{id}}"), "escaped braces became a reference");
             }
             _ => panic!("expected Basic auth"),
@@ -562,7 +564,7 @@ fn a_token_in_the_userinfo_is_a_credential() {
         let r = curl(&format!("curl '{url}'"));
         let s = &r.requests[0].spec;
         assert_eq!(s.url, "https://api.example.test/v1", "{url}");
-        assert!(matches!(&s.auth, AuthConfig::Basic { username, .. } if username == "{{username}}"), "{url}");
+        assert!(matches!(&s.auth, AuthConfig::Basic { username, .. } if is_auth_ref(username, "username")), "{url}");
         assert!(has(&r, "url_userinfo_replaced"), "{url}");
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu7"), "{url}");
     }
@@ -570,7 +572,7 @@ fn a_token_in_the_userinfo_is_a_credential() {
     // is quarantined, not imported and stored nowhere (review of #575).
     let r = curl(r#"curl 'https://{{ "tok-SENSITIVE-cu7:rest" }}@api.example.test/v1'"#);
     let s = &r.requests[0].spec;
-    assert_eq!(s.url, "{{url-needs-review}}");
+    assert!(is_quarantined(&s.url), "not quarantined");
     assert!(has(&r, "url_quarantined") && matches!(s.auth, AuthConfig::Inherit));
     assert!(r.workspace.variables.is_empty());
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu7"));
@@ -579,13 +581,13 @@ fn a_token_in_the_userinfo_is_a_credential() {
     let r = curl("curl 'https://{{api_token}}@api.example.test/v1'");
     assert!(matches!(&r.requests[0].spec.auth, AuthConfig::Basic { username, .. } if username == "{{api_token}}"));
     assert!(!has(&r, "url_userinfo_replaced"));
-    // A source that already references `username` and `password` gets other
-    // placeholder names.
+    // The placeholders are the import's own (`auth_<digest>_…`), never a
+    // name the source references.
     let r = curl("curl -H 'X-User: {{username}}' -H 'X-Pass: {{password}}' 'https://tok-SENSITIVE-cu8:pw@api.example.test/v1'");
     match &r.requests[0].spec.auth {
         AuthConfig::Basic { username, password } => {
-            assert_eq!(username, "{{username_2}}");
-            assert_eq!(password, &SensitiveValue::template("{{password_2}}"));
+            assert!(is_auth_ref(username, "username"), "the user name is not an auth placeholder");
+            assert!(is_auth_ref(template_of(password), "password"));
         }
         _ => panic!("expected Basic auth"),
     }

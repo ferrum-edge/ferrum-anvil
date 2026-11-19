@@ -14,8 +14,8 @@
 //! a warning — a sample is never claimed to be valid.
 
 use super::refs::{Refs, ref_name};
-use crate::report::ImportReport;
-use crate::util::{SplitMix64, clip, is_credential_name, json_type, ptr};
+use crate::report::{ImportReport, Message};
+use crate::util::{SplitMix64, is_credential_name, json_type, ptr};
 use crate::{Dialect, ImportOptions, SampleMode};
 use base64::Engine as _;
 use serde_json::{Map, Number, Value, json};
@@ -229,7 +229,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 self.report.warn(
                     "sample_size_limit",
                     at,
-                    format!("generated payload reached {} values (max_sample_nodes); the rest was omitted", self.max_nodes),
+                    Message::new("generated payload reached ").num(self.max_nodes).text(" values (max_sample_nodes); the rest was omitted"),
                 );
             }
             return false;
@@ -248,7 +248,11 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             return None;
         }
         if depth > MAX_NESTING {
-            self.report.warn("schema_depth_limit", at, format!("schema nesting deeper than {MAX_NESTING} levels was not expanded"));
+            self.report.warn(
+                "schema_depth_limit",
+                at,
+                Message::new("schema nesting deeper than ").num(MAX_NESTING).text(" levels was not expanded"),
+            );
             return None;
         }
         let obj = match schema {
@@ -259,23 +263,23 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             }
             Value::Object(o) => o,
             _ => {
-                self.report.warn("invalid_schema", at, format!("expected a schema object, found {}", json_type(schema)));
+                self.report.warn("invalid_schema", at, Message::new("expected a schema object, found ").text(json_type(schema)));
                 return None;
             }
         };
 
-        if let Some(r) = obj.get("$ref").and_then(Value::as_str) {
-            return self.gen_ref(schema, obj, r, at, depth, name);
+        if obj.get("$ref").and_then(Value::as_str).is_some() {
+            return self.gen_ref(schema, obj, at, depth, name);
         }
         for k in ["$dynamicRef", "$recursiveRef"] {
             if obj.contains_key(k) {
-                self.report.unsupported("dynamic_ref", at, format!("`{k}` resolution is not supported; value omitted"));
+                self.report.unsupported("dynamic_ref", at, Message::new("`").text(k).text("` resolution is not supported; value omitted"));
                 return None;
             }
         }
         for (k, why) in UNENFORCED {
             if obj.contains_key(*k) {
-                self.report.warn("schema_keyword_not_enforced", &ptr(at, k), format!("{why}; the sample may not satisfy it"));
+                self.report.warn("schema_keyword_not_enforced", &ptr(at, k), Message::new(why).text("; the sample may not satisfy it"));
             }
         }
         if obj.contains_key("$schema") {
@@ -304,19 +308,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
 
         let non_null: Vec<&String> = types.iter().filter(|t| *t != "null").collect();
         if non_null.len() > 1 {
-            // The message lists every type, on every visit: charged.
-            if !self.charge_scan(at, non_null.iter().fold(0usize, |n, t| n.saturating_add(t.len() + 2))) {
-                return None;
-            }
-            self.report.warn(
-                "multiple_types",
-                &ptr(at, "type"),
-                format!(
-                    "schema allows {}; the sample uses '{}'",
-                    non_null.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
-                    non_null[0]
-                ),
-            );
+            self.report.warn("multiple_types", &ptr(at, "type"), "the schema allows several types; the sample uses the first");
         }
         let t = match non_null.first() {
             Some(t) => Some(t.as_str().to_string()),
@@ -334,15 +326,15 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 self.report.warn("binary_placeholder", at, "file content cannot be generated; left empty");
                 Some(Value::String(String::new()))
             }
-            Some(other) => {
-                self.report.warn("unknown_type", &ptr(at, "type"), format!("unknown type '{other}'; null used"));
+            Some(_) => {
+                self.report.warn("unknown_type", &ptr(at, "type"), "the type is unknown; null used");
                 Some(Value::Null)
             }
             None => Some(Value::Object(Map::new())),
         }
     }
 
-    fn gen_ref(&mut self, schema: &Value, obj: &Map<String, Value>, r: &str, at: &str, depth: usize, name: Option<&str>) -> Option<Value> {
+    fn gen_ref(&mut self, schema: &Value, obj: &Map<String, Value>, at: &str, depth: usize, name: Option<&str>) -> Option<Value> {
         const ANNOTATIONS: &[&str] = &[
             "$ref",
             "description",
@@ -376,15 +368,15 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             return None;
         }
         if self.stack.contains(&tptr) {
-            self.report.warn(
-                "recursive_schema",
-                &tptr,
-                format!("recursive schema ({}): expansion stops at the first repetition", ref_name(r).unwrap_or_else(|| r.to_string())),
-            );
+            self.report.warn("recursive_schema", &tptr, "the schema is recursive: expansion stops at the first repetition");
             return None;
         }
         if self.stack.len() >= self.max_ref_depth {
-            self.report.warn("ref_depth_limit", at, format!("more than {} nested $ref levels were not expanded", self.max_ref_depth));
+            self.report.warn(
+                "ref_depth_limit",
+                at,
+                Message::new("more than ").num(self.max_ref_depth).text(" nested $ref levels were not expanded"),
+            );
             return None;
         }
         self.stack.push(tptr.clone());
@@ -401,7 +393,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 self.report.warn(
                     "ref_siblings_ignored",
                     at,
-                    format!("{} ignores keywords next to $ref; only the referenced schema is used", self.dialect.label()),
+                    Message::new(self.dialect.label()).text(" ignores keywords next to $ref; only the referenced schema is used"),
                 );
             }
             self.gen_value(target, &tptr, depth + 1, name)
@@ -422,7 +414,9 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                     self.report.warn(
                         "type_array_in_legacy_dialect",
                         &ptr(at, "type"),
-                        format!("type arrays are an OpenAPI 3.1+ construct; interpreted anyway in a {} document", self.dialect.label()),
+                        Message::new("type arrays are an OpenAPI 3.1+ construct; interpreted anyway in a ")
+                            .text(self.dialect.label())
+                            .text(" document"),
                     );
                 }
                 a.iter().filter_map(Value::as_str).map(str::to_string).collect()
@@ -452,7 +446,11 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             self.report.warn(
                 "example_type_mismatch",
                 &ptr(at, what),
-                format!("{what} value is {} but the schema type is {}; used as written", json_type(v), types.join("|")),
+                Message::new("the ")
+                    .text(what)
+                    .text(" value is ")
+                    .text(json_type(v))
+                    .text(", which the schema's type does not allow; used as written"),
             );
         }
         if let (Some(c), Some(e)) = (obj.get("const"), obj.get("enum").and_then(Value::as_array)) {
@@ -479,7 +477,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
     fn gen_alternative(
         &mut self,
         obj: &Map<String, Value>,
-        key: &str,
+        key: &'static str,
         alts: &[Value],
         at: &str,
         depth: usize,
@@ -487,7 +485,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
     ) -> Option<Value> {
         let kptr = ptr(at, key);
         if alts.is_empty() {
-            self.report.warn("contradictory_schema", &kptr, format!("empty `{key}` accepts no value"));
+            self.report.warn("contradictory_schema", &kptr, Message::new("an empty `").text(key).text("` accepts no value"));
             return None;
         }
         // Every alternative looked at is charged, with the check of its
@@ -510,14 +508,16 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             }
         }
         if alts.len() > 1 {
-            let label = Refs::ref_of(&alts[idx]).and_then(ref_name).unwrap_or_else(|| format!("#{idx}"));
             self.report.warn(
                 "composition_first_branch",
                 &kptr,
-                format!(
-                    "`{key}` has {} alternatives; the sample uses the first viable one ({label}) and does not prove it is the intended one",
-                    alts.len()
-                ),
+                Message::new("`")
+                    .text(key)
+                    .text("` has ")
+                    .num(alts.len())
+                    .text(" alternatives; the sample uses the first viable one (#")
+                    .num(idx)
+                    .text(") and does not prove it is the intended one"),
             );
         }
         let alt = &alts[idx];
@@ -589,7 +589,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                     self.report.warn(
                         "ref_depth_limit",
                         &bptr,
-                        format!("more than {} nested $ref levels were not expanded", self.max_ref_depth),
+                        Message::new("more than ").num(self.max_ref_depth).text(" nested $ref levels were not expanded"),
                     );
                     continue;
                 }
@@ -622,8 +622,11 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             let nested = if !cur.get("allOf").is_some_and(Value::is_array) {
                 None
             } else if nesting >= MAX_NESTING {
-                let msg = format!("allOf nesting deeper than {MAX_NESTING} levels was not expanded");
-                self.report.warn("schema_depth_limit", &bptr, msg);
+                self.report.warn(
+                    "schema_depth_limit",
+                    &bptr,
+                    Message::new("allOf nesting deeper than ").num(MAX_NESTING).text(" levels was not expanded"),
+                );
                 None
             } else {
                 let m = self.merge_all_of_at(cur, &bptr, nesting + 1);
@@ -749,11 +752,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                             self.report.warn(
                                 "contradictory_schema",
                                 &ptr(at, "allOf"),
-                                format!(
-                                    "allOf branches require incompatible types ({} vs {}); no value can satisfy both",
-                                    a.join("|"),
-                                    b.join("|")
-                                ),
+                                "allOf branches require incompatible types; no value can satisfy both",
                             );
                         } else {
                             // The generator uses the first type; keep a plain string so
@@ -838,7 +837,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                     self.report.warn(
                         "required_member_unsatisfied",
                         &pp,
-                        format!("required member '{k}' could not be generated (recursive or unsatisfiable); null used"),
+                        "a required member could not be generated (recursive or unsatisfiable); null used",
                     );
                     out.insert(k.clone(), Value::Null);
                 }
@@ -856,13 +855,9 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 break;
             }
             if ap == Some(&Value::Bool(false)) {
-                self.report.warn(
-                    "contradictory_schema",
-                    &rptr,
-                    format!("'{r}' is required but not allowed by additionalProperties: false"),
-                );
+                self.report.warn("contradictory_schema", &rptr, "a required member is not allowed by additionalProperties: false");
             } else {
-                self.report.warn("required_member_undeclared", &rptr, format!("'{r}' is required but has no schema; null used"));
+                self.report.warn("required_member_undeclared", &rptr, "a required member has no schema; null used");
             }
             out.insert((*r).to_string(), Value::Null);
         }
@@ -889,7 +884,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             self.report.warn(
                 "min_properties_unsatisfied",
                 &ptr(at, "minProperties"),
-                format!("minProperties is {min_props} but only {} members were generated", out.len()),
+                Message::new("only ").num(out.len()).text(" members were generated, fewer than minProperties requires"),
             );
         }
         if let Some(max) = obj.get("maxProperties").and_then(Value::as_u64)
@@ -898,7 +893,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             self.report.warn(
                 "contradictory_schema",
                 &ptr(at, "maxProperties"),
-                format!("maxProperties is {max} but {} members are required or included", out.len()),
+                Message::new("").num(out.len()).text(" members are required or included, more than maxProperties allows"),
             );
         }
         Some(Value::Object(out))
@@ -910,7 +905,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         if let Some(m) = max
             && m < min
         {
-            self.report.warn("contradictory_schema", at, format!("minItems {min} is greater than maxItems {m}"));
+            self.report.warn("contradictory_schema", at, "minItems is greater than maxItems");
         }
         let mut count = match self.mode {
             SampleMode::Blank => min,
@@ -923,7 +918,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             self.report.warn(
                 "sample_size_limit",
                 at,
-                format!("minItems {count} exceeds the sample cap; {MAX_ARRAY_ITEMS} items generated"),
+                Message::new("minItems exceeds the sample cap; ").num(MAX_ARRAY_ITEMS).text(" items generated"),
             );
             count = MAX_ARRAY_ITEMS;
         }
@@ -961,7 +956,11 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             out = uniq;
         }
         if out.len() < min {
-            self.report.warn("min_items_unsatisfied", at, format!("minItems is {min} but only {} items could be generated", out.len()));
+            self.report.warn(
+                "min_items_unsatisfied",
+                at,
+                Message::new("only ").num(out.len()).text(" items could be generated, fewer than minItems requires"),
+            );
         }
         Some(Value::Array(out))
     }
@@ -972,7 +971,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         if let (Some(a), Some(b)) = (min, max)
             && a > b
         {
-            self.report.warn("contradictory_schema", at, format!("minLength {a} is greater than maxLength {b}"));
+            self.report.warn("contradictory_schema", at, "minLength is greater than maxLength");
         }
         if self.mode == SampleMode::Blank {
             return Value::String(String::new());
@@ -987,9 +986,8 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             self.report.warn("credential_left_blank", at, "credential-like value is never generated; left empty for you to supply");
             return Value::String(String::new());
         }
-        if let Some(p) = obj.get("pattern").and_then(Value::as_str) {
-            let msg = format!("the sample is not guaranteed to match pattern `{}`", clip(p, 200));
-            self.report.warn("pattern_not_enforced", &ptr(at, "pattern"), msg);
+        if obj.get("pattern").and_then(Value::as_str).is_some() {
+            self.report.warn("pattern_not_enforced", &ptr(at, "pattern"), "the sample is not guaranteed to match the pattern");
         }
         let fixed = |s: String| (s, true);
         let (s, fixed_shape) = match format {
@@ -1023,7 +1021,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 self.report.warn(
                     "contradictory_schema",
                     at,
-                    format!("format '{format}' produces {len} characters, outside the length limits; the sample violates them"),
+                    Message::new("the format produces ").num(len).text(" characters, outside the length limits; the sample violates them"),
                 );
             }
             return Value::String(s);
@@ -1078,7 +1076,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
         }
         let (lo, hi) = (lo.unwrap_or(0), hi.unwrap_or(0));
         if lo > hi {
-            self.report.warn("contradictory_schema", at, format!("no integer satisfies minimum {lo} and maximum {hi}; minimum used"));
+            self.report.warn("contradictory_schema", at, "no integer satisfies the minimum and maximum; minimum used");
             return Value::Number((lo as i64).into());
         }
         let v = match obj.get("multipleOf").and_then(Value::as_f64).filter(|m| *m > 0.0 && m.fract() == 0.0) {
@@ -1087,7 +1085,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 let kmin = div_ceil(lo, m);
                 let kmax = div_floor(hi, m);
                 if kmin > kmax {
-                    self.report.warn("contradictory_schema", at, format!("no multiple of {m} lies within [{lo}, {hi}]; minimum used"));
+                    self.report.warn("contradictory_schema", at, "no multiple of multipleOf lies within the range; minimum used");
                     lo
                 } else {
                     self.rng.range_i128(kmin, kmax).saturating_mul(m)
@@ -1111,7 +1109,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
             (Some(l), Some(h)) => (l, h),
         };
         if lo > hi || (lo == hi && (lo_ex || hi_ex)) {
-            self.report.warn("contradictory_schema", at, format!("no number satisfies the range [{lo}, {hi}]; minimum used"));
+            self.report.warn("contradictory_schema", at, "no number satisfies the range; minimum used");
             return Number::from_f64(lo).map(Value::Number).unwrap_or(Value::Null);
         }
         let v = match obj.get("multipleOf").and_then(Value::as_f64).filter(|m| *m > 0.0) {
@@ -1119,7 +1117,7 @@ impl<'a, 'r> SampleGen<'a, 'r> {
                 let kmin = ((lo / m).ceil() as i128).saturating_add(i128::from(lo_ex && (lo / m).fract() == 0.0));
                 let kmax = ((hi / m).floor() as i128).saturating_sub(i128::from(hi_ex && (hi / m).fract() == 0.0));
                 if kmin > kmax {
-                    self.report.warn("contradictory_schema", at, format!("no multiple of {m} lies within the range; minimum used"));
+                    self.report.warn("contradictory_schema", at, "no multiple of multipleOf lies within the range; minimum used");
                     lo
                 } else {
                     self.rng.range_i128(kmin, kmax) as f64 * m

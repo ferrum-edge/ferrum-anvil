@@ -297,6 +297,14 @@ fn leaks(text: &str) -> bool {
     text.contains(MARKER) || text.contains(NUMBER)
 }
 
+/// Whether `text` is a quarantined URL's placeholder, `{{url_<16 hex
+/// digits>}}` (bound to the URL's text).
+fn is_quarantined(text: &str) -> bool {
+    text.strip_prefix("{{url_")
+        .and_then(|t| t.strip_suffix("}}"))
+        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// Import `source` both ways and check the outcome `export` describes.
 fn check(source: &[u8], export: Export, label: &str) {
     let redacted = import(source, &ImportOptions::default()).unwrap_or_else(|e| panic!("{label}: import failed: {e}"));
@@ -450,7 +458,7 @@ fn an_ambiguous_url_never_changes_host() {
         assert!(r.requests[0].spec.url.starts_with("https://{{baseUrl}}/items"), "{importer}: the host changed");
         assert!(!r.report.has_code("url_quarantined"), "{importer}: a reference authority was quarantined");
         let r = import(&build(&shape(quarantined_url)), &ImportOptions::default()).unwrap_or_else(|e| panic!("{importer}: {e}"));
-        assert_eq!(r.requests[0].spec.url, "{{url-needs-review}}", "{importer}: the URL was imported");
+        assert!(is_quarantined(&r.requests[0].spec.url), "{importer}: the URL was imported");
         assert!(r.report.has_code("url_quarantined"), "{importer}: no quarantine warning");
         let text = format!("{}{}", stored(&r), serde_json::to_string(&r.report).unwrap());
         assert!(!text.contains("example.test") && !text.contains("user@example.com"), "{importer}: the URL text was stored");
@@ -505,32 +513,51 @@ fn curl_diagnostics_never_echo_credentials() {
     }
 }
 
-/// Final gate of #575 (dsf F4): the quarantine placeholder never takes a
-/// name the source references or derives (a path parameter, a cURL shell
-/// variable, an explicit reference), so it cannot bind another request's
-/// variable.
+/// Final gate of #575 (dsf F4), sol F5 and dsf F1, under literal-bound
+/// names (#584): a source that uses a name in the shape of an import
+/// placeholder (`url_`, `auth_` or `secret_` and 16 hex digits) is refused
+/// however it spells it (an explicit or JSON-escaped reference,
+/// percent-encoding, shell quoting, a path parameter in its raw or its
+/// sanitized spelling), in either mode. So no placeholder can take a source
+/// name, and no source name can resolve a filled placeholder.
 #[test]
-fn the_quarantine_placeholder_never_binds_a_source_name() {
+fn a_source_name_in_the_placeholder_shape_is_refused() {
     let quarantined = "https://api.{{region}}.example.test/v1?to=a@b";
-    let doc = postman_doc_items(json!([
-        { "name": "a", "request": { "method": "GET", "url": { "raw": "https://api.example.test/items/:url_needs_review/:url-needs-review" } } },
-        { "name": "b", "request": { "method": "GET", "url": quarantined } },
-    ]));
-    let r = import(&doc, &ImportOptions::default()).unwrap();
-    let a = &r.requests[0].spec.url;
-    // The `:url-needs-review` path segment is reserved before any placeholder
-    // is allocated, so the quarantine placeholder takes the next free name.
-    assert_eq!(r.requests[1].spec.url, "{{url-needs-review_2}}");
-    assert!(!a.contains("{{url-needs-review_2}}"), "a path parameter took the quarantine placeholder");
-    let doc = postman_doc_items(json!([
-        { "name": "a", "request": { "method": "GET", "url": "https://api.example.test/", "header": [{ "key": "X-Id", "value": "{{url-needs-review}}" }] } },
-        { "name": "b", "request": { "method": "GET", "url": quarantined } },
-    ]));
-    let r = import(&doc, &ImportOptions::default()).unwrap();
-    assert_eq!(r.requests[1].spec.url, "{{url-needs-review_2}}", "an explicit reference was not reserved");
-    let r = import(format!("curl -H \"X-Id: $url_needs_review\" '{quarantined}'").as_bytes(), &ImportOptions::default()).unwrap();
-    assert_eq!(r.requests[0].spec.url, "{{url-needs-review}}");
-    assert_eq!(header_value(&r, "X-Id"), Some("{{url_needs_review}}"));
+    let name = "url_0123456789abcdef";
+    let with_header = |value: &str| {
+        postman_doc_items(json!([
+            { "name": "a", "request": { "method": "GET", "url": "https://api.example.test/", "header": [{ "key": "X-Id", "value": value }] } },
+            { "name": "b", "request": { "method": "GET", "url": quarantined } },
+        ]))
+    };
+    let with_path = |url: String| {
+        postman_doc_items(json!([
+            { "name": "a", "request": { "method": "GET", "url": { "raw": url } } },
+            { "name": "b", "request": { "method": "GET", "url": quarantined } },
+        ]))
+    };
+    let json_escaped = format!(
+        r#"{{"info":{{"name":"c","schema":"{POSTMAN_SCHEMA}"}},"item":[{{"name":"a","request":{{"method":"GET","url":"https://api.example.test/","header":[{{"key":"X-Id","value":"\u007b\u007b{name}\u007d\u007d"}}]}}}},{{"name":"b","request":{{"method":"GET","url":"{quarantined}"}}}}]}}"#
+    );
+    let cases: [(&str, Vec<u8>); 6] = [
+        ("explicit reference", with_header(&format!("{{{{{name}}}}}"))),
+        ("JSON escape", json_escaped.into_bytes()),
+        ("percent-encoding", with_header(&format!("{{{{{}}}}}", name.replace('_', "%5F")))),
+        ("path parameter", with_path(format!("https://api.example.test/items/:{name}"))),
+        ("raw path parameter", with_path(format!("https://api.example.test/items/:{}", name.replace('_', "-")))),
+        ("shell quoting", format!("curl -H 'X-Id: {{{{url_'\"0123456789abcdef}}}}\" '{quarantined}'").into_bytes()),
+    ];
+    for (label, source) in cases {
+        for include_credentials in [false, true] {
+            match import(&source, &ImportOptions { include_credentials, ..ImportOptions::default() }) {
+                Err(e) => assert!(e.to_string().contains("reserves"), "{label}: {e}"),
+                Ok(_) => panic!("{label}: a name in the placeholder shape was accepted ({include_credentials})"),
+            }
+        }
+    }
+    // The import's own placeholder is not refused.
+    let r = import(&with_header("plain"), &ImportOptions::default()).unwrap();
+    assert!(is_quarantined(&r.requests[1].spec.url));
 }
 
 fn postman_doc_items(items: Value) -> Vec<u8> {
@@ -540,10 +567,6 @@ fn postman_doc_items(items: Value) -> Vec<u8> {
     })
     .to_string()
     .into_bytes()
-}
-
-fn header_value<'r>(r: &'r ImportResult, name: &str) -> Option<&'r str> {
-    r.requests[0].spec.headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.as_str())
 }
 
 /// Final gate of #575: the userinfo placeholders never take a path
@@ -580,9 +603,14 @@ fn userinfo_placeholders_never_take_a_path_parameter_name() {
             let with_userinfo = r.requests.iter().find(|q| q.spec.url.contains("/items/")).expect("the userinfo request");
             let auth = serde_json::to_string(&with_userinfo.spec.auth).unwrap();
             assert!(with_userinfo.spec.url.ends_with("/items/{{username}}"), "{importer}: the path parameter changed");
-            assert!(auth.contains("{{username_2}}"), "{importer}: the user name placeholder took a path parameter's name");
+            // Bound to its literal (`auth_<digest>_…`), never a path
+            // parameter's name.
+            assert!(
+                auth.contains("{{auth_") && auth.contains("_username}}"),
+                "{importer}: the user name placeholder took a path parameter's name"
+            );
             if !include_credentials {
-                assert!(auth.contains("{{password_2}}"), "{importer}: the password placeholder took a path parameter's name");
+                assert!(auth.contains("_password}}"), "{importer}: the password placeholder took a path parameter's name");
                 assert!(!leaks(&stored(&r).to_string()), "{importer}: a literal credential survived");
             }
             assert!(r.requests.iter().any(|q| q.spec.url.ends_with("/accounts/{{password}}")), "{importer}: the other path changed");
@@ -601,7 +629,7 @@ fn a_reference_authority_keeps_the_url() {
         |build: Build, url: &'static str| import(&build(&shape(url)), &ImportOptions::default()).unwrap().requests[0].spec.url.clone();
     // Kept: not quarantined and not cut (its query may still become
     // parameters).
-    let kept = |stored: &str, url: &str| stored != "{{url-needs-review}}" && stored.starts_with(url.split('?').next().unwrap_or(url));
+    let kept = |stored: &str, url: &str| !is_quarantined(stored) && stored.starts_with(url.split('?').next().unwrap_or(url));
     for (importer, build) in importers {
         // HAR imports only `http(s)` URLs.
         let schemeless = importer != "HAR";
@@ -613,11 +641,11 @@ fn a_reference_authority_keeps_the_url() {
                 assert!(kept(&stored(build, url), url), "{importer}: {url}");
             }
             for url in ["{{baseUrl}}@evil/x", "{{ base Url }}/x@y", "{{a}}{{b}}/x@y"] {
-                assert_eq!(stored(build, url), "{{url-needs-review}}", "{importer}: {url}");
+                assert!(is_quarantined(&stored(build, url)), "{importer}: {url}");
             }
         }
         for url in ["https://{{ base Url }}/x@y", "https://{{a}}{{b}}/x@y", "https://pre{{a}}/x@y"] {
-            assert_eq!(stored(build, url), "{{url-needs-review}}", "{importer}: {url}");
+            assert!(is_quarantined(&stored(build, url)), "{importer}: {url}");
         }
     }
 }
@@ -705,7 +733,7 @@ fn oauth_endpoint_urls_never_keep_a_credential() {
         let r = import(&source, &ImportOptions::default()).unwrap();
         let config = &serde_json::to_value(&r.requests[0].spec.auth).unwrap()["config"];
         assert_eq!(config["token_url"], "https://issuer.example.test/token", "{importer}");
-        assert_eq!(config["authorization_url"], "{{url-needs-review}}", "{importer}");
+        assert!(config["authorization_url"].as_str().is_some_and(is_quarantined), "{importer}");
         let kept = import(&source, &with_credentials(true)).unwrap();
         assert!(leaks(&stored(&kept).to_string()), "{importer}: include_credentials did not keep the endpoint");
         assert_nothing_readable(&source, importer);
@@ -745,45 +773,6 @@ fn credential_placeholders_never_bind_a_source_variable() {
     }
 }
 
-/// sol F5: a reference the source escaped (a JSON \u escape, percent-encoding,
-/// shell quoting) is reserved by its decoded spelling.
-#[test]
-fn escaped_references_are_reserved() {
-    let quarantined = "https://api.{{region}}.example.test/v1?to=a@b";
-    let json_escaped = format!(
-        r#"{{"info":{{"name":"c","schema":"{POSTMAN_SCHEMA}"}},"item":[{{"name":"a","request":{{"method":"GET","url":"https://api.example.test/","header":[{{"key":"X-Id","value":"\u007b\u007burl-needs-review\u007d\u007d"}}]}}}},{{"name":"b","request":{{"method":"GET","url":"{quarantined}"}}}}]}}"#
-    );
-    let percent = postman_doc_items(json!([
-        { "name": "a", "request": { "method": "GET", "url": "https://api.example.test/", "header": [{ "key": "X-Id", "value": "{{url%2Dneeds%2Dreview}}" }] } },
-        { "name": "b", "request": { "method": "GET", "url": quarantined } },
-    ]));
-    for (label, source) in [("JSON escape", json_escaped.into_bytes()), ("percent-encoding", percent)] {
-        let r = import(&source, &ImportOptions::default()).unwrap();
-        assert_eq!(r.requests[1].spec.url, "{{url-needs-review_2}}", "{label}: an escaped reference was not reserved");
-    }
-    let shell = format!("curl -H 'X-Id: {{{{url-'\"needs-review}}}}\" '{quarantined}'");
-    let r = import(shell.as_bytes(), &ImportOptions::default()).unwrap();
-    assert_eq!(header_value(&r, "X-Id"), Some("{{url-needs-review}}"));
-    assert_eq!(r.requests[0].spec.url, "{{url-needs-review_2}}", "shell quoting hid a reference");
-}
-
-/// dsf F1: a path parameter is reserved by its raw spelling as well as the
-/// sanitized one its placeholder takes. That is fail-safe: no placeholder
-/// can bind the parameter under either spelling, at the cost of a suffix.
-#[test]
-fn a_path_parameter_reserves_its_raw_spelling() {
-    let r = import(
-        &postman_doc_items(json!([
-            { "name": "a", "request": { "method": "GET", "url": { "raw": "https://api.example.test/items/:url-needs-review" } } },
-            { "name": "b", "request": { "method": "GET", "url": "https://api.{{region}}.example.test/v1?to=a@b" } },
-        ])),
-        &ImportOptions::default(),
-    )
-    .unwrap();
-    assert_eq!(r.requests[0].spec.url, "https://api.example.test/items/{{url_needs_review}}");
-    assert_eq!(r.requests[1].spec.url, "{{url-needs-review_2}}");
-}
-
 /// #579: a retained script keeps no credential literal in the report.
 #[test]
 fn retained_scripts_hold_no_credential_literal() {
@@ -796,7 +785,9 @@ fn retained_scripts_hold_no_credential_literal() {
         "request": { "method": "GET", "url": "https://api.example.test/" } }]));
     let r = import(&source, &ImportOptions::default()).unwrap();
     assert_eq!(r.report.scripts.len(), 1);
-    assert!(r.report.scripts[0].source.contains("pm.request.headers.add"), "the script was not retained");
+    assert!(r.report.scripts[0].bytes > 0, "the script was not described");
+    // #584: the body is not copied into the report at all.
+    assert!(!serde_json::to_string(&r.report).unwrap().contains("pm.request.headers.add"), "the script body reached the report");
     assert_nothing_readable(&source, "Postman script");
 }
 
@@ -865,4 +856,264 @@ fn openapi_oauth_endpoint_urls_never_keep_a_credential() {
     assert!(text.contains("\"https://issuer.example.test/token\""), "the token URL lost more than its userinfo");
     assert!(text.contains("\"https://issuer.example.test/authorize\""), "the authorization URL lost more than its userinfo");
     assert_nothing_readable(&source, "OpenAPI OAuth endpoints");
+}
+
+// #584: report messages carry field names, locations and placeholders, never
+// source values, so the free-text redaction is only a last line of defence.
+
+/// Neither report holds a canary, in either mode. For rows whose stored
+/// objects keep the source text on purpose (a media type, a template left as
+/// written, a relative server URL): only the report is checked.
+fn assert_report_clean(source: &[u8], label: &str) {
+    for include_credentials in [false, true] {
+        let r = import(source, &with_credentials(include_credentials)).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(!leaks(&serde_json::to_string(&r.report).unwrap()), "{label}: the report holds a source value ({include_credentials})");
+    }
+}
+
+fn openapi_doc(extra: Value) -> Vec<u8> {
+    let mut doc = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "t", "version": "1" },
+        "servers": [{ "url": "https://api.example.test" }],
+        "paths": { "/a": { "get": { "responses": { "200": { "description": "ok" } } } } }
+    });
+    if let (Some(d), Some(e)) = (doc.as_object_mut(), extra.as_object()) {
+        for (k, v) in e {
+            d.insert(k.clone(), v.clone());
+        }
+    }
+    doc.to_string().into_bytes()
+}
+
+/// Every importer message that used to quote a source value (an option, a
+/// version, a scheme, a media type, a mode, an auth type, a grant, a resource
+/// type, a template, a dialect, a server URL, an HTTP scheme, a scheme type,
+/// a pattern, a `$ref`, a callback expression, a default, a parameter
+/// location) now says what it is about in the importer's words, and the
+/// pointer locates it. None of these canaries has a credential name or
+/// shape, so the free-text heuristics alone would have kept them.
+#[test]
+fn importer_messages_never_quote_a_source_value() {
+    let har = |request: Value, version: &str| {
+        json!({ "log": { "version": version, "entries": [{ "request": request }] } }).to_string().into_bytes()
+    };
+    let insomnia_resource = |resource: Value| {
+        json!({
+            "_type": "export",
+            "__export_format": 4,
+            "resources": [
+                { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+                { "_id": "req_1", "_type": "request", "parentId": "wrk_1", "name": "R", "method": "GET", "url": "https://api.example.test/" },
+                resource
+            ]
+        })
+        .to_string()
+        .into_bytes()
+    };
+    let mut insomnia_auth = insomnia_request("https://api.example.test/");
+    insomnia_auth["authentication"] = json!({ "type": "tok-SENSITIVE-c105" });
+    let mut insomnia_grant = insomnia_request("https://api.example.test/");
+    insomnia_grant["authentication"] = json!({ "type": "oauth2", "grantType": "tok-SENSITIVE-c106" });
+    let mut insomnia_expression = insomnia_request("https://api.example.test/");
+    insomnia_expression["headers"] = json!([{ "name": "X-Note", "value": "{{ 'a' | tok-SENSITIVE-c108 }}" }]);
+    let schema_body = |schema: Value| {
+        json!({ "paths": { "/a": { "post": {
+            "requestBody": { "content": { "application/json": { "schema": schema } } },
+            "responses": { "200": { "description": "ok" } }
+        } } } })
+    };
+    let rows: Vec<(&str, Vec<u8>)> = vec![
+        ("cURL, unknown option", b"curl --frobnicate-tok-SENSITIVE-c90 https://safe.example.test/".to_vec()),
+        ("cURL, header removal", b"curl -H 'X-tok-SENSITIVE-c91:' https://safe.example.test/".to_vec()),
+        ("HAR, version", har(json!({ "method": "GET", "url": "https://api.example.test/" }), "tok-SENSITIVE-c92")),
+        ("HAR, non-HTTP scheme", har(json!({ "method": "GET", "url": "tok-SENSITIVE-c93:opaque" }), "1.2")),
+        (
+            "HAR, unscanned media type",
+            har(
+                json!({ "method": "POST", "url": "https://api.example.test/",
+                    "postData": { "mimeType": "text/x-tok-SENSITIVE-c94", "text": "hello" } }),
+                "1.2",
+            ),
+        ),
+        (
+            "HAR, uncaptured file part",
+            har(
+                json!({ "method": "POST", "url": "https://api.example.test/", "postData": { "mimeType": "multipart/form-data",
+                    "params": [{ "name": "upload", "fileName": "tok-SENSITIVE-c95.bin" }] } }),
+                "1.2",
+            ),
+        ),
+        (
+            "Postman, body mode",
+            postman_doc(json!({ "method": "POST", "url": "https://api.example.test/", "body": { "mode": "tok-SENSITIVE-c96" } })),
+        ),
+        (
+            "Postman, auth type",
+            postman_doc(json!({ "method": "GET", "url": "https://api.example.test/", "auth": { "type": "tok-SENSITIVE-c97" } })),
+        ),
+        (
+            "Postman, OAuth 2 grant",
+            postman_doc(json!({ "method": "GET", "url": "https://api.example.test/", "auth": { "type": "oauth2",
+                "oauth2": [{ "key": "grant_type", "value": "tok-SENSITIVE-c98" }] } })),
+        ),
+        (
+            "Postman, dynamic variable",
+            postman_doc(json!({ "method": "GET", "url": "https://api.example.test/",
+                "header": [{ "key": "X-Note", "value": "{{$tok-SENSITIVE-c103}}" }] })),
+        ),
+        (
+            "Postman, script event, type and body",
+            postman_doc_items(json!([{ "name": "r",
+                "event": [{ "listen": "tok-SENSITIVE-c100", "script": { "type": "tok-SENSITIVE-c101",
+                    "exec": ["const note = 'tok-SENSITIVE-c102';"] } }],
+                "request": { "method": "GET", "url": "https://api.example.test/" } }])),
+        ),
+        ("Insomnia, resource type", insomnia_resource(json!({ "_id": "x_1", "_type": "tok-SENSITIVE-c104", "parentId": "wrk_1" }))),
+        ("Insomnia, auth type", insomnia_doc(insomnia_auth, json!({}))),
+        ("Insomnia, OAuth 2 grant", insomnia_doc(insomnia_grant, json!({}))),
+        ("Insomnia, template tag", insomnia_doc(insomnia_request("https://api.example.test/{% tok-SENSITIVE-c107 %}"), json!({}))),
+        ("Insomnia, Nunjucks expression", insomnia_doc(insomnia_expression, json!({}))),
+        (
+            "Insomnia, unit test",
+            insomnia_resource(json!({ "_id": "ut_1", "_type": "unit_test", "parentId": "uts_1",
+                "name": "tok-SENSITIVE-c109", "code": "expect('tok-SENSITIVE-c109b').to.equal(1);" })),
+        ),
+        ("OpenAPI, JSON Schema dialect", openapi_doc(json!({ "jsonSchemaDialect": "https://example.test/tok-SENSITIVE-c110" }))),
+        ("OpenAPI, relative server URL", openapi_doc(json!({ "servers": [{ "url": "/tok-SENSITIVE-c111" }] }))),
+        (
+            "OpenAPI, HTTP auth scheme and scheme type",
+            openapi_doc(json!({
+                "components": { "securitySchemes": {
+                    "h": { "type": "http", "scheme": "tok-SENSITIVE-c112" },
+                    "u": { "type": "tok-SENSITIVE-c113" }
+                } },
+                "paths": { "/a": { "get": { "security": [{ "h": [] }, { "u": [] }], "responses": { "200": { "description": "ok" } } } } }
+            })),
+        ),
+        (
+            "OpenAPI, pattern",
+            openapi_doc(schema_body(json!({ "type": "object", "required": ["n"],
+                "properties": { "n": { "type": "string", "pattern": "^tok-SENSITIVE-c114$" } } }))),
+        ),
+        ("OpenAPI, dangling $ref", openapi_doc(schema_body(json!({ "$ref": "#/components/schemas/tok-SENSITIVE-c115" })))),
+        (
+            "OpenAPI, alternative media types",
+            openapi_doc(json!({ "paths": { "/a": { "post": {
+                "requestBody": { "content": { "application/json": { "schema": { "type": "object" } },
+                    "application/x-tok-SENSITIVE-c116": { "schema": { "type": "object" } } } },
+                "responses": { "200": { "description": "ok" } }
+            } } } })),
+        ),
+        (
+            "OpenAPI, callback expression",
+            openapi_doc(json!({ "paths": { "/a": { "post": {
+                "callbacks": { "onEvent": { "https://tok-SENSITIVE-c117.example.test/cb": { "post": {
+                    "responses": { "200": { "description": "ok" } } } } } },
+                "responses": { "200": { "description": "ok" } }
+            } } } })),
+        ),
+        (
+            "OpenAPI, server variable default outside its enum",
+            openapi_doc(json!({ "servers": [{ "url": "https://{env}.example.test",
+                "variables": { "env": { "default": "tok-SENSITIVE-c118", "enum": ["prod"] } } }] })),
+        ),
+        (
+            "OpenAPI, parameter location",
+            openapi_doc(json!({ "paths": { "/a": { "get": {
+                "parameters": [{ "name": "q", "in": "tok-SENSITIVE-c119", "schema": { "type": "string" } }],
+                "responses": { "200": { "description": "ok" } }
+            } } } })),
+        ),
+    ];
+    for (label, source) in rows {
+        let r = import(&source, &ImportOptions::default()).unwrap_or_else(|e| panic!("{label}: {e}"));
+        let reported = r.report.warnings.len() + r.report.unsupported.len() + r.report.scripts.len() + r.report.inactive_settings.len();
+        assert!(reported > 0, "{label}: nothing was reported");
+        assert_report_clean(&source, label);
+    }
+}
+
+/// #584 (review of #583, sol F1): an auth placeholder is never named after
+/// its owner, so a collection, folder or request name that repeats a
+/// credential URL leaves no part of it in a placeholder, a required variable
+/// or the report. The digits survive sanitizing (`a-b` becomes `a_b`), so the
+/// numeric canary catches a sanitized copy.
+#[test]
+fn auth_placeholders_never_carry_an_owner_name() {
+    let name = "https://admin:571571571@api.example.test/v1";
+    let basic =
+        json!({ "type": "basic", "basic": [{ "key": "username", "value": "u" }, { "key": "password", "value": "tok-SENSITIVE-c120" }] });
+    let bearer = json!({ "type": "bearer", "bearer": [{ "key": "token", "value": "" }] });
+    let postman = json!({
+        "info": { "name": name, "schema": POSTMAN_SCHEMA },
+        "auth": basic,
+        "item": [{ "name": name, "auth": bearer,
+            "item": [{ "name": name, "request": { "method": "GET", "url": "https://api.example.test/", "auth": basic } }] }]
+    })
+    .to_string()
+    .into_bytes();
+    let mut request = insomnia_request("https://api.example.test/");
+    request["name"] = json!(name);
+    request["authentication"] = json!({ "type": "basic", "username": "u", "password": "tok-SENSITIVE-c121" });
+    let insomnia = insomnia_doc(request, json!({}));
+    for (importer, source) in [("Postman", postman), ("Insomnia", insomnia)] {
+        let r = import(&source, &ImportOptions::default()).unwrap();
+        assert!(
+            r.report.required_variables.iter().any(|v| v.name.starts_with("auth") && v.secret),
+            "{importer}: the auth placeholder was not named by the import"
+        );
+        assert_nothing_readable(&source, importer);
+    }
+}
+
+/// #584 and review of #586 (dsf F2): the free-text shapes the last line of
+/// defence must still catch, run through the channels that still quote
+/// source text: imported request, folder and workspace names (stored and
+/// exported) and settings keys (quoted only by report pointers). Each row
+/// fails if the matching heuristic regresses.
+#[test]
+fn free_text_edge_cases_leave_nothing_readable() {
+    const SHAPES: &[&str] = &[
+        // Whitespace around the separator (sol F4), Unicode and vertical tab
+        // included (dsf F1).
+        "const password =\n\"tok-SENSITIVE-c122\";",
+        "const secret\t=\t'tok-SENSITIVE-c123';",
+        "password\u{0b}=\u{0b}tok-SENSITIVE-c130",
+        "password\u{a0}=\u{3000}'tok-SENSITIVE-c132'",
+        // An escaped quote (sol F5).
+        "const api_key = \"\\\"tok-SENSITIVE-c124\";",
+        // A reference beside a literal (sol F3), and a marker with literal
+        // text attached (sol F2 of #586).
+        "const token = \"{{tenant}}-tok-SENSITIVE-c125\";",
+        "password=<redacted>tok-SENSITIVE-c128",
+        "token=<url redacted>tok-SENSITIVE-c129",
+        // A scheme token after several spaces or a Unicode space.
+        "headers.Authorization = 'Bearer  tok-SENSITIVE-c126abcdef';",
+        "Bearer\u{a0}tok-SENSITIVE-c131abcdef",
+        // A bare JWT (sol F6).
+        "eyJhbGciOiJIUzI1NiJ9.tok-SENSITIVE-c127.c2lnbmF0dXJl",
+    ];
+    // Labelled by index: a failure message never prints the canary.
+    for (n, shape) in SHAPES.iter().enumerate() {
+        let mut settings = serde_json::Map::new();
+        settings.insert((*shape).to_string(), json!(true));
+        let postman = json!({
+            "info": { "name": shape, "schema": POSTMAN_SCHEMA },
+            "item": [{ "name": shape, "item": [{
+                "name": shape,
+                "protocolProfileBehavior": settings,
+                "request": { "method": "GET", "url": "https://api.example.test/" }
+            }] }]
+        })
+        .to_string()
+        .into_bytes();
+        let r = import(&postman, &ImportOptions::default()).unwrap();
+        assert!(r.report.unsupported.iter().any(|f| f.code == "request_setting"), "shape {n}: the setting was not reported");
+        assert!(r.requests[0].name != *shape, "shape {n}: the name was not redacted");
+        assert_nothing_readable(&postman, &format!("Postman names and settings key, shape {n}"));
+        let mut request = insomnia_request("https://api.example.test/");
+        request["name"] = json!(shape);
+        assert_nothing_readable(&insomnia_doc(request, json!({})), &format!("Insomnia name, shape {n}"));
+    }
 }

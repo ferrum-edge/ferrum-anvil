@@ -300,7 +300,7 @@ async fn hints_follow_server_and_say_where_to_fill_in_without_an_environment() {
     std::fs::write(&curl, "curl -H 'Authorization: Bearer abc' http://127.0.0.1:9/x\n").unwrap();
     let o = anvil(&data, &["import-spec", "--new-workspace", "--file", curl.to_str().unwrap()]).await;
     let out = text(&o);
-    assert!(out.contains("fill in {{Authorization}}") && out.contains("`anvil env create \"cURL import\" <name> --use`"), "{out}");
+    assert!(out.contains("fill in {{secret_") && out.contains("`anvil env create \"cURL import\" <name> --use`"), "{out}");
     assert!(!out.contains("anvil env set \""), "{out}");
     let o = anvil(&data, &["import-spec", "Shop", "--file", curl.to_str().unwrap()]).await;
     let out = text(&o);
