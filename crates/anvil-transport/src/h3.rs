@@ -27,11 +27,11 @@ use crate::recorder::{EventCtx, Recorder};
 use crate::session::header_entries;
 use crate::tickets::{HandshakeGuard, ResumptionContext, TicketCache, TicketTransport};
 use crate::tls;
+use anvil_domain::Timestamp;
 use anvil_domain::events::ExecutionEvent;
 use anvil_domain::execution::*;
 use anvil_domain::settings::Limits;
 use bytes::{Buf, Bytes, BytesMut};
-use chrono::Utc;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -1507,7 +1507,7 @@ impl H3Transport {
             reason,
             method: plan.method.to_string(),
             url: plan.display_url.clone(),
-            started_at: Utc::now(),
+            started_at: Timestamp::now(),
             connection: None,
             phases: vec![],
             dispatch: DispatchState::NotDispatched,
@@ -2310,7 +2310,7 @@ mod tests {
             reason: AttemptReason::Initial,
             method: "POST".into(),
             url: "https://example.test/orders".into(),
-            started_at: Utc::now(),
+            started_at: Timestamp::now(),
             connection: None,
             phases: vec![],
             dispatch: DispatchState::MayHaveBeenSent,
