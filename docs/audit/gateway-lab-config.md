@@ -579,12 +579,12 @@ Evidence levels:
 - `/gw/opa-deny` (policy): the mock returns `{"result": false}`, giving **403** `{"error":"forbidden by policy"}`.
 - `/gw/opa-allow` (mock returns `{"result": true}`) gives 200.
 - The OPA call is `POST {opa_host}/v1/data/{policy_path}`.
-- Both routes use `timeout_ms: 5000`. The 500 ms timeout is reserved for `/gw/opa-timeout` (GW-013), because a scheduler stall in the in-process OPA mock (Lab run 44311523667, about 1.1 s on `macos-15`) otherwise turns the 403 into a fail-closed 503.
+- Current v0.9.20 lab settings: both routes use `timeout_ms: 5000`. The 500 ms timeout is reserved for `/gw/opa-timeout` (GW-013), because a scheduler stall in the in-process OPA mock ([Lab run 44311523667](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/44311523667/job/134826603937), ~1.1 s on `macos-15`) otherwise turns the 403 into a fail-closed 503.
 - Evidence: S (`src/plugins/opa.rs:35-38,476-495,695-771`). Config shape: `tests/functional/functional_opa_key_auth_redaction_test.rs:94-138`.
 
 **GW-013 · OPA unavailable (fail-closed)**
 - `/gw/opa-timeout`: 19203 never answers within the 500 ms `timeout_ms`.
-- `/gw/opa-refused`: nothing listens on 19209. Its `timeout_ms` is 5000, since only `/gw/opa-timeout` tests the timeout path.
+- `/gw/opa-refused`: nothing listens on 19209. Current v0.9.20 lab setting uses `timeout_ms: 5000` to protect its post-start recovery request, since connection refusal fails immediately and only `/gw/opa-timeout` tests the timeout path.
 - Both give **503** `{"error":"authorization service unavailable"}`. No `X-Gateway-Error` is expected (plugin reject; **verify live**).
 - Fail-closed is the default (`opa.rs:773-784`).
 - Evidence: S (`opa.rs:37-38,505-535,625-652`).

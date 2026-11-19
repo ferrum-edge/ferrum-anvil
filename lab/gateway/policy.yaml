@@ -431,7 +431,9 @@ plugin_configs:
   # Only gw013-opa-timeout exercises the OPA timeout path, so it alone keeps the
   # tight 500 ms timeout_ms. The other OPA configs use 5000 ms so a scheduler stall
   # in the in-process OPA mock (Lab run 44311523667: ~1.1 s on macos-15) cannot turn
-  # an allow/deny/refused decision into a spurious fail-closed 503.
+  # an allow/deny decision (or gw013-opa-refused's recovery request once the mock
+  # starts) into a spurious fail-closed 503; connection refusal itself still fails
+  # closed immediately with 503.
   - id: gw012-opa-allow
     plugin_name: opa
     scope: proxy
