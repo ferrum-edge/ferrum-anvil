@@ -1081,7 +1081,11 @@ fn a_source_name_in_the_reserved_shape_is_refused() {
         ] })
         .to_string()
     };
-    for name in ["auth_0123456789abcdef_token", "secret_0123456789abcdef", "url_0123456789ABCDEF"] {
+    // Built at run time: digits after a word like `secret_` read as a key
+    // to the secret scanner.
+    let digits = ["0123", "4567", "89ab", "cdef"].concat();
+    let reserved = [format!("auth_{digits}_token"), format!("secret_{digits}"), format!("url_{}", digits.to_uppercase())];
+    for name in &reserved {
         let cases = [
             ("reference", with_header(&format!("{{{{{name}}}}}"))),
             ("percent-encoded", with_header(&format!("{{{{{}}}}}", name.replacen('_', "%5F", 1)))),
@@ -1106,7 +1110,14 @@ fn a_source_name_in_the_reserved_shape_is_refused() {
             }
         }
     }
-    for name in ["auth_token", "secret_0123", "url_0123456789abcdefg", "auth_0123456789abcdeg_token", "api_0123456789abcdef"] {
+    let alike = [
+        "auth_token".to_string(),
+        "secret_0123".to_string(),
+        format!("url_{digits}g"),
+        format!("auth_{}g_token", &digits[..15]),
+        format!("api_{digits}"),
+    ];
+    for name in &alike {
         assert!(import(with_header(&format!("{{{{{name}}}}}")).as_bytes(), &opts()).is_ok(), "{name} was refused");
     }
 }

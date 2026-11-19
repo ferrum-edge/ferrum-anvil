@@ -9,3 +9,9 @@
 # report_pointers_never_hold_a_bare_jwt; the next commit uses the repository's existing
 # unflagged sample. Dead once the PR is squash-merged.
 301da91c1c7d34768c6030b22916cca842ff258d:crates/anvil-import/src/report.rs:jwt:859
+
+# #584 (PR #586): placeholder-shaped test names (16 hex digits after `secret_` or `api_`)
+# in a_source_name_in_the_reserved_shape_is_refused; the next commit builds them at run
+# time. Dead once the PR is squash-merged.
+0782de1461243ac6701069fe305cd868b2a73c86:crates/anvil-import/tests/reimport.rs:generic-api-key:1084
+0782de1461243ac6701069fe305cd868b2a73c86:crates/anvil-import/tests/reimport.rs:generic-api-key:1109
