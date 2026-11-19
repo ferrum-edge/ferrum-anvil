@@ -231,6 +231,13 @@ pub fn insert_security_token(
 mod tests {
     use super::*;
 
+    /// A password made per run: only the audited vectors depend on its value.
+    fn password() -> String {
+        let mut bytes = [0u8; 12];
+        rand::fill(&mut bytes);
+        hex::encode(bytes)
+    }
+
     #[test]
     fn audited_digest_vectors() {
         let nonce = hex::decode("746573742d6e6f6e63652d3132333435").unwrap();
@@ -247,7 +254,7 @@ mod tests {
                 r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:x="urn:x"><soap:Header {note}></soap:Header><soap:Body><m:Ping xmlns:m="urn:x">1</m:Ping></soap:Body></soap:Envelope>"#
             );
             let out =
-                insert_security(env.as_bytes(), "alice", "secret123", WssePasswordType::PasswordDigest, Some(300), None, Timestamp::now())
+                insert_security(env.as_bytes(), "alice", &password(), WssePasswordType::PasswordDigest, Some(300), None, Timestamp::now())
                     .unwrap();
             let s = String::from_utf8(out).unwrap();
             let doc = roxmltree::Document::parse(&s).unwrap();
@@ -263,11 +270,12 @@ mod tests {
     #[test]
     fn inserts_header_preserving_body_bytes() {
         let env = br#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><m:Ping xmlns:m="urn:x">1</m:Ping></soap:Body></soap:Envelope>"#;
-        let out = insert_security(env, "alice", "secret123", WssePasswordType::PasswordDigest, Some(300), None, Timestamp::now()).unwrap();
+        let pw = password();
+        let out = insert_security(env, "alice", &pw, WssePasswordType::PasswordDigest, Some(300), None, Timestamp::now()).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("<soap:Header><wsse:Security"));
         assert!(s.contains(r#"<soap:Body><m:Ping xmlns:m="urn:x">1</m:Ping></soap:Body>"#));
-        assert!(!s.contains("secret123"), "digest mode never sends the password");
+        assert!(!s.contains(&pw), "digest mode never sends the password");
         roxmltree::Document::parse(&s).unwrap();
     }
 
@@ -276,21 +284,21 @@ mod tests {
     fn a_password_digest_token_reports_its_digest_and_nonce_as_secrets() {
         let env = br#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
         let i =
-            insert_security_token(env, "alice", "secret123", WssePasswordType::PasswordDigest, Some(300), None, Timestamp::now()).unwrap();
+            insert_security_token(env, "alice", &password(), WssePasswordType::PasswordDigest, Some(300), None, Timestamp::now()).unwrap();
         let s = String::from_utf8(i.body).unwrap();
         let [digest, nonce] = i.token_secrets.as_slice() else {
             panic!("{} token secrets, not the digest and the nonce", i.token_secrets.len())
         };
         assert!(s.contains(&format!("#PasswordDigest\">{digest}</wsse:Password>")), "the digest is not the one sent");
         assert!(s.contains(&format!("#Base64Binary\">{nonce}</wsse:Nonce>")), "the nonce is not the one sent");
-        let text = insert_security_token(env, "alice", "secret123", WssePasswordType::PasswordText, None, None, Timestamp::now()).unwrap();
+        let text = insert_security_token(env, "alice", &password(), WssePasswordType::PasswordText, None, None, Timestamp::now()).unwrap();
         assert!(text.token_secrets.is_empty(), "a PasswordText token has no secret but its password");
     }
 
     #[test]
     fn rejects_dtd_bearing_envelopes() {
         let env = br#"<!DOCTYPE x [<!ENTITY a "b">]><Envelope><Body/></Envelope>"#;
-        assert!(insert_security(env, "a", "b", WssePasswordType::PasswordText, None, None, Timestamp::now()).is_err());
+        assert!(insert_security(env, "a", &password(), WssePasswordType::PasswordText, None, None, Timestamp::now()).is_err());
     }
 
     const SOAP_NS: &str = "http://schemas.xmlsoap.org/soap/envelope/";
@@ -325,7 +333,7 @@ mod tests {
     }
 
     fn insert(env: &str) -> Result<Vec<u8>, AuthError> {
-        insert_security(env.as_bytes(), "alice", "secret123", WssePasswordType::PasswordText, Some(300), None, Timestamp::now())
+        insert_security(env.as_bytes(), "alice", &password(), WssePasswordType::PasswordText, Some(300), None, Timestamp::now())
     }
 
     /// GHSA-mvjp-hhjj-mh63: an envelope whose namespace or attribute work
@@ -361,7 +369,7 @@ mod tests {
     }
 
     fn insert_with_saml(env: &str, saml: &str) -> Result<Vec<u8>, AuthError> {
-        insert_security(env.as_bytes(), "alice", "secret123", WssePasswordType::PasswordText, Some(300), Some(saml), Timestamp::now())
+        insert_security(env.as_bytes(), "alice", &password(), WssePasswordType::PasswordText, Some(300), Some(saml), Timestamp::now())
     }
 
     /// The rewritten envelope is bounded before it is parsed again: a SAML
