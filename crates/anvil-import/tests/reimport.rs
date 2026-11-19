@@ -731,8 +731,29 @@ fn reordering_items_keeps_each_auth_config_on_its_own_variables() {
         ] })
         .to_string()
     };
+    // Review of #586, round 2: these two ids collided under the 32-bit digest
+    // (sol F2), and URL userinfo is named from the request's key too (dsf F1).
+    let userinfo_item = |id: &str| {
+        serde_json::json!({ "id": id, "name": id, "request": { "method": "GET",
+            "url": format!("https://user-{id}:tok-SENSITIVE-{id}@{id}.example.invalid/v1") } })
+    };
+    let userinfo = |items: [&str; 2]| {
+        serde_json::json!({
+            "info": { "name": "Two", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+            "item": items.map(userinfo_item)
+        })
+        .to_string()
+    };
     let cases = [
         ("Postman", postman(["req-a", "req-b"]), postman(["req-b", "req-a"]), ["postman:req-a", "postman:req-b"], "token"),
+        (
+            "Postman, ids that collided",
+            postman(["req-137081", "req-723190"]),
+            postman(["req-723190", "req-137081"]),
+            ["postman:req-137081", "postman:req-723190"],
+            "token",
+        ),
+        ("Postman, URL userinfo", userinfo(["ui-a", "ui-b"]), userinfo(["ui-b", "ui-a"]), ["postman:ui-a", "postman:ui-b"], "password"),
         ("Insomnia", insomnia(1.0, 2.0), insomnia(2.0, 1.0), ["insomnia:req_a", "insomnia:req_b"], "password"),
     ];
     for (importer, before, after, keys, field) in cases {
@@ -742,7 +763,7 @@ fn reordering_items_keeps_each_auth_config_on_its_own_variables() {
         let filled: BTreeMap<String, String> =
             keys.iter().map(|k| (auth_reference(req(&first, k), field), format!("secret for {k}"))).collect();
         assert_eq!(filled.len(), 2, "{importer}: the two auth configs share a placeholder");
-        assert!(filled.keys().all(|p| p.starts_with("{{auth_")), "{importer}: {filled:?}");
+        assert!(filled.keys().all(|p| is_auth_ref(p, field)), "{importer}: {filled:?}");
 
         let fresh = reimport(&first, &after);
         for k in keys {
@@ -760,4 +781,92 @@ fn reordering_items_keeps_each_auth_config_on_its_own_variables() {
             );
         }
     }
+}
+
+/// Review of #586, round 2 (sol F1, dsf F1): a request matched only by its
+/// position (a Postman item without an id) that carries credentials, its
+/// own, from URL userinfo or inherited from its folder, is never updated
+/// silently: reordering the source holds every such request for review, so
+/// no request ends up on variables filled for another one.
+#[test]
+fn reordered_items_without_ids_are_held_for_review() {
+    let folder = |n: &str| {
+        serde_json::json!({ "name": format!("Folder {n}"),
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": format!("tok-SENSITIVE-folder-{n}") }] },
+            "item": [{ "name": format!("Inherits {n}"), "request": { "method": "GET", "url": format!("https://inherit-{n}.example.invalid/v1") } }] })
+    };
+    let own = |n: &str| {
+        serde_json::json!({ "name": format!("Own {n}"), "request": { "method": "GET", "url": format!("https://own-{n}.example.invalid/v1"),
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": format!("tok-SENSITIVE-own-{n}") }] } } })
+    };
+    let userinfo = |n: &str| {
+        serde_json::json!({ "name": format!("Userinfo {n}"), "request": { "method": "GET",
+            "url": format!("https://user-{n}:tok-SENSITIVE-ui-{n}@userinfo-{n}.example.invalid/v1") } })
+    };
+    let doc = |order: [&str; 2]| {
+        let makers: [fn(&str) -> serde_json::Value; 3] = [folder, own, userinfo];
+        let items: Vec<serde_json::Value> = makers.iter().flat_map(|make| order.map(make)).collect();
+        serde_json::json!({
+            "info": { "name": "No ids", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+            "item": items
+        })
+        .to_string()
+    };
+    let first = import(doc(["a", "b"]).as_bytes(), &opts()).unwrap();
+    let fresh = reimport(&first, &doc(["b", "a"]));
+    let plan = diff(&first, &first.requests, &fresh);
+    assert!(
+        plan.updated.is_empty(),
+        "a credentialed request moved silently: {:?}",
+        plan.updated.iter().map(|c| &c.operation_key).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        plan.conflicts.len(),
+        6,
+        "every moved request is held: {:?}",
+        plan.conflicts.iter().map(|c| &c.operation_key).collect::<Vec<_>>()
+    );
+    assert!(plan.conflicts.iter().all(|c| c.credential_review && !c.user_edited && c.conflicting_fields.contains(&"spec".to_string())));
+    // Declined, as by default: every request keeps the URL and references it
+    // had, so the variables filled for it still go to its own host.
+    let applied = plan.apply(&first.requests, &ReimportApproval::default());
+    for (before, after) in first.requests.iter().zip(&applied) {
+        assert_eq!(before.meta.id, after.meta.id);
+        assert_eq!(before.spec, after.spec, "a held request changed");
+    }
+}
+
+/// Review of #586, round 2: a request whose import-made credential
+/// placeholders were renamed upstream (here: a request imported by an
+/// earlier build, under an older naming) keeps the references it has, so
+/// it stays on the variables the user filled, and is not reported as
+/// changed.
+#[test]
+fn renamed_credential_placeholders_keep_the_existing_references() {
+    let doc = serde_json::json!({
+        "info": { "name": "One", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+        "item": [{ "id": "r1", "name": "r", "request": { "method": "GET", "url": "https://r.example.invalid/v1",
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "tok-SENSITIVE-legacy" }] } } }]
+    })
+    .to_string();
+    let mut first = import(doc.as_bytes(), &opts()).unwrap();
+    let legacy = &mut first.requests[0];
+    legacy.spec.auth = AuthConfig::Bearer { token: SensitiveValue::template("{{r_token}}"), prefix: "Bearer".into() };
+    let hash = anvil_import::spec_hash(&legacy.spec);
+    legacy.spec.source.as_mut().unwrap().generated_hash = hash;
+    let fresh = reimport(&first, &doc);
+    assert!(is_auth_ref(&auth_reference(&fresh.requests[0], "token"), "token"), "the fresh import uses the current naming");
+    let plan = diff(&first, &first.requests, &fresh);
+    assert_eq!(plan.unchanged, vec![first.requests[0].meta.id], "{plan:?}");
+    let applied = plan.apply(&first.requests, &ReimportApproval::default());
+    assert_eq!(auth_reference(&applied[0], "token"), "{{r_token}}");
+
+    // The URL changes upstream too: the update keeps the reference.
+    let moved = reimport(&first, &doc.replace("https://r.example.invalid/v1", "https://r.example.invalid/v2"));
+    let plan = diff(&first, &first.requests, &moved);
+    assert_eq!(plan.updated.len(), 1, "{plan:?}");
+    let applied = plan.apply(&first.requests, &ReimportApproval::default());
+    assert!(applied[0].spec.url.ends_with("/v2"));
+    assert_eq!(auth_reference(&applied[0], "token"), "{{r_token}}");
+    assert_eq!(anvil_import::spec_hash(&applied[0].spec), applied[0].spec.source.as_ref().unwrap().generated_hash, "applied as generated");
 }

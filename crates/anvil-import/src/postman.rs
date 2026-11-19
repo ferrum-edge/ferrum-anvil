@@ -146,7 +146,7 @@ fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str
         Some(a) => auth(b, a, &ptr(&rptr, "auth"), &key),
         None => AuthConfig::Inherit,
     };
-    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(&rptr, "url"));
+    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(&rptr, "url"), &key);
     for k in ["proxy", "certificate"] {
         if req.get(k).is_some() {
             b.report.unsupported(

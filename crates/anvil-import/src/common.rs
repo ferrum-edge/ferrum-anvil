@@ -77,9 +77,10 @@ fn credential_placeholder(b: &mut Builder, value: &str, var: &str, pointer: &str
 /// its owner (a request's operation key, a folder's or the collection's
 /// key, the source's own id where it has one).
 ///
-/// - Opaque (`auth_<8 hex digits of a digest of the identity>_<field>`): no
+/// - Opaque (`auth_<16 hex digits of the identity's SHA-256>_<field>`): no
 ///   collection, folder or request name, which can repeat a credential URL,
-///   reaches it (review of #583, sol F1).
+///   reaches it (review of #583, sol F1), and distinct identities do not
+///   collide in practice (review of #586, round 2, sol F2).
 /// - Stable across reimports whatever the order of the items, so a variable
 ///   the user filled stays with the same auth config (review of #586, sol
 ///   F1).
@@ -87,8 +88,8 @@ fn credential_placeholder(b: &mut Builder, value: &str, var: &str, pointer: &str
 ///   query or body placeholder aliases it, nor it one of theirs: a name
 ///   already taken gets the next free suffix (review of #586, sol F3).
 pub fn auth_secret_name(b: &mut Builder, identity: &str, field: &str) -> String {
-    let name = format!("auth_{:08x}_{field}", crate::util::fnv1a64(identity) as u32);
-    b.env_names.name_verbatim(&name)
+    let digest = crate::util::sha256_hex(identity.as_bytes());
+    b.env_names.name_verbatim(&format!("auth_{}_{field}", &digest[..16]))
 }
 
 /// [`credential`] for secret `field` of the auth config `identity`, named by
@@ -437,8 +438,8 @@ pub fn reserve_source_references(b: &mut Builder, text: &str) {
 }
 
 /// Reserve every name a request can define implicitly, before any
-/// placeholder is made, so a fresh placeholder (`{{username}}`,
-/// `{{password}}`, a path-named environment leaf) never names one:
+/// placeholder is made, so a fresh placeholder (an auth secret, a
+/// credential field, a path-named environment leaf) never names one:
 /// - every path parameter, written as a `:name` segment at the start of a
 ///   string or after a `/` (a Postman or Insomnia URL, a Postman `path`
 ///   element), up to the next `/`, `?` or `#`; a valueless one becomes
@@ -990,11 +991,11 @@ pub fn take_userinfo(url: &str, syntax: anvil_domain::secret::TemplateSyntax) ->
 /// store, and whether it was quarantined ([`quarantine_url`]), in which case
 /// it is stored as returned, with no query, fragment or other processing.
 /// Userinfo goes through [`apply_userinfo`].
-pub fn take_url_credentials(b: &mut Builder, url: &str, auth: &mut AuthConfig, pointer: &str) -> (String, bool) {
+pub fn take_url_credentials(b: &mut Builder, url: &str, auth: &mut AuthConfig, pointer: &str, identity: &str) -> (String, bool) {
     match take_userinfo(url, b.template_syntax) {
         TakenUrl::Plain(url) => (url, false),
         TakenUrl::Userinfo(url, userinfo) => {
-            apply_userinfo(b, auth, Some(userinfo), pointer);
+            apply_userinfo(b, auth, Some(userinfo), pointer, identity);
             (url, false)
         }
         TakenUrl::Ambiguous => (quarantine_url(b, url, pointer), true),
@@ -1085,12 +1086,14 @@ pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str) -> String {
 /// kept only in the password, a secret field. Fresh placeholders come from
 /// the import's name allocator, so they never name a variable the source
 /// defines or references (`url_userinfo_replaced`).
-pub fn userinfo_auth(b: &mut Builder, userinfo: &str, pointer: &str) -> AuthConfig {
+pub fn userinfo_auth(b: &mut Builder, userinfo: &str, pointer: &str, identity: &str) -> AuthConfig {
     if anvil_domain::secret::is_plain_userinfo(userinfo, b.template_syntax) {
         let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
         return AuthConfig::Basic { username: user.to_string(), password: SensitiveValue::template(pass) };
     }
-    let user_var = b.env_names.name("username");
+    // Named like the request's own auth secrets, from its stable key
+    // (review of #586, round 2, dsf F1).
+    let user_var = auth_secret_name(b, identity, "username");
     let username = format!("{{{{{user_var}}}}}");
     b.report.require_var(&user_var, true, "the user name in the URL is not imported", pointer);
     let password = if b.opts.include_credentials {
@@ -1102,7 +1105,7 @@ pub fn userinfo_auth(b: &mut Builder, userinfo: &str, pointer: &str) -> AuthConf
         };
         SensitiveValue::template(decode_keeping_references(literal).unwrap_or_else(|| literal.to_string()))
     } else {
-        let pass_var = b.env_names.name("password");
+        let pass_var = auth_secret_name(b, identity, "password");
         let placeholder = format!("{{{{{pass_var}}}}}");
         b.report.redacted(pointer, "credentials in the URL", &placeholder);
         b.report.require_var(&pass_var, true, "the credentials in the URL were redacted on import", pointer);
@@ -1122,10 +1125,10 @@ pub fn userinfo_auth(b: &mut Builder, userinfo: &str, pointer: &str) -> AuthConf
 /// cURL `-u`, a Postman or Insomnia auth helper) and an explicit "no auth"
 /// win, as curl prefers `-u`; the userinfo, already removed from the URL,
 /// is then dropped with a `url_credentials_dropped` warning.
-pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<Userinfo>, pointer: &str) {
+pub fn apply_userinfo(b: &mut Builder, auth: &mut AuthConfig, userinfo: Option<Userinfo>, pointer: &str, identity: &str) {
     let Some(userinfo) = userinfo else { return };
     if matches!(auth, AuthConfig::Inherit) {
-        *auth = userinfo_auth(b, &userinfo, pointer);
+        *auth = userinfo_auth(b, &userinfo, pointer, identity);
     } else {
         b.report.warn(
             "url_credentials_dropped",

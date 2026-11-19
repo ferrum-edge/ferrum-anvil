@@ -567,6 +567,8 @@ export interface ReimportChange {
   upstream_fields?: string[];
   /** The parts of `upstream_fields` the user edited too (what makes it a conflict). */
   conflicting_fields?: string[];
+  /** Its credential references changed, or it matched by position: held for review. */
+  credential_review?: boolean;
   /** The freshly generated request. */
   fresh: RequestDefinition;
 }

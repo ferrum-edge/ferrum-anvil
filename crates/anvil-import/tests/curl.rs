@@ -200,7 +200,9 @@ fn url_credentials_and_scheme_default() {
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "http://example.com/x");
     // A literal userinfo is replaced by placeholders, user name included.
-    assert!(matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password.is_pure_reference()));
+    assert!(
+        matches!(&s.auth, AuthConfig::Basic { username, password } if is_auth_ref(username, "username") && password.is_pure_reference())
+    );
     let r = curl("curl example.com/x");
     assert_eq!(r.requests[0].spec.url, "http://example.com/x");
     assert!(has(&r, "curl_default_scheme"));
@@ -469,20 +471,20 @@ fn literal_userinfo_is_replaced_by_placeholders() {
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "https://api.example.com/v1");
     assert!(
-        matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password == &SensitiveValue::template("{{password}}"))
+        matches!(&s.auth, AuthConfig::Basic { username, password } if is_auth_ref(username, "username") && is_auth_ref(template_of(password), "password"))
     );
     assert!(has(&r, "url_userinfo_replaced"));
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu1"));
     let keep = ImportOptions { include_credentials: true, ..opts() };
     let r = import(b"curl 'https://admin:p@tok-SENSITIVE-cu1@api.example.com/v1'", &keep).unwrap();
     assert!(
-        matches!(&r.requests[0].spec.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password == &SensitiveValue::template("p@tok-SENSITIVE-cu1"))
+        matches!(&r.requests[0].spec.auth, AuthConfig::Basic { username, password } if is_auth_ref(username, "username") && password == &SensitiveValue::template("p@tok-SENSITIVE-cu1"))
     );
     for options in [opts(), keep] {
         let r = import(b"curl 'https://%7B%7Bu%7D%7D:%7B%7Bid%7D%7D@example.test/'", &options).unwrap();
         match &r.requests[0].spec.auth {
             AuthConfig::Basic { username, password } => {
-                assert_eq!(username, "{{username}}");
+                assert!(is_auth_ref(username, "username"), "{username}");
                 assert!(!matches!(password, SensitiveValue::Template { value } if value == "{{id}}"), "escaped braces became a reference");
             }
             _ => panic!("expected Basic auth"),
@@ -562,7 +564,7 @@ fn a_token_in_the_userinfo_is_a_credential() {
         let r = curl(&format!("curl '{url}'"));
         let s = &r.requests[0].spec;
         assert_eq!(s.url, "https://api.example.test/v1", "{url}");
-        assert!(matches!(&s.auth, AuthConfig::Basic { username, .. } if username == "{{username}}"), "{url}");
+        assert!(matches!(&s.auth, AuthConfig::Basic { username, .. } if is_auth_ref(username, "username")), "{url}");
         assert!(has(&r, "url_userinfo_replaced"), "{url}");
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu7"), "{url}");
     }
@@ -579,13 +581,13 @@ fn a_token_in_the_userinfo_is_a_credential() {
     let r = curl("curl 'https://{{api_token}}@api.example.test/v1'");
     assert!(matches!(&r.requests[0].spec.auth, AuthConfig::Basic { username, .. } if username == "{{api_token}}"));
     assert!(!has(&r, "url_userinfo_replaced"));
-    // A source that already references `username` and `password` gets other
-    // placeholder names.
+    // The placeholders are the import's own (`auth_<digest>_…`), never a
+    // name the source references.
     let r = curl("curl -H 'X-User: {{username}}' -H 'X-Pass: {{password}}' 'https://tok-SENSITIVE-cu8:pw@api.example.test/v1'");
     match &r.requests[0].spec.auth {
         AuthConfig::Basic { username, password } => {
-            assert_eq!(username, "{{username_2}}");
-            assert_eq!(password, &SensitiveValue::template("{{password_2}}"));
+            assert!(is_auth_ref(username, "username"), "{username}");
+            assert!(is_auth_ref(template_of(password), "password"));
         }
         _ => panic!("expected Basic auth"),
     }

@@ -822,7 +822,7 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     // Credentials embedded in the URL become Basic auth, unless `-u` (or
     // another auth option) gave the request its own, which curl prefers.
     let mut auth = auth;
-    let (taken, quarantined) = crate::common::take_url_credentials(b, &url, &mut auth, &url_at);
+    let (taken, quarantined) = crate::common::take_url_credentials(b, &url, &mut auth, &url_at, "curl");
     url = taken;
     // A quarantined URL is stored as returned.
     let (base, pairs) = if quarantined { (url.clone(), vec![]) } else { split_query(&url) };

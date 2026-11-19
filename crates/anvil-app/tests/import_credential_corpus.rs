@@ -580,9 +580,14 @@ fn userinfo_placeholders_never_take_a_path_parameter_name() {
             let with_userinfo = r.requests.iter().find(|q| q.spec.url.contains("/items/")).expect("the userinfo request");
             let auth = serde_json::to_string(&with_userinfo.spec.auth).unwrap();
             assert!(with_userinfo.spec.url.ends_with("/items/{{username}}"), "{importer}: the path parameter changed");
-            assert!(auth.contains("{{username_2}}"), "{importer}: the user name placeholder took a path parameter's name");
+            // Named after the request's stable key (`auth_<digest>_…`), never a
+            // path parameter's name.
+            assert!(
+                auth.contains("{{auth_") && auth.contains("_username}}"),
+                "{importer}: the user name placeholder took a path parameter's name"
+            );
             if !include_credentials {
-                assert!(auth.contains("{{password_2}}"), "{importer}: the password placeholder took a path parameter's name");
+                assert!(auth.contains("_password}}"), "{importer}: the password placeholder took a path parameter's name");
                 assert!(!leaks(&stored(&r).to_string()), "{importer}: a literal credential survived");
             }
             assert!(r.requests.iter().any(|q| q.spec.url.ends_with("/accounts/{{password}}")), "{importer}: the other path changed");

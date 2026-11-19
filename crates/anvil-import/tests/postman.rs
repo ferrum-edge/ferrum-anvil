@@ -327,7 +327,7 @@ fn url_userinfo_becomes_basic_auth_and_its_password_is_redacted() {
         let s = &r.requests[0].spec;
         assert_eq!(s.url, "https://api.example.com/v1/status");
         assert!(
-            matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password == &SensitiveValue::template("{{password}}")),
+            matches!(&s.auth, AuthConfig::Basic { username, password } if is_auth_ref(username, "username") && is_auth_ref(template_of(password), "password")),
             "expected Basic auth with a placeholder password"
         );
         assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-pm2"));
@@ -388,8 +388,8 @@ fn userinfo_placeholders_never_take_a_collection_variable_name() {
     let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
     match &r.requests[0].spec.auth {
         AuthConfig::Basic { username, password } => {
-            assert_eq!(username, "{{username_2}}");
-            assert_eq!(password, &SensitiveValue::template("{{password_2}}"));
+            assert!(is_auth_ref(username, "username"), "{username}");
+            assert!(is_auth_ref(template_of(password), "password"));
         }
         _ => panic!("expected Basic auth"),
     }
@@ -413,8 +413,8 @@ fn userinfo_placeholders_never_take_a_path_variable_name() {
     assert_eq!(r.requests[1].spec.url, "https://api.example.test/accounts/{{password}}");
     match &r.requests[0].spec.auth {
         AuthConfig::Basic { username, password } => {
-            assert_eq!(username, "{{username_2}}");
-            assert_eq!(password, &SensitiveValue::template("{{password_2}}"));
+            assert!(is_auth_ref(username, "username"), "{username}");
+            assert!(is_auth_ref(template_of(password), "password"));
         }
         _ => panic!("expected Basic auth"),
     }

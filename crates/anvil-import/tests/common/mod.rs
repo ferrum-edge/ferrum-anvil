@@ -65,3 +65,22 @@ pub fn substituted(text: &str, vars: &[(&str, &str)]) -> serde_json::Value {
     }
     serde_json::from_str(&t).unwrap_or_else(|e| panic!("not JSON after substitution ({e}): {t}"))
 }
+
+/// Whether `text` is exactly the placeholder an auth secret `field` gets:
+/// `{{auth_<16 hex digits>_<field>}}`, possibly with a `_n` suffix.
+pub fn is_auth_ref(text: &str, field: &str) -> bool {
+    let Some(inner) = text.strip_prefix("{{auth_").and_then(|t| t.strip_suffix("}}")) else { return false };
+    let Some((digest, rest)) = inner.split_at_checked(16) else { return false };
+    digest.bytes().all(|b| b.is_ascii_hexdigit())
+        && rest.strip_prefix('_').and_then(|r| r.strip_prefix(field)).is_some_and(|tail| {
+            tail.is_empty() || tail.strip_prefix('_').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+}
+
+/// The text of a template value.
+pub fn template_of(v: &anvil_domain::secret::SensitiveValue) -> &str {
+    match v {
+        anvil_domain::secret::SensitiveValue::Template { value } => value,
+        anvil_domain::secret::SensitiveValue::Secret { .. } => "",
+    }
+}

@@ -83,7 +83,7 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     // Userinfo first: a `#` inside a password expression is no fragment.
     // A quarantined URL is stored as returned, fragment included, with no
     // query parameters.
-    let (url, quarantined) = take_url_credentials(b, raw_url, &mut auth, &uptr);
+    let (url, quarantined) = take_url_credentials(b, raw_url, &mut auth, &uptr, &format!("har:{index}"));
     let url = if quarantined { url } else { crate::common::strip_fragment(&url).to_string() };
     let (base, pairs) = if quarantined { (url.clone(), vec![]) } else { split_query(&url) };
     if !quarantined {

@@ -88,9 +88,10 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   - A userinfo that is exactly variable references (`{{user}}`,
     `{{user}}:`, `{{user}}:{{password}}`) keeps them. Anything else (a
     literal user name or password, a token) is credential material, and no
-    part of it is kept as a user name or in the URL: the user name becomes a
-    fresh `{{username}}` placeholder and the password a fresh `{{password}}`
-    placeholder (`url_userinfo_replaced`). With `include_credentials`, the
+    part of it is kept as a user name or in the URL: the user name and the
+    password become placeholders named from the request's stable key like
+    its own auth secrets (`{{auth_<digest>_username}}`,
+    `{{auth_<digest>_password}}`, see below; `url_userinfo_replaced`). With `include_credentials`, the
     password keeps the literal (the part after the first `:`, or the whole
     userinfo when it has no password), a secret field.
   - Fresh placeholders never take a name the source defines or references,
@@ -115,15 +116,19 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     field, an auth secret) is named through the same allocator: one name
     per field name, never a name the source defines, references or derives
     (`api_key_2` when the source defines `api_key`). A path parameter keeps
-    its own name. A Postman or Insomnia auth config's secrets are named
-    `auth_<8 hex digits>_<field>` (`auth_3f9a0c12_password`), the digits a
-    digest of the owner's stable key (the request's operation key, the
-    folder's or collection's key, the source's own id where it has one).
+    its own name. A Postman or Insomnia auth config's secrets, and the
+    Basic auth a URL userinfo becomes (every importer), are named
+    `auth_<16 hex digits>_<field>` (`auth_3f9a0c12d4e5b6a7_password`), the
+    digits the start of the SHA-256 of the owner's stable key (the
+    request's operation key, the folder's or collection's key, the source's
+    own id where it has one).
     The name never comes from a collection, folder or request name, which
-    can repeat a credential. It stays the same across reimports whatever
-    the order of the items, so a variable you filled stays with its auth
-    config. It is reserved as a whole, so no header, query or body
-    placeholder shares it (a name the source already uses gets a suffix).
+    can repeat a credential. For an owner with a stable key it stays the
+    same across reimports whatever the order of the items, and a reimport
+    never moves a filled variable to another request whatever the names
+    (see [Reimport](#reimport)). It is reserved as a whole, so no header,
+    query or body placeholder shares it (a name the source already uses
+    gets a suffix).
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia
@@ -515,6 +520,31 @@ moves added requests into the existing workspace. A request whose spec is
 updated loses its `revision_id`, since that revision holds the old spec.
 Changing the sample mode or seed between imports changes generated hashes;
 every operation then shows up as changed upstream.
+
+Credential references never move silently (#584). A credential slot is a
+pure `{{reference}}` in a request's auth, a URL that is one reference (a
+quarantined URL), or the value of a field marked sensitive.
+
+- When the fresh import puts a placeholder of its own in a slot where the
+  existing request has another reference (it was renamed: a different
+  naming in an earlier build, a digest collision, an allocation order), the
+  request keeps the reference it has, so it stays on the variable you
+  filled. The rest of the update applies as usual, and the request is
+  `unchanged` when nothing else changed.
+- When a fresh placeholder of the import's own sits in a slot the existing
+  request does not have, or when a request with credentials (its own, from
+  URL userinfo, or inherited from a folder or the source's auth) is matched
+  only by its position in the source (a Postman or Insomnia item without an
+  id, any HAR entry), a spec change upstream is a conflict with
+  `credential_review: true` and `spec` in `conflicting_fields`. It is never
+  applied unless approved, so reordering such items never points a request
+  at variables filled for another one.
+- The same holds for scoped auth: an `auth` or `folders/<id>/auth` unit
+  whose fresh version puts an import-made placeholder where the stored one
+  has something else is a scope conflict.
+
+References the source itself wrote or changed are the source's changes and
+apply as usual.
 
 ### Renames
 

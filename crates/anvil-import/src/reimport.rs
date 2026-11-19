@@ -11,7 +11,15 @@
 //! * operations changed upstream on requests the user edited are
 //!   conflicts, preserved unless explicitly approved;
 //! * operations removed upstream are listed, never deleted automatically;
-//! * requests without an import link are left alone.
+//! * requests without an import link are left alone;
+//! * credential references are never moved silently (review of #586): a
+//!   matched request whose import-made credential placeholders were renamed
+//!   upstream but sit in the same places keeps the references it has, so it
+//!   stays on the variables the user filled; one whose credential slots
+//!   changed shape, or one with credentials (its own or inherited) matched
+//!   only by its position in the source (a Postman or Insomnia item without
+//!   an id, a HAR entry), is held for review as a conflict
+//!   ([`ReimportChange::credential_review`]), never applied as a safe update.
 //!
 //! A request's name, description and tags are not part of its spec hash.
 //! Each is compared on its own, by the same rules: a request the user
@@ -61,6 +69,14 @@ pub struct ReimportChange {
     /// them and still takes the rest of `upstream_fields`.
     #[serde(default)]
     pub conflicting_fields: Vec<String>,
+    /// Held for review although the user may not have edited it: its
+    /// credential slots changed shape, or it carries credentials (its own or
+    /// inherited) and was matched only by its position in the source, so
+    /// applying the source's version could point it at variables filled for
+    /// another request. `spec` is then in `conflicting_fields`: declined, the
+    /// request keeps its spec.
+    #[serde(default)]
+    pub credential_review: bool,
     /// The freshly generated request (its id is the fresh import's id; the
     /// applied update keeps `existing_id`).
     pub fresh: RequestDefinition,
@@ -310,6 +326,12 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
     for f in &fresh.folders {
         folders.entry(f.meta.id).or_insert(f);
     }
+    let generated_refs = generated_references(fresh);
+    // Whether a request that inherits its auth may inherit credentials.
+    let scope_credentials = [&scope.current.auth, &fresh.workspace.auth]
+        .into_iter()
+        .chain(scope.current.folders.iter().chain(&fresh.folders).map(|f| &f.auth))
+        .any(|a| !auth_slots(a).is_empty());
     for prev in previous {
         let Some(src) = &prev.spec.source else {
             plan.unlinked.push(prev.meta.id);
@@ -324,6 +346,8 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
             continue;
         };
         matched.insert(src.operation_key.as_str());
+        let guard = guard_credentials(prev, f, &src.operation_key, &generated_refs, scope_credentials);
+        let f = guard.fresh.as_ref().unwrap_or(f);
         let fsrc = f.spec.source.as_ref().expect("filtered on source");
         // Each part as (name, differs, changed upstream, edited by the user).
         let spec_fields = changed_fields(&prev.spec, &f.spec);
@@ -342,8 +366,13 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
             }
             continue;
         }
-        let conflicting: Vec<String> = differing.iter().filter(|(_, _, up, edited)| *up && *edited).map(|(p, ..)| p.to_string()).collect();
+        let mut conflicting: Vec<String> =
+            differing.iter().filter(|(_, _, up, edited)| *up && *edited).map(|(p, ..)| p.to_string()).collect();
         let user_edited = !conflicting.is_empty();
+        let credential_review = guard.review && upstream.iter().any(|p| p == "spec");
+        if credential_review && !conflicting.iter().any(|p| p == "spec") {
+            conflicting.push("spec".to_string());
+        }
         let mut changed = spec_fields;
         changed.extend(differing.iter().map(|(p, ..)| *p).filter(|p| *p != "spec").map(String::from));
         let change = ReimportChange {
@@ -353,9 +382,10 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
             changed_fields: changed,
             upstream_fields: upstream,
             conflicting_fields: conflicting,
+            credential_review,
             fresh: f.clone(),
         };
-        if user_edited {
+        if user_edited || credential_review {
             plan.conflicts.push(change);
         } else {
             plan.updated.push(change);
@@ -376,8 +406,171 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
         }
     }
     plan.added_folders = fresh.folders.iter().filter(|f| needed.contains(&f.meta.id)).cloned().collect();
-    diff_scope(&mut plan, scope);
+    diff_scope(&mut plan, scope, &generated_refs);
     plan
+}
+
+/// A string that is exactly one `{{name}}` reference.
+fn pure_reference(s: &str) -> bool {
+    s.len() > 4 && s.starts_with("{{") && s.ends_with("}}") && !s[2..s.len() - 2].contains(['{', '}'])
+}
+
+/// One RFC 6901 reference token.
+fn pointer_token(k: &str) -> String {
+    k.replace('~', "~0").replace('/', "~1")
+}
+
+/// Every pure reference in `v` (an auth config), by JSON pointer under `at`.
+fn collect_references(v: &Value, at: &str, out: &mut BTreeMap<String, String>) {
+    match v {
+        Value::String(s) if pure_reference(s) => {
+            out.insert(at.to_string(), s.clone());
+        }
+        Value::Array(items) => {
+            for (i, x) in items.iter().enumerate() {
+                collect_references(x, &format!("{at}/{i}"), out);
+            }
+        }
+        Value::Object(m) => {
+            for (k, x) in m {
+                collect_references(x, &format!("{at}/{}", pointer_token(k)), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The pure-reference value of every field marked `sensitive` in `v`
+/// outside its `auth`, by JSON pointer under `at`.
+fn collect_sensitive(v: &Value, at: &str, out: &mut BTreeMap<String, String>) {
+    match v {
+        Value::Object(m) => {
+            if m.get("sensitive") == Some(&Value::Bool(true))
+                && let Some(Value::String(s)) = m.get("value")
+                && pure_reference(s)
+            {
+                out.insert(format!("{at}/value"), s.clone());
+            }
+            for (k, x) in m {
+                if !(at.is_empty() && k == "auth") {
+                    collect_sensitive(x, &format!("{at}/{}", pointer_token(k)), out);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (i, x) in items.iter().enumerate() {
+                collect_sensitive(x, &format!("{at}/{i}"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Where an auth config holds a reference: JSON pointer to reference.
+fn auth_slots(auth: &AuthConfig) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    collect_references(&to_json(auth), "", &mut out);
+    out
+}
+
+/// Where a request holds a credential reference: every pure reference in
+/// its auth, its URL when that is one pure reference (a quarantined URL),
+/// and the value of every field marked sensitive. JSON pointer (into the
+/// spec without its `source`) to reference.
+fn credential_slots(spec: &Value) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if let Some(auth) = spec.get("auth") {
+        collect_references(auth, "/auth", &mut out);
+    }
+    if let Some(Value::String(url)) = spec.get("url")
+        && pure_reference(url)
+    {
+        out.insert("/url".to_string(), url.clone());
+    }
+    collect_sensitive(spec, "", &mut out);
+    out
+}
+
+/// The placeholders the fresh import made (`{{name}}`): its required
+/// variables and the placeholders of its redactions.
+fn generated_references(fresh: &ImportResult) -> HashSet<String> {
+    let report = &fresh.report;
+    report
+        .required_variables
+        .iter()
+        .map(|v| format!("{{{{{}}}}}", v.name))
+        .chain(report.redactions.iter().map(|r| r.placeholder.clone()))
+        .collect()
+}
+
+/// Whether an operation key names a position in the source rather than an
+/// identity: a Postman or Insomnia item without an id (`postman:/item/0`,
+/// `insomnia:/resources/3`) or a HAR entry (`har:<index>:…`). Another
+/// request may have moved into that position.
+fn positional_key(key: &str) -> bool {
+    key.starts_with("har:")
+        || key.split_once(':').is_some_and(|(kind, rest)| matches!(kind, "postman" | "insomnia") && rest.starts_with('/'))
+}
+
+/// What [`guard_credentials`] decided for a matched request.
+struct Guarded {
+    /// The fresh request with the existing request's credential references
+    /// kept, when they had only been renamed.
+    fresh: Option<RequestDefinition>,
+    /// Hold the request for review if its spec changed upstream.
+    review: bool,
+}
+
+/// Credential continuity for a request matched by its operation key (review
+/// of #586): see the module documentation.
+fn guard_credentials(
+    prev: &RequestDefinition,
+    fresh: &RequestDefinition,
+    key: &str,
+    generated: &HashSet<String>,
+    scope_credentials: bool,
+) -> Guarded {
+    let keep = Guarded { fresh: None, review: false };
+    let strip = |spec: &RequestSpec| {
+        let mut spec = spec.clone();
+        spec.source = None;
+        to_json(&spec)
+    };
+    let (before_spec, mut after_spec) = (strip(&prev.spec), strip(&fresh.spec));
+    let (before, after) = (credential_slots(&before_spec), credential_slots(&after_spec));
+    let inherits = matches!(prev.spec.auth, AuthConfig::Inherit) || matches!(fresh.spec.auth, AuthConfig::Inherit);
+    if before.is_empty() && after.is_empty() && !(inherits && scope_credentials) {
+        return keep;
+    }
+    if positional_key(key) {
+        return Guarded { fresh: None, review: true };
+    }
+    // The places where the fresh import put a placeholder of its own that the
+    // existing request does not have there. A reference the source itself
+    // wrote, or changed, is the source's change and applies as usual.
+    let moved: Vec<&String> =
+        after.iter().filter(|(path, new)| generated.contains(*new) && before.get(*path) != Some(*new)).map(|(path, _)| path).collect();
+    if moved.is_empty() {
+        return keep;
+    }
+    // A new credential slot: nothing the user filled can go there.
+    if moved.iter().any(|path| !before.contains_key(*path)) {
+        return Guarded { fresh: None, review: true };
+    }
+    // Same places, renamed: keep each reference the request has, so it
+    // stays on the variable the user filled.
+    for path in moved {
+        if let Some(slot) = after_spec.pointer_mut(path) {
+            *slot = Value::String(before[path].clone());
+        }
+    }
+    let Ok(mut spec) = serde_json::from_value::<RequestSpec>(after_spec) else { return Guarded { fresh: None, review: true } };
+    let mut kept = fresh.clone();
+    let Some(mut source) = fresh.spec.source.clone() else { return keep };
+    source.generated_hash = spec_hash(&spec);
+    spec.source = Some(source);
+    kept.spec = spec;
+    Guarded { fresh: Some(kept), review: false }
 }
 
 /// Whether `part` of the request `prev` (linked by `src`) changed upstream,
@@ -396,7 +589,7 @@ fn detail_diff(
 
 /// Three-way comparison of every scope unit: as stored, as generated last
 /// time and as generated now.
-fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>) {
+fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>, generated: &HashSet<String>) {
     let current_units = scope_units(scope.current);
     let fresh_units = scope_units(scope.fresh);
     let current: BTreeMap<String, String> = current_units.iter().map(|(k, v)| (k.clone(), unit_hash(v))).collect();
@@ -423,6 +616,16 @@ fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>) {
         .collect();
     // Looked up by key; reversed so that the first of equal keys wins.
     let fresh_values: HashMap<&str, &Value> = fresh_units.iter().rev().map(|(k, v)| (k.as_str(), v)).collect();
+    let current_values: HashMap<&str, &Value> = current_units.iter().rev().map(|(k, v)| (k.as_str(), v)).collect();
+    // The references an auth unit holds (review of #586): an upstream change
+    // that moves them is held for review, never applied as a safe update.
+    let references = |v: Option<&&Value>| {
+        let mut out = BTreeMap::new();
+        if let Some(v) = v {
+            collect_references(v, "", &mut out);
+        }
+        out
+    };
     let fresh_environments: HashMap<String, &Environment> =
         scope.fresh.environments.iter().rev().map(|e| (environment_key(e.meta.id), e)).collect();
     let current_only = current_units.iter().map(|(k, _)| k).filter(|k| !fresh.contains_key(*k));
@@ -453,9 +656,15 @@ fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>) {
         };
         let label = scope_label(key, scope);
         let change = ScopeChange { key: key.clone(), label, user_edited, whole_environment: whole, fresh: fresh_value };
+        // An auth unit whose fresh version puts a placeholder of the import's
+        // own where the stored one has something else.
+        let moves_credentials = (key == "auth" || key.ends_with("/auth")) && {
+            let (stored, fresh_refs) = (references(current_values.get(key.as_str())), references(fresh_values.get(key.as_str())));
+            fresh_refs.iter().any(|(path, new)| generated.contains(new) && stored.get(path) != Some(new))
+        };
         if f.is_none() {
             plan.scope_removed.push(change);
-        } else if user_edited {
+        } else if user_edited || moves_credentials {
             plan.scope_conflicts.push(change);
         } else {
             plan.scope_updated.push(change);

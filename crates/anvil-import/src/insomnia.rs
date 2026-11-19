@@ -718,7 +718,7 @@ fn request(
         Some(a) => auth(b, a, &ptr(at, "authentication"), key),
         None => AuthConfig::Inherit,
     };
-    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(at, "url"));
+    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(at, "url"), key);
     spec.settings = settings;
     for (ev, s) in scripts {
         if let Some(src) = s.and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {

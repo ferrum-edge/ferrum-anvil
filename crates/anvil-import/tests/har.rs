@@ -107,7 +107,7 @@ fn url_userinfo_becomes_basic_auth_only_inside_the_authority() {
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "https://example.test/x");
     assert!(
-        matches!(&s.auth, AuthConfig::Basic { username, password } if username == "{{username}}" && password.is_pure_reference()),
+        matches!(&s.auth, AuthConfig::Basic { username, password } if is_auth_ref(username, "username") && password.is_pure_reference()),
         "the userinfo becomes Basic auth with the password redacted"
     );
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("pw-secret"));
