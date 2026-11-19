@@ -1142,7 +1142,7 @@ pub fn lint_body(kind: String, text: String) -> anvil_engine::lint::LintResult {
 
 #[tauri::command]
 pub fn jwt_inspect(token: String) -> R<anvil_auth::jwt::Inspection> {
-    anvil_auth::jwt::inspect(&token, chrono::Utc::now(), 0).map_err(|x| x.to_string())
+    anvil_auth::jwt::inspect(&token, anvil_domain::Timestamp::now(), 0).map_err(|x| x.to_string())
 }
 
 /// What a SPIFFE Workload API endpoint issues to this process (public data
