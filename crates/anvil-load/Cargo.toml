@@ -21,7 +21,6 @@ tokio-util.workspace = true
 serde.workspace = true
 # Exact f64 round trips keep a reopened report's integrity hash stable.
 serde_json = { workspace = true, features = ["float_roundtrip"] }
-chrono.workspace = true
 thiserror.workspace = true
 hdrhistogram.workspace = true
 base64.workspace = true

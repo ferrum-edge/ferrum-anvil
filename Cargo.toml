@@ -51,9 +51,8 @@ anyhow = "1.0.104"
 thiserror = "2.0.21"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order", "raw_value"] }
-schemars = { version = "1.2.2", features = ["uuid1", "chrono04"] }
+schemars = { version = "1.2.2", features = ["uuid1"] }
 uuid = { version = "1.26.1", features = ["v4", "v7", "serde"] }
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
 # UTC timestamps (anvil_domain::Timestamp). No serde/formatting features: the
 # wire format is written by hand to match the earlier chrono output byte for byte.
 time = { version = "0.3.55", default-features = false, features = ["std"] }

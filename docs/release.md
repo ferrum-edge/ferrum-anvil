@@ -423,16 +423,11 @@ release page once.
   exceptions — `cssparser`, `cssparser-macros`, `dtoa-short`, `selectors`
   (Tauri's HTML/CSS tooling) and `option-ext` (`dirs`) — all used unmodified.
   Sources: crates.io only. Duplicate crate versions are reported as warnings.
-- **Advisories**: RustSec, with two reviewed ignores. Each carries an exit
+- **Advisories**: RustSec, with one reviewed ignore. It carries an exit
   condition in `deny.toml` and is an open item for the owner:
   - `RUSTSEC-2024-0429` — `glib` 0.18 `VariantStrIter` unsoundness via Tauri's
     Linux GTK stack; not called by Anvil or Tauri. Resolves when Tauri moves to
     gtk 0.19+ (glib ≥ 0.20).
-  - `RUSTSEC-2026-0543` — `chrono` is unmaintained (no known vulnerability, no
-    patched release). It is a direct dependency of 16 workspace crates and also
-    comes in through `schemars` (`chrono04`) and `serde_with` (`tauri-utils`).
-    Resolves when the workspace moves to `jiff` or `time` without changing any
-    stored or published timestamp format (ferrum-edge/ferrum-anvil#576).
 - **npm**: `npm audit --omit=dev --audit-level=high` gates the dependencies that
   ship in the UI bundle. The development-only E2E tooling is a mixed WebdriverIO
   graph: `@wdio/cli` and `@wdio/mocha-framework` 10.1.0 (nested WebdriverIO
