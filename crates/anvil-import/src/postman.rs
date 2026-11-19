@@ -51,7 +51,7 @@ pub(crate) fn import_collection(root: &Value, dialect: Dialect, b: &mut Builder)
     crate::common::reserve_implicit_names(b, root);
     b.workspace.variables = variables(b, root.get("variable"), "/variable");
     b.workspace.auth = match root.get("auth") {
-        Some(a) => auth(b, a, "/auth", "postman:collection"),
+        Some(a) => auth(b, a, "/auth"),
         None => AuthConfig::None,
     };
     events(b, root.get("event"), "/event", ScriptOwner::Collection);
@@ -94,9 +94,7 @@ fn walk_items(b: &mut Builder, items: &[Value], base: &str, parent: Option<Id>, 
             let key = format!("pm:{at}");
             let fid = b.folder(parent, &key, if name.is_empty() { "Folder" } else { &name });
             let vars = variables(b, it.get("variable"), &ptr(&at, "variable"));
-            // Known by the folder's key, as the folder itself is (its position:
-            // see `ImportResult::positional_folders`).
-            let fauth = it.get("auth").map(|a| auth(b, a, &ptr(&at, "auth"), &key));
+            let fauth = it.get("auth").map(|a| auth(b, a, &ptr(&at, "auth")));
             if let Some(f) = b.folder_mut(fid) {
                 f.description = description(it.get("description"));
                 f.variables = vars;
@@ -120,9 +118,6 @@ fn walk_items(b: &mut Builder, items: &[Value], base: &str, parent: Option<Id>, 
 fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str) {
     // An empty id is no id: the item is known by its position.
     let key = str_of(it, "id").filter(|id| !id.is_empty()).map(|id| format!("postman:{id}")).unwrap_or_else(|| format!("postman:{at}"));
-    // Credential placeholders are named from the key the request will have
-    // (with its `#n` suffix when the id repeats).
-    let identity = b.peek_operation_key(&key);
     let rptr = ptr(at, "request");
     let req = &it["request"];
     let (method, url_v, header_v, body_v, auth_v, desc) = match req {
@@ -136,7 +131,7 @@ fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str
             description(req.get("description")),
         ),
     };
-    let (url, params, userinfo) = url(b, &url_v, &ptr(&rptr, "url"), &identity);
+    let (url, params, userinfo) = url(b, &url_v, &ptr(&rptr, "url"));
     let mut spec = RequestSpec::http(&method, &url);
     spec.params = params;
     spec.headers = headers(b, header_v, &ptr(&rptr, "header"));
@@ -147,10 +142,10 @@ fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str
     };
     dedupe_content_type(&mut spec.headers, &spec.body);
     spec.auth = match auth_v {
-        Some(a) => auth(b, a, &ptr(&rptr, "auth"), &identity),
+        Some(a) => auth(b, a, &ptr(&rptr, "auth")),
         None => AuthConfig::Inherit,
     };
-    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(&rptr, "url"), &identity);
+    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(&rptr, "url"));
     for k in ["proxy", "certificate"] {
         if req.get(k).is_some() {
             b.report.unsupported(
@@ -295,7 +290,7 @@ fn headers(b: &mut Builder, v: Option<&Value>, at: &str) -> Vec<KeyValue> {
 /// the raw query string. Path variables (`:id`) are substituted from
 /// `url.variable` or become `{{id}}` placeholders. URL userinfo is removed
 /// and returned for [`apply_userinfo`].
-fn url(b: &mut Builder, v: &Value, at: &str, identity: &str) -> (String, Vec<KeyValue>, Option<crate::common::Userinfo>) {
+fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<crate::common::Userinfo>) {
     let (raw, query_list, path_vars) = match v {
         Value::String(s) => (s.clone(), None, None),
         Value::Object(_) => {
@@ -310,7 +305,7 @@ fn url(b: &mut Builder, v: &Value, at: &str, identity: &str) -> (String, Vec<Key
         TakenUrl::Userinfo(raw, userinfo) => (raw, Some(userinfo)),
         // Quarantined whole, query included; the `query` list repeats that
         // query, so it adds no parameters.
-        TakenUrl::Ambiguous => return (quarantine_url(b, &raw, &ptr(at, "raw"), identity, "url"), vec![], None),
+        TakenUrl::Ambiguous => return (quarantine_url(b, &raw, &ptr(at, "raw")), vec![], None),
     };
     let (base, raw_pairs) = split_query(&raw);
     if query_list.is_none() {
@@ -533,10 +528,10 @@ fn param(a: &Value, ty: &str, key: &str) -> Option<String> {
     }
 }
 
-/// An auth config whose owner the import knows as `identity`. Its credential
-/// placeholders are named by [`crate::common::auth_secret_name`]: opaque,
-/// stable across reimports and never after the owner's name.
-fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
+/// An auth config. Its credential placeholders are bound to the literals
+/// they replace ([`crate::common::literal_name`]), never named after the
+/// owner, which can repeat a credential.
+fn auth(b: &mut Builder, a: &Value, at: &str) -> AuthConfig {
     let ty = str_of(a, "type").unwrap_or("noauth");
     let p = |k: &str| param(a, ty, k).unwrap_or_default();
     let fp = |k: &str| ptr(&ptr(at, ty), k);
@@ -545,20 +540,19 @@ fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
         "inherit" => AuthConfig::Inherit,
         "basic" => {
             let username = p("username");
-            let password = auth_credential(b, &p("password"), identity, "password", &fp("password"), "Basic auth password");
+            let password = auth_credential(b, &p("password"), "password", &fp("password"), "Basic auth password");
             AuthConfig::Basic { username, password }
         }
-        "bearer" => AuthConfig::Bearer {
-            token: auth_credential(b, &p("token"), identity, "token", &fp("token"), "bearer token"),
-            prefix: "Bearer".into(),
-        },
+        "bearer" => {
+            AuthConfig::Bearer { token: auth_credential(b, &p("token"), "token", &fp("token"), "bearer token"), prefix: "Bearer".into() }
+        }
         "apikey" => {
             let name = param(a, ty, "key").unwrap_or_else(|| "X-API-Key".into());
             let location = match p("in").as_str() {
                 "query" => KeyLocation::Query,
                 _ => KeyLocation::Header,
             };
-            AuthConfig::ApiKey { name, value: auth_credential(b, &p("value"), identity, "api_key", &fp("value"), "API key"), location }
+            AuthConfig::ApiKey { name, value: auth_credential(b, &p("value"), "api_key", &fp("value"), "API key"), location }
         }
         "oauth2" => {
             let access = p("accessToken");
@@ -580,35 +574,18 @@ fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
                     at,
                     "this OAuth 2 grant is not supported; imported as a bearer-token placeholder",
                 );
-                return AuthConfig::Bearer {
-                    token: auth_credential(b, "", identity, "token", at, "bearer token"),
-                    prefix: "Bearer".into(),
-                };
+                return AuthConfig::Bearer { token: auth_credential(b, "", "token", at, "bearer token"), prefix: "Bearer".into() };
             };
             let client_secret = if grant == OAuthGrant::ClientCredentials || !p("clientSecret").is_empty() {
-                auth_credential(b, &p("clientSecret"), identity, "client_secret", &fp("clientSecret"), "OAuth 2 client secret")
+                auth_credential(b, &p("clientSecret"), "client_secret", &fp("clientSecret"), "OAuth 2 client secret")
             } else {
                 SensitiveValue::default()
             };
             AuthConfig::OAuth2 {
                 config: OAuth2Config {
                     grant,
-                    token_url: crate::common::endpoint_url(
-                        b,
-                        &p("accessTokenUrl"),
-                        &fp("accessTokenUrl"),
-                        "OAuth 2 token URL",
-                        identity,
-                        "token_url",
-                    ),
-                    authorization_url: crate::common::endpoint_url(
-                        b,
-                        &p("authUrl"),
-                        &fp("authUrl"),
-                        "OAuth 2 authorization URL",
-                        identity,
-                        "authorization_url",
-                    ),
+                    token_url: crate::common::endpoint_url(b, &p("accessTokenUrl"), &fp("accessTokenUrl"), "OAuth 2 token URL"),
+                    authorization_url: crate::common::endpoint_url(b, &p("authUrl"), &fp("authUrl"), "OAuth 2 authorization URL"),
                     client_id: p("clientId"),
                     client_secret,
                     scope: p("scope"),

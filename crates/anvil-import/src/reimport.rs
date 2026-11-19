@@ -11,9 +11,7 @@
 //! * operations changed upstream on requests the user edited are
 //!   conflicts, preserved unless explicitly approved;
 //! * operations removed upstream are listed, never deleted automatically;
-//! * requests without an import link are left alone;
-//! * a credential reference never moves to another request (#584). See
-//!   [`Continuity`] for the invariants and where each is enforced.
+//! * requests without an import link are left alone.
 //!
 //! A request's name, description and tags are not part of its spec hash.
 //! Each is compared on its own, by the same rules: a request the user
@@ -63,15 +61,6 @@ pub struct ReimportChange {
     /// them and still takes the rest of `upstream_fields`.
     #[serde(default)]
     pub conflicting_fields: Vec<String>,
-    /// Held for review although the user may not have edited it: it carries
-    /// credentials the import allocated (its own, or inherited from a
-    /// folder) and is matched only by its position in the source, or a
-    /// placeholder it holds could be kept only by an ambiguous match, so
-    /// applying the source's version could point it at variables filled for
-    /// another request (`Continuity`). Every part that changed upstream is
-    /// then in `conflicting_fields`: declined, nothing of it is applied.
-    #[serde(default)]
-    pub credential_review: bool,
     /// The freshly generated request (its id is the fresh import's id; the
     /// applied update keeps `existing_id`).
     pub fresh: RequestDefinition,
@@ -190,13 +179,6 @@ pub struct ScopeChange {
     /// are judged on all of it.
     #[serde(default)]
     pub whole_environment: bool,
-    /// Held for review although the user may not have edited it: a unit of
-    /// a folder known only by its position that holds or feeds credentials
-    /// the import allocated, or an auth unit whose fresh version puts such a
-    /// placeholder where the stored one has another reference
-    /// (`Continuity`).
-    #[serde(default)]
-    pub credential_review: bool,
     /// The freshly generated value (the whole environment for an
     /// `environments/<id>` key); `None` when the source no longer has it.
     pub fresh: Option<Value>,
@@ -328,8 +310,6 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
     for f in &fresh.folders {
         folders.entry(f.meta.id).or_insert(f);
     }
-    let continuity = Continuity::new(previous, fresh, scope);
-    let mut taken = continuity.names_in_use(previous);
     for prev in previous {
         let Some(src) = &prev.spec.source else {
             plan.unlinked.push(prev.meta.id);
@@ -344,8 +324,6 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
             continue;
         };
         matched.insert(src.operation_key.as_str());
-        let guard = continuity.matched(prev, f, &src.operation_key);
-        let f = guard.fresh.as_ref().unwrap_or(f);
         let fsrc = f.spec.source.as_ref().expect("filtered on source");
         // Each part as (name, differs, changed upstream, edited by the user).
         let spec_fields = changed_fields(&prev.spec, &f.spec);
@@ -364,20 +342,8 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
             }
             continue;
         }
-        let mut conflicting: Vec<String> =
-            differing.iter().filter(|(_, _, up, edited)| *up && *edited).map(|(p, ..)| p.to_string()).collect();
+        let conflicting: Vec<String> = differing.iter().filter(|(_, _, up, edited)| *up && *edited).map(|(p, ..)| p.to_string()).collect();
         let user_edited = !conflicting.is_empty();
-        // Held whole: declined, nothing of it is applied, its name included
-        // (a positional request's name says which request now holds the
-        // position).
-        let credential_review = guard.review;
-        if credential_review {
-            for part in &upstream {
-                if !conflicting.contains(part) {
-                    conflicting.push(part.clone());
-                }
-            }
-        }
         let mut changed = spec_fields;
         changed.extend(differing.iter().map(|(p, ..)| *p).filter(|p| *p != "spec").map(String::from));
         let change = ReimportChange {
@@ -387,10 +353,9 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
             changed_fields: changed,
             upstream_fields: upstream,
             conflicting_fields: conflicting,
-            credential_review,
             fresh: f.clone(),
         };
-        if user_edited || credential_review {
+        if user_edited {
             plan.conflicts.push(change);
         } else {
             plan.updated.push(change);
@@ -400,7 +365,7 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
     for f in &fresh.requests {
         let key = f.spec.source.as_ref().map(|s| s.operation_key.as_str()).unwrap_or("");
         if !matched.contains(key) {
-            plan.added.push(continuity.added(f, &mut taken));
+            plan.added.push(f.clone());
             let mut cur = f.folder_id;
             while let Some(id) = cur {
                 if !needed.insert(id) {
@@ -410,342 +375,9 @@ pub fn reimport_diff(previous: &[RequestDefinition], fresh: &ImportResult, scope
             }
         }
     }
-    plan.added_folders =
-        fresh.folders.iter().filter(|f| needed.contains(&f.meta.id)).map(|f| continuity.added_folder(f, &mut taken)).collect();
-    diff_scope(&mut plan, scope, &continuity);
+    plan.added_folders = fresh.folders.iter().filter(|f| needed.contains(&f.meta.id)).cloned().collect();
+    diff_scope(&mut plan, scope);
     plan
-}
-
-/// A string that is exactly one `{{name}}` reference.
-fn pure_reference(s: &str) -> bool {
-    s.len() > 4 && s.starts_with("{{") && s.ends_with("}}") && !s[2..s.len() - 2].contains(['{', '}'])
-}
-
-/// The name inside a pure reference.
-fn reference_name(r: &str) -> &str {
-    r.get(2..r.len().saturating_sub(2)).unwrap_or("").trim()
-}
-
-/// One RFC 6901 reference token.
-fn pointer_token(k: &str) -> String {
-    k.replace('~', "~0").replace('/', "~1")
-}
-
-/// Every pure reference in `v`, by JSON pointer under `at`.
-fn collect_references(v: &Value, at: &str, out: &mut BTreeMap<String, String>) {
-    match v {
-        Value::String(s) if pure_reference(s) => {
-            out.insert(at.to_string(), s.clone());
-        }
-        Value::Array(items) => {
-            for (i, x) in items.iter().enumerate() {
-                collect_references(x, &format!("{at}/{i}"), out);
-            }
-        }
-        Value::Object(m) => {
-            for (k, x) in m {
-                collect_references(x, &format!("{at}/{}", pointer_token(k)), out);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Where an auth config holds a reference: JSON pointer to reference.
-fn auth_slots(auth: &AuthConfig) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    collect_references(&to_json(auth), "", &mut out);
-    out
-}
-
-/// A request spec as JSON, without its `source`.
-fn spec_json(spec: &RequestSpec) -> Value {
-    let mut spec = spec.clone();
-    spec.source = None;
-    to_json(&spec)
-}
-
-/// Where a request can hold a credential placeholder the import allocates:
-/// every pure reference in its auth, and its URL when that is one pure
-/// reference (a quarantined URL). JSON pointer (into [`spec_json`]) to
-/// reference. Header, query and form placeholders are named after their
-/// field and shared by every request with that field: they never move.
-fn credential_slots(spec: &Value) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    if let Some(auth) = spec.get("auth") {
-        collect_references(auth, "/auth", &mut out);
-    }
-    if let Some(Value::String(url)) = spec.get("url")
-        && pure_reference(url)
-    {
-        out.insert("/url".to_string(), url.clone());
-    }
-    out
-}
-
-/// Whether a JSON pointer names a field by its name only, with no array
-/// index in it.
-fn semantic_pointer(path: &str) -> bool {
-    !path.split('/').any(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// Whether `name` has the shape of a placeholder an import allocates
-/// (`auth_<16 hex>_<field>`, `url-needs-review-<16 hex>`), for references
-/// stored by an earlier import, whose allocations are not at hand.
-fn allocated_shape(name: &str) -> bool {
-    let hex16 = |s: &str| s.len() >= 16 && s.as_bytes()[..16].iter().all(u8::is_ascii_hexdigit);
-    name.strip_prefix("auth_").is_some_and(|rest| hex16(rest) && rest.as_bytes().get(16) == Some(&b'_'))
-        || name.strip_prefix("url-needs-review-").is_some_and(hex16)
-}
-
-/// A repeated operation key's `#n` suffix (`postman:dup#2`).
-fn repeated_key(key: &str) -> bool {
-    key.rsplit_once('#').is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// What [`Continuity::matched`] decided for a matched request.
-struct Guarded {
-    /// The fresh request with the existing request's references kept.
-    fresh: Option<RequestDefinition>,
-    /// Hold the request whole for review if anything changed upstream.
-    review: bool,
-}
-
-/// Credential continuity on reimport (#584): a reference the user filled
-/// never ends up used by another request. Each invariant has one place:
-///
-/// 1. *Only what the import allocated is handled.* The fresh import records
-///    the placeholders it allocated ([`ImportResult::credential_names`]);
-///    only those are kept or renamed. Every other reference, one the source
-///    wrote or names (an OpenAPI security scheme's variable, a Postman
-///    `{{token}}`), follows the source like any other change. ([`Continuity::allocated`])
-/// 2. *Names follow identity.* An allocated name derives from its owner's
-///    operation key as made unique (or folder key) and the field
-///    (`crate::common::auth_secret_name`), never an index or a constant; an
-///    empty id is no id, and a repeated one is positional
-///    ([`ImportResult::positional_keys`]; [`Continuity::positional`]).
-/// 3. *Added requests fail safe.* An added request (or folder) that would
-///    reference an allocated name a stored variable already defines gets a
-///    fresh, unused name instead, which the user fills: nothing resolves to
-///    a value filled for another request. ([`Continuity::added`],
-///    [`Continuity::added_folder`])
-/// 4. *Positional continuity fails closed, for the whole chain.* A request
-///    with allocated credentials (its own, or inherited from a folder) that
-///    is matched only by its position is held whole for review when anything
-///    of it changed upstream ([`Continuity::matched`]); every changed unit of a folder known only
-///    by its position whose subtree holds such credentials (its auth, and
-///    the variables that feed its requests' destinations, such as a host) is
-///    held for review together ([`diff_scope`]), even when the requests'
-///    specs are unchanged.
-/// 5. *Kept only by semantic field.* A matched request with a stable
-///    identity keeps its stored reference only where the fresh import put
-///    an allocated placeholder of the same owner in the same named field
-///    (no array index), each name used once; anything ambiguous is held for
-///    review. ([`Continuity::matched`])
-struct Continuity<'a> {
-    fresh: &'a ImportResult,
-    /// Operation keys of both sides, to recognize a repeated key.
-    keys: HashSet<String>,
-    /// Folders known only by their position.
-    positional_folders: HashSet<Id>,
-    /// Every folder's parent, fresh first.
-    parents: HashMap<Id, Option<Id>>,
-    /// Folders whose auth (stored or fresh) holds an allocated placeholder.
-    credentialed_folders: HashSet<Id>,
-    /// Positional folders whose subtree holds allocated credentials: their
-    /// changed units are held for review together (invariant 4).
-    guarded_folders: HashSet<String>,
-    /// Variable names the stored scope defines: values the user may have
-    /// filled.
-    filled: HashSet<String>,
-}
-
-impl<'a> Continuity<'a> {
-    fn new(previous: &[RequestDefinition], fresh: &'a ImportResult, scope: ScopeDiff<'_>) -> Self {
-        let mut c = Continuity {
-            fresh,
-            keys: previous.iter().chain(&fresh.requests).filter_map(|q| q.spec.source.as_ref().map(|s| s.operation_key.clone())).collect(),
-            positional_folders: fresh.positional_folders.iter().copied().collect(),
-            parents: HashMap::new(),
-            credentialed_folders: HashSet::new(),
-            guarded_folders: HashSet::new(),
-            filled: HashSet::new(),
-        };
-        for f in fresh.folders.iter().chain(&scope.current.folders) {
-            c.parents.entry(f.meta.id).or_insert(f.parent_id);
-        }
-        for f in fresh.folders.iter().chain(&scope.current.folders) {
-            if auth_slots(&f.auth).values().any(|r| c.looks_allocated(r)) {
-                c.credentialed_folders.insert(f.meta.id);
-            }
-        }
-        // The subtrees that hold allocated credentials: each credentialed
-        // folder and each folder holding a request with its own, in either
-        // placement, with their ancestors.
-        let mut relevant: HashSet<Id> = HashSet::new();
-        let own = |q: &RequestDefinition| credential_slots(&spec_json(&q.spec)).values().any(|r| c.looks_allocated(r));
-        let mut starts: Vec<Option<Id>> = c.credentialed_folders.iter().map(|id| Some(*id)).collect();
-        starts.extend(previous.iter().chain(&fresh.requests).filter(|q| own(q)).map(|q| q.folder_id));
-        for start in starts {
-            relevant.extend(c.chain(start));
-        }
-        c.guarded_folders = relevant.into_iter().filter(|id| c.positional_folders.contains(id)).map(folder_key).collect();
-        c.filled = scope
-            .current
-            .variables
-            .iter()
-            .chain(scope.current.environments.iter().flat_map(|e| &e.variables))
-            .chain(scope.current.folders.iter().flat_map(|f| &f.variables))
-            .map(|v| v.name.clone())
-            .collect();
-        c
-    }
-
-    /// The folder `start` and its ancestors (a cycle or a chain over 256
-    /// levels is cut).
-    fn chain(&self, start: Option<Id>) -> Vec<Id> {
-        let mut out = vec![];
-        let mut cur = start;
-        while let Some(id) = cur {
-            if out.contains(&id) || out.len() >= 256 {
-                break;
-            }
-            out.push(id);
-            cur = self.parents.get(&id).copied().flatten();
-        }
-        out
-    }
-
-    /// The allocation record of the fresh import's placeholder `reference`
-    /// (invariant 1).
-    fn allocated(&self, reference: &str) -> Option<&'a crate::CredentialName> {
-        self.fresh.credential_names.get(reference_name(reference))
-    }
-
-    /// Whether `reference` is a placeholder this import or, by its shape, an
-    /// earlier one allocated.
-    fn looks_allocated(&self, reference: &str) -> bool {
-        self.allocated(reference).is_some() || allocated_shape(reference_name(reference))
-    }
-
-    /// Whether `key` names a position rather than an identity (invariant 2).
-    fn positional(&self, key: &str) -> bool {
-        self.fresh.positional_keys.contains(key) || repeated_key(key) || self.keys.contains(&format!("{key}#2"))
-    }
-
-    /// Whether a request inherits credentials from a folder with allocated
-    /// ones, in its stored or its fresh placement.
-    fn inherits_credentials(&self, q: &RequestDefinition) -> bool {
-        matches!(q.spec.auth, AuthConfig::Inherit) && self.chain(q.folder_id).iter().any(|id| self.credentialed_folders.contains(id))
-    }
-
-    /// Every name a fresh name must not take: stored variables, allocated
-    /// names, and every credential reference of both sides.
-    fn names_in_use(&self, previous: &[RequestDefinition]) -> HashSet<String> {
-        let mut taken = self.filled.clone();
-        taken.extend(self.fresh.credential_names.keys().cloned());
-        for q in previous.iter().chain(&self.fresh.requests) {
-            taken.extend(credential_slots(&spec_json(&q.spec)).values().map(|r| reference_name(r).to_string()));
-        }
-        taken
-    }
-
-    /// A name for `name` no variable or reference uses, now taken.
-    fn unused(name: &str, taken: &mut HashSet<String>) -> String {
-        let mut n = 1;
-        loop {
-            let candidate = if n == 1 { format!("{name}_new") } else { format!("{name}_new_{n}") };
-            n += 1;
-            if taken.insert(candidate.clone()) {
-                return candidate;
-            }
-        }
-    }
-
-    /// Invariants 4 and 5 for a request matched by its operation key.
-    fn matched(&self, prev: &RequestDefinition, fresh: &RequestDefinition, key: &str) -> Guarded {
-        let keep = Guarded { fresh: None, review: false };
-        let (before_spec, mut after_spec) = (spec_json(&prev.spec), spec_json(&fresh.spec));
-        let (before, after) = (credential_slots(&before_spec), credential_slots(&after_spec));
-        if self.positional(key) {
-            let own = before.values().chain(after.values()).any(|r| self.looks_allocated(r));
-            let inherited = self.inherits_credentials(prev) || self.inherits_credentials(fresh);
-            return Guarded { fresh: None, review: own || inherited };
-        }
-        let mut kept = false;
-        for (path, new) in &after {
-            let Some(name) = self.allocated(new) else { continue };
-            let Some(old) = before.get(path) else { continue };
-            if old == new || name.owner != key {
-                continue;
-            }
-            let once = before.values().filter(|r| *r == old).count() == 1 && after.values().filter(|r| *r == new).count() == 1;
-            if !semantic_pointer(path) || !once {
-                return Guarded { fresh: None, review: true };
-            }
-            if let Some(slot) = after_spec.pointer_mut(path) {
-                *slot = Value::String(old.clone());
-                kept = true;
-            }
-        }
-        if !kept {
-            return keep;
-        }
-        let Ok(mut spec) = serde_json::from_value::<RequestSpec>(after_spec) else { return Guarded { fresh: None, review: true } };
-        let Some(mut source) = fresh.spec.source.clone() else { return keep };
-        source.generated_hash = spec_hash(&spec);
-        spec.source = Some(source);
-        let mut out = fresh.clone();
-        out.spec = spec;
-        Guarded { fresh: Some(out), review: false }
-    }
-
-    /// Invariant 3 for an added request: each allocated placeholder a stored
-    /// variable defines becomes a fresh, unused name.
-    fn added(&self, fresh: &RequestDefinition, taken: &mut HashSet<String>) -> RequestDefinition {
-        let mut v = spec_json(&fresh.spec);
-        let mut renamed = false;
-        for (path, r) in credential_slots(&v) {
-            let name = reference_name(&r);
-            if self.allocated(&r).is_some()
-                && self.filled.contains(name)
-                && let Some(slot) = v.pointer_mut(&path)
-            {
-                *slot = Value::String(format!("{{{{{}}}}}", Self::unused(name, taken)));
-                renamed = true;
-            }
-        }
-        let mut out = fresh.clone();
-        if renamed && let Ok(mut spec) = serde_json::from_value::<RequestSpec>(v) {
-            if let Some(mut source) = fresh.spec.source.clone() {
-                source.generated_hash = spec_hash(&spec);
-                spec.source = Some(source);
-            }
-            out.spec = spec;
-        }
-        out
-    }
-
-    /// Invariant 3 for a folder added with the requests in it.
-    fn added_folder(&self, fresh: &Folder, taken: &mut HashSet<String>) -> Folder {
-        let mut v = to_json(&fresh.auth);
-        let mut renamed = false;
-        for (path, r) in auth_slots(&fresh.auth) {
-            let name = reference_name(&r);
-            if self.allocated(&r).is_some()
-                && self.filled.contains(name)
-                && let Some(slot) = v.pointer_mut(&path)
-            {
-                *slot = Value::String(format!("{{{{{}}}}}", Self::unused(name, taken)));
-                renamed = true;
-            }
-        }
-        let mut out = fresh.clone();
-        if renamed && let Ok(auth) = serde_json::from_value::<AuthConfig>(v) {
-            out.auth = auth;
-        }
-        out
-    }
 }
 
 /// Whether `part` of the request `prev` (linked by `src`) changed upstream,
@@ -763,10 +395,8 @@ fn detail_diff(
 }
 
 /// Three-way comparison of every scope unit: as stored, as generated last
-/// time and as generated now. `continuity` holds a guarded folder's changed
-/// units and an auth unit that would move an allocated placeholder for
-/// review ([`Continuity`], invariant 4).
-fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>, continuity: &Continuity<'_>) {
+/// time and as generated now.
+fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>) {
     let current_units = scope_units(scope.current);
     let fresh_units = scope_units(scope.fresh);
     let current: BTreeMap<String, String> = current_units.iter().map(|(k, v)| (k.clone(), unit_hash(v))).collect();
@@ -793,20 +423,8 @@ fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>, continuity: &Contin
         .collect();
     // Looked up by key; reversed so that the first of equal keys wins.
     let fresh_values: HashMap<&str, &Value> = fresh_units.iter().rev().map(|(k, v)| (k.as_str(), v)).collect();
-    let current_values: HashMap<&str, &Value> = current_units.iter().rev().map(|(k, v)| (k.as_str(), v)).collect();
-    let references = |v: Option<&&Value>| {
-        let mut out = BTreeMap::new();
-        if let Some(v) = v {
-            collect_references(v, "", &mut out);
-        }
-        out
-    };
     let fresh_environments: HashMap<String, &Environment> =
         scope.fresh.environments.iter().rev().map(|e| (environment_key(e.meta.id), e)).collect();
-    // Every unit that differs, as (key, whole environment, removed upstream,
-    // changed upstream, edited by the user); decided below, once it is known
-    // which folders changed upstream.
-    let mut differing: Vec<(&String, bool, bool, bool, bool)> = vec![];
     let current_only = current_units.iter().map(|(k, _)| k).filter(|k| !fresh.contains_key(*k));
     for key in fresh_units.iter().map(|(k, _)| k).chain(current_only) {
         let owner = unit_owner(key);
@@ -825,16 +443,6 @@ fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>, continuity: &Contin
         let generated = scope.generated.map(|g| hash_at(g, key, whole));
         let upstream_changed = generated.as_ref().is_none_or(|g| *g != f);
         let user_edited = generated.as_ref().is_none_or(|g| *g != c);
-        differing.push((key, whole, f.is_none(), upstream_changed, user_edited));
-    }
-    // Guarded folders (positional, holding or feeding allocated credentials)
-    // with any unit changed upstream: all their changed units are held.
-    let held: HashSet<&str> = differing
-        .iter()
-        .filter(|(_, _, _, upstream, _)| *upstream)
-        .filter_map(|&(key, ..)| unit_owner(key).filter(|o| continuity.guarded_folders.contains(*o)))
-        .collect();
-    for (key, whole, removed, upstream_changed, user_edited) in differing {
         if !upstream_changed {
             plan.scope_preserved_edits.push(key.clone());
             continue;
@@ -843,19 +451,11 @@ fn diff_scope(plan: &mut ReimportPlan, scope: ScopeDiff<'_>, continuity: &Contin
             Some(e) => Some(to_json(e)),
             None => fresh_values.get(key.as_str()).copied().cloned(),
         };
-        // An auth unit whose fresh version puts an allocated placeholder
-        // where the stored one has another reference: it cannot be kept
-        // here, so it is held.
-        let moves_credentials = (key == "auth" || key.ends_with("/auth")) && {
-            let (stored, fresh_refs) = (references(current_values.get(key.as_str())), references(fresh_values.get(key.as_str())));
-            fresh_refs.iter().any(|(path, new)| continuity.allocated(new).is_some() && stored.get(path) != Some(new))
-        };
-        let credential_review = moves_credentials || unit_owner(key).is_some_and(|o| held.contains(o));
         let label = scope_label(key, scope);
-        let change = ScopeChange { key: key.clone(), label, user_edited, whole_environment: whole, credential_review, fresh: fresh_value };
-        if removed {
+        let change = ScopeChange { key: key.clone(), label, user_edited, whole_environment: whole, fresh: fresh_value };
+        if f.is_none() {
             plan.scope_removed.push(change);
-        } else if user_edited || credential_review {
+        } else if user_edited {
             plan.scope_conflicts.push(change);
         } else {
             plan.scope_updated.push(change);

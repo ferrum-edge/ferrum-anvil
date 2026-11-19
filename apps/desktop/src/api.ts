@@ -567,8 +567,6 @@ export interface ReimportChange {
   upstream_fields?: string[];
   /** The parts of `upstream_fields` the user edited too (what makes it a conflict). */
   conflicting_fields?: string[];
-  /** Its credential references changed, or it matched by position: held for review. */
-  credential_review?: boolean;
   /** The freshly generated request. */
   fresh: RequestDefinition;
 }
@@ -586,8 +584,6 @@ export interface ScopeChange {
   label: string;
   user_edited: boolean;
   whole_environment?: boolean;
-  /** Holds or feeds credentials of a folder known only by its position: held for review. */
-  credential_review?: boolean;
 }
 /** What reimporting a newer version of a source would do (`anvil_import::ReimportPlan`). */
 export interface ReimportPlan {

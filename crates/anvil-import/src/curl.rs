@@ -10,7 +10,7 @@
 //! `{{VAR}}` placeholders.
 
 use crate::builder::Builder;
-use crate::common::{body_from_text, credential, dedupe_content_type, maybe_redact, parse_form, redact_raw_query, split_query};
+use crate::common::{auth_credential, body_from_text, dedupe_content_type, maybe_redact, parse_form, redact_raw_query, split_query};
 use crate::report::Message;
 use crate::util::is_json_media;
 use crate::{Dialect, ImportError};
@@ -361,13 +361,13 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
                         Some((a, p)) => (a.to_string(), p.to_string()),
                         None => (u.clone(), String::new()),
                     };
-                    let pw = credential(b, &pass, "password", &at, "Basic auth password");
+                    let pw = auth_credential(b, &pass, "password", &at, "Basic auth password");
                     auth = AuthConfig::Basic { username: user, password: pw };
                 }
             }
             "--oauth2-bearer" => {
                 if let Some(t) = value(&mut i) {
-                    auth = AuthConfig::Bearer { token: credential(b, &t, "token", &at, "bearer token"), prefix: "Bearer".into() };
+                    auth = AuthConfig::Bearer { token: auth_credential(b, &t, "token", &at, "bearer token"), prefix: "Bearer".into() };
                 }
             }
             "--digest" | "--ntlm" | "--negotiate" | "--anyauth" | "--aws-sigv4" => {
@@ -987,12 +987,11 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     b.title = Some(format!("{method} {host}"));
     let name = format!("{method} {path}");
     let key = format!("curl:{method} {shown}");
-    let identity = b.peek_operation_key(&key);
     if quarantined {
         // Not imported (or kept as written with included credentials).
-        spec.url = crate::common::quarantine_url(b, &source_url, &url_at, &identity, "url");
+        spec.url = crate::common::quarantine_url(b, &source_url, &url_at);
     }
-    crate::common::apply_userinfo(b, &mut spec.auth, userinfo, &url_at, &identity);
+    crate::common::apply_userinfo(b, &mut spec.auth, userinfo, &url_at);
     b.add_request(None, &name, &key, spec, &url_at);
     Ok(())
 }

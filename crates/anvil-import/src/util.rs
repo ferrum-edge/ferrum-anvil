@@ -10,6 +10,26 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// HMAC-SHA256 (RFC 2104) of `message` under `key`.
+pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut block = [0u8; 64];
+    if key.len() > block.len() {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(block.map(|b| b ^ 0x36));
+    inner.update(message);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(block.map(|b| b ^ 0x5c));
+    outer.update(inner);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&outer.finalize());
+    out
+}
+
 /// Canonical JSON: object keys sorted (byte order), no insignificant
 /// whitespace, numbers as serde_json prints them. Stable across runs and
 /// independent of the `preserve_order` feature.
@@ -391,6 +411,18 @@ pub fn is_json_document(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// RFC 4231 test cases 1 and 2, and a key longer than a block (case 6).
+    #[test]
+    fn hmac_sha256_matches_rfc_4231() {
+        let hex = |k: &[u8], m: &[u8]| hex::encode(super::hmac_sha256(k, m));
+        assert_eq!(hex(&[0x0b; 20], b"Hi There"), "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+        assert_eq!(hex(b"Jefe", b"what do ya want for nothing?"), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+        assert_eq!(
+            hex(&[0xaa; 131], b"Test Using Larger Than Block-Size Key - Hash Key First"),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
     use super::*;
     use serde_json::json;
 

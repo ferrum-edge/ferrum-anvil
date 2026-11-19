@@ -356,12 +356,7 @@ function PlanView(props: {
                 onChange={(e) => props.onToggle("overwrite", c.existing_id, e.target.checked)}
               />
               <span className="grow">
-                {name(c)}{" "}
-                <span className="faint">
-                  {c.credential_review && !c.user_edited
-                    ? "— its credentials or the request they belong to may have changed: check before taking the source's version"
-                    : `— both changed ${fields(c.conflicting_fields?.length ? c.conflicting_fields : c.changed_fields)}`}
-                </span>
+                {name(c)} <span className="faint">— both changed {fields(c.conflicting_fields?.length ? c.conflicting_fields : c.changed_fields)}</span>
               </span>
             </label>
           ))}
@@ -374,12 +369,7 @@ function PlanView(props: {
                 disabled={props.disabled}
                 onChange={(e) => props.onToggle("overwrite_scope", c.key, e.target.checked)}
               />
-              <span className="grow">
-                {c.label}
-                {c.credential_review && !c.user_edited && (
-                  <span className="faint"> — it holds or feeds credentials that may now belong elsewhere: check before taking it</span>
-                )}
-              </span>
+              <span className="grow">{c.label}</span>
             </label>
           ))}
         </fieldset>

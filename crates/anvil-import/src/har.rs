@@ -157,12 +157,11 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     let folder = if host.is_empty() { None } else { Some(b.folder(None, &format!("har:{host}"), &host)) };
     let name = format!("{method} {}", path.split('?').next().unwrap_or(&path));
     let key = format!("har:{index}:{method} {}", shown.split('?').next().unwrap_or(&shown));
-    let identity = b.peek_operation_key(&key);
     if quarantined {
         // Not imported (or kept as written with included credentials).
-        spec.url = crate::common::quarantine_url(b, raw_url, &uptr, &identity, "url");
+        spec.url = crate::common::quarantine_url(b, raw_url, &uptr);
     }
-    crate::common::apply_userinfo(b, &mut spec.auth, userinfo, &uptr, &identity);
+    crate::common::apply_userinfo(b, &mut spec.auth, userinfo, &uptr);
     b.add_request(folder, &name, &key, spec, rptr);
 }
 

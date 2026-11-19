@@ -126,9 +126,8 @@ fn env_vars(b: &mut Builder, data: Option<&Value>, at: &str) -> Vec<Variable> {
     if let Some(d) = data {
         flatten("", d, &mut flat, 0);
     }
-    let mut names = std::mem::take(&mut b.env_names);
     for (k, _) in &flat {
-        names.reserve(k);
+        b.env_names.reserve(k);
     }
     let mut out = vec![];
     for (k, item) in flat {
@@ -137,7 +136,7 @@ fn env_vars(b: &mut Builder, data: Option<&Value>, at: &str) -> Vec<Variable> {
             Flat::Text(t) => t,
             Flat::Json(mut v) => {
                 let text = v.to_string();
-                if !b.opts.include_credentials && scrub_stored_json(b, &mut v, &k, &p, &mut names) {
+                if !b.opts.include_credentials && scrub_stored_json(b, &mut v, &k, &p) {
                     render_json(&v, false, &text).unwrap_or(text)
                 } else {
                     text
@@ -149,7 +148,6 @@ fn env_vars(b: &mut Builder, data: Option<&Value>, at: &str) -> Vec<Variable> {
             out.push(var);
         }
     }
-    b.env_names = names;
     out
 }
 
@@ -466,7 +464,7 @@ fn group(
 ) -> Id {
     let fid = b.folder(parent, &format!("insomnia:{id}"), name);
     let vars = env_vars(b, env, &ptr(at, "environment"));
-    let auth = r.get("authentication").map(|a| auth(b, a, &ptr(at, "authentication"), &format!("insomnia:{id}")));
+    let auth = r.get("authentication").map(|a| auth(b, a, &ptr(at, "authentication")));
     for (ev, s) in [("prerequest", pre), ("after_response", post)] {
         if let Some(src) = s.and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
             b.report.script(at, ScriptOwner::Folder, ev, "text/javascript", src);
@@ -684,9 +682,6 @@ fn request(
     scripts: &[(&str, Option<&Value>)],
 ) {
     let name = str_of(r, "name").unwrap_or("").to_string();
-    // Credential placeholders are named from the key the request will have
-    // (with its `#n` suffix when the id repeats).
-    let identity = b.peek_operation_key(key);
     let method = str_of(r, "method").unwrap_or("GET").to_ascii_uppercase();
     // Userinfo is never kept in the URL (the engine refuses it); an
     // ambiguous URL is quarantined whole. The URL as written is judged first,
@@ -707,7 +702,7 @@ fn request(
             // credential-named pairs, which become sensitive parameters.
             if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { (url, vec![]) }
         }
-        None => (quarantine_url(b, &templated, &ptr(at, "url"), &identity, "url"), vec![]),
+        None => (quarantine_url(b, &templated, &ptr(at, "url")), vec![]),
     };
     params.extend(query_params(b, r.get("parameters"), &ptr(at, "parameters")));
     let mut spec = RequestSpec::http(&method, &url);
@@ -719,10 +714,10 @@ fn request(
     keep_declared_content_type(&mut spec.headers, declared);
     dedupe_content_type(&mut spec.headers, &spec.body);
     spec.auth = match r.get("authentication") {
-        Some(a) => auth(b, a, &ptr(at, "authentication"), &identity),
+        Some(a) => auth(b, a, &ptr(at, "authentication")),
         None => AuthConfig::Inherit,
     };
-    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(at, "url"), &identity);
+    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(at, "url"));
     spec.settings = settings;
     for (ev, s) in scripts {
         if let Some(src) = s.and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
@@ -946,10 +941,10 @@ fn body(b: &mut Builder, v: Option<&Value>, at: &str, header_ct: Option<&str>, d
     }
 }
 
-/// An auth config whose owner the import knows as `identity`. Its credential
-/// placeholders are named by [`crate::common::auth_secret_name`]: opaque,
-/// stable across reimports and never after the owner's name.
-fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
+/// An auth config. Its credential placeholders are bound to the literals
+/// they replace ([`crate::common::literal_name`]), never named after the
+/// owner, which can repeat a credential.
+fn auth(b: &mut Builder, a: &Value, at: &str) -> AuthConfig {
     let Some(m) = a.as_object() else { return AuthConfig::Inherit };
     if m.is_empty() {
         return AuthConfig::Inherit;
@@ -965,15 +960,12 @@ fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
         "basic" => {
             let username = get(b, "username");
             let pw = get(b, "password");
-            AuthConfig::Basic {
-                username,
-                password: auth_credential(b, &pw, identity, "password", &ptr(at, "password"), "Basic auth password"),
-            }
+            AuthConfig::Basic { username, password: auth_credential(b, &pw, "password", &ptr(at, "password"), "Basic auth password") }
         }
         "bearer" => {
             let t = get(b, "token");
             let prefix = str_of(a, "prefix").filter(|p| !p.is_empty()).unwrap_or("Bearer").to_string();
-            AuthConfig::Bearer { token: auth_credential(b, &t, identity, "token", &ptr(at, "token"), "bearer token"), prefix }
+            AuthConfig::Bearer { token: auth_credential(b, &t, "token", &ptr(at, "token"), "bearer token"), prefix }
         }
         "apikey" => {
             let name = get(b, "key");
@@ -983,7 +975,7 @@ fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
                 Some("cookie") => KeyLocation::Cookie,
                 _ => KeyLocation::Header,
             };
-            AuthConfig::ApiKey { name, value: auth_credential(b, &val, identity, "api_key", &ptr(at, "value"), "API key"), location }
+            AuthConfig::ApiKey { name, value: auth_credential(b, &val, "api_key", &ptr(at, "value"), "API key"), location }
         }
         "oauth2" => {
             let grant = match str_of(a, "grantType") {
@@ -1012,14 +1004,11 @@ fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
                     at,
                     "this OAuth 2 grant is not supported; imported as a bearer-token placeholder",
                 );
-                return AuthConfig::Bearer {
-                    token: auth_credential(b, "", identity, "token", at, "bearer token"),
-                    prefix: "Bearer".into(),
-                };
+                return AuthConfig::Bearer { token: auth_credential(b, "", "token", at, "bearer token"), prefix: "Bearer".into() };
             };
             let secret_raw = get(b, "clientSecret");
             let client_secret = if grant == OAuthGrant::ClientCredentials || !secret_raw.is_empty() {
-                auth_credential(b, &secret_raw, identity, "client_secret", &ptr(at, "clientSecret"), "OAuth 2 client secret")
+                auth_credential(b, &secret_raw, "client_secret", &ptr(at, "clientSecret"), "OAuth 2 client secret")
             } else {
                 SensitiveValue::default()
             };
@@ -1028,18 +1017,11 @@ fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
                     grant,
                     token_url: {
                         let url = get(b, "accessTokenUrl");
-                        crate::common::endpoint_url(b, &url, &ptr(at, "accessTokenUrl"), "OAuth 2 token URL", identity, "token_url")
+                        crate::common::endpoint_url(b, &url, &ptr(at, "accessTokenUrl"), "OAuth 2 token URL")
                     },
                     authorization_url: {
                         let url = get(b, "authorizationUrl");
-                        crate::common::endpoint_url(
-                            b,
-                            &url,
-                            &ptr(at, "authorizationUrl"),
-                            "OAuth 2 authorization URL",
-                            identity,
-                            "authorization_url",
-                        )
+                        crate::common::endpoint_url(b, &url, &ptr(at, "authorizationUrl"), "OAuth 2 authorization URL")
                     },
                     client_id: get(b, "clientId"),
                     client_secret,

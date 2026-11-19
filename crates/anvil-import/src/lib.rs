@@ -64,7 +64,7 @@ use chrono::{DateTime, Utc};
 use detect::Parsed;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Blank or sample payloads for spec-driven imports (OpenAPI, WSDL).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
@@ -127,6 +127,12 @@ pub struct ImportOptions {
     /// Timestamp for created objects; `None` uses the current time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_at: Option<DateTime<Utc>>,
+    /// The key credential placeholder names are derived with
+    /// ([`CredentialKey`]). `None` uses a fresh random key, so every name is
+    /// new. Never serialized, and not kept in [`ImportedSource::options`].
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub credential_key: Option<CredentialKey>,
 }
 
 impl Default for ImportOptions {
@@ -146,6 +152,7 @@ impl Default for ImportOptions {
             max_sample_nodes: 20_000,
             id_namespace: None,
             imported_at: None,
+            credential_key: None,
         }
     }
 }
@@ -194,32 +201,69 @@ pub struct ImportResult {
     pub environments: Vec<Environment>,
     pub source: ImportedSource,
     pub report: ImportReport,
-    /// The credential placeholders this import allocated itself (auth
-    /// secrets, URL userinfo, quarantined URLs), by name: whose they are and
-    /// which field they fill. A reimport keeps or renames only these; every
-    /// other reference follows the source.
+    /// The credential placeholders this import allocated itself, by name:
+    /// each is bound to the literal it replaced ([`CredentialKey`]).
     #[serde(default)]
     pub credential_names: BTreeMap<String, CredentialName>,
-    /// Operation keys that name a position in the source rather than an
-    /// identity: an item without an id, or with an empty or repeated one, and
-    /// every HAR entry.
-    #[serde(default)]
-    pub positional_keys: BTreeSet<String>,
-    /// Folders whose identity is a position in the source (every Postman
-    /// folder, an Insomnia request group without an id).
-    #[serde(default)]
-    pub positional_folders: Vec<Id>,
 }
 
 /// A credential placeholder an import allocated ([`ImportResult::credential_names`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CredentialName {
-    /// Its owner's identity: a request's operation key as made unique, a
-    /// folder's key, or the source's own scope.
-    pub owner: String,
-    /// The field it fills: `password`, `token`, `api_key`, `client_secret`,
-    /// `username`, `url`, `token_url` or `authorization_url`.
+    /// `auth` (an auth secret or URL userinfo), `secret` (a header, query,
+    /// form, body, path or environment value) or `url` (a quarantined URL).
+    pub kind: String,
+    /// The field it fills: an auth field (`password`, `token`, `api_key`,
+    /// `client_secret`, `username`), the source field's name, or `url`.
     pub field: String,
+}
+
+/// The key credential placeholder names are derived with (#584): a
+/// placeholder for a literal the import replaces is
+/// `<kind>_<16 hex digits of HMAC-SHA256(key, kind | field | literal)>`
+/// (`auth_…_<field>` for an auth secret), so equal names mean the same
+/// literal, and a variable filled for one literal resolves nowhere the
+/// source holds another. Keyed, so a name cannot be checked against
+/// guessed passwords without the key. The caller keeps it outside workspace
+/// files (the app derives one per profile from the profile's data key), and
+/// it is never serialized. The same key gives the same names, so a preview,
+/// the import it previews and every later reimport agree; another key (a
+/// missing one, another profile) gives other names, and every credential is
+/// asked for again.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CredentialKey([u8; 32]);
+
+impl CredentialKey {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        CredentialKey(bytes)
+    }
+
+    /// The key derived from `secret` (HKDF-SHA256, RFC 5869, with an empty
+    /// salt and its own label), so the caller's secret is never used as is.
+    pub fn derive(secret: &[u8]) -> Self {
+        let prk = util::hmac_sha256(&[0u8; 32], secret);
+        CredentialKey(util::hmac_sha256(&prk, b"anvil-import-credential-names-v1\x01"))
+    }
+
+    /// A fresh random key: every name then differs from any earlier
+    /// import's, so nothing resolves a filled variable and everything is
+    /// asked for again (what a missing key means).
+    pub fn random() -> Self {
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        bytes[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        CredentialKey(bytes)
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for CredentialKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CredentialKey(..)")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize, JsonSchema)]
@@ -303,5 +347,18 @@ pub fn import(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult, Import
             return Err(ImportError::Unrecognized { message: format!("{} input could not be dispatched", detected.dialect) });
         }
     }
-    Ok(b.finish(&detected, sha, bytes.len()))
+    let result = b.finish(&detected, sha, bytes.len());
+    // A source may never name a variable the way the import names the
+    // placeholders bound to literals: it could point a request at a value
+    // filled for one of those (#584).
+    if common::uses_reserved_name(&result) {
+        return Err(ImportError::Invalid {
+            dialect: detected.dialect,
+            pointer: "/".into(),
+            message: "the source uses a variable name in the shape Anvil reserves for credential placeholders \
+                      (`auth_`, `secret_` or `url_` followed by 16 hex digits): rename it"
+                .into(),
+        });
+    }
+    Ok(result)
 }

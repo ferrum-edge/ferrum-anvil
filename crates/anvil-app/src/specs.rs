@@ -209,9 +209,27 @@ fn run(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult> {
 }
 
 impl App {
+    /// The key import credential placeholders are named with (#584,
+    /// [`anvil_import::CredentialKey`]), derived from the profile's data key
+    /// ([`anvil_import::CredentialKey::derive`]). It lives where the
+    /// profile's other secrets do (the OS keychain or a passphrase-wrapped
+    /// key), never in workspace
+    /// files or exports, and is never stored itself. Another profile, a fresh
+    /// clone or a data-key rotation gives another key: every placeholder name
+    /// then changes and every credential is asked for again (fail-safe).
+    fn import_credential_key(&self) -> Result<anvil_import::CredentialKey> {
+        let key = self.store.with_key(|key| anvil_import::CredentialKey::derive(key.as_bytes()))?;
+        Ok(key)
+    }
+
+    /// `opts` with the profile's import credential key.
+    fn keyed(&self, opts: &ImportOptions) -> Result<ImportOptions> {
+        Ok(ImportOptions { credential_key: Some(self.import_credential_key()?), ..opts.clone() })
+    }
+
     pub fn spec_preview(&self, bytes: &[u8], opts: &ImportOptions) -> Result<SpecPreview> {
         let detected = anvil_import::detect(bytes);
-        let r = import_review(bytes, opts)?;
+        let r = import_review(bytes, &self.keyed(opts)?)?;
         let binding = import_binding(&r)?;
         let sample = r.requests.iter().take(200).map(|q| format!("{} {}", q.spec.method, q.name)).collect();
         Ok(SpecPreview {
@@ -241,7 +259,7 @@ impl App {
         target: SpecTarget,
         binding: &SpecBinding,
     ) -> Result<PreparedSpecImport> {
-        let result = reviewed_import_result(&bytes, opts, binding)?;
+        let result = reviewed_import_result(&bytes, &self.keyed(opts)?, binding)?;
         Ok(PreparedSpecImport { bytes, file_name, target, result })
     }
 
@@ -265,7 +283,7 @@ impl App {
     /// the destination workspace. Imported requests are ordinary saved
     /// requests (with an import link for reimport diffs); nothing is sent.
     pub fn spec_import(&self, bytes: &[u8], file_name: &str, opts: &ImportOptions, target: SpecTarget) -> Result<SpecImported> {
-        let opts = ImportOptions { id_namespace: Some(Id::new()), ..opts.clone() };
+        let opts = ImportOptions { id_namespace: Some(Id::new()), ..self.keyed(opts)? };
         let r = run(bytes, &opts)?;
         self.persist_import(bytes, file_name, target, r)
     }
@@ -387,7 +405,7 @@ impl App {
     /// read.
     fn original_baseline(&self, rec: &SpecSourceRecord) -> Option<BTreeMap<String, String>> {
         let Ok(Some(bytes)) = self.get_attachment(&rec.original_sha256) else { return None };
-        let mut opts = rec.source.options.clone();
+        let mut opts = self.keyed(&rec.source.options).ok()?;
         opts.id_namespace = Some(rec.source.id_namespace);
         anvil_import::import(&bytes, &opts).ok().map(|r| baseline(&r, rec.root_folder_id.is_some()))
     }
@@ -402,7 +420,7 @@ impl App {
             RootStatus::Missing => return Err(AppError::Invalid(ROOT_DELETED.into())),
             RootStatus::Invalid => return Err(AppError::Invalid(ROOT_INVALID.into())),
         }
-        let mut opts = rec.source.options.clone();
+        let mut opts = self.keyed(&rec.source.options)?;
         opts.id_namespace = Some(rec.source.id_namespace);
         let r = run(bytes, &opts)?;
         let generated = self.scope_baseline(&rec);

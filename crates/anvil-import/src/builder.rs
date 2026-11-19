@@ -55,26 +55,12 @@ pub(crate) struct Builder<'o> {
     pub template_syntax: anvil_domain::secret::TemplateSyntax,
     /// [`ImportResult::credential_names`].
     pub credential_names: std::collections::BTreeMap<String, CredentialName>,
-    /// [`ImportResult::positional_keys`].
-    positional_keys: std::collections::BTreeSet<String>,
-    /// [`ImportResult::positional_folders`].
-    positional_folders: Vec<Id>,
-}
-
-/// Whether a request or folder key names a position in the source rather
-/// than an identity: a JSON-pointer key (`postman:/item/0`,
-/// `insomnia:/resources/3`, every Postman folder's `pm:/…`), an empty id
-/// (`insomnia:`), or a HAR entry (`har:<index>:…`; a HAR host folder holds
-/// no auth).
-fn positional_identity(key: &str) -> bool {
-    if key.starts_with("pm:") {
-        return true;
-    }
-    if let Some(rest) = key.strip_prefix("har:") {
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        return digits > 0 && rest.as_bytes().get(digits) == Some(&b':');
-    }
-    key.split_once(':').is_some_and(|(kind, rest)| matches!(kind, "postman" | "insomnia") && (rest.is_empty() || rest.starts_with('/')))
+    /// The key credential placeholder names are made with
+    /// ([`crate::CredentialKey`]): the caller's, or a random one.
+    pub credential_key: [u8; 32],
+    /// The name each literal got (by its full HMAC), so equal literals share
+    /// one name.
+    pub literal_names: HashMap<String, String>,
 }
 
 impl<'o> Builder<'o> {
@@ -86,6 +72,7 @@ impl<'o> Builder<'o> {
         };
         let import_id = Id(Uuid::new_v5(&ANVIL_IMPORT_NAMESPACE, format!("import|{sha}|{fp}|{ns}").as_bytes()));
         let now = opts.imported_at.unwrap_or_else(Utc::now);
+        let credential_key = *opts.credential_key.clone().unwrap_or_else(crate::CredentialKey::random).as_bytes();
         let ws_id = Id(Uuid::new_v5(&ns, b"workspace"));
         let workspace = Workspace {
             meta: Meta { id: ws_id, schema_version: anvil_domain::SCHEMA_VERSION, created_at: now, updated_at: now },
@@ -118,8 +105,8 @@ impl<'o> Builder<'o> {
             env_names: Default::default(),
             template_syntax: Default::default(),
             credential_names: Default::default(),
-            positional_keys: Default::default(),
-            positional_folders: vec![],
+            credential_key,
+            literal_names: HashMap::new(),
         }
     }
 
@@ -184,9 +171,6 @@ impl<'o> Builder<'o> {
         self.charge_text("/", name.len());
         let meta = self.meta("folder", key);
         let id = meta.id;
-        if positional_identity(key) {
-            self.positional_folders.push(id);
-        }
         let sort_key = self.sort_key(parent);
         self.folders.push(Folder {
             meta,
@@ -261,24 +245,6 @@ impl<'o> Builder<'o> {
         self.report.counts.skipped_operations += 1;
     }
 
-    /// The operation key [`Builder::add_request`] will give the next request
-    /// added under `operation_key` (redacted, and with a `#n` suffix when
-    /// repeated): the identity its credential placeholders are named from.
-    pub fn peek_operation_key(&self, operation_key: &str) -> String {
-        let key = crate::report::redact_for_report(operation_key);
-        if !self.op_keys.contains(&key) {
-            return key;
-        }
-        let mut n = self.key_suffix.get(&key).copied().unwrap_or(2);
-        loop {
-            let candidate = format!("{key}#{n}");
-            if !self.op_keys.contains(&candidate) {
-                return candidate;
-            }
-            n += 1;
-        }
-    }
-
     /// Add a request. `operation_key` is made unique (duplicates get a
     /// `#n` suffix and a warning, found from a counter per key); `source` and
     /// `generated_hash` are set from the final spec. The key, name, URL and
@@ -299,9 +265,6 @@ impl<'o> Builder<'o> {
         let text = operation_key.len().saturating_add(name.len()).saturating_add(spec.url.len()).saturating_add(pointer.len());
         self.charge_text(pointer, text);
         let mut key = operation_key.to_string();
-        if positional_identity(operation_key) {
-            self.positional_keys.insert(key.clone());
-        }
         if self.op_keys.contains(&key) {
             let n = self.key_suffix.entry(key.clone()).or_insert(2);
             key = loop {
@@ -311,10 +274,6 @@ impl<'o> Builder<'o> {
                     break candidate;
                 }
             };
-            // A repeated key identifies none of its operations: each is known
-            // only by its order among them.
-            self.positional_keys.insert(operation_key.to_string());
-            self.positional_keys.insert(key.clone());
             self.report.warn(
                 "duplicate_operation_key",
                 pointer,
@@ -371,7 +330,8 @@ impl<'o> Builder<'o> {
             sha256: sha,
             size_bytes: size as u64,
             imported_at: self.now,
-            options: self.opts.clone(),
+            // The credential key stays with the caller.
+            options: ImportOptions { credential_key: None, ..self.opts.clone() },
         };
         ImportResult {
             workspace: self.workspace,
@@ -381,8 +341,6 @@ impl<'o> Builder<'o> {
             source,
             report: self.report,
             credential_names: self.credential_names,
-            positional_keys: self.positional_keys,
-            positional_folders: self.positional_folders,
         }
     }
 }
