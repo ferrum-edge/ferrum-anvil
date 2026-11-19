@@ -191,7 +191,7 @@ pub fn to_junit(r: &RunReport) -> String {
             xml_escape(&suite_name),
             it.index,
             secs(it.duration_ms),
-            it.started_at.format("%Y-%m-%dT%H:%M:%S")
+            it.started_at.format_iso_seconds()
         );
         properties(
             &mut suites,
@@ -215,7 +215,7 @@ pub fn to_junit(r: &RunReport) -> String {
         "<testsuites name=\"{}\" tests=\"{t_tests}\" failures=\"{t_fail}\" errors=\"{t_err}\" skipped=\"{t_skip}\" time=\"{}\" timestamp=\"{}\">",
         xml_escape(&r.name),
         secs(r.duration_ms),
-        r.started_at.format("%Y-%m-%dT%H:%M:%S")
+        r.started_at.format_iso_seconds()
     );
     out.push_str(&suites);
     if r.iterations.is_empty() {

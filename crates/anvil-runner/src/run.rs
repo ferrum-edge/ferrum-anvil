@@ -6,6 +6,7 @@ use crate::provider::{StepError, StepProvider};
 use crate::redact::RunSecrets;
 use crate::{MAX_ASSERTIONS_PER_STEP, MAX_EXTRA_FAILED_STEPS, MAX_FINDINGS_PER_STEP, MAX_NOTES, MAX_REPORT_STEPS, RunError, clip};
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::execution::{DispatchState, ExecutionRecord, exchange_duration_us};
 use anvil_domain::outcome::{ApplicationState, AssertionState, ProtocolStatus, TransportState};
 use anvil_domain::runner::*;
@@ -13,7 +14,6 @@ use anvil_engine::Engine;
 use anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_transport::recorder::EventCtx;
-use chrono::Utc;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -70,7 +70,7 @@ impl Notes {
 
 struct Run {
     run_id: Id,
-    started_at: chrono::DateTime<Utc>,
+    started_at: anvil_domain::Timestamp,
     t0: Instant,
     fail_on: FailOn,
     stop_on_failure: bool,
@@ -130,7 +130,7 @@ impl Run {
         let run_id = opts.run_id.unwrap_or_default();
         Run {
             run_id,
-            started_at: Utc::now(),
+            started_at: Timestamp::now(),
             t0: Instant::now(),
             fail_on: opts.fail_on,
             stop_on_failure: opts.stop_on_failure.unwrap_or(plan.stop_on_failure),
@@ -161,7 +161,7 @@ impl Run {
         it: u32,
         cancel: &CancellationToken,
     ) -> bool {
-        let started_at = Utc::now();
+        let started_at = Timestamp::now();
         let t0 = Instant::now();
         let dataset_row = plan.dataset.as_ref().map(|d| d.row_index(it) as u32 + 1);
         let dataset_layer = plan.dataset.as_ref().map(|d| d.row_layer(it));
@@ -551,7 +551,7 @@ impl Run {
             grpc_status,
             summary: clip(&sec.text(&o.summary), MAX_SUMMARY),
             message,
-            duration_ms: Some((rec.finished_at - rec.started_at).num_milliseconds().max(0) as u64),
+            duration_ms: Some((rec.finished_at - rec.started_at).whole_milliseconds().max(0) as u64),
             exchange_ms: exchange_duration_us(&rec.attempts).map(|us| us / 1000),
             delay_ms: step.delay_ms,
             assertion_results,
@@ -581,7 +581,7 @@ impl Run {
             },
             Class::Always,
         );
-        let finished_at = Utc::now();
+        let finished_at = Timestamp::now();
         RunReport {
             run_id: self.run_id,
             report_version: RUN_REPORT_VERSION,
