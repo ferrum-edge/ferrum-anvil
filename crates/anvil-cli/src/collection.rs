@@ -331,7 +331,7 @@ pub fn scenario_cmd(app: &App, cmd: &ScenarioCmd) -> Result<i32> {
             for r in runs {
                 println!(
                     "  run {} {}: {:?}, {} passed / {} failed steps",
-                    r.started_at.format("%Y-%m-%d %H:%M:%S"),
+                    r.started_at.format_date_time(),
                     r.run_id,
                     r.completion,
                     r.totals.steps_passed,

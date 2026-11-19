@@ -56,7 +56,7 @@ fn save_gateway(data: &Path, name: &str, host: &str) -> IntegrationProfile {
 fn save_gateway_in(data: &Path, workspace: &str, name: &str, host: &str, verified: bool) -> IntegrationProfile {
     let app = open(data);
     let ws = app.find_workspace(workspace).unwrap();
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     app.save_integration(IntegrationProfile {
         id: anvil_domain::Id::new(),
         workspace_id: ws.meta.id,

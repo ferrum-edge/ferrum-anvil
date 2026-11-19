@@ -311,7 +311,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 (_, _, Some(n)) => Workload::Iterations { iterations: *n, concurrency: *concurrency },
                 _ => bail!("choose --vus, --rate or --iterations"),
             };
-            let now = chrono::Utc::now();
+            let now = anvil_domain::Timestamp::now();
             let p = LoadPlan {
                 id: Id::new(),
                 workspace_id: ws,
@@ -483,7 +483,7 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 println!(
                     "{}  {}  {}  {}  {:?}{}  {:.1}/s  p95 {}  {} failed",
                     r.run_id,
-                    r.started_at.format("%Y-%m-%d %H:%M:%S"),
+                    r.started_at.format_date_time(),
                     t(&r.plan_name),
                     anvil_load::protocol::label(r.unit),
                     r.completion,
