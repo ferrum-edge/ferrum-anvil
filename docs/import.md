@@ -55,8 +55,9 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
   its placeholder would resolve without percent-encoding and a kept literal
   would not be extracted on export. A moved name whose decoding would make a
   `{{reference}}` keeps its encoded spelling (the engine resolves parameter
-  names), and its placeholder is named after the name as written, never a
-  decoded one (so `%7B%7Bapi_key%7D%7D` cannot read a variable `api_key`).
+  names), and its placeholder is bound to its literal like every other
+  (below), never named after the name (so `%7B%7Bapi_key%7D%7D` cannot read
+  a variable `api_key`).
   A value that decodes to whitespace only stays in the query, and a `+` or
   an escape that is not UTF-8 in a moved pair is reported.
 - URL userinfo (`https://user:password@host/`) is taken off the URL in every
@@ -70,10 +71,8 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     it is not cut at all but quarantined (`url_quarantined`: "this URL
     mixes a template with a possible credential in its authority; re-enter
     it"). By default the URL is not imported: the request's URL becomes a
-    fresh reference no variable defines, named from the request's key
-    (`{{url-needs-review-<16 hex digits>}}`, see below: hyphenated, so no
-    path parameter, shell variable or other name the import derives can be
-    it, and never a name the source references), and the original text is
+    fresh reference no variable defines, bound to the URL's text
+    (`{{url_<16 hex digits>}}`, see below), and the original text is
     stored nowhere. With `include_credentials` it is kept exactly as
     written and the same warning says it may hold a credential; a sanitized
     export extracts it whole. Either way the request's name, folder and
@@ -90,21 +89,17 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     `{{user}}:`, `{{user}}:{{password}}`) keeps them. Anything else (a
     literal user name or password, a token) is credential material, and no
     part of it is kept as a user name or in the URL: the user name and the
-    password become placeholders named from the request's stable key like
-    its own auth secrets (`{{auth_<digest>_username}}`,
-    `{{auth_<digest>_password}}`, see below; `url_userinfo_replaced`). With
-    `include_credentials`, the password keeps the literal (the part after the first `:`, or the whole
-    userinfo when it has no password), a secret field.
-  - Fresh placeholders never take a name the source defines or references,
-    including cURL `$NAME` shell variables, Postman path variables and
-    `url.variable` keys, and Insomnia path parameters, in any request of the
-    import (a `_2` suffix then). References are reserved as they decode
-    too: a JSON or YAML escape (`\u007b\u007bname\u007d\u007d`), shell
-    quoting, or percent-encoding in the name (`{{url%2Dneeds%2Dreview}}`
-    reserves `url-needs-review`). A path parameter is reserved by its raw
-    spelling as well as the sanitized one its placeholder takes, which is
-    fail-safe (a path parameter spelled like a quarantine placeholder pushes
-    that placeholder to `_2`).
+    password become placeholders bound to their literals like auth secrets
+    (`{{auth_<16 hex digits>_username}}`, `{{auth_<16 hex digits>_password}}`,
+    see below; `url_userinfo_replaced`), and an empty password stays empty.
+    With `include_credentials`, the password keeps the literal (the part
+    after the first `:`, or the whole userinfo when it has no password), a
+    secret field.
+  - A name of the shape placeholders take (below) that the source uses
+    itself is refused, however it is spelled: as written, in a JSON or YAML
+    escape (`\u007b\u007bname\u007d\u007d`), shell-quoted,
+    percent-encoded in the name (`{{url%5F…}}`), or as a path parameter in
+    its raw or its sanitized spelling.
   - A request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a
     Postman or Insomnia auth helper) or with auth explicitly off keeps
     that, and the userinfo is dropped (`url_credentials_dropped`).
@@ -113,36 +108,50 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     reported (`url_credentials_removed`; with `include_credentials` it is
     kept and a sanitized export extracts the whole URL), and an ambiguous
     one is quarantined.
-  - Every other credential placeholder (a header, query, form or body
-    field, an auth secret) is named through the same allocator: one name
-    per field name, never a name the source defines, references or derives
-    (`api_key_2` when the source defines `api_key`). A path parameter keeps
-    its own name. A Postman or Insomnia auth config's secrets, and the
-    Basic auth a URL userinfo becomes (every importer), are named
-    `auth_<16 hex digits>_<field>` (`auth_3f9a0c12d4e5b6a7_password`), the
-    digits the start of the SHA-256 of the owner's identity: the request's
-    operation key as made unique (with its `#n` suffix when the key
-    repeats), or the folder's or collection's key; never an array index
-    alone or a constant. An empty item id counts as no id, and an item
-    without an id, with a repeated id, or any HAR entry is known only by
-    its position. The name never comes from a collection, folder or request
-    name, which can repeat a credential. It is reserved as a whole, so no
-    header, query or body placeholder shares it (a name the source already
-    uses gets a suffix). The import records every name it allocates this
-    way (`ImportResult::credential_names`); a reimport never moves one to
-    another request (see [Reimport](#reimport)).
+  - Every credential placeholder the import makes (a header, query, form,
+    body, path or environment value, an auth secret, URL userinfo, a
+    quarantined URL) is bound to the literal it replaces (#584):
+    `<kind>_<16 hex digits>`, where the kind is `secret` (a field's value),
+    `auth` (an auth secret or URL userinfo, followed by `_<field>`:
+    `auth_3f9a0c12d4e5b6a7_password`) or `url` (a quarantined URL), and
+    the digits are the start of HMAC-SHA256(key, kind | field | literal),
+    the field being the auth field or the source field's name, lowercased.
+    So the same literal in the same field gets the same name in every
+    request of the import and in every reimport, and another literal gets
+    another name. No owner (no collection, folder or request name or key),
+    no position and no source field name is part of a name, so a name never
+    carries source text, and a variable you fill resolves only where the
+    source holds exactly the secret it replaced. The import records each
+    name with its kind and field (`ImportResult::credential_names`). Two
+    literals whose digits agree (64 bits) get a `_2` suffix.
+  - The key (`ImportOptions::credential_key`, a `CredentialKey`) is never
+    serialized and never stored with the import. The app derives one per
+    profile from the profile's data key (HKDF-SHA256 under its own label),
+    so it lives where the profile's other secrets do (the OS keychain or a
+    passphrase-wrapped key), never in workspace files or exports, and a
+    preview, the import it previews and every reimport agree. Keyed, a name
+    cannot be tested against guessed passwords. Without the key (`None`,
+    as for a library caller; another profile; a new data key) a random one
+    is used: every name is new, nothing you filled resolves, and every
+    credential is asked for again (fail-safe).
+  - An empty secret stays empty: there is no literal to bind a name to.
+    Fill it in on the request.
+  - The names have a reserved shape: `auth_`, `secret_` or `url_`, then 16
+    hex digits, then `_` or the end. A source that uses a name of that
+    shape itself, in a reference or as a variable, is refused
+    (`ImportError::Invalid`: rename it; see above for the spellings
+    covered), so a source can never point a request at a value filled for
+    a placeholder.
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia
   environment value that is an array (`{"accounts": [{"api_key": "…"}]}`,
-  `"tokens": ["…"]`), each with its own placeholder named by its path
-  (bounded, and never the name of a variable or placeholder of any
-  environment of the import); as everywhere, only a plain reference is
-  kept.
+  `"tokens": ["…"]`), each with its own placeholder bound to its literal
+  (bounded); as everywhere, only a plain reference is kept.
 - JSON bodies and GraphQL variables are scanned recursively: string members
   with credential-like names, and numbers under such names (`pin`, `otp`, …;
   not names recognized only by `token`, such as `max_tokens`), whose
-  placeholder is written unquoted (`"pin": {{pin}}`) so the value supplied
+  placeholder is written unquoted (`"pin": {{secret_<16 hex digits>}}`) so the value supplied
   later is sent as a number.
 - A JSON body that repeats a member name is rewritten keeping the last value of
   each member (`json_duplicate_member`), so an earlier value that was never
@@ -232,9 +241,10 @@ Report text never carries a credential, in either mode (#584):
   the code this is a type (`Message`), which cannot be built from a
   `String`.
 - Scripts are listed by metadata only (see above).
-- Credential placeholders and required variables are named by the import:
-  an auth config's secrets are `{{auth_<digest>_<field>}}` (see above),
-  never derived from a collection, folder or request name.
+- Credential placeholders and required variables are named by the import,
+  bound to the literal they replace (`{{secret_<16 hex digits>}}`,
+  `{{auth_<16 hex digits>_<field>}}`, `{{url_<16 hex digits>}}`, see
+  above), never derived from a collection, folder, request or field name.
 - What must quote the source goes through one redaction as a last line of
   defence: pointer tokens (source keys; a changed token keeps a digest so
   locations stay distinct), external references (shown for approval),
@@ -523,43 +533,26 @@ updated loses its `revision_id`, since that revision holds the old spec.
 Changing the sample mode or seed between imports changes generated hashes;
 every operation then shows up as changed upstream.
 
-A credential reference never moves to another request (#584). Only the
-placeholders the fresh import allocated itself (`ImportResult::credential_names`:
-auth secrets, URL userinfo, quarantined URLs) are handled below; every
-other reference (one the source wrote, or a name it designates, such as an
-OpenAPI security scheme's variable) follows the source like any other
-change. Header, query and form placeholders are named after their field and
-shared by every request with that field, so they never move.
+A credential placeholder is bound to the literal it replaced (#584, see
+[Credential redaction](#credential-redaction)), so reimport needs no special
+case for it: a request, folder or scope unit takes the fresh import's
+references with the rest of its update.
 
-- **Added requests fail safe.** An added request (one whose key is new,
-  such as a moved HAR entry or a cURL command with a different URL), or a
-  folder added with it, that would reference an allocated name a stored
-  variable already defines gets a fresh, unused name instead
-  (`<name>_new`). You fill it in; nothing resolves to a value filled for
-  another request.
-- **Positional continuity fails closed, for the whole chain.** A request
-  with allocated credentials (its own, or inherited from a folder that has
-  them) that is matched only by its position in the source (an item
-  without an id, with an empty or repeated id, any HAR entry) is held whole
-  when anything of it changed upstream (its name included): a conflict with
-  `credential_review: true` and every changed part in `conflicting_fields`. Every changed unit of a folder known only by its
-  position (every Postman folder, an Insomnia request group without an id)
-  whose subtree holds such credentials is held together, its auth and the
-  variables that feed its requests' destinations (a `host`, a base URL),
-  as scope conflicts with `credential_review: true`, even when the
-  requests' specs did not change. Declined, which is the default, the
-  stored values stay, so each credential keeps its destination.
-- **Kept only by semantic field.** For a request with a stable identity,
-  where the fresh import put an allocated placeholder of the same owner in
-  the same named auth field (no array index) as a different stored
-  reference (another naming from an earlier build), the request keeps the
-  stored reference, so it stays on the variable you filled; the rest of the
-  update applies, and the request is `unchanged` when nothing else
-  changed. A field matched only ambiguously (an index, a name used twice)
-  is held for review instead. An auth unit of the source's or a folder's
-  scope whose fresh version puts an allocated placeholder where the stored
-  one has another reference is a scope conflict with
-  `credential_review: true`.
+- A literal the source still holds keeps its name, wherever its request
+  moved and whatever was inserted, reordered or repeated. A request known
+  only by its position (an item without an id, with an empty or repeated
+  id, any HAR entry) takes the URL and the names of whichever request is
+  now at that position, together.
+- A changed literal gets a new name, which you are asked to fill in. So a
+  value you filled resolves only where the source sends exactly the secret
+  it replaced.
+- The same literal sent to a new host (a request that moved, a new request
+  holding it) keeps its name: the source itself sends that secret there.
+- A request imported by an earlier build under another naming moves to the
+  literal-bound name and is asked for again. So is everything after a
+  reimport without the first import's key (in another profile).
+- A reference the source wrote, or a name it designates (an OpenAPI security
+  scheme's variable), follows the source like any other change.
 
 ### Renames
 
