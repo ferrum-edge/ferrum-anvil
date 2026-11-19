@@ -66,12 +66,18 @@ pub fn has_at(r: &ImportResult, code: &str, pointer_part: &str) -> bool {
     r.report.warnings.iter().chain(r.report.unsupported.iter()).any(|f| f.code == code && f.pointer.contains(pointer_part))
 }
 
-/// `text` with `{{name}}` placeholders replaced by the given values, as the
-/// engine's resolver substitutes them, parsed as JSON.
-pub fn substituted(text: &str, vars: &[(&str, &str)]) -> serde_json::Value {
+/// `text` with the unquoted placeholder written for each named JSON member
+/// (`"pin": {{secret_<16 hex>}}`) replaced by the given value, as the
+/// engine's resolver substitutes it, parsed as JSON.
+pub fn substituted(text: &str, members: &[(&str, &str)]) -> serde_json::Value {
     let mut t = text.to_string();
-    for (n, v) in vars {
-        t = t.replace(&format!("{{{{{n}}}}}"), v);
+    for (member, v) in members {
+        let key = format!("\"{member}\":");
+        let after = t.find(&key).unwrap_or_else(|| panic!("no member {member}: {t}")) + key.len();
+        let start = after + (t[after..].len() - t[after..].trim_start().len());
+        assert!(t[start..].starts_with("{{"), "{member} is not an unquoted placeholder: {t}");
+        let end = start + t[start..].find("}}").expect("a closed placeholder") + 2;
+        t.replace_range(start..end, v);
     }
     serde_json::from_str(&t).unwrap_or_else(|e| panic!("not JSON after substitution ({e}): {t}"))
 }

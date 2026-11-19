@@ -94,6 +94,8 @@ pub fn uses_reserved_name(result: &crate::ImportResult) -> bool {
         to_json(serde_json::to_value(&result.folders)),
         to_json(serde_json::to_value(&result.requests)),
         to_json(serde_json::to_value(&result.environments)),
+        // A dropped secret variable is listed only here.
+        to_json(serde_json::to_value(&result.report.required_variables)),
     ]
     .iter()
     .any(|v| walk(v, &result.credential_names))

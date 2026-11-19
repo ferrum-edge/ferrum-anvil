@@ -391,7 +391,8 @@ fn userinfo_placeholders_never_take_a_collection_variable_name() {
     match &r.requests[0].spec.auth {
         AuthConfig::Basic { username, password } => {
             assert!(is_auth_ref(username, "username"), "the user name is not an auth placeholder");
-            assert!(is_auth_ref(template_of(password), "password"));
+            // No password in the URL: nothing to bind a placeholder to.
+            assert_eq!(template_of(password), "");
         }
         _ => panic!("expected Basic auth"),
     }
