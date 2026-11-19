@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Import reports and auth placeholder names (#584)
+
+- Import report messages, required-variable reasons and inactive-setting values
+  changed wording and no longer quote source values. Tooling that parsed text
+  out of `warnings[].message`, `unsupported[].message` or
+  `required_variables[].reason` should use `code` and `pointer` instead. A
+  callback's inactive-setting `value` is now a count such as `1 callback URL
+  expression(s)`.
+- `report.scripts[]` no longer has `source`, and `owner` is now one of
+  `collection`, `folder`, `request` or `test_suite` rather than a name. `event`
+  is one of `prerequest`, `test`, `after_response`, `unit_test` or `other`.
+  `language` is `javascript` or `other`. `bytes` and `lines` are new. Read a
+  script's body from the source file at the entry's `pointer`.
+- Credential placeholders made by an import are now bound to the secret they
+  replaced: `{{secret_<16 hex digits>}}` for header, query, form, body, path and
+  environment values, `{{auth_<16 hex digits>_<field>}}` for auth secrets and
+  URL userinfo, and `{{url_<16 hex digits>}}` for quarantined URLs. They replace
+  field-named placeholders (`{{Authorization}}`, `{{api_key}}`), owner-named
+  ones (`{{<collection>_password}}`), `{{username}}` / `{{password}}` and
+  `{{url-needs-review}}`. The report's required variables list them.
+- The first reimport after upgrading moves requests imported by an earlier build
+  to the new names, so their credentials are asked for again once. After that, a
+  credential you fill stays with the secret it replaced across reimports, and a
+  secret that changed in the source gets a new variable to fill in.
+- The names are keyed by your profile. Reimporting in another profile, or after
+  restoring a backup into a new profile, asks for every credential again.
+  Library callers of `anvil_import::import` should pass a stable
+  `ImportOptions::credential_key` (`CredentialKey::derive` of a secret they keep
+  outside workspace files) if they want names to survive reimports. Without one,
+  every import makes new names.
+- An empty secret in the source is no longer replaced by a placeholder; fill it
+  in on the request.
+- A source that uses a variable named like these placeholders (`auth_`,
+  `secret_` or `url_` followed by 16 hex digits) is refused; rename the variable
+  in the source.
+- `ReimportChange` and `ScopeChange` are unchanged; no reimport change is held
+  for credential review.
+- These names supersede the `{{username}}` / `{{password}}` and
+  `{{url-needs-review}}` placeholders described under "Import behaviour changes"
+  below.
+
 ### Load runs: exit codes and CSV (#565, #566)
 
 `anvil load run` now decides its exit code from the send ledger. A chained
