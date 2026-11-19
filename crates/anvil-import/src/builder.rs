@@ -5,11 +5,11 @@ use crate::report::ImportReport;
 use crate::util::{spec_hash, text_size_within};
 use crate::{CredentialName, ImportOptions, ImportResult, ImportedSource};
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::request::{ImportSource, RequestSpec};
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::workspace::{Environment, Folder, Meta, RequestDefinition, Variable, Workspace};
-use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -25,7 +25,7 @@ const TEXT_BYTES_PER_INPUT_BYTE: usize = 4;
 pub(crate) struct Builder<'o> {
     pub opts: &'o ImportOptions,
     ns: Uuid,
-    pub now: DateTime<Utc>,
+    pub now: Timestamp,
     pub import_id: Id,
     pub workspace: Workspace,
     pub folders: Vec<Folder>,
@@ -76,7 +76,7 @@ impl<'o> Builder<'o> {
             None => Uuid::new_v5(&ANVIL_IMPORT_NAMESPACE, format!("ns|{sha}|{fp}").as_bytes()),
         };
         let import_id = Id(Uuid::new_v5(&ANVIL_IMPORT_NAMESPACE, format!("import|{sha}|{fp}|{ns}").as_bytes()));
-        let now = opts.imported_at.unwrap_or_else(Utc::now);
+        let now = opts.imported_at.unwrap_or_else(Timestamp::now);
         let credential_key = *opts.credential_key.clone().unwrap_or_else(crate::CredentialKey::random).as_bytes();
         let ws_id = Id(Uuid::new_v5(&ns, b"workspace"));
         let workspace = Workspace {
