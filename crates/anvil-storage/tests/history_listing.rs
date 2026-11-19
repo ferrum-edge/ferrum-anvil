@@ -89,7 +89,7 @@ fn the_listing_decodes_the_same_fields_as_reading_each_record() {
         assert_eq!(serde_json::to_value(rec.outcome.application).unwrap(), full["outcome"]["application"]);
         assert_eq!(rec.response.map(|r| u64::from(r.status)), full["response"]["status"].as_u64());
         assert_eq!(rec.request_id.map(|r| r.to_string()), h.request_id);
-        assert_eq!(rec.started_at, serde_json::from_value::<chrono::DateTime<chrono::Utc>>(full["started_at"].clone()).unwrap());
+        assert_eq!(rec.started_at, serde_json::from_value::<anvil_domain::Timestamp>(full["started_at"].clone()).unwrap());
     }
     // Filters and limit as in `list_history`.
     let one = f.store.list_history_with::<ExecutionListing>(Some(&f.ws), Some(&f.request), 1).unwrap();

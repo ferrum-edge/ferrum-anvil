@@ -46,8 +46,8 @@ fn workspace(id: &Id, name: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id,
         "schema_version": anvil_domain::SCHEMA_VERSION,
-        "created_at": chrono::Utc::now(),
-        "updated_at": chrono::Utc::now(),
+        "created_at": anvil_domain::Timestamp::now(),
+        "updated_at": anvil_domain::Timestamp::now(),
         "name": name,
     })
 }
@@ -312,7 +312,7 @@ fn prune_during_add_history(dir: &Path, adder: &Store, pruner: &Store, id: &Id, 
         let (resume, resume_rx) = mpsc::channel();
         let (pruned, pruned_rx) = mpsc::channel();
         let record = PausedRecord { reached, resume: resume_rx };
-        let started_at = chrono::Utc::now().timestamp_millis();
+        let started_at = anvil_domain::Timestamp::now().unix_millis();
         let add = sc.spawn(move || adder.add_history(id, None, None, started_at, &record, Some(body)));
         reached_rx.recv().unwrap();
 

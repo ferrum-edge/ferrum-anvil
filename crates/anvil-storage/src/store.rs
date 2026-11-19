@@ -922,7 +922,7 @@ fn checkpoint_on(conn: &Connection, dir: &Path, label: &str) -> Result<PathBuf> 
     let dir = dir.join("checkpoints");
     std::fs::create_dir_all(&dir)?;
     let safe: String = label.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect();
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string();
+    let stamp = anvil_domain::Timestamp::now().format_basic_millis();
     let mut path = dir.join(format!("{stamp}-{safe}.db"));
     let mut n = 1;
     while path.exists() {
@@ -1843,7 +1843,7 @@ impl Store {
         // of `history` and the pins, never against a snapshot another
         // connection has since written past.
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let cutoff = chrono::Utc::now().timestamp_millis() - (max_age_days as i64) * 86_400_000;
+        let cutoff = anvil_domain::Timestamp::now().unix_millis() - (max_age_days as i64) * 86_400_000;
         // The usual case (a recorded send under budget): no record is too
         // old and all fit, so none is removed and no body is released. Every
         // other delete of a record releases its body itself (`clear_history`,
@@ -2549,7 +2549,7 @@ impl Records<'_> {
                 owner,
                 parent,
                 sort_key,
-                chrono::Utc::now().timestamp_millis(),
+                anvil_domain::Timestamp::now().unix_millis(),
                 env
             ],
         )?;
@@ -2775,7 +2775,7 @@ impl Records<'_> {
         let env = crypto::seal(&self.key, &secret_aad(&id_s, owner.as_deref()), &payload);
         self.conn.execute(
             "INSERT OR ABORT INTO secrets(id,workspace_id,updated_at,payload) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id, updated_at=excluded.updated_at, payload=excluded.payload",
-            params![id_s, owner, chrono::Utc::now().timestamp_millis(), env],
+            params![id_s, owner, anvil_domain::Timestamp::now().unix_millis(), env],
         )?;
         self.remember(crate::manifest::Entry::new("secrets", "", &id_s, owner.as_deref(), None, &env))?;
         Ok(())
@@ -2849,7 +2849,7 @@ impl Records<'_> {
             let env = crypto::seal(&self.key, &aad("blobs", "blob", &id), bytes);
             self.conn.execute(
                 "INSERT INTO blobs(id,size,created_at,payload) VALUES(?1,?2,?3,?4)",
-                params![id, bytes.len() as i64, chrono::Utc::now().timestamp_millis(), env],
+                params![id, bytes.len() as i64, anvil_domain::Timestamp::now().unix_millis(), env],
             )?;
         }
         Ok(id)

@@ -88,7 +88,7 @@ fn rows(conn: &Connection) -> Vec<(String, Vec<u8>, Vec<u8>)> {
 }
 fn seed_every_payload(store: &Store, key: &Key) -> String {
     let ws = Id::new();
-    let value = serde_json::json!({"id":ws,"schema_version":1,"created_at":chrono::Utc::now(),"updated_at":chrono::Utc::now(),"name":"kept workspace"});
+    let value = serde_json::json!({"id":ws,"schema_version":1,"created_at":anvil_domain::Timestamp::now(),"updated_at":anvil_domain::Timestamp::now(),"name":"kept workspace"});
     store.put(kind::WORKSPACE, &ws, None, None, 0.0, &value).unwrap();
     store.put_secret(&Id::new(), Some(&ws), "label", "secret marker").unwrap();
     let blob = store.put_blob(b"attachment marker").unwrap();
