@@ -227,8 +227,8 @@ impl Timestamp {
             SecondsFormat::Micros => write!(w, ".{:06}", nano / 1_000),
             SecondsFormat::Nanos => write!(w, ".{nano:09}"),
             SecondsFormat::AutoSi if nano == 0 => Ok(()),
-            SecondsFormat::AutoSi if nano % 1_000_000 == 0 => write!(w, ".{:03}", nano / 1_000_000),
-            SecondsFormat::AutoSi if nano % 1_000 == 0 => write!(w, ".{:06}", nano / 1_000),
+            SecondsFormat::AutoSi if nano.is_multiple_of(1_000_000) => write!(w, ".{:03}", nano / 1_000_000),
+            SecondsFormat::AutoSi if nano.is_multiple_of(1_000) => write!(w, ".{:06}", nano / 1_000),
             SecondsFormat::AutoSi => write!(w, ".{nano:09}"),
         }
     }
@@ -246,6 +246,19 @@ impl Default for Timestamp {
     /// The Unix epoch, as `chrono::DateTime<Utc>::default()` was.
     fn default() -> Self {
         Self::UNIX_EPOCH
+    }
+}
+
+impl From<std::time::SystemTime> for Timestamp {
+    /// Panics when the time is outside years -9999..=9999.
+    fn from(t: std::time::SystemTime) -> Self {
+        Self(UtcDateTime::from(t))
+    }
+}
+
+impl From<Timestamp> for std::time::SystemTime {
+    fn from(t: Timestamp) -> Self {
+        std::time::SystemTime::from(t.0)
     }
 }
 
