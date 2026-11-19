@@ -15,8 +15,8 @@ pub struct IntegrationProfile {
     pub name: String,
     #[serde(flatten)]
     pub kind: IntegrationKind,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: crate::Timestamp,
+    pub updated_at: crate::Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

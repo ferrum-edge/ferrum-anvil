@@ -424,7 +424,7 @@ pub struct StoredRuleset {
     pub text: String,
     /// SHA-256 (hex) of `text`.
     pub sha256: String,
-    pub added_at: chrono::DateTime<chrono::Utc>,
+    pub added_at: crate::Timestamp,
     #[serde(default = "crate::request::default_true")]
     pub enabled: bool,
 }

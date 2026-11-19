@@ -3,7 +3,7 @@
 //! Send, in a separate worker process.
 
 use crate::Id;
-use chrono::{DateTime, Utc};
+use crate::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -89,8 +89,8 @@ pub struct LoadPlan {
     /// destination and ownership reminder for each run.
     #[serde(default)]
     pub trusted: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -521,8 +521,8 @@ pub struct LoadReport {
     pub request_revisions: Vec<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_sha256: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: DateTime<Utc>,
+    pub started_at: Timestamp,
+    pub finished_at: Timestamp,
     pub completion: RunCompletion,
     /// True if the report is partial (cancel, crash, abort, lock).
     pub partial: bool,
