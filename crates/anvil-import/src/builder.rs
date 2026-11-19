@@ -58,9 +58,14 @@ pub(crate) struct Builder<'o> {
     /// The key credential placeholder names are made with
     /// ([`crate::CredentialKey`]): the caller's, or a random one.
     pub credential_key: [u8; 32],
-    /// The name each literal got (by its full HMAC), so equal literals share
-    /// one name.
+    /// The sentinel each literal got (by its full HMAC), so equal literals
+    /// share one placeholder ([`crate::common::literal_name`]).
     pub literal_names: HashMap<String, String>,
+    /// 32 hex digits drawn at random for this import: the sentinels' nonce
+    /// ([`crate::common::sentinel`]).
+    pub sentinel_nonce: String,
+    /// The name of each sentinel, by index ([`crate::common::finalize`]).
+    pub placeholder_names: Vec<String>,
 }
 
 impl<'o> Builder<'o> {
@@ -107,6 +112,13 @@ impl<'o> Builder<'o> {
             credential_names: Default::default(),
             credential_key,
             literal_names: HashMap::new(),
+            sentinel_nonce: {
+                let mut bytes = [0u8; 16];
+                bytes[..8].copy_from_slice(&Uuid::new_v4().as_bytes()[..8]);
+                bytes[8..].copy_from_slice(&Uuid::new_v4().as_bytes()[8..]);
+                hex::encode(bytes)
+            },
+            placeholder_names: vec![],
         }
     }
 

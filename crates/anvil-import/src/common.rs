@@ -23,11 +23,17 @@ use serde_json::Value;
 /// rotated, and a different literal gets a new, unfilled name. No owner, no
 /// position and no raw source field name is part of a name. The name is
 /// recorded in [`crate::ImportResult::credential_names`].
+///
+/// What is returned, and written into the imported objects, is not the name
+/// but this import's sentinel for it ([`sentinel`]). [`finalize`] replaces
+/// each sentinel with its name only after refusing any reserved-shape name
+/// in the output. At that point every such name came from the source,
+/// however the import derived it.
 pub fn literal_name(b: &mut Builder, kind: &'static str, field: &str, suffix: Option<&'static str>, literal: &str) -> String {
     let field = field.to_ascii_lowercase();
     let mac = hex::encode(crate::util::hmac_sha256(&b.credential_key, &hmac_input(&[kind, &field, literal])));
-    if let Some(name) = b.literal_names.get(&mac) {
-        return name.clone();
+    if let Some(token) = b.literal_names.get(&mac) {
+        return token.clone();
     }
     let base = match suffix {
         Some(f) => format!("{kind}_{}_{f}", &mac[..16]),
@@ -36,9 +42,198 @@ pub fn literal_name(b: &mut Builder, kind: &'static str, field: &str, suffix: Op
     // Taken only by another literal whose digest shares 64 bits with this
     // one: the next free suffix.
     let name = b.env_names.name_verbatim(&base);
-    b.literal_names.insert(mac, name.clone());
-    b.credential_names.insert(name.clone(), crate::CredentialName { kind: kind.to_string(), field });
-    name
+    let token = sentinel(&b.sentinel_nonce, b.placeholder_names.len());
+    b.placeholder_names.push(name.clone());
+    b.literal_names.insert(mac, token.clone());
+    b.credential_names.insert(name, crate::CredentialName { kind: kind.to_string(), field });
+    token
+}
+
+/// The sentinel for placeholder `index` of an import with `nonce` (32 hex
+/// digits, 128 random bits drawn per import): `anvil<nonce>n<index>e`.
+/// It is a plain identifier, so every path a name takes (percent-encoding,
+/// sanitizing, a template or credential classifier, a renderer) keeps it as
+/// it keeps a name. The source cannot write one, because it cannot know the
+/// nonce.
+pub fn sentinel(nonce: &str, index: usize) -> String {
+    format!("anvil{nonce}n{index}e")
+}
+
+/// Finalize an import's objects (#584), in one pass over each:
+///
+/// 1. Refuse any string or object key that is, or holds as a `{{…}}`
+///    reference (also percent-decoded), a name of [`generated_shape`].
+///    The import has written only sentinels so far, so every such name came
+///    from the source, however the import derived it: decoded, embedded,
+///    concatenated or copied from an XML namespace.
+/// 2. Refuse any sentinel-shaped text that is not one of this import's own:
+///    another nonce, or an index it never issued.
+/// 3. Replace each sentinel with its name, then recompute each request's
+///    generated hash, which was computed over the sentinel.
+///
+/// Objects without a sentinel are left untouched.
+pub fn finalize(result: &mut crate::ImportResult, nonce: &str, names: &[String]) -> Result<(), crate::ImportError> {
+    let dialect = result.source.dialect;
+    let refused = || reserved_name_error(dialect);
+    let check = |v: &Value| walk_strings(v, &mut |s: &str| holds_reserved_name(s) || foreign_sentinel(s, nonce, names.len()));
+    let to_json = |v: serde_json::Result<Value>| v.unwrap_or(Value::Null);
+    let workspace = to_json(serde_json::to_value(&result.workspace));
+    let folders: Vec<Value> = result.folders.iter().map(|f| to_json(serde_json::to_value(f))).collect();
+    let requests: Vec<Value> = result.requests.iter().map(|q| to_json(serde_json::to_value(q))).collect();
+    let environments: Vec<Value> = result.environments.iter().map(|e| to_json(serde_json::to_value(e))).collect();
+    let report = to_json(serde_json::to_value(&result.report));
+    if check(&workspace) || folders.iter().any(&check) || requests.iter().any(&check) || environments.iter().any(&check) || check(&report) {
+        return Err(refused());
+    }
+    if names.is_empty() {
+        return Ok(());
+    }
+    let prefix = format!("anvil{nonce}n");
+    let replace = |v: Value| -> Option<Value> { contains_text(&v, &prefix).then(|| substitute(v, &prefix, names)) };
+    let invalid = |what: &str| crate::ImportError::Invalid {
+        dialect,
+        pointer: "/".into(),
+        message: format!("the imported {what} could not be finalized"),
+    };
+    if let Some(v) = replace(workspace) {
+        result.workspace = serde_json::from_value(v).map_err(|_| invalid("workspace"))?;
+    }
+    for (f, v) in result.folders.iter_mut().zip(folders) {
+        if let Some(v) = replace(v) {
+            *f = serde_json::from_value(v).map_err(|_| invalid("folder"))?;
+        }
+    }
+    for (q, v) in result.requests.iter_mut().zip(requests) {
+        if let Some(v) = replace(v) {
+            *q = serde_json::from_value(v).map_err(|_| invalid("request"))?;
+            let source = q.spec.source.take();
+            let hash = crate::spec_hash(&q.spec);
+            q.spec.source = source.map(|s| anvil_domain::request::ImportSource { generated_hash: hash, ..s });
+        }
+    }
+    for (e, v) in result.environments.iter_mut().zip(environments) {
+        if let Some(v) = replace(v) {
+            *e = serde_json::from_value(v).map_err(|_| invalid("environment"))?;
+        }
+    }
+    for r in &mut result.report.redactions {
+        r.placeholder = substitute_text(&r.placeholder, &prefix, names);
+    }
+    for v in &mut result.report.required_variables {
+        v.name = substitute_text(&v.name, &prefix, names);
+    }
+    Ok(())
+}
+
+/// Call `f` on every string and object key of `v` until it returns true.
+/// One pass, without recursion.
+fn walk_strings(v: &Value, f: &mut dyn FnMut(&str) -> bool) -> bool {
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::String(s) if f(s) => return true,
+            Value::Array(items) => stack.extend(items),
+            Value::Object(m) => {
+                for (k, x) in m {
+                    if f(k) {
+                        return true;
+                    }
+                    stack.push(x);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn contains_text(v: &Value, needle: &str) -> bool {
+    walk_strings(v, &mut |s: &str| s.contains(needle))
+}
+
+/// Whether `s` is a name of [`generated_shape`], or holds one as a `{{…}}`
+/// reference (Insomnia's `{{ _.name }}` too), as written or percent-decoded.
+fn holds_reserved_name(s: &str) -> bool {
+    let shaped = |n: &str| {
+        generated_shape(n) || (n.contains('%') && percent_encoding::percent_decode_str(n).decode_utf8().is_ok_and(|d| generated_shape(&d)))
+    };
+    if shaped(s.trim()) {
+        return true;
+    }
+    let mut rest = s;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        let inner = after[..close].trim();
+        if shaped(inner.strip_prefix("_.").unwrap_or(inner)) {
+            return true;
+        }
+        rest = &after[close + 2..];
+    }
+    false
+}
+
+/// Whether `s` holds sentinel-shaped text (`anvil<32 hex>n<digits>e`) that is
+/// not one of this import's: another nonce, or an index past `issued`.
+fn foreign_sentinel(s: &str, nonce: &str, issued: usize) -> bool {
+    let mut rest = s;
+    while let Some(at) = rest.find("anvil") {
+        let tail = &rest[at + 5..];
+        rest = tail;
+        let b = tail.as_bytes();
+        if b.len() < 34 || !b[..32].iter().all(u8::is_ascii_hexdigit) || b[32] != b'n' {
+            continue;
+        }
+        let digits = b[33..].iter().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 || b.get(33 + digits) != Some(&b'e') {
+            continue;
+        }
+        let index = std::str::from_utf8(&b[33..33 + digits]).ok().and_then(|d| d.parse::<usize>().ok());
+        if &tail[..32] != nonce || index.is_none_or(|i| i >= issued) {
+            return true;
+        }
+    }
+    false
+}
+
+/// `s` with each of this import's sentinels replaced by its name.
+fn substitute_text(s: &str, prefix: &str, names: &[String]) -> String {
+    if !s.contains(prefix) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find(prefix) {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + prefix.len()..];
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        let name = tail[..digits].parse::<usize>().ok().and_then(|i| names.get(i)).filter(|_| tail.as_bytes().get(digits) == Some(&b'e'));
+        match name {
+            Some(name) => {
+                out.push_str(name);
+                rest = &tail[digits + 1..];
+            }
+            // Not a sentinel after all (checked before): kept as written.
+            None => {
+                out.push_str(prefix);
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `v` with every string and object key passed through [`substitute_text`].
+fn substitute(v: Value, prefix: &str, names: &[String]) -> Value {
+    match v {
+        Value::String(s) => Value::String(substitute_text(&s, prefix, names)),
+        Value::Array(items) => Value::Array(items.into_iter().map(|x| substitute(x, prefix, names)).collect()),
+        Value::Object(m) => {
+            Value::Object(m.into_iter().map(|(k, x)| (substitute_text(&k, prefix, names), substitute(x, prefix, names))).collect())
+        }
+        other => other,
+    }
 }
 
 /// The HMAC input for `parts`: each part's byte length (8 bytes, big
@@ -55,9 +250,8 @@ pub fn hmac_input(parts: &[&str]) -> Vec<u8> {
 
 /// Whether `name` has the shape of a placeholder [`literal_name`] makes
 /// (`auth_<16 hex>…`, `secret_<16 hex>…`, `url_<16 hex>…`). A source that
-/// uses such a name itself is refused before any importer runs
-/// ([`reserved_text`]), so a source can never point a request at a variable
-/// filled for one of these.
+/// uses such a name itself is refused ([`finalize`]), so a source can never
+/// point a request at a variable filled for one of these.
 pub fn generated_shape(name: &str) -> bool {
     let Some((kind, rest)) = name.split_once('_') else { return false };
     // Bytes, not a string split: byte 16 may fall inside a character.
@@ -68,55 +262,7 @@ pub fn generated_shape(name: &str) -> bool {
         && rest.get(16).is_none_or(|&c| c == b'_')
 }
 
-/// Whether source text `s` names something of [`generated_shape`], in any
-/// spelling an importer could turn into a variable name (#584):
-///
-/// * the whole text, sanitized as a derived name is ([`sanitize_var`]): a
-///   key such as an OpenAPI security scheme or a server variable;
-/// * every piece between ASCII delimiters (anything but letters, digits,
-///   `_`, `.`, `~` and `-`), sanitized: a `{{reference}}` (Insomnia's
-///   `{{ _.name }}` too), a `:path` parameter in its raw spelling, an
-///   OpenAPI `{template}`;
-/// * the same again, percent-decoded.
-///
-/// Linear in `s`.
-pub fn reserved_text(s: &str) -> bool {
-    let check = |t: &str| -> bool {
-        let whole = t.trim();
-        (whole.len() >= 20 && generated_shape(&sanitize_var(whole)))
-            || t.split(|c: char| c.is_ascii() && !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '~' | '-')))
-                .any(|piece| piece.len() >= 20 && generated_shape(&sanitize_var(piece)))
-    };
-    check(s) || (s.contains('%') && check(percent_encoding::percent_decode_str(s).decode_utf8_lossy().as_ref()))
-}
-
-/// Whether a structured source (JSON or YAML) holds [`reserved_text`] in any
-/// object key or string value. Run before any importer reads it, so no
-/// source-written name of the reserved shape reaches an import, and every
-/// such name in its output is one the import made. One pass, without
-/// recursion.
-pub fn source_uses_reserved_name(root: &Value) -> bool {
-    let mut stack = vec![root];
-    while let Some(v) = stack.pop() {
-        match v {
-            Value::String(s) if reserved_text(s) => return true,
-            Value::Array(items) => stack.extend(items),
-            Value::Object(m) => {
-                for (k, x) in m {
-                    if reserved_text(k) {
-                        return true;
-                    }
-                    stack.push(x);
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// The refusal for a source that uses a reserved-shape name
-/// ([`reserved_text`]).
+/// The refusal for a source that uses a reserved-shape name ([`finalize`]).
 pub fn reserved_name_error(dialect: crate::Dialect) -> crate::ImportError {
     crate::ImportError::Invalid {
         dialect,

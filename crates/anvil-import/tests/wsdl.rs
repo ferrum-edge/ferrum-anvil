@@ -598,3 +598,17 @@ fn namespace_uris_and_attribute_pairs_are_bounded_before_parsing() {
     let doc = format!(r#"<definitions xmlns="http://schemas.xmlsoap.org/wsdl/">{kids}</definitions>"#);
     refused(&doc, "pairs", 1 << 24);
 }
+
+/// Round 7 of #586 (sol F3): a reserved-shape name decoded from a namespace
+/// URI that the unresolved-element fallback copies into the envelope is
+/// refused.
+#[test]
+fn a_reserved_name_in_a_namespace_uri_is_refused() {
+    let digits = ["0123", "4567", "89ab", "cdef"].concat();
+    let part = format!(r#"<part name="body" element="ex:Missing" xmlns:ex="urn:{{{{&#x61;uth_{digits}_password}}}}"/>"#);
+    let doc = WSDL_TEMPLATE.replace("{schema}", "").replace("{parts}", &part);
+    match import(doc.as_bytes(), &opts()) {
+        Err(e) => assert!(e.to_string().contains("reserves"), "{e}"),
+        Ok(_) => panic!("a reserved name in a namespace URI was accepted"),
+    }
+}

@@ -216,11 +216,6 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
     }
     b.workspace.name = "cURL import".into();
     b.workspace.auth = AuthConfig::None;
-    // A reserved-shape name hidden by shell quoting is refused by the word
-    // it makes (#584).
-    if words.iter().any(|w| crate::common::reserved_text(&w.text) || w.vars.iter().any(|v| crate::common::reserved_text(v))) {
-        return Err(crate::common::reserved_name_error(Dialect::Curl));
-    }
     for w in &words {
         // References written with shell quoting (`'{{a'"b}}"`) are reserved
         // by the word they make.

@@ -96,10 +96,11 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     after the first `:`, or the whole userinfo when it has no password), a
     secret field.
   - A name of the shape placeholders take (below) that the source uses
-    itself is refused, however it is spelled: as written, in a JSON or YAML
-    escape (`\u007b\u007bname\u007d\u007d`), shell-quoted,
-    percent-encoded in the name (`{{url%5F…}}`), or as a path parameter in
-    its raw or its sanitized spelling.
+    itself is refused wherever it ends up in the import, however it was
+    spelled: as written, in a JSON or YAML escape
+    (`\u007b\u007bname\u007d\u007d`), shell-quoted, percent-encoded in
+    the name (`{{url%5F…}}`), as a path parameter in its raw or its
+    sanitized spelling, or assembled from several source fragments.
   - A request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a
     Postman or Insomnia auth helper) or with auth explicitly off keeps
     that, and the userinfo is dropped (`url_credentials_dropped`).
@@ -142,17 +143,29 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     shape itself, in a reference or as a variable, is refused
     (`ImportError::Invalid`: rename it; see above for the spellings
     covered), so a source can never point a request at a value filled for
-    a placeholder. The check runs on the source, before any importer reads
-    it: every object key and string value of a JSON or YAML source, every
-    word of a cURL command once unquoted, and every text and attribute of a
-    WSDL once decoded. Each is checked as a whole and piece by piece
-    between delimiters, sanitized as a derived name would be, and
-    percent-decoded too. That covers a reference, a key the import derives
-    a name from (an OpenAPI security scheme, a server or path variable),
-    and a `:path` parameter. So every reserved-shape name in an import's
-    output is one the import made. No importer reads Anvil's own export
-    format (bundles are restored by `anvil-portability`, without this
-    check), so no source legitimately carries such names.
+    a placeholder. The check is closed by construction. While importing,
+    every placeholder is written as a sentinel, `anvil<nonce>n<index>e`:
+    a plain identifier with 128 random bits drawn per import, which the
+    source cannot write. Copies and clones of a sentinel are fine, and one
+    left in a discarded alternative never reaches the output. Then one
+    pass over every imported object (workspace, folders, requests,
+    environments, report) does three things:
+    1. It refuses any string or object key that is a reserved-shape name,
+       or holds one as a `{{…}}` reference, also percent-decoded. However
+       the import derived it (decoded from an embedded body, concatenated
+       from fragments, copied from an XML namespace), such a name can only
+       be the source's.
+    2. It refuses sentinel-shaped text with another nonce or an unknown
+       index.
+    3. It replaces each sentinel with its name and recomputes the
+       requests' generated hashes.
+
+    Text that only mentions the shape is not refused when it reaches the
+    output as something other than a name: a description holding
+    `secret-<16 hex>`, or a reference kept percent-encoded in a URL. No
+    importer reads Anvil's own export format (bundles are restored by
+    `anvil-portability`, without this check), so no legitimate source
+    carries such names.
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia

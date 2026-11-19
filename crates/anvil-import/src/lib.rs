@@ -328,18 +328,6 @@ pub fn import(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult, Import
             ImportError::UnsupportedDialect { dialect: detected.dialect, message }
         });
     }
-    // A source may never name anything the way the import names the
-    // placeholders bound to literals: it could point a request at a value
-    // filled for one of those (#584). Checked on the source, before any
-    // importer reads it (cURL words and XML text are checked by their
-    // importers once unquoted or decoded).
-    let source_reserved = match &parsed {
-        Parsed::Structured(v) => common::source_uses_reserved_name(v),
-        _ => common::reserved_text(&String::from_utf8_lossy(bytes)),
-    };
-    if source_reserved {
-        return Err(common::reserved_name_error(detected.dialect));
-    }
     let sha = util::sha256_hex(bytes);
     let mut b = builder::Builder::new(opts, &sha);
     // Placeholders never take a name the source references.
@@ -359,5 +347,13 @@ pub fn import(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult, Import
             return Err(ImportError::Unrecognized { message: format!("{} input could not be dispatched", detected.dialect) });
         }
     }
-    Ok(b.finish(&detected, sha, bytes.len()))
+    let nonce = std::mem::take(&mut b.sentinel_nonce);
+    let names = std::mem::take(&mut b.placeholder_names);
+    let mut result = b.finish(&detected, sha, bytes.len());
+    // A source may never name anything the way the import names the
+    // placeholders bound to literals: it could point a request at a value
+    // filled for one of those (#584). The output still holds sentinels, so
+    // any such name in it is the source's.
+    common::finalize(&mut result, &nonce, &names)?;
+    Ok(result)
 }
