@@ -388,7 +388,7 @@ fn userinfo_placeholders_never_take_a_collection_variable_name() {
     let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
     match &r.requests[0].spec.auth {
         AuthConfig::Basic { username, password } => {
-            assert!(is_auth_ref(username, "username"), "{username}");
+            assert!(is_auth_ref(username, "username"), "the user name is not an auth placeholder");
             assert!(is_auth_ref(template_of(password), "password"));
         }
         _ => panic!("expected Basic auth"),
@@ -413,7 +413,7 @@ fn userinfo_placeholders_never_take_a_path_variable_name() {
     assert_eq!(r.requests[1].spec.url, "https://api.example.test/accounts/{{password}}");
     match &r.requests[0].spec.auth {
         AuthConfig::Basic { username, password } => {
-            assert!(is_auth_ref(username, "username"), "{username}");
+            assert!(is_auth_ref(username, "username"), "the user name is not an auth placeholder");
             assert!(is_auth_ref(template_of(password), "password"));
         }
         _ => panic!("expected Basic auth"),

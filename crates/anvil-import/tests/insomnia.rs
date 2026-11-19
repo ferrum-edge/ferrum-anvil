@@ -580,7 +580,7 @@ fn userinfo_placeholders_never_take_a_path_parameter_name() {
         assert_eq!(s.url, "https://api.example.test/items/{{username}}/{{password}}");
         match &s.auth {
             AuthConfig::Basic { username, password } => {
-                assert!(is_auth_ref(username, "username"), "{username}");
+                assert!(is_auth_ref(username, "username"), "the user name is not an auth placeholder");
                 assert!(is_auth_ref(&template_text(password), "password"));
             }
             _ => panic!("expected Basic auth"),

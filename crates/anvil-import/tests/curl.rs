@@ -484,7 +484,7 @@ fn literal_userinfo_is_replaced_by_placeholders() {
         let r = import(b"curl 'https://%7B%7Bu%7D%7D:%7B%7Bid%7D%7D@example.test/'", &options).unwrap();
         match &r.requests[0].spec.auth {
             AuthConfig::Basic { username, password } => {
-                assert!(is_auth_ref(username, "username"), "{username}");
+                assert!(is_auth_ref(username, "username"), "the user name is not an auth placeholder");
                 assert!(!matches!(password, SensitiveValue::Template { value } if value == "{{id}}"), "escaped braces became a reference");
             }
             _ => panic!("expected Basic auth"),
@@ -586,7 +586,7 @@ fn a_token_in_the_userinfo_is_a_credential() {
     let r = curl("curl -H 'X-User: {{username}}' -H 'X-Pass: {{password}}' 'https://tok-SENSITIVE-cu8:pw@api.example.test/v1'");
     match &r.requests[0].spec.auth {
         AuthConfig::Basic { username, password } => {
-            assert!(is_auth_ref(username, "username"), "{username}");
+            assert!(is_auth_ref(username, "username"), "the user name is not an auth placeholder");
             assert!(is_auth_ref(template_of(password), "password"));
         }
         _ => panic!("expected Basic auth"),
