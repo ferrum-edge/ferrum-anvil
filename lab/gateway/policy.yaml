@@ -428,6 +428,12 @@ plugin_configs:
           pattern: ANVIL-LAB-WAF-MARKER
           action: enforce
 
+  # Only gw013-opa-timeout exercises the OPA timeout path, so it alone keeps the
+  # tight 500 ms timeout_ms. The other OPA configs use 5000 ms so a scheduler stall
+  # in the in-process OPA mock (Lab run 44311523667: ~1.1 s on macos-15) cannot turn
+  # an allow/deny decision (or gw013-opa-refused's recovery request once the mock
+  # starts) into a spurious fail-closed 503; connection refusal itself still fails
+  # closed immediately with 503.
   - id: gw012-opa-allow
     plugin_name: opa
     scope: proxy
@@ -436,7 +442,7 @@ plugin_configs:
     config:
       opa_host: "http://127.0.0.1:19202"
       policy_path: anvil/lab/allow
-      timeout_ms: 500
+      timeout_ms: 5000
 
   - id: gw012-opa-deny
     plugin_name: opa
@@ -446,7 +452,7 @@ plugin_configs:
     config:
       opa_host: "http://127.0.0.1:19202"
       policy_path: anvil/lab/deny
-      timeout_ms: 500
+      timeout_ms: 5000
 
   - id: gw013-opa-timeout
     plugin_name: opa
@@ -466,7 +472,7 @@ plugin_configs:
     config:
       opa_host: "http://127.0.0.1:19209"
       policy_path: anvil/lab/allow
-      timeout_ms: 500
+      timeout_ms: 5000
 
   - id: gw014-ip
     plugin_name: ip_restriction
