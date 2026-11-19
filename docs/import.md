@@ -142,12 +142,17 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     shape itself, in a reference or as a variable, is refused
     (`ImportError::Invalid`: rename it; see above for the spellings
     covered), so a source can never point a request at a value filled for
-    a placeholder. The check runs on what the import produced, for every
-    importer: a name the import made appears only as a `{{name}}`
-    reference, as often as the import wrote it. Any other occurrence is
-    the source's, and refused. That includes a name it designates (an
-    OpenAPI security scheme's key, a path or server variable) that happens
-    to equal a placeholder of the same import.
+    a placeholder. The check runs on the source, before any importer reads
+    it: every object key and string value of a JSON or YAML source, every
+    word of a cURL command once unquoted, and every text and attribute of a
+    WSDL once decoded. Each is checked as a whole and piece by piece
+    between delimiters, sanitized as a derived name would be, and
+    percent-decoded too. That covers a reference, a key the import derives
+    a name from (an OpenAPI security scheme, a server or path variable),
+    and a `:path` parameter. So every reserved-shape name in an import's
+    output is one the import made. No importer reads Anvil's own export
+    format (bundles are restored by `anvil-portability`, without this
+    check), so no source legitimately carries such names.
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia

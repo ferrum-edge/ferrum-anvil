@@ -682,6 +682,20 @@ fn credential_named_path_parameters_are_redacted() {
     }
 }
 
+/// Round 6 of #586 (sol F2): a credential path parameter used twice gets
+/// one placeholder, written twice, and imports cleanly (v4 and v5).
+#[test]
+fn a_repeated_credential_path_parameter_imports() {
+    let request = serde_json::json!({ "url": "https://api.example.test/:api_key/items/:api_key", "pathParameters": [
+        { "name": "api_key", "value": "tok-SENSITIVE-in9" },
+    ]});
+    for r in both(request, serde_json::json!({}), &opts()) {
+        let url = &r.requests[0].spec.url;
+        let parts: Vec<&str> = url.strip_prefix("https://api.example.test/").unwrap_or_default().split("/items/").collect();
+        assert!(parts.len() == 2 && is_secret_ref(parts[0]) && parts[0] == parts[1], "{url}");
+    }
+}
+
 /// Review of #573, sol F4: environment placeholders never take the name of
 /// a variable of the environment (here the 48-byte name of the array
 /// itself) or of a placeholder made for another array whose path reads the

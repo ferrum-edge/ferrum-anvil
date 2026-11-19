@@ -1100,6 +1100,16 @@ fn a_source_name_in_the_reserved_shape_is_refused() {
                 .to_string(),
             ),
             ("Insomnia", insomnia(&format!("{{{{ _.{name} }}}}"))),
+            (
+                "object key",
+                postman_items(vec![serde_json::json!({ "name": "r", "protocolProfileBehavior": { (name.as_str()): true },
+                    "request": { "method": "GET", "url": "https://api.example.test/v1" } })]),
+            ),
+            (
+                "percent-encoded URL",
+                postman_items(vec![serde_json::json!({ "name": "r", "request": { "method": "GET",
+                    "url": format!("https://api.example.test/%7B%7B{}%7D%7D", name.replacen('_', "%5F", 1)) } })]),
+            ),
             ("cURL", format!("curl -H 'X-Id: {{{{{name}}}}}' https://api.example.test/v1")),
         ];
         for (label, source) in cases {
@@ -1232,24 +1242,33 @@ fn quarantined_urls_stay_with_their_requests() {
 /// value filled for that placeholder.
 #[test]
 fn a_designated_name_equal_to_a_made_placeholder_is_refused() {
-    let doc = |evil: Option<&str>| {
+    let doc = |evil: Option<&str>, alternatives: bool| {
         let mut schemes = serde_json::json!({ "cc": { "type": "oauth2", "flows": { "clientCredentials": {
-            "tokenUrl": "https://{{tenant}}.issuer.example.test/token?to=a@b", "scopes": {} } } } });
+            "tokenUrl": "https://{{tenant}}.issuer.example.test/token?to=a@b", "scopes": {} } } },
+            "mtls": { "type": "mutualTLS" } });
         let mut paths =
             serde_json::json!({ "/a": { "get": { "security": [{ "cc": [] }], "responses": { "200": { "description": "ok" } } } } });
         if let Some(name) = evil {
             schemes[name] = serde_json::json!({ "type": "http", "scheme": "bearer" });
-            paths["/evil"] = serde_json::json!({ "get": { "security": [{ name: [] }], "servers": [{ "url": "https://evil.example.test" }],
+            // Round 6 (sol F1): an incomplete first alternative whose
+            // allocation is discarded, then the scheme named N.
+            let security =
+                if alternatives { serde_json::json!([{ "cc": [], "mtls": [] }, { name: [] }]) } else { serde_json::json!([{ name: [] }]) };
+            paths["/evil"] = serde_json::json!({ "get": { "security": security, "servers": [{ "url": "https://evil.example.test" }],
                 "responses": { "200": { "description": "ok" } } } });
         }
         serde_json::json!({ "openapi": "3.0.3", "info": { "title": "t", "version": "1" }, "servers": [{ "url": "https://api.example.test" }],
             "components": { "securitySchemes": schemes }, "paths": paths })
         .to_string()
     };
-    let first = import(doc(None).as_bytes(), &opts()).unwrap();
+    let first = import(doc(None, false).as_bytes(), &opts()).unwrap();
     let name = first.credential_names.iter().find(|(_, c)| c.kind == "url").map(|(n, _)| n.clone()).expect("the token URL is quarantined");
-    let evil = doc(Some(&name));
-    for (label, o) in [("import", opts()), ("reimport", ImportOptions { id_namespace: Some(first.source.id_namespace), ..opts() })] {
+    for (label, o, alternatives) in [
+        ("import", opts(), false),
+        ("reimport", ImportOptions { id_namespace: Some(first.source.id_namespace), ..opts() }, false),
+        ("reimport, discarded alternative", ImportOptions { id_namespace: Some(first.source.id_namespace), ..opts() }, true),
+    ] {
+        let evil = doc(Some(&name), alternatives);
         match import(evil.as_bytes(), &o) {
             Err(e) => assert!(e.to_string().contains("reserves"), "{label}: {e}"),
             Ok(_) => panic!("{label}: a scheme named like the quarantine placeholder was accepted"),

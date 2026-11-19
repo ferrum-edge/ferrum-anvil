@@ -61,9 +61,6 @@ pub(crate) struct Builder<'o> {
     /// The name each literal got (by its full HMAC), so equal literals share
     /// one name.
     pub literal_names: HashMap<String, String>,
-    /// How many `{{name}}` references the import wrote for each name it made
-    /// ([`crate::common::uses_reserved_name`]).
-    pub placeholders_written: HashMap<String, usize>,
 }
 
 impl<'o> Builder<'o> {
@@ -110,7 +107,6 @@ impl<'o> Builder<'o> {
             credential_names: Default::default(),
             credential_key,
             literal_names: HashMap::new(),
-            placeholders_written: HashMap::new(),
         }
     }
 

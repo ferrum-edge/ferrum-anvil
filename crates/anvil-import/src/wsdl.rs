@@ -145,6 +145,14 @@ pub(crate) fn import(text: &str, b: &mut Builder) -> Result<(), ImportError> {
             }
         }
     })?;
+    // A reserved-shape name hidden by an XML character reference is refused
+    // by its decoded text (#584).
+    if doc
+        .descendants()
+        .any(|n| n.text().is_some_and(crate::common::reserved_text) || n.attributes().any(|a| crate::common::reserved_text(a.value())))
+    {
+        return Err(crate::common::reserved_name_error(crate::Dialect::Wsdl11));
+    }
     if doc.descendants().any(|n| n.is_element() && n.namespaces().len() > MAX_IN_SCOPE_NAMESPACES) {
         return Err(ImportError::LimitExceeded { what: "XML namespaces in scope of one element".into(), limit: MAX_IN_SCOPE_NAMESPACES });
     }

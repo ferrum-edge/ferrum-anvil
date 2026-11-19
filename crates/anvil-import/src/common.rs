@@ -26,9 +26,8 @@ use serde_json::Value;
 pub fn literal_name(b: &mut Builder, kind: &'static str, field: &str, suffix: Option<&'static str>, literal: &str) -> String {
     let field = field.to_ascii_lowercase();
     let mac = hex::encode(crate::util::hmac_sha256(&b.credential_key, &hmac_input(&[kind, &field, literal])));
-    if let Some(name) = b.literal_names.get(&mac).cloned() {
-        *b.placeholders_written.entry(name.clone()).or_default() += 1;
-        return name;
+    if let Some(name) = b.literal_names.get(&mac) {
+        return name.clone();
     }
     let base = match suffix {
         Some(f) => format!("{kind}_{}_{f}", &mac[..16]),
@@ -39,7 +38,6 @@ pub fn literal_name(b: &mut Builder, kind: &'static str, field: &str, suffix: Op
     let name = b.env_names.name_verbatim(&base);
     b.literal_names.insert(mac, name.clone());
     b.credential_names.insert(name.clone(), crate::CredentialName { kind: kind.to_string(), field });
-    *b.placeholders_written.entry(name.clone()).or_default() += 1;
     name
 }
 
@@ -57,8 +55,9 @@ pub fn hmac_input(parts: &[&str]) -> Vec<u8> {
 
 /// Whether `name` has the shape of a placeholder [`literal_name`] makes
 /// (`auth_<16 hex>…`, `secret_<16 hex>…`, `url_<16 hex>…`). A source that
-/// uses such a name itself is refused ([`crate::import`]), so a source can
-/// never point a request at a variable filled for one of these.
+/// uses such a name itself is refused before any importer runs
+/// ([`reserved_text`]), so a source can never point a request at a variable
+/// filled for one of these.
 pub fn generated_shape(name: &str) -> bool {
     let Some((kind, rest)) = name.split_once('_') else { return false };
     // Bytes, not a string split: byte 16 may fall inside a character.
@@ -69,73 +68,63 @@ pub fn generated_shape(name: &str) -> bool {
         && rest.get(16).is_none_or(|&c| c == b'_')
 }
 
-/// Whether the imported objects use a name of [`generated_shape`] anywhere
-/// the import did not write it itself (#584). A name the import made
-/// ([`literal_name`]) is written only as a `{{name}}` reference, once per
-/// placeholder (`written`). So a name of that shape in any spelling is
-/// refused when the import did not make it, when it appears whole or
-/// percent-encoded, or when it appears in more `{{…}}` references than the
-/// import wrote. This last case covers a source that designates such a
-/// name (an OpenAPI security scheme's key, a path parameter, a variable)
-/// equal to one the import also made. One rule for every importer, applied
-/// to its output. Every string is checked whole and for each `{{…}}` it
-/// holds. The required variables are checked by name. Linear in the
-/// objects.
-pub fn uses_reserved_name(result: &crate::ImportResult, written: &std::collections::HashMap<String, usize>) -> bool {
-    use std::collections::HashMap;
-    let decoded = |name: &str| -> Option<String> {
-        if !name.contains('%') {
-            return None;
-        }
-        percent_encoding::percent_decode_str(name).decode_utf8().ok().map(|d| d.into_owned())
+/// Whether source text `s` names something of [`generated_shape`], in any
+/// spelling an importer could turn into a variable name (#584):
+///
+/// * the whole text, sanitized as a derived name is ([`sanitize_var`]): a
+///   key such as an OpenAPI security scheme or a server variable;
+/// * every piece between ASCII delimiters (anything but letters, digits,
+///   `_`, `.`, `~` and `-`), sanitized: a `{{reference}}` (Insomnia's
+///   `{{ _.name }}` too), a `:path` parameter in its raw spelling, an
+///   OpenAPI `{template}`;
+/// * the same again, percent-decoded.
+///
+/// Linear in `s`.
+pub fn reserved_text(s: &str) -> bool {
+    let check = |t: &str| -> bool {
+        let whole = t.trim();
+        (whole.len() >= 20 && generated_shape(&sanitize_var(whole)))
+            || t.split(|c: char| c.is_ascii() && !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '~' | '-')))
+                .any(|piece| piece.len() >= 20 && generated_shape(&sanitize_var(piece)))
     };
-    // Any spelling of a reserved-shape name, as written or percent-decoded.
-    let shaped = |name: &str| generated_shape(name) || decoded(name).is_some_and(|d| generated_shape(&d));
-    fn walk(v: &Value, check: &mut dyn FnMut(&str) -> bool) -> bool {
+    check(s) || (s.contains('%') && check(percent_encoding::percent_decode_str(s).decode_utf8_lossy().as_ref()))
+}
+
+/// Whether a structured source (JSON or YAML) holds [`reserved_text`] in any
+/// object key or string value. Run before any importer reads it, so no
+/// source-written name of the reserved shape reaches an import, and every
+/// such name in its output is one the import made. One pass, without
+/// recursion.
+pub fn source_uses_reserved_name(root: &Value) -> bool {
+    let mut stack = vec![root];
+    while let Some(v) = stack.pop() {
         match v {
-            Value::String(s) => check(s),
-            Value::Array(items) => items.iter().any(|x| walk(x, check)),
-            Value::Object(m) => m.iter().any(|(k, x)| check(k) || walk(x, check)),
-            _ => false,
+            Value::String(s) if reserved_text(s) => return true,
+            Value::Array(items) => stack.extend(items),
+            Value::Object(m) => {
+                for (k, x) in m {
+                    if reserved_text(k) {
+                        return true;
+                    }
+                    stack.push(x);
+                }
+            }
+            _ => {}
         }
     }
-    let mut seen: HashMap<&str, usize> = HashMap::new();
-    let mut check = |s: &str| -> bool {
-        if shaped(s.trim()) {
-            return true;
-        }
-        let mut rest = s;
-        while let Some(open) = rest.find("{{") {
-            let after = &rest[open + 2..];
-            let Some(close) = after.find("}}") else { break };
-            let inner = after[..close].trim();
-            let name = inner.strip_prefix("_.").unwrap_or(inner);
-            rest = &after[close + 2..];
-            if !shaped(name) {
-                continue;
-            }
-            // Only the exact name, as the import writes it.
-            let Some((made, _)) = result.credential_names.get_key_value(name) else { return true };
-            let count = seen.entry(made.as_str()).or_default();
-            *count += 1;
-            if *count > written.get(name).copied().unwrap_or(0) {
-                return true;
-            }
-        }
-        false
-    };
-    if result.report.required_variables.iter().any(|v| shaped(&v.name) && !result.credential_names.contains_key(&v.name)) {
-        return true;
+    false
+}
+
+/// The refusal for a source that uses a reserved-shape name
+/// ([`reserved_text`]).
+pub fn reserved_name_error(dialect: crate::Dialect) -> crate::ImportError {
+    crate::ImportError::Invalid {
+        dialect,
+        pointer: "/".into(),
+        message: "the source uses a variable name in the shape Anvil reserves for credential placeholders \
+                  (`auth_`, `secret_` or `url_` followed by 16 hex digits): rename it"
+            .into(),
     }
-    let to_json = |v: serde_json::Result<Value>| v.unwrap_or(Value::Null);
-    [
-        to_json(serde_json::to_value(&result.workspace)),
-        to_json(serde_json::to_value(&result.folders)),
-        to_json(serde_json::to_value(&result.requests)),
-        to_json(serde_json::to_value(&result.environments)),
-    ]
-    .iter()
-    .any(|v| walk(v, &mut check))
 }
 
 /// The policy for a credential `value` of field `field`:
