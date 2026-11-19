@@ -23,7 +23,7 @@ fn new_app(root: &std::path::Path) -> App {
 }
 
 /// What a History row shows: id, start, method, url, summary, status, request.
-type Listed = (String, i64, String, String, String, Option<u16>, Option<String>, chrono::DateTime<chrono::Utc>);
+type Listed = (String, i64, String, String, String, Option<u16>, Option<String>, anvil_domain::Timestamp);
 
 /// The listing as the desktop built it before: each entry's full record.
 fn read_each_record(app: &App, ws: &anvil_domain::Id) -> Vec<Listed> {
@@ -124,7 +124,7 @@ async fn a_record_only_the_listed_fields_decode_from_is_listed_but_does_not_open
     let id = anvil_domain::Id::new();
     partial["id"] = serde_json::json!(id);
     assert!(partial.as_object_mut().unwrap().remove("finished_at").is_some());
-    app.store.add_history(&id, Some(&ws), None, sent.record.started_at.timestamp_millis() + 1, &partial, None).unwrap();
+    app.store.add_history(&id, Some(&ws), None, sent.record.started_at.unix_millis() + 1, &partial, None).unwrap();
 
     assert!(matches!(app.store.get_history::<ExecutionRecord>(&id.to_string()), Err(StoreError::Serde(_))), "it does not open");
     let listed = listing(&app, &ws);

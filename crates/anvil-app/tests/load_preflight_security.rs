@@ -48,8 +48,8 @@ fn plan(app: &App, workspace: Id, spec: RequestSpec) -> LoadPlan {
         abort: None,
         seed: 1,
         trusted: true,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     })
     .unwrap()
 }
@@ -83,8 +83,8 @@ fn proxy(app: &App, workspace: Id, kind: ProxyKind, address: &str, no_proxy: &st
         no_proxy: no_proxy.into(),
         tls_profile_id: None,
         hbone: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     })
     .unwrap()
 }
@@ -687,8 +687,8 @@ async fn app_worker_round_trip_preserves_eligible_vault_issuers_and_credential_v
                 min_version: anvil_domain::tls::TlsMinVersion::Tls12,
                 server_name_override: None,
                 server_spiffe: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
+                created_at: anvil_domain::Timestamp::now(),
+                updated_at: anvil_domain::Timestamp::now(),
             })
             .unwrap();
         for variable_credential in [false, true] {
@@ -1168,8 +1168,8 @@ async fn masque_locality_checks_the_template_and_records_the_actual_connect_udp_
             min_version: Default::default(),
             server_name_override: None,
             server_spiffe: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         })
         .unwrap();
     let environment = app
@@ -1352,8 +1352,8 @@ async fn hbone_receives_unpinned_target_and_oauth_names_despite_client_overrides
             min_version: Default::default(),
             server_name_override: None,
             server_spiffe: Some(ServerSpiffeIdentity { expected_server_spiffe_id: Some(ZTUNNEL_SPIFFE_ID.into()), trust_domain: None }),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         })
         .unwrap();
     let mut profile = proxy(&app, ws, ProxyKind::Hbone, &endpoint.address(), "127.0.0.1");

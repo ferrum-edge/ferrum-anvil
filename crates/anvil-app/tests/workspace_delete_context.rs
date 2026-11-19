@@ -57,8 +57,8 @@ async fn a_context_built_before_its_workspace_delete_keeps_nothing_for_the_resto
             min_version: TlsMinVersion::Tls12,
             server_name_override: None,
             server_spiffe: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         })
         .unwrap();
     ws.settings.tls_profile_id = Some(trust.id);

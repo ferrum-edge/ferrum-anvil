@@ -552,7 +552,7 @@ async fn an_imported_collection_does_not_use_a_proxys_client_identity_bound_to_n
     // The destination selects no TLS profile of its own, but an HTTPS proxy
     // whose own TLS profile presents a client certificate to any host.
     let tls = unbound_client_certificate(&app, &dest.meta.id, "proxy cert");
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     let proxy = app
         .save_proxy_profile(ProxyProfile {
             id: Id::new(),
@@ -613,7 +613,7 @@ fn unbound_client_certificate(app: &App, ws: &Id, name: &str) -> TlsProfile {
         cert_chain_pem: "-----BEGIN CERTIFICATE-----".into(),
         private_key_pem: SensitiveValue::Template { value: "destination-key".into() },
     };
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     app.save_tls_profile(TlsProfile {
         id: Id::new(),
         workspace_id: *ws,
@@ -633,7 +633,7 @@ fn unbound_client_certificate(app: &App, ws: &Id, name: &str) -> TlsProfile {
 }
 
 fn load_plan(ws: Id, request: Id) -> LoadPlan {
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     LoadPlan {
         id: Id::new(),
         workspace_id: ws,
@@ -1030,7 +1030,7 @@ fn attached_days_ago(app: &App, sha256: &str, days: i64) {
         .filter_map(|id| app.store.get::<serde_json::Value>(kind::IMPORT_SOURCE, &id).unwrap().map(|v| (id, v)))
         .find(|(_, v)| v["attachment"] == sha256)
         .expect("its index entry");
-    entry["attached_at"] = (chrono::Utc::now() - chrono::Duration::days(days)).timestamp_millis().into();
+    entry["attached_at"] = (anvil_domain::Timestamp::now() - anvil_domain::TimeDelta::days(days)).unix_millis().into();
     app.store.put(kind::IMPORT_SOURCE, &id, None, None, 0.0, &entry).unwrap();
 }
 

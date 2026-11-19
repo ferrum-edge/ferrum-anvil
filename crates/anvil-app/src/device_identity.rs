@@ -23,13 +23,13 @@
 
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::tls::{ClientIdentity, TlsProfile};
 use anvil_domain::workload::JwtSvidSource;
 use anvil_domain::workspace::Workspace;
 use anvil_engine::context::ExecutionContext;
 use anvil_storage::{StoreTx, kind};
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// The record note while a sealed workspace's diagnostic lookups are paused.
@@ -39,7 +39,7 @@ pub const LOOKUP_PAUSED_NOTE: &str = "diagnostic lookup paused: this workspace c
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceIdentitySeal {
     pub workspace_id: Id,
-    pub sealed_at: DateTime<Utc>,
+    pub sealed_at: Timestamp,
 }
 
 impl App {
@@ -60,7 +60,7 @@ impl App {
 /// Seal every workspace in `workspaces`, inside the import's or restore's
 /// transaction.
 pub(crate) fn seal_in<'a>(s: &StoreTx<'_>, workspaces: impl IntoIterator<Item = &'a Id>) -> anvil_storage::store::Result<()> {
-    let sealed_at = Utc::now();
+    let sealed_at = Timestamp::now();
     for ws in workspaces {
         s.put(kind::DEVICE_IDENTITY_SEAL, ws, Some(ws), None, 0.0, &DeviceIdentitySeal { workspace_id: *ws, sealed_at })?;
     }

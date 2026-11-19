@@ -20,7 +20,7 @@ pub struct ProfileSummary {
     pub display_name: String,
     pub protection: anvil_domain::workspace::ProtectionMode,
     pub dir: PathBuf,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: anvil_domain::Timestamp,
     /// The OS credential store entry a profile converted to a passphrase
     /// left behind because the store refused to delete it. It no longer
     /// unlocks the profile; its removal is retried at each unlock until it is
@@ -176,14 +176,14 @@ impl ProfileManager {
     /// [`ProfileManager::unlock_with_fresh_login`]. The recovery key always
     /// works without a provider (offline/recovery path).
     pub fn unlock(dir: &Path, how: Unlock<'_>) -> Result<(ProfileHeader, Key)> {
-        Self::unlock_checked(dir, how, None, chrono::Utc::now())
+        Self::unlock_checked(dir, how, None, anvil_domain::Timestamp::now())
     }
 
     /// Unlock with the local secret *and* a provider sign-in that just
     /// happened. The proof never unlocks anything by itself: `how` must
     /// still unwrap the data key.
     pub fn unlock_with_fresh_login(dir: &Path, how: Unlock<'_>, proof: VerifiedIdentity) -> Result<(ProfileHeader, Key)> {
-        Self::unlock_with_fresh_login_at(dir, how, proof, chrono::Utc::now())
+        Self::unlock_with_fresh_login_at(dir, how, proof, anvil_domain::Timestamp::now())
     }
 
     /// [`ProfileManager::unlock_with_fresh_login`] with an explicit clock (tests).
@@ -191,7 +191,7 @@ impl ProfileManager {
         dir: &Path,
         how: Unlock<'_>,
         proof: VerifiedIdentity,
-        now: chrono::DateTime<chrono::Utc>,
+        now: anvil_domain::Timestamp,
     ) -> Result<(ProfileHeader, Key)> {
         Self::unlock_checked(dir, how, Some(&proof), now)
     }
@@ -200,7 +200,7 @@ impl ProfileManager {
         dir: &Path,
         how: Unlock<'_>,
         proof: Option<&VerifiedIdentity>,
-        now: chrono::DateTime<chrono::Utc>,
+        now: anvil_domain::Timestamp,
     ) -> Result<(ProfileHeader, Key)> {
         Self::unlock_checked_policy(dir, how, proof, now, false)
     }
@@ -209,7 +209,7 @@ impl ProfileManager {
         dir: &Path,
         how: Unlock<'_>,
         proof: Option<&VerifiedIdentity>,
-        now: chrono::DateTime<chrono::Utc>,
+        now: anvil_domain::Timestamp,
         enroll_missing: bool,
     ) -> Result<(ProfileHeader, Key)> {
         let mut h = vault::read_header(dir)?;
@@ -297,7 +297,7 @@ impl ProfileManager {
         require_fresh_login: bool,
         rotation: PolicyRotation<'_>,
     ) -> Result<LinkedIdentity> {
-        Self::link_identity_at(dir, how, proof, require_fresh_login, chrono::Utc::now(), rotation)
+        Self::link_identity_at(dir, how, proof, require_fresh_login, anvil_domain::Timestamp::now(), rotation)
     }
 
     pub fn link_identity_at(
@@ -305,7 +305,7 @@ impl ProfileManager {
         how: Unlock<'_>,
         proof: VerifiedIdentity,
         require_fresh_login: bool,
-        now: chrono::DateTime<chrono::Utc>,
+        now: anvil_domain::Timestamp,
         rotation: PolicyRotation<'_>,
     ) -> Result<LinkedIdentity> {
         identity::check_fresh(&proof, now)?;
@@ -345,7 +345,7 @@ impl ProfileManager {
         if current.is_none() && !recovery {
             return Err(IdentityPolicyError::NotLinked.into());
         }
-        let (h, key) = Self::unlock_checked_policy(dir, how, proof.as_ref(), chrono::Utc::now(), true)?;
+        let (h, key) = Self::unlock_checked_policy(dir, how, proof.as_ref(), anvil_domain::Timestamp::now(), true)?;
         Self::rotate_policy(dir, h, key, rotation, false)
     }
 
@@ -366,7 +366,7 @@ impl ProfileManager {
         let Some(binding) = binding else {
             return Self::enroll_unlinked_policy(dir, how, rotation);
         };
-        let (h, key) = Self::unlock_checked_policy(dir, how, proof, chrono::Utc::now(), true)?;
+        let (h, key) = Self::unlock_checked_policy(dir, how, proof, anvil_domain::Timestamp::now(), true)?;
         if has_current_records(&h) {
             return Err(AppError::Invalid("this profile is already enrolled".into()));
         }
@@ -390,7 +390,7 @@ impl ProfileManager {
         if has_current_records(&h) || identity::read_binding(dir)?.is_some() {
             return Err(AppError::Invalid("this profile already has a policy; authorize an unlink instead".into()));
         }
-        let (h, key) = Self::unlock_checked_policy(dir, how, None, chrono::Utc::now(), true)?;
+        let (h, key) = Self::unlock_checked_policy(dir, how, None, anvil_domain::Timestamp::now(), true)?;
         if has_current_records(&h) || identity::read_binding(dir)?.is_some() {
             return Err(AppError::Invalid("policy enrollment changed; authorize the current policy explicitly".into()));
         }
@@ -577,7 +577,7 @@ mod manifest_enrollment_tests {
                 subject: "test-subject".into(),
                 email: None,
                 require_fresh_login: true,
-                linked_at: chrono::Utc::now(),
+                linked_at: anvil_domain::Timestamp::now(),
             };
             let binding = identity::sealed_binding(&created.header, &created.dek, &linked).unwrap();
             std::fs::write(dir.path().join("identity.json"), serde_json::to_vec(&binding).unwrap()).unwrap();
@@ -633,7 +633,7 @@ mod manifest_enrollment_tests {
             subject: "test-subject".into(),
             email: None,
             require_fresh_login: true,
-            linked_at: chrono::Utc::now(),
+            linked_at: anvil_domain::Timestamp::now(),
         };
         let binding = identity::sealed_binding(&created.header, &created.dek, &linked).unwrap();
         std::fs::write(dir.path().join("identity.json"), serde_json::to_vec(&binding).unwrap()).unwrap();

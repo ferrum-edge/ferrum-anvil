@@ -62,8 +62,8 @@ async fn the_vault_lock_drops_every_session_ticket() {
             min_version: TlsMinVersion::Tls12,
             server_name_override: None,
             server_spiffe: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         })
         .unwrap();
     ws.settings.tls_profile_id = Some(tls.id);

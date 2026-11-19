@@ -24,7 +24,7 @@ fn new_app(root: &std::path::Path) -> App {
 }
 
 fn gateway(ws: Id, host: &str, port: Option<u16>) -> IntegrationProfile {
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     IntegrationProfile {
         id: Id::new(),
         workspace_id: ws,

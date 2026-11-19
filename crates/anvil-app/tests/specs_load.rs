@@ -141,8 +141,8 @@ fn plan(ws: Id, req: Id) -> LoadPlan {
         abort: None,
         seed: 1,
         trusted: true,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -530,8 +530,8 @@ fn load_preflight_applies_port_free_no_proxy_entries_to_a_per_run_port() {
                 no_proxy: no_proxy.into(),
                 tls_profile_id: None,
                 hbone: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
+                created_at: anvil_domain::Timestamp::now(),
+                updated_at: anvil_domain::Timestamp::now(),
             })
             .unwrap();
         let mut spec = RequestSpec::http("GET", "http://127.0.0.1:{{$randomInt 8000 9000}}/x");
@@ -792,8 +792,8 @@ fn load_preflight_warns_when_either_the_target_or_the_tunnel_proxy_is_remote() {
                 no_proxy: String::new(),
                 tls_profile_id: None,
                 hbone: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
+                created_at: anvil_domain::Timestamp::now(),
+                updated_at: anvil_domain::Timestamp::now(),
             })
             .unwrap();
         let mut s = udp("udp://127.0.0.1:9", None);
@@ -838,8 +838,8 @@ fn load_preflight_judges_every_proxy_profile_after_no_proxy() {
             no_proxy: no_proxy.into(),
             tls_profile_id: None,
             hbone: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         })
         .unwrap()
     };

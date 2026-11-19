@@ -852,8 +852,8 @@ fn load_plan(ws: Id, request: Id) -> LoadPlan {
         abort: None,
         seed: 1,
         trusted: true,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -939,15 +939,15 @@ async fn an_imported_history_record_is_never_dated_after_its_import() {
     let (bytes, _) = bundle::write_redacting(&g, &opts, &[]).unwrap();
 
     let b = new_app(root.path(), "b");
-    let before = chrono::Utc::now();
+    let before = anvil_domain::Timestamp::now();
     b.import_approved(&bytes, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
-    let after = chrono::Utc::now();
+    let after = anvil_domain::Timestamp::now();
     let stored = b.store.list_history(Some(&ws.meta.id), None, 10).unwrap();
     assert_eq!(stored.len(), 1);
     let at = stored[0].started_at;
-    assert!(before.timestamp_millis() <= at && at <= after.timestamp_millis(), "stored at {at}");
+    assert!(before.unix_millis() <= at && at <= after.unix_millis(), "stored at {at}");
     let (record, _) = b.store.get_history::<anvil_domain::execution::ExecutionRecord>(&stored[0].id).unwrap().unwrap();
-    assert_eq!(record.started_at.timestamp_millis(), at);
+    assert_eq!(record.started_at.unix_millis(), at);
 }
 
 /// An export with history carries a workspace's newest records up to
@@ -976,8 +976,8 @@ async fn an_export_with_history_lists_the_records_it_leaves_out() {
             for i in 1..=EXPORT_HISTORY_LIMIT as i64 {
                 let mut r = rec.clone();
                 r.id = Id::new();
-                r.started_at = chrono::DateTime::from_timestamp_millis(rec.started_at.timestamp_millis() - i).unwrap();
-                let (ws_id, req_id, at) = (r.workspace_id, r.request_id, r.started_at.timestamp_millis());
+                r.started_at = anvil_domain::Timestamp::from_unix_millis(rec.started_at.unix_millis() - i).unwrap();
+                let (ws_id, req_id, at) = (r.workspace_id, r.request_id, r.started_at.unix_millis());
                 tx.add_history(&r.id, ws_id.as_ref(), req_id.as_ref(), at, &r, None)?;
             }
             Ok(())
@@ -1012,8 +1012,8 @@ fn a_share_safe_import_lists_a_missing_proxy_password() {
         no_proxy: String::new(),
         tls_profile_id: None,
         hbone: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     })
     .unwrap();
     let (bytes, _) = a.export_with_standards(Some(&ws.meta.id), ExportMode::ShareSafely, None, false, false).unwrap();

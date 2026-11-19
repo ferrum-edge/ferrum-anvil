@@ -31,7 +31,7 @@ fn a_stored_object_that_does_not_decode_is_named_in_the_log_file() {
     let db = rusqlite::Connection::open(app.dir.join(DB_FILE)).unwrap();
     let id = damaged.meta.id.to_string();
     db.execute("UPDATE objects SET payload=x'00' WHERE kind=?1 AND id=?2", rusqlite::params![kind::REQUEST, id]).unwrap();
-    let past = (chrono::Utc::now() - chrono::Duration::days(31)).timestamp_millis();
+    let past = (anvil_domain::Timestamp::now() - anvil_domain::TimeDelta::days(31)).unix_millis();
     drop(db);
     // Attached past the grace period.
     for entry in app.store.object_meta(kind::IMPORT_SOURCE).unwrap() {

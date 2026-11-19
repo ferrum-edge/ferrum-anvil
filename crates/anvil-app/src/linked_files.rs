@@ -32,11 +32,11 @@
 
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::request::AttachmentRef;
 use anvil_domain::workspace::{Dataset, RequestDefinition, RequestRevision};
 use anvil_storage::StoreTx;
 use anvil_storage::store::kind;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::Path;
@@ -73,7 +73,7 @@ pub struct LinkedFileBinding {
     pub referrer: LinkedFileReferrer,
     /// Canonical absolute path of the chosen file.
     pub path: String,
-    pub bound_at: DateTime<Utc>,
+    pub bound_at: Timestamp,
 }
 
 /// Whether a linked file a request or dataset names can be used on this device.
@@ -119,7 +119,7 @@ impl App {
         if let Some(b) = self.linked_file_bindings()?.into_iter().find(|b| b.referrer == referrer && b.path == path) {
             return Ok(b);
         }
-        let b = LinkedFileBinding { id: Id::new(), referrer, path, bound_at: Utc::now() };
+        let b = LinkedFileBinding { id: Id::new(), referrer, path, bound_at: Timestamp::now() };
         self.store.put(kind::LINKED_FILE, &b.id, None, None, 0.0, &b)?;
         Ok(b)
     }
@@ -143,7 +143,7 @@ impl App {
             return Err(not_named(old_path, referrer));
         }
         let path = crate::token_files::chosen_path(picked, "linked file")?;
-        let fresh = LinkedFileBinding { id: Id::new(), referrer, path: path.clone(), bound_at: Utc::now() };
+        let fresh = LinkedFileBinding { id: Id::new(), referrer, path: path.clone(), bound_at: Timestamp::now() };
         self.store.atomically(|s| {
             // The request or dataset may have changed since the check above.
             if let Err(e) = repoint_in(s, referrer, old_path, &path)? {
@@ -234,7 +234,7 @@ pub(crate) fn drop_bindings_in(s: &StoreTx<'_>, referrers: &std::collections::Ha
 /// files one) or a dataset's file. Refused if `referrer` is gone or no longer
 /// names `old`.
 fn repoint_in(s: &StoreTx<'_>, referrer: LinkedFileReferrer, old: &str, new: &str) -> anvil_storage::store::Result<Result<()>> {
-    let now = Utc::now();
+    let now = Timestamp::now();
     match referrer {
         LinkedFileReferrer::Request { id } => {
             let Some(mut r) = s.get::<RequestDefinition>(kind::REQUEST, &id)? else {
