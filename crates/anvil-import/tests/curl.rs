@@ -572,7 +572,7 @@ fn a_token_in_the_userinfo_is_a_credential() {
     // is quarantined, not imported and stored nowhere (review of #575).
     let r = curl(r#"curl 'https://{{ "tok-SENSITIVE-cu7:rest" }}@api.example.test/v1'"#);
     let s = &r.requests[0].spec;
-    assert_eq!(s.url, "{{url-needs-review}}");
+    assert!(is_quarantined(&s.url), "not quarantined");
     assert!(has(&r, "url_quarantined") && matches!(s.auth, AuthConfig::Inherit));
     assert!(r.workspace.variables.is_empty());
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("tok-SENSITIVE-cu7"));

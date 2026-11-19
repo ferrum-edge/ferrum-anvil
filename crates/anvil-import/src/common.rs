@@ -89,7 +89,19 @@ fn credential_placeholder(b: &mut Builder, value: &str, var: &str, pointer: &str
 ///   already taken gets the next free suffix (review of #586, sol F3).
 pub fn auth_secret_name(b: &mut Builder, identity: &str, field: &str) -> String {
     let digest = crate::util::sha256_hex(identity.as_bytes());
-    b.env_names.name_verbatim(&format!("auth_{}_{field}", &digest[..16]))
+    let name = b.env_names.name_verbatim(&format!("auth_{}_{field}", &digest[..16]));
+    b.credential_names.insert(name.clone(), crate::CredentialName { owner: identity.to_string(), field: field.to_string() });
+    name
+}
+
+/// A credential placeholder named `<prefix><sep><16 hex digits>`, the digits
+/// from the SHA-256 of the owner's identity and the field, reserved whole
+/// and recorded in [`crate::ImportResult::credential_names`].
+fn allocate_credential_name(b: &mut Builder, prefix: &str, sep: &str, identity: &str, field: &str) -> String {
+    let digest = crate::util::sha256_hex(format!("{identity}\n{field}").as_bytes());
+    let name = b.env_names.name_verbatim(&format!("{prefix}{sep}{}", &digest[..16]));
+    b.credential_names.insert(name.clone(), crate::CredentialName { owner: identity.to_string(), field: field.to_string() });
+    name
 }
 
 /// [`credential`] for secret `field` of the auth config `identity`, named by
@@ -987,22 +999,8 @@ pub fn take_userinfo(url: &str, syntax: anvil_domain::secret::TemplateSyntax) ->
     }
 }
 
-/// [`take_userinfo`] applied to a request whose auth is `auth`: the URL to
-/// store, and whether it was quarantined ([`quarantine_url`]), in which case
-/// it is stored as returned, with no query, fragment or other processing.
-/// Userinfo goes through [`apply_userinfo`].
-pub fn take_url_credentials(b: &mut Builder, url: &str, auth: &mut AuthConfig, pointer: &str, identity: &str) -> (String, bool) {
-    match take_userinfo(url, b.template_syntax) {
-        TakenUrl::Plain(url) => (url, false),
-        TakenUrl::Userinfo(url, userinfo) => {
-            apply_userinfo(b, auth, Some(userinfo), pointer, identity);
-            (url, false)
-        }
-        TakenUrl::Ambiguous => (quarantine_url(b, url, pointer), true),
-    }
-}
-
-/// The reference a quarantined URL is replaced by ([`quarantine_url`]).
+/// The start of the reference a quarantined URL is replaced by
+/// ([`quarantine_url`]).
 pub const QUARANTINE_PLACEHOLDER: &str = "url-needs-review";
 
 /// An endpoint URL other than the request's (an OAuth token or
@@ -1012,11 +1010,14 @@ pub const QUARANTINE_PLACEHOLDER: &str = "url-needs-review";
 /// and an ambiguous URL is quarantined ([`quarantine_url`]). With
 /// `include_credentials` a literal userinfo is kept, and a sanitized export
 /// extracts the whole URL.
-pub fn endpoint_url(b: &mut Builder, url: &str, pointer: &str, field: &'static str) -> String {
+/// `identity` and `slot` name the quarantine placeholder
+/// ([`quarantine_url`]): the auth config's owner and `token_url` or
+/// `authorization_url`.
+pub fn endpoint_url(b: &mut Builder, url: &str, pointer: &str, field: &'static str, identity: &str, slot: &str) -> String {
     use anvil_domain::secret::{UrlUserinfo, is_plain_userinfo, url_userinfo};
     match url_userinfo(url, b.template_syntax) {
         UrlUserinfo::None => url.to_string(),
-        UrlUserinfo::Ambiguous => quarantine_url(b, url, pointer),
+        UrlUserinfo::Ambiguous => quarantine_url(b, url, pointer, identity, slot),
         UrlUserinfo::Userinfo { start, at } => {
             let userinfo = &url[start..at];
             if userinfo.trim().is_empty() || is_plain_userinfo(userinfo, b.template_syntax) || b.opts.include_credentials {
@@ -1043,12 +1044,13 @@ pub const QUARANTINED_URL_NAME: &str = "<url redacted>";
 /// end of its authority and an `@`, so where a credential in it ends cannot
 /// be told. Nothing in it is parsed or cut, so the request's host cannot
 /// change. Unless `include_credentials`, the URL is not imported at all: the
-/// request gets a fresh reference no variable defines (`url-needs-review`,
-/// from the import's allocator, so it never binds an existing variable) and
-/// the original text is stored nowhere. With `include_credentials`, the URL
+/// request gets a reference no variable defines, named from its owner's
+/// identity and the field (`url-needs-review-<16 hex digits>`, see
+/// [`auth_secret_name`]; recorded, so a reimport can tell it is the
+/// import's), and the original text is stored nowhere. With `include_credentials`, the URL
 /// is kept exactly as written. Either way the request is reported
 /// (`url_quarantined`).
-pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str) -> String {
+pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str, identity: &str, field: &str) -> String {
     const WHY: &str = "this URL mixes a template with a possible credential in its authority";
     if b.opts.include_credentials {
         b.report.warn(
@@ -1061,7 +1063,7 @@ pub fn quarantine_url(b: &mut Builder, url: &str, pointer: &str) -> String {
     // Hyphenated, so no name the import derives from the source (Postman
     // and Insomnia path parameters, cURL `$NAME`, sanitized keys) can be it,
     // and explicit `{{…}}` references and declared variables are reserved.
-    let name = b.env_names.name_verbatim(QUARANTINE_PLACEHOLDER);
+    let name = allocate_credential_name(b, QUARANTINE_PLACEHOLDER, "-", identity, field);
     let reference = format!("{{{{{name}}}}}");
     b.report.redacted(pointer, "request URL", &reference);
     // The placeholder is the import's own name, listed with the redaction.

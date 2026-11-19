@@ -821,9 +821,14 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     }
     // Credentials embedded in the URL become Basic auth, unless `-u` (or
     // another auth option) gave the request its own, which curl prefers.
-    let mut auth = auth;
-    let (taken, quarantined) = crate::common::take_url_credentials(b, &url, &mut auth, &url_at, "curl");
-    url = taken;
+    // Userinfo and a quarantine are settled once the request's key, which
+    // names their placeholders, is known (below).
+    let (taken, userinfo, quarantined) = match crate::common::take_userinfo(&url, b.template_syntax) {
+        crate::common::TakenUrl::Plain(u) => (u, None, false),
+        crate::common::TakenUrl::Userinfo(u, userinfo) => (u, Some(userinfo), false),
+        crate::common::TakenUrl::Ambiguous => (url.clone(), None, true),
+    };
+    let source_url = std::mem::replace(&mut url, taken);
     // A quarantined URL is stored as returned.
     let (base, pairs) = if quarantined { (url.clone(), vec![]) } else { split_query(&url) };
     if !quarantined {
@@ -981,7 +986,14 @@ fn finish(b: &mut Builder, p: Parsed) -> Result<(), ImportError> {
     let path = shown.split("://").nth(1).and_then(|r| r.find('/').map(|p| &r[p..])).unwrap_or("/");
     b.title = Some(format!("{method} {host}"));
     let name = format!("{method} {path}");
-    b.add_request(None, &name, &format!("curl:{method} {shown}"), spec, &url_at);
+    let key = format!("curl:{method} {shown}");
+    let identity = b.peek_operation_key(&key);
+    if quarantined {
+        // Not imported (or kept as written with included credentials).
+        spec.url = crate::common::quarantine_url(b, &source_url, &url_at, &identity, "url");
+    }
+    crate::common::apply_userinfo(b, &mut spec.auth, userinfo, &url_at, &identity);
+    b.add_request(None, &name, &key, spec, &url_at);
     Ok(())
 }
 

@@ -10,7 +10,7 @@ use anvil_import::{
     request_unit_hashes,
 };
 use common::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const V1: &str = r#"
 openapi: 3.0.3
@@ -769,6 +769,7 @@ fn reordering_items_keeps_each_auth_config_on_its_own_variables() {
         for k in keys {
             assert_eq!(auth_reference(req(&fresh, k), field), auth_reference(req(&first, k), field), "{importer}: {k} changed placeholder");
         }
+        assert_credentials_stay(importer, &first, &fresh);
         let plan = diff(&first, &first.requests, &fresh);
         assert!(plan.conflicts.is_empty(), "{importer}: {:?}", plan.conflicts);
         let applied = plan.apply(&first.requests, &ReimportApproval::default());
@@ -814,6 +815,7 @@ fn reordered_items_without_ids_are_held_for_review() {
     };
     let first = import(doc(["a", "b"]).as_bytes(), &opts()).unwrap();
     let fresh = reimport(&first, &doc(["b", "a"]));
+    assert_credentials_stay("items without ids", &first, &fresh);
     let plan = diff(&first, &first.requests, &fresh);
     assert!(
         plan.updated.is_empty(),
@@ -826,7 +828,7 @@ fn reordered_items_without_ids_are_held_for_review() {
         "every moved request is held: {:?}",
         plan.conflicts.iter().map(|c| &c.operation_key).collect::<Vec<_>>()
     );
-    assert!(plan.conflicts.iter().all(|c| c.credential_review && !c.user_edited && c.conflicting_fields.contains(&"spec".to_string())));
+    assert!(plan.conflicts.iter().all(|c| c.credential_review && !c.user_edited && c.conflicting_fields == c.upstream_fields));
     // Declined, as by default: every request keeps the URL and references it
     // had, so the variables filled for it still go to its own host.
     let applied = plan.apply(&first.requests, &ReimportApproval::default());
@@ -869,4 +871,296 @@ fn renamed_credential_placeholders_keep_the_existing_references() {
     assert!(applied[0].spec.url.ends_with("/v2"));
     assert_eq!(auth_reference(&applied[0], "token"), "{{r_token}}");
     assert_eq!(anvil_import::spec_hash(&applied[0].spec), applied[0].spec.source.as_ref().unwrap().generated_hash, "applied as generated");
+}
+
+// ------------------------------------- credential continuity (#584, round 3)
+
+const PM: &str = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json";
+
+fn template_value(v: &SensitiveValue) -> String {
+    match v {
+        SensitiveValue::Template { value } => value.clone(),
+        SensitiveValue::Secret { .. } => String::new(),
+    }
+}
+
+/// Every pure `{{reference}}` name in `v`.
+fn references_in(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::String(s)
+            if s.len() > 4 && s.starts_with("{{") && s.ends_with("}}") && !s[2..s.len() - 2].contains(['{', '}']) =>
+        {
+            out.push(s[2..s.len() - 2].trim().to_string());
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|x| references_in(x, out)),
+        serde_json::Value::Object(m) => m.values().for_each(|x| references_in(x, out)),
+        _ => {}
+    }
+}
+
+/// Where each request sends its credentials under `scope`: (destination,
+/// references). The destination is the host of its URL, with every variable
+/// but a filled credential resolved through its folders and then the scope;
+/// a URL left as one reference (quarantined) is the request itself, by name.
+/// The references are those of its auth, or of the nearest folder (or the
+/// scope) it inherits auth from, and of a quarantined URL.
+fn destinations(requests: &[RequestDefinition], scope: &ImportedScope, filled: &BTreeSet<String>) -> Vec<(String, Vec<String>)> {
+    requests
+        .iter()
+        .map(|q| {
+            let mut vars: Vec<&Variable> = vec![];
+            let mut inherited: Option<&AuthConfig> = None;
+            let mut cur = q.folder_id;
+            for _ in 0..64 {
+                let Some(f) = cur.and_then(|id| scope.folders.iter().find(|f| f.meta.id == id)) else { break };
+                vars.extend(&f.variables);
+                if inherited.is_none() && !matches!(f.auth, AuthConfig::Inherit) {
+                    inherited = Some(&f.auth);
+                }
+                cur = f.parent_id;
+            }
+            vars.extend(&scope.variables);
+            let mut url = q.spec.url.clone();
+            for _ in 0..4 {
+                for v in vars.iter().filter(|v| !filled.contains(&v.name)) {
+                    url = url.replace(&format!("{{{{{}}}}}", v.name), &template_value(&v.value));
+                }
+            }
+            let auth = if matches!(q.spec.auth, AuthConfig::Inherit) { inherited.unwrap_or(&scope.auth) } else { &q.spec.auth };
+            let mut refs = vec![];
+            references_in(&serde_json::to_value(auth).unwrap(), &mut refs);
+            let destination = match url.split_once("://") {
+                Some((_, rest)) => rest.split(['/', '?']).next().unwrap_or("").to_string(),
+                None => {
+                    references_in(&serde_json::Value::String(url.clone()), &mut refs);
+                    format!("request {}", q.name)
+                }
+            };
+            (destination, refs)
+        })
+        .collect()
+}
+
+/// Reimport `fresh` over `first` with every credential placeholder the first
+/// import allocated filled in by the user, apply the request and the scope
+/// plans as by default, and check that each filled credential still goes
+/// only to the destination it was filled for.
+fn assert_credentials_stay(label: &str, first: &ImportResult, fresh: &ImportResult) -> ReimportPlan {
+    let mut current = ImportedScope::generated(first);
+    let mut owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (destination, refs) in destinations(&first.requests, &current, &BTreeSet::new()) {
+        for r in refs {
+            owners.entry(r).or_default().insert(destination.clone());
+        }
+    }
+    let filled: BTreeMap<String, String> = owners
+        .into_iter()
+        .filter(|(r, d)| d.len() == 1 && first.credential_names.contains_key(r))
+        .filter_map(|(r, d)| d.into_iter().next().map(|d| (r, d)))
+        .collect();
+    assert!(!filled.is_empty(), "{label}: the first import allocated no credential to fill");
+    current.variables.extend(filled.keys().map(|name| Variable::plain(name, "filled by the user")));
+    let names: BTreeSet<String> = filled.keys().cloned().collect();
+    let generated = baseline(first);
+    let fresh_scope = ImportedScope::generated(fresh);
+    let plan = reimport_diff(&first.requests, fresh, ScopeDiff { current: &current, generated: Some(&generated), fresh: &fresh_scope });
+    let requests = plan.apply(&first.requests, &ReimportApproval::default());
+    let mut scope = plan.apply_scope(&current, &fresh_scope, &ReimportApproval::default());
+    for f in &plan.added_folders {
+        if !scope.folders.iter().any(|x| x.meta.id == f.meta.id) {
+            scope.folders.push(f.clone());
+        }
+    }
+    for (destination, refs) in destinations(&requests, &scope, &names) {
+        for r in refs {
+            if let Some(owner) = filled.get(&r) {
+                assert_eq!(owner, &destination, "{label}: a credential filled for {owner} goes to {destination}");
+            }
+        }
+    }
+    plan
+}
+
+fn postman_items(items: Vec<serde_json::Value>) -> String {
+    serde_json::json!({ "info": { "name": "C", "schema": PM }, "item": items }).to_string()
+}
+
+/// A Postman request to `host` with a literal bearer token; `id` when given.
+fn bearer_item(id: Option<&str>, host: &str) -> serde_json::Value {
+    let mut item = serde_json::json!({ "name": format!("to {host}"), "request": { "method": "GET", "url": format!("https://{host}/v1"),
+        "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": format!("tok-SENSITIVE-{host}") }] } } });
+    if let Some(id) = id {
+        item["id"] = serde_json::json!(id);
+    }
+    item
+}
+
+/// Round 3, sol F1 and dsf F1: a reordered or inserted HAR entry has a new
+/// key, so it is added; its userinfo placeholders are named from that key
+/// and never resolve the credentials filled for another host.
+#[test]
+fn har_reorders_and_insertions_never_reuse_another_hosts_userinfo() {
+    let har = |entries: &[(&str, &str)]| {
+        let entries: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(userinfo, host)| serde_json::json!({ "request": { "method": "GET", "url": format!("https://{userinfo}@{host}/v1") } }))
+            .collect();
+        serde_json::json!({ "log": { "version": "1.2", "entries": entries } }).to_string()
+    };
+    let (a, b, c) = (
+        ("alice:tok-SENSITIVE-1", "a.example.test"),
+        ("bob:tok-SENSITIVE-2", "b.example.test"),
+        ("carol:tok-SENSITIVE-3", "c.example.test"),
+    );
+    let first = import(har(&[a, b]).as_bytes(), &opts()).unwrap();
+    for (label, after) in [("reordered", har(&[b, a])), ("inserted", har(&[c, a, b]))] {
+        let fresh = reimport(&first, &after);
+        assert_credentials_stay(&format!("HAR {label}"), &first, &fresh);
+    }
+}
+
+/// Round 3, dsf F1: a cURL command for another URL is a new request; neither
+/// its userinfo nor a quarantined URL resolves what was filled for the old
+/// one.
+#[test]
+fn a_curl_command_for_another_url_never_reuses_the_filled_credentials() {
+    let first = import(b"curl 'https://alice:tok-SENSITIVE-1@a.example.test/v1'", &opts()).unwrap();
+    let fresh = reimport(&first, "curl 'https://bob:tok-SENSITIVE-2@b.example.test/v1'");
+    let plan = assert_credentials_stay("cURL userinfo", &first, &fresh);
+    assert_eq!((plan.added.len(), plan.removed.len()), (1, 1));
+    let first = import(b"curl 'https://a.{{region}}.example.test/v1?to=a@b'", &opts()).unwrap();
+    assert!(is_quarantined(&first.requests[0].spec.url));
+    let fresh = reimport(&first, "curl -X POST 'https://b.{{region}}.example.test/v1?to=a@b'");
+    assert_credentials_stay("cURL quarantined URL", &first, &fresh);
+}
+
+/// Invariant 3 on its own: an added request that would reference an
+/// allocated name a stored variable defines gets a fresh, unused name, so it
+/// can never resolve another request's value (here the fresh import is made
+/// to hand it such a name, as a faulty allocator would).
+#[test]
+fn an_added_request_never_takes_a_filled_allocated_name() {
+    let first = import(postman_items(vec![bearer_item(Some("r1"), "a.example.test")]).as_bytes(), &opts()).unwrap();
+    let filled = auth_reference(req(&first, "postman:r1"), "token");
+    let mut fresh =
+        reimport(&first, &postman_items(vec![bearer_item(Some("r1"), "a.example.test"), bearer_item(Some("r2"), "b.example.test")]));
+    let r2 = fresh.requests.iter_mut().find(|q| q.spec.source.as_ref().is_some_and(|s| s.operation_key == "postman:r2")).unwrap();
+    r2.spec.auth = AuthConfig::Bearer { token: SensitiveValue::template(filled.clone()), prefix: "Bearer".into() };
+    let hash = anvil_import::spec_hash(&r2.spec);
+    r2.spec.source.as_mut().unwrap().generated_hash = hash;
+    let plan = assert_credentials_stay("added request", &first, &fresh);
+    let added = auth_reference(&plan.added[0], "token");
+    assert_eq!(added, filled.replace("}}", "_new}}"), "the added request was not given a fresh name");
+    assert_eq!(anvil_import::spec_hash(&plan.added[0].spec), plan.added[0].spec.source.as_ref().unwrap().generated_hash);
+}
+
+/// Round 3, sol F2: folders known only by their position whose requests'
+/// specs stay identical (`{{host}}/v1`, inherited auth) while their `host`
+/// variables move: every changed unit of such a folder is held with its
+/// auth, so no token reaches the other folder's host.
+#[test]
+fn positional_folders_hold_their_destination_variables_with_their_auth() {
+    let folder = |n: &str| {
+        serde_json::json!({ "name": format!("Folder {n}"),
+            "variable": [{ "key": "host", "value": format!("https://{n}.example.test") }],
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": format!("tok-SENSITIVE-folder-{n}") }] },
+            "item": [{ "name": "Ping", "request": { "method": "GET", "url": "{{host}}/v1" } }] })
+    };
+    let first = import(postman_items(vec![folder("a"), folder("b")]).as_bytes(), &opts()).unwrap();
+    let fresh = reimport(&first, &postman_items(vec![folder("b"), folder("a")]));
+    let plan = assert_credentials_stay("positional folders", &first, &fresh);
+    assert!(
+        plan.scope_updated.iter().all(|c| !c.key.starts_with("folders/")),
+        "a guarded folder unit was applied: {:?}",
+        keys(&plan.scope_updated)
+    );
+    assert!(
+        plan.scope_conflicts.iter().any(|c| c.credential_review && c.key.ends_with("/variables/host")),
+        "{:?}",
+        keys(&plan.scope_conflicts)
+    );
+}
+
+/// Round 3, sol F3: reordering a stable request's sensitive headers keeps
+/// each header on its own placeholder (they are named after the field and
+/// never kept by position).
+#[test]
+fn reordered_sensitive_headers_keep_their_own_placeholders() {
+    let item = |headers: [(&str, &str); 2]| {
+        serde_json::json!({ "id": "r1", "name": "r", "request": { "method": "GET", "url": "https://api.example.test/v1",
+            "header": headers.map(|(k, v)| serde_json::json!({ "key": k, "value": v })) } })
+    };
+    let first = import(
+        postman_items(vec![item([("X-Api-Key", "tok-SENSITIVE-alpha"), ("X-Auth-Token", "tok-SENSITIVE-beta")])]).as_bytes(),
+        &opts(),
+    )
+    .unwrap();
+    let fresh =
+        reimport(&first, &postman_items(vec![item([("X-Auth-Token", "tok-SENSITIVE-beta"), ("X-Api-Key", "tok-SENSITIVE-alpha")])]));
+    let plan = diff(&first, &first.requests, &fresh);
+    let applied = plan.apply(&first.requests, &ReimportApproval::default());
+    let spec = &applied[0].spec;
+    assert_eq!(header(spec, "X-Api-Key").unwrap().value, "{{X_Api_Key}}");
+    assert_eq!(header(spec, "X-Auth-Token").unwrap().value, "{{X_Auth_Token}}");
+}
+
+/// Round 3, dsf F2: repeated or empty item ids identify nothing; such items
+/// are positional, so a reorder never swaps their filled credentials.
+#[test]
+fn repeated_and_empty_ids_are_positional() {
+    for id in ["dup", ""] {
+        let items = |hosts: [&str; 2]| postman_items(hosts.iter().map(|h| bearer_item(Some(id), h)).collect());
+        let first = import(items(["a.example.test", "b.example.test"]).as_bytes(), &opts()).unwrap();
+        let fresh = reimport(&first, &items(["b.example.test", "a.example.test"]));
+        let plan = assert_credentials_stay(&format!("id {id:?}"), &first, &fresh);
+        assert_eq!(plan.conflicts.len(), 2, "id {id:?}");
+        assert!(plan.conflicts.iter().all(|c| c.credential_review), "id {id:?}");
+    }
+}
+
+/// Round 3, dsf F3: a reference the source designates is the source's to
+/// change: an OpenAPI operation switching security scheme, or a Postman
+/// bearer token switching variable, applies.
+#[test]
+fn source_designated_references_follow_the_source() {
+    let openapi = |scheme: &str| {
+        serde_json::json!({ "openapi": "3.0.3", "info": { "title": "t", "version": "1" }, "servers": [{ "url": "https://api.example.test" }],
+            "components": { "securitySchemes": { "A": { "type": "http", "scheme": "bearer" }, "B": { "type": "http", "scheme": "bearer" } } },
+            "paths": { "/users": { "get": { "operationId": "getUsers", "security": [{ scheme: [] }], "responses": { "200": { "description": "ok" } } } } } })
+        .to_string()
+    };
+    let first = import(openapi("A").as_bytes(), &opts()).unwrap();
+    let fresh = reimport(&first, &openapi("B"));
+    let applied = diff(&first, &first.requests, &fresh).apply(&first.requests, &ReimportApproval::default());
+    assert_eq!(auth_reference(&applied[0], "token"), "{{B}}", "the scheme switch was not applied");
+    let postman = |token: &str| {
+        postman_items(vec![
+            serde_json::json!({ "id": "r1", "name": "r", "request": { "method": "GET", "url": "https://api.example.test/v1",
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": token }] } } }),
+        ])
+    };
+    let first = import(postman("{{tokenA}}").as_bytes(), &opts()).unwrap();
+    let fresh = reimport(&first, &postman("{{tokenB}}"));
+    let applied = diff(&first, &first.requests, &fresh).apply(&first.requests, &ReimportApproval::default());
+    assert_eq!(auth_reference(&applied[0], "token"), "{{tokenB}}", "the variable switch was not applied");
+}
+
+/// Quarantined URLs: named from their request's key, so stable items keep
+/// theirs across a reorder, and items without ids are held.
+#[test]
+fn quarantined_urls_stay_with_their_requests() {
+    let item = |id: Option<&str>, host: &str| {
+        let mut item = serde_json::json!({ "name": host, "request": { "method": "GET", "url": format!("https://api.{{{{region}}}}.{host}/v1?to=a@b") } });
+        if let Some(id) = id {
+            item["id"] = serde_json::json!(id);
+        }
+        item
+    };
+    for ids in [[Some("q1"), Some("q2")], [None, None]] {
+        let first =
+            import(postman_items(vec![item(ids[0], "a.example.test"), item(ids[1], "b.example.test")]).as_bytes(), &opts()).unwrap();
+        assert!(first.requests.iter().all(|q| is_quarantined(&q.spec.url)));
+        let fresh = reimport(&first, &postman_items(vec![item(ids[1], "b.example.test"), item(ids[0], "a.example.test")]));
+        assert_credentials_stay(&format!("quarantined, ids {ids:?}"), &first, &fresh);
+    }
 }

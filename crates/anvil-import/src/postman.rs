@@ -94,9 +94,9 @@ fn walk_items(b: &mut Builder, items: &[Value], base: &str, parent: Option<Id>, 
             let key = format!("pm:{at}");
             let fid = b.folder(parent, &key, if name.is_empty() { "Folder" } else { &name });
             let vars = variables(b, it.get("variable"), &ptr(&at, "variable"));
-            // A folder's auth is known by the folder's own id where it has one.
-            let identity = str_of(it, "id").map_or_else(|| key.clone(), |id| format!("postman:{id}"));
-            let fauth = it.get("auth").map(|a| auth(b, a, &ptr(&at, "auth"), &identity));
+            // Known by the folder's key, as the folder itself is (its position:
+            // see `ImportResult::positional_folders`).
+            let fauth = it.get("auth").map(|a| auth(b, a, &ptr(&at, "auth"), &key));
             if let Some(f) = b.folder_mut(fid) {
                 f.description = description(it.get("description"));
                 f.variables = vars;
@@ -118,7 +118,11 @@ fn walk_items(b: &mut Builder, items: &[Value], base: &str, parent: Option<Id>, 
 }
 
 fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str) {
-    let key = str_of(it, "id").map(|id| format!("postman:{id}")).unwrap_or_else(|| format!("postman:{at}"));
+    // An empty id is no id: the item is known by its position.
+    let key = str_of(it, "id").filter(|id| !id.is_empty()).map(|id| format!("postman:{id}")).unwrap_or_else(|| format!("postman:{at}"));
+    // Credential placeholders are named from the key the request will have
+    // (with its `#n` suffix when the id repeats).
+    let identity = b.peek_operation_key(&key);
     let rptr = ptr(at, "request");
     let req = &it["request"];
     let (method, url_v, header_v, body_v, auth_v, desc) = match req {
@@ -132,7 +136,7 @@ fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str
             description(req.get("description")),
         ),
     };
-    let (url, params, userinfo) = url(b, &url_v, &ptr(&rptr, "url"));
+    let (url, params, userinfo) = url(b, &url_v, &ptr(&rptr, "url"), &identity);
     let mut spec = RequestSpec::http(&method, &url);
     spec.params = params;
     spec.headers = headers(b, header_v, &ptr(&rptr, "header"));
@@ -143,10 +147,10 @@ fn request(b: &mut Builder, it: &Value, at: &str, folder: Option<Id>, name: &str
     };
     dedupe_content_type(&mut spec.headers, &spec.body);
     spec.auth = match auth_v {
-        Some(a) => auth(b, a, &ptr(&rptr, "auth"), &key),
+        Some(a) => auth(b, a, &ptr(&rptr, "auth"), &identity),
         None => AuthConfig::Inherit,
     };
-    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(&rptr, "url"), &key);
+    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(&rptr, "url"), &identity);
     for k in ["proxy", "certificate"] {
         if req.get(k).is_some() {
             b.report.unsupported(
@@ -291,7 +295,7 @@ fn headers(b: &mut Builder, v: Option<&Value>, at: &str) -> Vec<KeyValue> {
 /// the raw query string. Path variables (`:id`) are substituted from
 /// `url.variable` or become `{{id}}` placeholders. URL userinfo is removed
 /// and returned for [`apply_userinfo`].
-fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<crate::common::Userinfo>) {
+fn url(b: &mut Builder, v: &Value, at: &str, identity: &str) -> (String, Vec<KeyValue>, Option<crate::common::Userinfo>) {
     let (raw, query_list, path_vars) = match v {
         Value::String(s) => (s.clone(), None, None),
         Value::Object(_) => {
@@ -306,7 +310,7 @@ fn url(b: &mut Builder, v: &Value, at: &str) -> (String, Vec<KeyValue>, Option<c
         TakenUrl::Userinfo(raw, userinfo) => (raw, Some(userinfo)),
         // Quarantined whole, query included; the `query` list repeats that
         // query, so it adds no parameters.
-        TakenUrl::Ambiguous => return (quarantine_url(b, &raw, &ptr(at, "raw")), vec![], None),
+        TakenUrl::Ambiguous => return (quarantine_url(b, &raw, &ptr(at, "raw"), identity, "url"), vec![], None),
     };
     let (base, raw_pairs) = split_query(&raw);
     if query_list.is_none() {
@@ -589,8 +593,22 @@ fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
             AuthConfig::OAuth2 {
                 config: OAuth2Config {
                     grant,
-                    token_url: crate::common::endpoint_url(b, &p("accessTokenUrl"), &fp("accessTokenUrl"), "OAuth 2 token URL"),
-                    authorization_url: crate::common::endpoint_url(b, &p("authUrl"), &fp("authUrl"), "OAuth 2 authorization URL"),
+                    token_url: crate::common::endpoint_url(
+                        b,
+                        &p("accessTokenUrl"),
+                        &fp("accessTokenUrl"),
+                        "OAuth 2 token URL",
+                        identity,
+                        "token_url",
+                    ),
+                    authorization_url: crate::common::endpoint_url(
+                        b,
+                        &p("authUrl"),
+                        &fp("authUrl"),
+                        "OAuth 2 authorization URL",
+                        identity,
+                        "authorization_url",
+                    ),
                     client_id: p("clientId"),
                     client_secret,
                     scope: p("scope"),

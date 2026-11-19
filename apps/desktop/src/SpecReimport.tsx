@@ -374,7 +374,12 @@ function PlanView(props: {
                 disabled={props.disabled}
                 onChange={(e) => props.onToggle("overwrite_scope", c.key, e.target.checked)}
               />
-              <span className="grow">{c.label}</span>
+              <span className="grow">
+                {c.label}
+                {c.credential_review && !c.user_edited && (
+                  <span className="faint"> — it holds or feeds credentials that may now belong elsewhere: check before taking it</span>
+                )}
+              </span>
             </label>
           ))}
         </fieldset>

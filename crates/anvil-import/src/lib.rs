@@ -64,6 +64,7 @@ use chrono::{DateTime, Utc};
 use detect::Parsed;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Blank or sample payloads for spec-driven imports (OpenAPI, WSDL).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
@@ -193,6 +194,32 @@ pub struct ImportResult {
     pub environments: Vec<Environment>,
     pub source: ImportedSource,
     pub report: ImportReport,
+    /// The credential placeholders this import allocated itself (auth
+    /// secrets, URL userinfo, quarantined URLs), by name: whose they are and
+    /// which field they fill. A reimport keeps or renames only these; every
+    /// other reference follows the source.
+    #[serde(default)]
+    pub credential_names: BTreeMap<String, CredentialName>,
+    /// Operation keys that name a position in the source rather than an
+    /// identity: an item without an id, or with an empty or repeated one, and
+    /// every HAR entry.
+    #[serde(default)]
+    pub positional_keys: BTreeSet<String>,
+    /// Folders whose identity is a position in the source (every Postman
+    /// folder, an Insomnia request group without an id).
+    #[serde(default)]
+    pub positional_folders: Vec<Id>,
+}
+
+/// A credential placeholder an import allocated ([`ImportResult::credential_names`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CredentialName {
+    /// Its owner's identity: a request's operation key as made unique, a
+    /// folder's key, or the source's own scope.
+    pub owner: String,
+    /// The field it fills: `password`, `token`, `api_key`, `client_secret`,
+    /// `username`, `url`, `token_url` or `authorization_url`.
+    pub field: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize, JsonSchema)]

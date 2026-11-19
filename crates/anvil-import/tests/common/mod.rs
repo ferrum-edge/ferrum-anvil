@@ -84,3 +84,11 @@ pub fn template_of(v: &anvil_domain::secret::SensitiveValue) -> &str {
         anvil_domain::secret::SensitiveValue::Secret { .. } => "",
     }
 }
+
+/// Whether `text` is a quarantined URL's placeholder,
+/// `{{url-needs-review-<16 hex digits>}}`.
+pub fn is_quarantined(text: &str) -> bool {
+    text.strip_prefix("{{url-needs-review-")
+        .and_then(|t| t.strip_suffix("}}"))
+        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}

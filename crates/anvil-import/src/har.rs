@@ -11,7 +11,7 @@
 use crate::builder::Builder;
 use crate::common::{
     body_from_text, dedupe_content_type, keep_declared_content_type, maybe_redact, parse_form, redact_raw_query, scrub_json_text,
-    split_query, take_url_credentials, warn_query_conversions,
+    split_query, warn_query_conversions,
 };
 use crate::report::Message;
 use crate::util::{is_json_media, media_essence, ptr, scalar_text, str_of};
@@ -78,12 +78,16 @@ pub(crate) fn import(root: &Value, b: &mut Builder) -> Result<(), ImportError> {
 
 fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, index: usize, dropped: &mut BTreeSet<&'static str>) {
     let uptr = ptr(rptr, "url");
-    let mut auth = AuthConfig::Inherit;
     // Userinfo is never kept in the URL (the engine refuses it).
     // Userinfo first: a `#` inside a password expression is no fragment.
     // A quarantined URL is stored as returned, fragment included, with no
-    // query parameters.
-    let (url, quarantined) = take_url_credentials(b, raw_url, &mut auth, &uptr, &format!("har:{index}"));
+    // query parameters. Userinfo and a quarantine are settled once the
+    // request's key, which names their placeholders, is known (below).
+    let (url, userinfo, quarantined) = match crate::common::take_userinfo(raw_url, b.template_syntax) {
+        crate::common::TakenUrl::Plain(u) => (u, None, false),
+        crate::common::TakenUrl::Userinfo(u, userinfo) => (u, Some(userinfo), false),
+        crate::common::TakenUrl::Ambiguous => (raw_url.to_string(), None, true),
+    };
     let url = if quarantined { url } else { crate::common::strip_fragment(&url).to_string() };
     let (base, pairs) = if quarantined { (url.clone(), vec![]) } else { split_query(&url) };
     if !quarantined {
@@ -144,7 +148,7 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     spec.params = params;
     spec.headers = headers;
     spec.body = body;
-    spec.auth = auth;
+    spec.auth = AuthConfig::Inherit;
     // Names, the folder and the operation key never come from a quarantined
     // URL's text (with include_credentials it is kept as written).
     let shown = if quarantined { crate::common::QUARANTINED_URL_NAME.to_string() } else { base };
@@ -153,6 +157,12 @@ fn entry(b: &mut Builder, req: &Value, rptr: &str, method: &str, raw_url: &str, 
     let folder = if host.is_empty() { None } else { Some(b.folder(None, &format!("har:{host}"), &host)) };
     let name = format!("{method} {}", path.split('?').next().unwrap_or(&path));
     let key = format!("har:{index}:{method} {}", shown.split('?').next().unwrap_or(&shown));
+    let identity = b.peek_operation_key(&key);
+    if quarantined {
+        // Not imported (or kept as written with included credentials).
+        spec.url = crate::common::quarantine_url(b, raw_url, &uptr, &identity, "url");
+    }
+    crate::common::apply_userinfo(b, &mut spec.auth, userinfo, &uptr, &identity);
     b.add_request(folder, &name, &key, spec, rptr);
 }
 

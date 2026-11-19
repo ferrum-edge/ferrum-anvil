@@ -70,10 +70,11 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     it is not cut at all but quarantined (`url_quarantined`: "this URL
     mixes a template with a possible credential in its authority; re-enter
     it"). By default the URL is not imported: the request's URL becomes a
-    fresh reference no variable defines (`{{url-needs-review}}`: hyphenated,
-    so no path parameter, shell variable or other name the import derives
-    can be it, and never a name the source references), and the original
-    text is stored nowhere. With `include_credentials` it is kept exactly as
+    fresh reference no variable defines, named from the request's key
+    (`{{url-needs-review-<16 hex digits>}}`, see below: hyphenated, so no
+    path parameter, shell variable or other name the import derives can be
+    it, and never a name the source references), and the original text is
+    stored nowhere. With `include_credentials` it is kept exactly as
     written and the same warning says it may hold a credential; a sanitized
     export extracts it whole. Either way the request's name, folder and
     operation key never come from its text (`<url redacted>`), and an
@@ -91,19 +92,19 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     part of it is kept as a user name or in the URL: the user name and the
     password become placeholders named from the request's stable key like
     its own auth secrets (`{{auth_<digest>_username}}`,
-    `{{auth_<digest>_password}}`, see below; `url_userinfo_replaced`). With `include_credentials`, the
-    password keeps the literal (the part after the first `:`, or the whole
+    `{{auth_<digest>_password}}`, see below; `url_userinfo_replaced`). With
+    `include_credentials`, the password keeps the literal (the part after the first `:`, or the whole
     userinfo when it has no password), a secret field.
   - Fresh placeholders never take a name the source defines or references,
     including cURL `$NAME` shell variables, Postman path variables and
     `url.variable` keys, and Insomnia path parameters, in any request of the
-    import (`username_2` then). References are reserved as they decode too:
-    a JSON or YAML escape (`\u007b\u007bname\u007d\u007d`), shell
+    import (a `_2` suffix then). References are reserved as they decode
+    too: a JSON or YAML escape (`\u007b\u007bname\u007d\u007d`), shell
     quoting, or percent-encoding in the name (`{{url%2Dneeds%2Dreview}}`
     reserves `url-needs-review`). A path parameter is reserved by its raw
     spelling as well as the sanitized one its placeholder takes, which is
-    fail-safe (`:url-needs-review` makes a quarantined URL
-    `{{url-needs-review_2}}`).
+    fail-safe (a path parameter spelled like a quarantine placeholder pushes
+    that placeholder to `_2`).
   - A request with auth of its own (a cURL `-u` or `--oauth2-bearer`, a
     Postman or Insomnia auth helper) or with auth explicitly off keeps
     that, and the userinfo is dropped (`url_credentials_dropped`).
@@ -119,16 +120,17 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     its own name. A Postman or Insomnia auth config's secrets, and the
     Basic auth a URL userinfo becomes (every importer), are named
     `auth_<16 hex digits>_<field>` (`auth_3f9a0c12d4e5b6a7_password`), the
-    digits the start of the SHA-256 of the owner's stable key (the
-    request's operation key, the folder's or collection's key, the source's
-    own id where it has one).
-    The name never comes from a collection, folder or request name, which
-    can repeat a credential. For an owner with a stable key it stays the
-    same across reimports whatever the order of the items, and a reimport
-    never moves a filled variable to another request whatever the names
-    (see [Reimport](#reimport)). It is reserved as a whole, so no header,
-    query or body placeholder shares it (a name the source already uses
-    gets a suffix).
+    digits the start of the SHA-256 of the owner's identity: the request's
+    operation key as made unique (with its `#n` suffix when the key
+    repeats), or the folder's or collection's key; never an array index
+    alone or a constant. An empty item id counts as no id, and an item
+    without an id, with a repeated id, or any HAR entry is known only by
+    its position. The name never comes from a collection, folder or request
+    name, which can repeat a credential. It is reserved as a whole, so no
+    header, query or body placeholder shares it (a name the source already
+    uses gets a suffix). The import records every name it allocates this
+    way (`ImportResult::credential_names`); a reimport never moves one to
+    another request (see [Reimport](#reimport)).
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia
@@ -229,7 +231,7 @@ Report text never carries a credential, in either mode (#584):
   a constraint or a URL. The entry's pointer locates what it is about. In
   the code this is a type (`Message`), which cannot be built from a
   `String`.
-- Retained scripts carry metadata only (see above).
+- Scripts are listed by metadata only (see above).
 - Credential placeholders and required variables are named by the import:
   an auth config's secrets are `{{auth_<digest>_<field>}}` (see above),
   never derived from a collection, folder or request name.
@@ -521,30 +523,43 @@ updated loses its `revision_id`, since that revision holds the old spec.
 Changing the sample mode or seed between imports changes generated hashes;
 every operation then shows up as changed upstream.
 
-Credential references never move silently (#584). A credential slot is a
-pure `{{reference}}` in a request's auth, a URL that is one reference (a
-quarantined URL), or the value of a field marked sensitive.
+A credential reference never moves to another request (#584). Only the
+placeholders the fresh import allocated itself (`ImportResult::credential_names`:
+auth secrets, URL userinfo, quarantined URLs) are handled below; every
+other reference (one the source wrote, or a name it designates, such as an
+OpenAPI security scheme's variable) follows the source like any other
+change. Header, query and form placeholders are named after their field and
+shared by every request with that field, so they never move.
 
-- When the fresh import puts a placeholder of its own in a slot where the
-  existing request has another reference (it was renamed: a different
-  naming in an earlier build, a digest collision, an allocation order), the
-  request keeps the reference it has, so it stays on the variable you
-  filled. The rest of the update applies as usual, and the request is
-  `unchanged` when nothing else changed.
-- When a fresh placeholder of the import's own sits in a slot the existing
-  request does not have, or when a request with credentials (its own, from
-  URL userinfo, or inherited from a folder or the source's auth) is matched
-  only by its position in the source (a Postman or Insomnia item without an
-  id, any HAR entry), a spec change upstream is a conflict with
-  `credential_review: true` and `spec` in `conflicting_fields`. It is never
-  applied unless approved, so reordering such items never points a request
-  at variables filled for another one.
-- The same holds for scoped auth: an `auth` or `folders/<id>/auth` unit
-  whose fresh version puts an import-made placeholder where the stored one
-  has something else is a scope conflict.
-
-References the source itself wrote or changed are the source's changes and
-apply as usual.
+- **Added requests fail safe.** An added request (one whose key is new,
+  such as a moved HAR entry or a cURL command with a different URL), or a
+  folder added with it, that would reference an allocated name a stored
+  variable already defines gets a fresh, unused name instead
+  (`<name>_new`). You fill it in; nothing resolves to a value filled for
+  another request.
+- **Positional continuity fails closed, for the whole chain.** A request
+  with allocated credentials (its own, or inherited from a folder that has
+  them) that is matched only by its position in the source (an item
+  without an id, with an empty or repeated id, any HAR entry) is held whole
+  when anything of it changed upstream (its name included): a conflict with
+  `credential_review: true` and every changed part in `conflicting_fields`. Every changed unit of a folder known only by its
+  position (every Postman folder, an Insomnia request group without an id)
+  whose subtree holds such credentials is held together, its auth and the
+  variables that feed its requests' destinations (a `host`, a base URL),
+  as scope conflicts with `credential_review: true`, even when the
+  requests' specs did not change. Declined, which is the default, the
+  stored values stay, so each credential keeps its destination.
+- **Kept only by semantic field.** For a request with a stable identity,
+  where the fresh import put an allocated placeholder of the same owner in
+  the same named auth field (no array index) as a different stored
+  reference (another naming from an earlier build), the request keeps the
+  stored reference, so it stays on the variable you filled; the rest of the
+  update applies, and the request is `unchanged` when nothing else
+  changed. A field matched only ambiguously (an index, a name used twice)
+  is held for review instead. An auth unit of the source's or a folder's
+  scope whose fresh version puts an allocated placeholder where the stored
+  one has another reference is a scope conflict with
+  `credential_review: true`.
 
 ### Renames
 
@@ -910,7 +925,7 @@ globals exports. `protocolProfileBehavior.followRedirects`/`maxRedirects`/
 `$randomUUID`, `$timestamp`, `$isoTimestamp`, `$randomInt`) are kept;
 the faker family (`$randomAlphaNumeric`, …) is reported per location.
 
-Reported: pre-request/test scripts (retained, disabled), auth types digest,
+Reported: pre-request/test scripts (listed by metadata, never imported), auth types digest,
 hawk, awsv4, ntlm, edgegrid, oauth1, akamai, jwt, asap (request imported with
 auth `none`), OAuth 2 password/implicit grants (bearer placeholder), cached
 OAuth tokens (dropped), saved example responses, per-request proxy and
@@ -920,7 +935,7 @@ collection v1 (refused).
 ## Insomnia (v4 JSON export, v5 YAML)
 
 Request groups → folders (environment → folder variables, folder auth,
-scripts retained), requests (URL, parameters, headers, path parameters, body
+scripts listed by metadata), requests (URL, parameters, headers, path parameters, body
 by MIME type: JSON, XML, form-urlencoded, multipart with file placeholders,
 GraphQL, other text), auth (basic, bearer with prefix, API key
 header/query/cookie, OAuth 2 client credentials/authorization code/refresh
@@ -945,7 +960,7 @@ Reported: other template tags (`{% response %}`, `{% base64 %}`, …) and
 Nunjucks filters (left in place), digest/NTLM/Hawk/IAM/netrc/ASAP auth,
 cookie jars, embedded API specs, gRPC and WebSocket requests, folder-level
 headers, `settingEncodeUrl: false`, disabled body rendering, private
-environments (imported with a warning), unit tests (retained as scripts).
+environments (imported with a warning), unit tests (listed by metadata like scripts).
 
 ## cURL
 

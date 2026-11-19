@@ -586,6 +586,8 @@ export interface ScopeChange {
   label: string;
   user_edited: boolean;
   whole_environment?: boolean;
+  /** Holds or feeds credentials of a folder known only by its position: held for review. */
+  credential_review?: boolean;
 }
 /** What reimporting a newer version of a source would do (`anvil_import::ReimportPlan`). */
 export interface ReimportPlan {

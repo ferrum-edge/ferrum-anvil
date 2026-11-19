@@ -186,12 +186,17 @@ fn oauth2(ctx: &Ctx, b: &mut Builder, v: &str, scheme: &Value, sptr: &str, scope
     let raw_token_url = str_of(f, "tokenUrl").unwrap_or("");
     // Endpoint URLs get the request URL's userinfo rule
     // ([`crate::common::endpoint_url`]).
-    let token_url = crate::common::endpoint_url(b, raw_token_url, &ptr(fptr, "tokenUrl"), "OAuth 2 token URL");
+    // A quarantined endpoint's placeholder is named from the security
+    // scheme's location, its owner.
+    let owner = format!("openapi:{sptr}");
+    let token_url = crate::common::endpoint_url(b, raw_token_url, &ptr(fptr, "tokenUrl"), "OAuth 2 token URL", &owner, "token_url");
     let authorization_url = crate::common::endpoint_url(
         b,
         str_of(f, "authorizationUrl").unwrap_or(""),
         &ptr(fptr, "authorizationUrl"),
         "OAuth 2 authorization URL",
+        &owner,
+        "authorization_url",
     );
     if raw_token_url.is_empty() {
         b.report.warn("oauth2_missing_token_url", fptr, "the OAuth 2 flow has no tokenUrl");

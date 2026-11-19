@@ -441,7 +441,8 @@ fn walk_v4(
                 if !b.admit(&at) {
                     continue;
                 }
-                let key = format!("insomnia:{}", str_of(r, "_id").unwrap_or(&at));
+                // An empty id is no id: the request is known by its position.
+                let key = format!("insomnia:{}", str_of(r, "_id").filter(|id| !id.is_empty()).unwrap_or(&at));
                 let settings = v4_settings(b, r, &at);
                 let scripts = [("prerequest", r.get("preRequestScript")), ("after_response", r.get("afterResponseScript"))];
                 request(b, r, &at, folder, &key, settings, &scripts);
@@ -683,6 +684,9 @@ fn request(
     scripts: &[(&str, Option<&Value>)],
 ) {
     let name = str_of(r, "name").unwrap_or("").to_string();
+    // Credential placeholders are named from the key the request will have
+    // (with its `#n` suffix when the id repeats).
+    let identity = b.peek_operation_key(key);
     let method = str_of(r, "method").unwrap_or("GET").to_ascii_uppercase();
     // Userinfo is never kept in the URL (the engine refuses it); an
     // ambiguous URL is quarantined whole. The URL as written is judged first,
@@ -703,7 +707,7 @@ fn request(
             // credential-named pairs, which become sensitive parameters.
             if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { (url, vec![]) }
         }
-        None => (quarantine_url(b, &templated, &ptr(at, "url")), vec![]),
+        None => (quarantine_url(b, &templated, &ptr(at, "url"), &identity, "url"), vec![]),
     };
     params.extend(query_params(b, r.get("parameters"), &ptr(at, "parameters")));
     let mut spec = RequestSpec::http(&method, &url);
@@ -715,10 +719,10 @@ fn request(
     keep_declared_content_type(&mut spec.headers, declared);
     dedupe_content_type(&mut spec.headers, &spec.body);
     spec.auth = match r.get("authentication") {
-        Some(a) => auth(b, a, &ptr(at, "authentication"), key),
+        Some(a) => auth(b, a, &ptr(at, "authentication"), &identity),
         None => AuthConfig::Inherit,
     };
-    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(at, "url"), key);
+    apply_userinfo(b, &mut spec.auth, userinfo, &ptr(at, "url"), &identity);
     spec.settings = settings;
     for (ev, s) in scripts {
         if let Some(src) = s.and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
@@ -1024,11 +1028,18 @@ fn auth(b: &mut Builder, a: &Value, at: &str, identity: &str) -> AuthConfig {
                     grant,
                     token_url: {
                         let url = get(b, "accessTokenUrl");
-                        crate::common::endpoint_url(b, &url, &ptr(at, "accessTokenUrl"), "OAuth 2 token URL")
+                        crate::common::endpoint_url(b, &url, &ptr(at, "accessTokenUrl"), "OAuth 2 token URL", identity, "token_url")
                     },
                     authorization_url: {
                         let url = get(b, "authorizationUrl");
-                        crate::common::endpoint_url(b, &url, &ptr(at, "authorizationUrl"), "OAuth 2 authorization URL")
+                        crate::common::endpoint_url(
+                            b,
+                            &url,
+                            &ptr(at, "authorizationUrl"),
+                            "OAuth 2 authorization URL",
+                            identity,
+                            "authorization_url",
+                        )
                     },
                     client_id: get(b, "clientId"),
                     client_secret,
