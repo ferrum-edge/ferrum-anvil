@@ -95,8 +95,8 @@ pub struct TlsProfile {
     /// DNS host name. Unset (the default) keeps ordinary host-name verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_spiffe: Option<ServerSpiffeIdentity>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: crate::Timestamp,
+    pub updated_at: crate::Timestamp,
 }
 
 /// Expected SPIFFE identity of a TLS server (X.509-SVID). At least one field
@@ -157,8 +157,8 @@ pub struct ProxyProfile {
     /// HBONE `CONNECT` options (kind `hbone` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hbone: Option<HboneOptions>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: crate::Timestamp,
+    pub updated_at: crate::Timestamp,
 }
 
 /// Optional protocol marker on the HBONE `CONNECT`. Istio ztunnel sends none;

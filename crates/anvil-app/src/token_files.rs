@@ -16,10 +16,10 @@
 
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::workload::JwtSvidSource;
 use anvil_storage::store::kind;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -30,7 +30,7 @@ pub struct TokenFileBinding {
     pub id: Id,
     /// Absolute path of the chosen file, as chosen (links not resolved).
     pub path: String,
-    pub bound_at: DateTime<Utc>,
+    pub bound_at: Timestamp,
 }
 
 impl App {
@@ -47,7 +47,7 @@ impl App {
         if let Some(b) = self.token_file_bindings()?.into_iter().find(|b| b.path == path) {
             return Ok(b);
         }
-        let b = TokenFileBinding { id: Id::new(), path, bound_at: Utc::now() };
+        let b = TokenFileBinding { id: Id::new(), path, bound_at: Timestamp::now() };
         self.store.put(kind::TOKEN_FILE, &b.id, None, None, 0.0, &b)?;
         Ok(b)
     }

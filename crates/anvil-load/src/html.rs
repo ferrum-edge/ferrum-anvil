@@ -552,8 +552,8 @@ pub fn to_html(r: &LoadReport) -> String {
         esc(&r.plan.name),
         esc(completion_text(r.completion)),
         esc(&r.run_id.to_string()),
-        esc(&r.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
-        esc(&r.finished_at.format("%H:%M:%S UTC").to_string()),
+        esc(&format!("{} UTC", r.started_at.format_date_time())),
+        esc(&format!("{} UTC", r.finished_at.format_time())),
         esc(&r.engine),
         esc(&r.engine_version)
     );

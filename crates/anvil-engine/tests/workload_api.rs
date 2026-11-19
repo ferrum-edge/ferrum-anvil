@@ -85,8 +85,8 @@ fn workload_tls(endpoint: &str, trust_bundle: bool, extra_roots: Vec<String>) ->
         min_version: Default::default(),
         server_name_override: None,
         server_spiffe: Some(ServerSpiffeIdentity { expected_server_spiffe_id: Some(wl::SERVER_ID.into()), trust_domain: None }),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 

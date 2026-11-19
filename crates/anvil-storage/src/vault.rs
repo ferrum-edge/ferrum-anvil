@@ -108,7 +108,7 @@ pub struct ProfileHeader {
     /// SHA-256 of the DEK under a fixed label — lets the app detect a
     /// keychain entry that belongs to a different profile.
     pub key_check: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: anvil_domain::Timestamp,
     /// Hex HMAC-SHA256, under a key derived from the DEK, of the profile id,
     /// protection mode and key check. Absent only in headers written by
     /// earlier builds.
@@ -618,7 +618,7 @@ pub fn create_passphrase_profile(dir: &Path, display_name: &str, passphrase: &st
         recovery_wrap: Some(wrap_with_passphrase(&dek, &normalize_recovery(&recovery), kdf, RECOVERY_LABEL)?),
         keychain_account: None,
         key_check: key_check(&dek),
-        created_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
         protection_mac: None,
         rotation: None,
     };
@@ -1058,7 +1058,7 @@ pub fn create_keychain_profile(dir: &Path, display_name: &str) -> Result<Created
         recovery_wrap: None,
         keychain_account: Some(account),
         key_check: key_check(&dek),
-        created_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
         protection_mac: None,
         rotation: None,
     };

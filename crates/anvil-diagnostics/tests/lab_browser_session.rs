@@ -23,7 +23,7 @@ fn attempt(index: u32, reason: AttemptReason, url: &str, status: u16) -> Attempt
         reason,
         method: "GET".into(),
         url: url.into(),
-        started_at: chrono::Utc::now(),
+        started_at: anvil_domain::Timestamp::now(),
         connection: None,
         phases: vec![],
         dispatch: DispatchState::Sent,

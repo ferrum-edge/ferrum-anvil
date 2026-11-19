@@ -108,7 +108,7 @@ fn objects(app: &App, ws: Id) -> Vec<(&'static str, Id, Value)> {
     ];
     for k in [kind::TLS_PROFILE, kind::PROXY_PROFILE, kind::INTEGRATION, kind::LOAD_PLAN] {
         let id = Id::new();
-        let now = chrono::Utc::now();
+        let now = anvil_domain::Timestamp::now();
         let mut value = json!({
             "id": id, "workspace_id": ws, "name": k, "created_at": now, "updated_at": now
         });

@@ -37,8 +37,8 @@ use anvil_domain::execution::{FailureKind, Phase, TransportFailure};
 use anvil_domain::secret::{SecretRef, SensitiveValue};
 use anvil_domain::tls::{ClientIdentity, ProxyKind, TlsProfile};
 use anvil_domain::workload::*;
+use anvil_domain::{TimeDelta, Timestamp};
 use anvil_transport::workload_api::{self as wapi, CallError, Endpoint, EndpointError, X509Fetch};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -55,17 +55,17 @@ const MAX_TOKEN_FILE_BYTES: u64 = 16 * 1024;
 
 struct CachedX509 {
     fetch: Arc<X509Fetch>,
-    refresh_after: DateTime<Utc>,
+    refresh_after: Timestamp,
 }
 
 struct CachedJwt {
     token: Zeroizing<String>,
-    refresh_after: DateTime<Utc>,
+    refresh_after: Timestamp,
 }
 
 struct CachedBundles {
     bundles: Arc<BTreeMap<String, Vec<u8>>>,
-    refresh_after: DateTime<Utc>,
+    refresh_after: Timestamp,
 }
 
 /// In-memory Workload API material (SVIDs with their private keys, JWT-SVIDs,
@@ -308,9 +308,9 @@ async fn x509_for(
     timeout: Duration,
     purpose: &str,
     ev: &mut WorkloadApiEvidence,
-) -> Result<(Arc<X509Fetch>, DateTime<Utc>), TransportFailure> {
+) -> Result<(Arc<X509Fetch>, Timestamp), TransportFailure> {
     let key = endpoint.uri.clone();
-    let now = Utc::now();
+    let now = Timestamp::now();
     if let Some(c) = engine.workload.state.lock().x509.get(&key)
         && now < c.refresh_after
     {
@@ -535,8 +535,8 @@ fn ts(v: Option<&serde_json::Value>) -> Option<i64> {
     v.and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
 }
 
-fn when(t: i64) -> Option<DateTime<Utc>> {
-    DateTime::from_timestamp(t, 0)
+fn when(t: i64) -> Option<Timestamp> {
+    Timestamp::from_unix_seconds(t)
 }
 
 fn audience_claim(v: Option<&serde_json::Value>) -> Option<Vec<String>> {
@@ -559,7 +559,7 @@ pub fn check_jwt_svid(
     expected_subject: Option<&str>,
     bundles: Option<&BTreeMap<String, Vec<u8>>>,
     source: JwtSvidSourceKind,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> JwtSvidSummary {
     use CheckResult::*;
     use JwtSvidCheckKind as K;
@@ -632,14 +632,14 @@ pub fn check_jwt_svid(
         Some(exp) => {
             s.expires_at = when(exp);
             // `exp` and `nbf` come from the token: saturate, never wrap.
-            let left = exp.saturating_sub(now.timestamp());
+            let left = exp.saturating_sub(now.unix_seconds());
             if left <= 0 {
                 s.checks.push(check(K::Expiry, Failed, format!("exp is {}s in the past by this machine's clock", left.unsigned_abs())));
-            } else if let Some(nbf) = ts(c.get("nbf")).filter(|n| *n > now.timestamp()) {
+            } else if let Some(nbf) = ts(c.get("nbf")).filter(|n| *n > now.unix_seconds()) {
                 s.checks.push(check(
                     K::Expiry,
                     Failed,
-                    format!("nbf is {}s in the future by this machine's clock", nbf.saturating_sub(now.timestamp())),
+                    format!("nbf is {}s in the future by this machine's clock", nbf.saturating_sub(now.unix_seconds())),
                 ));
             } else {
                 s.checks.push(check(K::Expiry, Passed, format!("expires in {left}s by this machine's clock")));
@@ -677,7 +677,7 @@ async fn bundles_for(
     timeout: Duration,
     ev: &mut WorkloadApiEvidence,
 ) -> Result<Arc<BTreeMap<String, Vec<u8>>>, TransportFailure> {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let purpose = "JWT-SVID signature check";
     if let Some(c) = engine.workload.state.lock().bundles.get(&endpoint.uri)
         && now < c.refresh_after
@@ -700,7 +700,7 @@ async fn bundles_for(
         Ok(b) => {
             ev.calls.push(call_record(WorkloadRpc::FetchJwtBundles, endpoint, purpose, false, Some(timed.duration), None).await);
             let b = Arc::new(b);
-            let refresh_after = now + ChronoDuration::seconds(JWT_BUNDLE_TTL_SECS);
+            let refresh_after = now + TimeDelta::seconds(JWT_BUNDLE_TTL_SECS);
             engine.workload.publish(generation, |s| {
                 s.bundles.insert(endpoint.uri.clone(), CachedBundles { bundles: b.clone(), refresh_after });
             });
@@ -739,7 +739,7 @@ async fn acquire_jwt_svid(
         JwtSvidSourceKind::WorkloadApi => {
             let endpoint = endpoint.as_ref().expect("resolved above");
             let key = format!("{}|{}|{}", endpoint.uri, plan.spiffe_id.clone().unwrap_or_default(), plan.audiences.join("\u{1f}"));
-            let now = Utc::now();
+            let now = Timestamp::now();
             let cached = engine.workload.state.lock().jwt.get(&key).filter(|c| now < c.refresh_after).map(|c| c.token.clone());
             match cached {
                 Some(t) => {
@@ -766,7 +766,7 @@ async fn acquire_jwt_svid(
                             );
                             let claims = anvil_auth::jwt_svid::decode(&f.token).ok().map(|d| d.claims);
                             let exp = claims.as_ref().and_then(|c| ts(c.get("exp")));
-                            let iat = claims.as_ref().and_then(|c| ts(c.get("iat"))).unwrap_or(now.timestamp());
+                            let iat = claims.as_ref().and_then(|c| ts(c.get("iat"))).unwrap_or(now.unix_seconds());
                             if let Some(exp) = exp {
                                 // Reuse until half its lifetime, and never within the margin.
                                 let refresh =
@@ -797,7 +797,7 @@ async fn acquire_jwt_svid(
     };
     // With the Workload API source the configured ID was requested; the
     // token must then carry it too.
-    let mut summary = check_jwt_svid(&token, &plan.audiences, plan.spiffe_id.as_deref(), bundles.as_deref(), plan.source, Utc::now());
+    let mut summary = check_jwt_svid(&token, &plan.audiences, plan.spiffe_id.as_deref(), bundles.as_deref(), plan.source, Timestamp::now());
     let failed: Vec<String> = summary.failed_checks().map(|c| format!("{:?}: {}", c.check, c.detail).to_lowercase()).collect();
     if !failed.is_empty() {
         if !plan.send_despite_failed_checks {
@@ -924,7 +924,7 @@ async fn prepare_inner(
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProbedSvid {
     pub spiffe_id: String,
-    pub not_after: DateTime<Utc>,
+    pub not_after: Timestamp,
     pub chain_length: u32,
     pub bundle_certificates: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1023,8 +1023,14 @@ pub async fn probe(endpoint: &str, audience: Option<&str>, timeout: Duration) ->
         let j = client.fetch_jwt_svid(&[aud.to_string()], None).await;
         p.calls.push(call_record(WorkloadRpc::FetchJwtSvid, &ep, purpose, false, Some(j.duration), j.result.as_ref().err()).await);
         if let Ok(t) = j.result {
-            p.jwt_svid =
-                Some(check_jwt_svid(&t.token, &[aud.to_string()], None, bundles.as_ref(), JwtSvidSourceKind::WorkloadApi, Utc::now()));
+            p.jwt_svid = Some(check_jwt_svid(
+                &t.token,
+                &[aud.to_string()],
+                None,
+                bundles.as_ref(),
+                JwtSvidSourceKind::WorkloadApi,
+                Timestamp::now(),
+            ));
         }
     }
     p
@@ -1077,7 +1083,7 @@ mod tests {
         let seg = |v: serde_json::Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
         let claims = serde_json::json!({"sub": "spiffe://example.org/w", "aud": ["a"], "exp": i64::MIN});
         let token = format!("{}.{}.c2ln", seg(serde_json::json!({"alg": "ES256"})), seg(claims));
-        let s = check_jwt_svid(&token, &["a".into()], None, None, JwtSvidSourceKind::Value, Utc::now());
+        let s = check_jwt_svid(&token, &["a".into()], None, None, JwtSvidSourceKind::Value, Timestamp::now());
         let expiry = s.checks.iter().find(|c| c.check == JwtSvidCheckKind::Expiry).unwrap();
         assert_eq!(expiry.result, CheckResult::Failed, "{expiry:?}");
         assert!(expiry.detail.contains("in the past"), "{expiry:?}");

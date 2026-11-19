@@ -105,8 +105,8 @@ pub(crate) fn ferrum_profile() -> IntegrationProfile {
             detail: None,
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -138,8 +138,8 @@ fn ctx_with(env: &Env, spec: RequestSpec, tls: bool) -> ExecutionContext {
             bindings: vec![],
             min_version: TlsMinVersion::Tls12,
             server_name_override: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         };
         run.tls_profile_id = Some(p.id);
         c.tls_profiles.push(p);

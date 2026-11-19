@@ -19,7 +19,6 @@ sha1.workspace = true
 hmac.workspace = true
 hex.workspace = true
 rand.workspace = true
-chrono.workspace = true
 httpdate.workspace = true
 jsonwebtoken.workspace = true
 # Not called directly: enables `aws-lc-rs/prebuilt-nasm` for jsonwebtoken's

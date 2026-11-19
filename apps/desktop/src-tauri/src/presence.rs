@@ -729,7 +729,7 @@ mod tests {
     fn sealed_workspace(st: &DesktopState) -> Id {
         let app = st.app().unwrap();
         let ws = app.create_workspace("Imported").unwrap().meta.id;
-        let seal = DeviceIdentitySeal { workspace_id: ws, sealed_at: chrono::Utc::now() };
+        let seal = DeviceIdentitySeal { workspace_id: ws, sealed_at: anvil_domain::Timestamp::now() };
         app.store.put(kind::DEVICE_IDENTITY_SEAL, &ws, Some(&ws), None, 0.0, &seal).unwrap();
         assert!(app.device_identity_sealed(&ws).unwrap());
         ws

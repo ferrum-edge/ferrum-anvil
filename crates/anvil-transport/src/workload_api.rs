@@ -34,9 +34,9 @@
 use crate::certs::pem;
 use crate::connector::BoxIo;
 use crate::errors::display_chain;
+use anvil_domain::Timestamp;
 use anvil_domain::workload::{SPIFFE_ENDPOINT_SOCKET, WorkloadCallResult, WorkloadEndpointSource, WorkloadRpc, grpc_code_name};
 use bytes::{Buf, Bytes, BytesMut};
-use chrono::{DateTime, Utc};
 use http::{Method, Request};
 use http_body_util::{BodyExt, Full};
 use hyper::client::conn::http2;
@@ -299,8 +299,8 @@ pub struct FetchedX509Svid {
     /// The trust domain's CA certificates, one PEM each.
     pub bundle_pem: Vec<String>,
     pub hint: String,
-    pub not_before: DateTime<Utc>,
-    pub not_after: DateTime<Utc>,
+    pub not_before: Timestamp,
+    pub not_after: Timestamp,
 }
 
 impl std::fmt::Debug for FetchedX509Svid {
@@ -648,12 +648,12 @@ pub fn split_der_certificates(mut data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     Ok(out)
 }
 
-fn validity(der: &[u8]) -> Result<(DateTime<Utc>, DateTime<Utc>), String> {
+fn validity(der: &[u8]) -> Result<(Timestamp, Timestamp), String> {
     use x509_parser::prelude::*;
     let (_, cert) = X509Certificate::from_der(der).map_err(|e| e.to_string())?;
     let v = cert.validity();
-    let nb = DateTime::from_timestamp(v.not_before.timestamp(), 0).ok_or("invalid notBefore")?;
-    let na = DateTime::from_timestamp(v.not_after.timestamp(), 0).ok_or("invalid notAfter")?;
+    let nb = Timestamp::from_unix_seconds(v.not_before.timestamp()).ok_or("invalid notBefore")?;
+    let na = Timestamp::from_unix_seconds(v.not_after.timestamp()).ok_or("invalid notAfter")?;
     Ok((nb, na))
 }
 

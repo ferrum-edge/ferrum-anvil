@@ -37,8 +37,8 @@ fn workspace(id: &Id, name: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id,
         "schema_version": anvil_domain::SCHEMA_VERSION,
-        "created_at": chrono::Utc::now(),
-        "updated_at": chrono::Utc::now(),
+        "created_at": anvil_domain::Timestamp::now(),
+        "updated_at": anvil_domain::Timestamp::now(),
         "name": name,
     })
 }
@@ -57,8 +57,8 @@ fn plaintext_leak_audit_db_wal_checkpoints() {
     let req = serde_json::json!({
         "id": id,
         "schema_version": anvil_domain::SCHEMA_VERSION,
-        "created_at": chrono::Utc::now(),
-        "updated_at": chrono::Utc::now(),
+        "created_at": anvil_domain::Timestamp::now(),
+        "updated_at": anvil_domain::Timestamp::now(),
         "workspace_id": ws,
         "name": PLANTED[3],
         "description": PLANTED[0],
@@ -206,7 +206,7 @@ fn history_retention_prunes_by_size() {
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
     let store = Store::open(dir.path(), created.dek.clone()).unwrap();
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = anvil_domain::Timestamp::now().unix_millis();
     for i in 0..20 {
         store.add_history(&Id::new(), None, None, now + i, &serde_json::json!({"i": i}), Some(&vec![b'x'; 10_000])).unwrap();
     }
@@ -221,7 +221,7 @@ fn retention_sweeps_bodies_only_when_it_removes_a_record() {
     let dir = tempfile::tempdir().unwrap();
     let created = vault::create_passphrase_profile(dir.path(), "t", "pw", KdfParams::testing()).unwrap();
     let store = Store::open(dir.path(), created.dek.clone()).unwrap();
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = anvil_domain::Timestamp::now().unix_millis();
     let recent = Id::new();
     store.add_history(&recent, None, None, now, &serde_json::json!({"n": 1}), Some(b"recent body")).unwrap();
     // A body no record uses and nothing pins (left by an earlier build).

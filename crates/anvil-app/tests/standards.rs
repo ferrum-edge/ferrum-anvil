@@ -210,7 +210,7 @@ fn migration_keeps_all_legacy_rulesets_over_limits_and_the_profile_can_be_trimme
             sha256: hex::encode(sha2::Sha256::digest(TEAM.as_bytes())),
             enabled: true,
             version: None,
-            added_at: chrono::Utc::now(),
+            added_at: anvil_domain::Timestamp::now(),
         });
     }
     let mut settings = app.settings().unwrap();
@@ -247,7 +247,7 @@ fn existing_ruleset_wins_legacy_id_collision_regardless_of_legacy_timestamp() {
         let existing = app.add_api_ruleset("stored.yaml", TEAM.as_bytes()).unwrap();
         let mut legacy = existing.clone();
         legacy.name = "Legacy copy".into();
-        legacy.added_at += chrono::Duration::seconds(offset);
+        legacy.added_at += anvil_domain::TimeDelta::seconds(offset);
         let mut settings = app.settings().unwrap();
         settings.api_standards.legacy_rulesets.push(legacy);
         app.store.put(kind::APP_SETTINGS, &anvil_app::settings_id(), None, None, 0.0, &settings).unwrap();

@@ -60,8 +60,8 @@ pub fn integration(name: &str, hosts: &[(&str, u16)]) -> IntegrationProfile {
             detail: None,
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -230,8 +230,8 @@ fn tls_profile(c: &Client<'_>) -> TlsProfile {
         min_version: if c.min13 { TlsMinVersion::Tls13 } else { TlsMinVersion::Tls12 },
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 

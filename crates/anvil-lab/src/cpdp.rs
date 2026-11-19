@@ -82,7 +82,7 @@ fn admin_jwt(secret: &str) -> String {
     use base64::Engine as _;
     use hmac::{Hmac, KeyInit, Mac};
     let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let now = chrono::Utc::now().timestamp();
+    let now = anvil_domain::Timestamp::now().unix_seconds();
     let header = b64.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
     let claims = serde_json::json!({
         "iss": "ferrum-edge", "sub": "anvil-lab", "role": "admin",
@@ -200,8 +200,8 @@ fn ctx(env: &Env, addr: &str, path: &str) -> ExecutionContext {
                 detail: None,
                 console_url: None,
             },
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         });
     }
     c

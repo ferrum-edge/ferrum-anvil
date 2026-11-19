@@ -33,12 +33,12 @@ use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::request::RequestSpec;
 use anvil_domain::workspace::LinkedIdentity;
+use anvil_domain::{TimeDelta, Timestamp};
 use anvil_engine::context::ExecutionContext;
 use anvil_engine::oauth_http::TokenSummary;
 use anvil_identity::{ApiAuthorization, BrowserOpener, FlowObserver, FlowOptions, ProviderInfo, VerifiedIdentity};
 use anvil_storage::vault::ProfileHeader;
 use anvil_storage::{Key, crypto};
-use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -78,7 +78,7 @@ pub struct IdentityHint {
     pub provider: String,
     pub subject: String,
     pub require_fresh_login: bool,
-    pub linked_at: DateTime<Utc>,
+    pub linked_at: Timestamp,
 }
 
 /// How a profile can be unlocked right now.
@@ -99,7 +99,7 @@ pub(crate) struct BindingFile {
     provider: String,
     subject: String,
     require_fresh_login: bool,
-    linked_at: DateTime<Utc>,
+    linked_at: Timestamp,
     /// Hex AEAD envelope (profile data key) of the full [`LinkedIdentity`].
     sealed: String,
 }
@@ -242,16 +242,16 @@ pub(crate) fn rotate_binding(
 }
 
 /// A proof counts only for the linked provider and subject, and only while fresh.
-pub(crate) fn check_proof(provider: &str, subject: &str, proof: &VerifiedIdentity, now: DateTime<Utc>) -> Result<()> {
+pub(crate) fn check_proof(provider: &str, subject: &str, proof: &VerifiedIdentity, now: Timestamp) -> Result<()> {
     if proof.provider() != provider || proof.subject() != subject {
         return Err(IdentityPolicyError::IdentityMismatch { provider: provider.to_string() }.into());
     }
     check_fresh(proof, now)
 }
 
-pub(crate) fn check_fresh(proof: &VerifiedIdentity, now: DateTime<Utc>) -> Result<()> {
+pub(crate) fn check_fresh(proof: &VerifiedIdentity, now: Timestamp) -> Result<()> {
     let age = now - proof.authenticated_at();
-    if age > Duration::seconds(FRESH_LOGIN_MAX_AGE_SECS) || age < -Duration::seconds(FUTURE_SKEW_SECS) {
+    if age > TimeDelta::seconds(FRESH_LOGIN_MAX_AGE_SECS) || age < -TimeDelta::seconds(FUTURE_SKEW_SECS) {
         return Err(IdentityPolicyError::StaleProof { max_age_secs: FRESH_LOGIN_MAX_AGE_SECS }.into());
     }
     Ok(())

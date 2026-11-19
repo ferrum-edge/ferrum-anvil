@@ -85,7 +85,7 @@ fn revisions_of(app: &App, r: &Id) -> usize {
 /// Mark attachment `a` as attached `days` ago.
 fn attached_days_ago(app: &App, a: &AttachmentRef, days: i64) {
     let (id, mut entry) = index_entry(app, a);
-    entry["attached_at"] = (chrono::Utc::now() - chrono::Duration::days(days)).timestamp_millis().into();
+    entry["attached_at"] = (anvil_domain::Timestamp::now() - anvil_domain::TimeDelta::days(days)).unix_millis().into();
     app.store.put(kind::IMPORT_SOURCE, &id, None, None, 0.0, &entry).unwrap();
 }
 
@@ -95,13 +95,13 @@ fn last_pass_ran_hours_ago(app: &App, hours: i64) {
     let key = "note:storage_cleanup";
     let note: String = db.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0)).unwrap();
     let mut note: serde_json::Value = serde_json::from_str(&note).unwrap();
-    note["ran_at"] = (chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339().into();
+    note["ran_at"] = (anvil_domain::Timestamp::now() - anvil_domain::TimeDelta::hours(hours)).to_rfc3339().into();
     db.execute("UPDATE meta SET value=?1 WHERE key=?2", [note.to_string().as_str(), key]).unwrap();
 }
 
 /// How long ago the last cleanup pass ran.
-fn since_last_pass(app: &App) -> chrono::Duration {
-    chrono::Utc::now() - app.last_storage_cleanup().unwrap().expect("a pass ran").ran_at
+fn since_last_pass(app: &App) -> anvil_domain::TimeDelta {
+    anvil_domain::Timestamp::now() - app.last_storage_cleanup().unwrap().expect("a pass ran").ran_at
 }
 
 #[test]
@@ -226,7 +226,7 @@ fn opening_a_profile_cleans_up_at_most_once_a_day_and_keeps_the_last_pass() {
     // Opening the new profile ran a pass.
     let first = app.last_storage_cleanup().unwrap().expect("the pass at open is kept");
     assert_eq!(first.result, StorageCleanup::default());
-    assert!(since_last_pass(&app) < chrono::Duration::minutes(5));
+    assert!(since_last_pass(&app) < anvil_domain::TimeDelta::minutes(5));
     let ws = app.create_workspace("W").unwrap().meta.id;
     let gone = app.put_attachment("gone.bin", b"payload of a request deleted long ago", None).unwrap();
     let old = app.create_request(&ws, None, "old", upload(&gone)).unwrap();
@@ -247,7 +247,7 @@ fn opening_a_profile_cleans_up_at_most_once_a_day_and_keeps_the_last_pass() {
     assert!(!stored(&app, &gone));
     let last = app.last_storage_cleanup().unwrap().unwrap();
     assert_eq!(last.result, StorageCleanup { orphaned_revisions: 1, released_attachments: 1, ..Default::default() });
-    assert!(since_last_pass(&app) < chrono::Duration::minutes(5));
+    assert!(since_last_pass(&app) < anvil_domain::TimeDelta::minutes(5));
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn an_object_that_does_not_decode_keeps_every_file_and_is_named() {
     let app = reopen(app);
     assert!(stored(&app, &abandoned));
     assert_eq!(app.clean_up_storage_if_due().unwrap(), None);
-    assert!(since_last_pass(&app) > chrono::Duration::hours(24), "no pass ran");
+    assert!(since_last_pass(&app) > anvil_domain::TimeDelta::hours(24), "no pass ran");
 
     // Once the damaged row is deleted, the next pass releases the file.
     app.store.delete(kind::REQUEST, &damaged.meta.id).unwrap();
@@ -302,7 +302,7 @@ fn a_mark_with_no_time_ages_from_the_first_pass_that_sees_it() {
     entry.as_object_mut().unwrap().remove("attached_at");
     app.store.put(kind::IMPORT_SOURCE, &id, None, None, 0.0, &entry).unwrap();
 
-    let before = chrono::Utc::now().timestamp_millis();
+    let before = anvil_domain::Timestamp::now().unix_millis();
     assert_eq!(app.clean_up_storage().unwrap(), StorageCleanup::default(), "its age is unknown: kept");
     assert!(stored(&app, &legacy));
     let (_, entry) = index_entry(&app, &legacy);
@@ -389,7 +389,7 @@ fn a_mark_stamped_by_a_pass_an_undecodable_object_blocked_does_not_make_the_next
     last_pass_ran_hours_ago(&app, 25);
     let app = reopen(app);
     assert_eq!(app.clean_up_storage_if_due().unwrap(), None);
-    assert!(since_last_pass(&app) > chrono::Duration::hours(24), "no pass ran");
+    assert!(since_last_pass(&app) > anvil_domain::TimeDelta::hours(24), "no pass ran");
     assert!(stored(&app, &abandoned) && stored(&app, &legacy));
 }
 

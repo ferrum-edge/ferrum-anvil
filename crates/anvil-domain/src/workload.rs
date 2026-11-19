@@ -9,9 +9,9 @@
 //! evidence therefore records which endpoint was dialed and what it
 //! answered, and never the SVID private key or the JWT-SVID itself.
 
+use crate::Timestamp;
 use crate::execution::CertificateSummary;
 use crate::secret::SensitiveValue;
-use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -181,7 +181,7 @@ pub struct X509SvidSummary {
     /// When Anvil will fetch a fresh SVID (half its lifetime, as SPIFFE
     /// agents rotate).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refresh_after: Option<DateTime<Utc>>,
+    pub refresh_after: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -240,11 +240,11 @@ pub struct JwtSvidSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issued_at: Option<DateTime<Utc>>,
+    pub issued_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub not_before: Option<DateTime<Utc>>,
+    pub not_before: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
     /// The token carries an `iss` claim (JWT-SVIDs define none).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_issuer: bool,

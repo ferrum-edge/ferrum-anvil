@@ -1495,11 +1495,13 @@ impl<'r, 'a, 'i> XsdGen<'r, 'a, 'i> {
             "boolean" => (if r.bool() { "true" } else { "false" }).into(),
             "dateTime" => {
                 let secs = r.range_i128(1_577_836_800, 1_893_455_999) as i64;
-                chrono::DateTime::from_timestamp(secs, 0).map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default()
+                anvil_domain::Timestamp::from_unix_seconds(secs)
+                    .map(|d| d.to_rfc3339_opts(anvil_domain::SecondsFormat::Secs, true))
+                    .unwrap_or_default()
             }
             "date" => {
                 let secs = r.range_i128(1_577_836_800, 1_893_455_999) as i64;
-                chrono::DateTime::from_timestamp(secs, 0).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default()
+                anvil_domain::Timestamp::from_unix_seconds(secs).map(|d| d.format_date()).unwrap_or_default()
             }
             "time" => format!("{:02}:{:02}:00", r.range_i128(0, 23), r.range_i128(0, 59)),
             "duration" => format!("P{}D", r.range_i128(1, 30)),

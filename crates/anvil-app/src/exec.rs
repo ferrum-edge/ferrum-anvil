@@ -686,7 +686,7 @@ impl App {
             &out.record.id,
             out.record.workspace_id.as_ref(),
             out.record.request_id.as_ref(),
-            out.record.started_at.timestamp_millis(),
+            out.record.started_at.unix_millis(),
             &out.record,
             body,
         )?;
@@ -891,7 +891,7 @@ mod prefetch_tests {
 
     /// An HTTP proxy profile whose password is `password`.
     fn proxy(app: &App, ws: &Id, password: &SecretRef) -> Id {
-        let now = chrono::Utc::now();
+        let now = anvil_domain::Timestamp::now();
         let p = ProxyProfile {
             id: Id::new(),
             workspace_id: *ws,

@@ -156,7 +156,7 @@ impl Subscriber for Logger {
         let metadata = event.metadata();
         let mut fields = Fields::default();
         event.record(&mut fields);
-        let time = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+        let time = anvil_domain::Timestamp::now().to_rfc3339_opts(anvil_domain::SecondsFormat::Millis, true);
         let line = format!("{time} {} {}: {}{}", metadata.level().as_str(), metadata.target(), fields.message, fields.rest);
         // One event, one line.
         let line = line.replace('\r', "\\r").replace('\n', "\\n") + "\n";

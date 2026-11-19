@@ -39,7 +39,6 @@ hex.workspace = true
 flate2.workspace = true
 brotli.workspace = true
 zstd.workspace = true
-chrono.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
 dimpl.workspace = true

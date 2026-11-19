@@ -62,7 +62,7 @@ fn deleted_device_deny_record_is_not_treated_as_permission() {
             Some(&ws.meta.id),
             None,
             0.0,
-            &serde_json::json!({"workspace_id":ws.meta.id,"sealed_at":chrono::Utc::now()}),
+            &serde_json::json!({"workspace_id":ws.meta.id,"sealed_at":anvil_domain::Timestamp::now()}),
         )
         .unwrap();
     assert!(app.device_identity_sealed(&ws.meta.id).unwrap());

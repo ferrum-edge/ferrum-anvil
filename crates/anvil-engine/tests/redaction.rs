@@ -374,7 +374,7 @@ fn authorization_endpoint_evidence_is_redacted_as_a_url() {
         reason,
         method: "GET".into(),
         url: url.into(),
-        started_at: chrono::Utc::now(),
+        started_at: anvil_domain::Timestamp::now(),
         connection: None,
         phases: vec![],
         dispatch: DispatchState::Sent,
@@ -982,7 +982,7 @@ async fn a_hidden_username_crossing_the_body_preview_cut_shows_no_password_prefi
     anvil_transport::init();
     let padding = "u".repeat(65_498);
     let password = format!("tok-SENSITIVE-straddle-{}", "w".repeat(200));
-    let (username, text, now) = (format!("Qb{padding}"), WssePasswordType::PasswordText, chrono::Utc::now());
+    let (username, text, now) = (format!("Qb{padding}"), WssePasswordType::PasswordText, anvil_domain::Timestamp::now());
     // Where the password starts in the body sent, with a comment of `pad` bytes.
     let password_at = |pad: usize| {
         let sent = insert_security(padded_envelope(pad).as_bytes(), &username, &password, text, None, None, now).unwrap();
@@ -1093,7 +1093,7 @@ async fn a_hidden_username_whose_closing_tag_straddles_the_capture_is_withheld()
     anvil_transport::init();
     let suffix = "u".repeat(65_600);
     let username = format!("Qb{suffix}");
-    let (password, text, now) = ("tok-SENSITIVE-long-user-pw", WssePasswordType::PasswordText, chrono::Utc::now());
+    let (password, text, now) = ("tok-SENSITIVE-long-user-pw", WssePasswordType::PasswordText, anvil_domain::Timestamp::now());
     // Where `</wsse:Username>` starts in the body sent, with a comment of `pad` bytes.
     let close_at = |pad: usize| {
         let sent = insert_security(padded_envelope(pad).as_bytes(), &username, password, text, None, None, now).unwrap();
@@ -1484,7 +1484,7 @@ fn local_failures_and_shared_protocol_metadata_do_not_keep_folded_secrets() {
     resolver.mark_sensitive("credential", secret);
     let mut failure = TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, folded.clone());
     failure.field = Some(folded.clone());
-    let mut record = anvil_engine::record::local_failure(&ctx, &resolver, chrono::Utc::now(), failure).record;
+    let mut record = anvil_engine::record::local_failure(&ctx, &resolver, anvil_domain::Timestamp::now(), failure).record;
     assert!(!serde_json::to_string(&record).unwrap().to_ascii_lowercase().contains(&folded));
     let redactor = Redactor::new(vec![secret.into()], vec![]);
     if let Some(finding) = record.findings.first_mut() {
@@ -1534,7 +1534,7 @@ fn late_learned_encoded_secrets_cannot_hide_behind_masked_metadata_structure() {
         anvil_domain::execution::FailureKind::InvalidUrl,
         "not sent",
     );
-    let mut record = anvil_engine::record::local_failure(&ctx, &resolver, chrono::Utc::now(), failure).record;
+    let mut record = anvil_engine::record::local_failure(&ctx, &resolver, anvil_domain::Timestamp::now(), failure).record;
     record
         .assertion_results
         .push(serde_json::from_value(serde_json::json!({"label":"observed URL", "passed":false,"actual":raw,"message":"failed"})).unwrap());

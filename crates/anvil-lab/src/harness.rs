@@ -47,7 +47,7 @@ pub struct RunCtx {
 impl RunCtx {
     pub fn new(profile: &str) -> Result<Self> {
         let (_bin, lock) = gateway::binary()?;
-        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let stamp = anvil_domain::Timestamp::now().format_basic();
         let out_dir = gateway::repo_root().join("results/lab").join(format!("{stamp}-{profile}"));
         std::fs::create_dir_all(&out_dir)?;
         Ok(RunCtx { profile: profile.into(), out_dir, stamp, lock })

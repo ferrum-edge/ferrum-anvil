@@ -78,8 +78,8 @@ fn trust_profile() -> TlsProfile {
         bindings: vec![],
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -437,8 +437,8 @@ fn proxy_profile(kind: ProxyKind, tls_profile_id: Option<Id>) -> ProxyProfile {
         username: None,
         password: None,
         no_proxy: String::new(),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 

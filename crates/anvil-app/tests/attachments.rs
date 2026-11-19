@@ -85,7 +85,7 @@ fn attached_days_ago(app: &App, a: &AttachmentRef, days: i64) {
         .filter_map(|id| app.store.get::<serde_json::Value>(kind::IMPORT_SOURCE, &id).unwrap().map(|v| (id, v)))
         .find(|(_, v)| v["attachment"] == sha(a).as_str())
         .expect("its index entry");
-    entry["attached_at"] = (chrono::Utc::now() - chrono::Duration::days(days)).timestamp_millis().into();
+    entry["attached_at"] = (anvil_domain::Timestamp::now() - anvil_domain::TimeDelta::days(days)).unix_millis().into();
     app.store.put(kind::IMPORT_SOURCE, &id, None, None, 0.0, &entry).unwrap();
 }
 

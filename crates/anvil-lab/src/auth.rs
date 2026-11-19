@@ -293,7 +293,7 @@ fn manual(env: &Env, method: &str, target: &str, headers: &[(String, String)], b
 }
 
 fn now_http_date(offset_secs: i64) -> String {
-    let t = chrono::Utc::now() + chrono::Duration::seconds(offset_secs);
+    let t = anvil_domain::Timestamp::now() + anvil_domain::TimeDelta::seconds(offset_secs);
     httpdate::fmt_http_date(t.into())
 }
 
@@ -574,7 +574,7 @@ fn auth010(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let none = fixtures_auth::alg_none_token(
-            serde_json::json!({"sub": "alice", "anvil_consumer": "alice", "exp": chrono::Utc::now().timestamp() + 300}),
+            serde_json::json!({"sub": "alice", "anvil_consumer": "alice", "exp": anvil_domain::Timestamp::now().unix_seconds() + 300}),
         );
         let o = go(env, &ctx(env, "GET", "/auth/jwt/echo", bearer(&none))).await;
         signal(&mut c, &o, 401, "Invalid JWT token");
@@ -586,7 +586,7 @@ fn auth010(env: &Env) -> Fut<'_> {
         signal(&mut c, &j, 401, "Invalid or unrecognized JWT");
         no_confirmed_text(&mut c, &j, "verified");
         let n2 = fixtures_auth::alg_none_token(
-            serde_json::json!({"sub": "alice", "iss": ISSUER, "aud": AUDIENCE, "exp": chrono::Utc::now().timestamp() + 300}),
+            serde_json::json!({"sub": "alice", "iss": ISSUER, "aud": AUDIENCE, "exp": anvil_domain::Timestamp::now().unix_seconds() + 300}),
         );
         let j2 = go(env, &ctx(env, "GET", "/auth/jwks/echo", bearer(&n2))).await;
         signal(&mut c, &j2, 401, "Invalid or unrecognized JWT");
@@ -766,7 +766,7 @@ fn authx01_nbf(env: &Env) -> Fut<'_> {
             early,
             serde_json::json!({
                 "username": "alice", "sub": "alice", "iss": ISSUER, "aud": AUDIENCE, "token_type": "bearer",
-                "nbf": chrono::Utc::now().timestamp() + 600,
+                "nbf": anvil_domain::Timestamp::now().unix_seconds() + 600,
             }),
         );
         let o = go(env, &ctx(env, "GET", "/auth/introspect/echo", bearer(early))).await;
@@ -995,7 +995,7 @@ fn dpop_cfg(token: &str, key: &str) -> AuthConfig {
 
 fn manual_proof(key: &str, method: &str, path: &str, token: &str) -> String {
     let htu = anvil_auth::dpop::htu("http", AUTHORITY, path).expect("htu");
-    anvil_auth::dpop::proof(key, method, &htu, Some(token), None, chrono::Utc::now()).expect("proof").jwt
+    anvil_auth::dpop::proof(key, method, &htu, Some(token), None, anvil_domain::Timestamp::now()).expect("proof").jwt
 }
 
 fn auth024(env: &Env) -> Fut<'_> {
@@ -1286,7 +1286,7 @@ fn captured_wsse(env: &Env, ptype: WssePasswordType, ttl: u32) -> String {
         ptype,
         Some(ttl),
         None,
-        chrono::Utc::now(),
+        anvil_domain::Timestamp::now(),
     )
     .expect("lab wsse capture");
     String::from_utf8(bytes).expect("utf-8 envelope")
@@ -1423,7 +1423,7 @@ fn soap_signing_unavailable(env: &Env) -> Option<String> {
 }
 
 fn signed(env: &Env, signer: &Signer, payload: &str) -> String {
-    env.fx.soap.signed_envelope(signer, payload, chrono::Utc::now(), 60).expect("lab signed envelope")
+    env.fx.soap.signed_envelope(signer, payload, anvil_domain::Timestamp::now(), 60).expect("lab signed envelope")
 }
 
 fn auth030(env: &Env) -> Fut<'_> {
@@ -1464,14 +1464,14 @@ fn auth030(env: &Env) -> Fut<'_> {
 }
 
 fn saml_spec(issuer: &str, audience: &str, not_before_offset: i64, lifetime: i64) -> SamlSpec {
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     SamlSpec {
         issuer: issuer.into(),
         name_id: "alice".into(),
         audience: audience.into(),
         recipient: SAML_RECIPIENT.into(),
-        not_before: now + chrono::Duration::seconds(not_before_offset),
-        not_on_or_after: now + chrono::Duration::seconds(not_before_offset + lifetime),
+        not_before: now + anvil_domain::TimeDelta::seconds(not_before_offset),
+        not_on_or_after: now + anvil_domain::TimeDelta::seconds(not_before_offset + lifetime),
     }
 }
 

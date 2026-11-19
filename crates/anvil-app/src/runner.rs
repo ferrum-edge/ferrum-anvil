@@ -384,7 +384,7 @@ impl App {
 
     /// Save (encrypted) and keep the newest [`MAX_RUN_REPORTS`] per workspace.
     pub fn save_run_report(&self, r: &RunReport) -> Result<()> {
-        self.store.put(kind::RUN_REPORT, &r.run_id, Some(&r.workspace_id), None, r.started_at.timestamp_millis() as f64, r)?;
+        self.store.put(kind::RUN_REPORT, &r.run_id, Some(&r.workspace_id), None, r.started_at.unix_millis() as f64, r)?;
         let ws = r.workspace_id.to_string();
         let mut mine: Vec<_> =
             self.store.object_meta(kind::RUN_REPORT)?.into_iter().filter(|m| m.workspace_id.as_deref() == Some(&ws)).collect();
@@ -487,7 +487,7 @@ impl App {
         if let Some(d) = s.dataset_id {
             self.workspace_dataset(&s.workspace_id, &d)?;
         }
-        s.meta.updated_at = chrono::Utc::now();
+        s.meta.updated_at = anvil_domain::Timestamp::now();
         self.save_scenario(s)
     }
 
@@ -495,7 +495,7 @@ impl App {
     pub fn trust_scenario(&self, id: &Id) -> Result<Scenario> {
         let mut s = self.scenario(id)?;
         s.trusted = true;
-        s.meta.updated_at = chrono::Utc::now();
+        s.meta.updated_at = anvil_domain::Timestamp::now();
         self.save_scenario(s)
     }
 

@@ -20,7 +20,7 @@ fn raw(dir: &tempfile::TempDir) -> Connection {
     Connection::open(dir.path().join(DB_FILE)).unwrap()
 }
 fn put_file(store: &Store, id: &Id, path: &str) {
-    store.put(kind::TOKEN_FILE, id, None, None, 0.0, &json!({"id":id,"path":path,"bound_at":chrono::Utc::now()})).unwrap();
+    store.put(kind::TOKEN_FILE, id, None, None, 0.0, &json!({"id":id,"path":path,"bound_at":anvil_domain::Timestamp::now()})).unwrap();
 }
 fn secret_payload(c: &Connection, id: &Id) -> Vec<u8> {
     c.query_row("SELECT payload FROM secrets WHERE id=?1", [id.to_string()], |r| r.get(0)).unwrap()
@@ -281,7 +281,7 @@ fn schema_replace_cannot_delete_an_object_outside_the_upsert_target() {
     store.protected_authority().unwrap();
     put_file(&store, &victim, "updated");
     let authority = store.protected_authority().unwrap();
-    let value = json!({"id":new,"path":"rejected","bound_at":chrono::Utc::now()});
+    let value = json!({"id":new,"path":"rejected","bound_at":anvil_domain::Timestamp::now()});
     assert!(store.put(kind::TOKEN_FILE, &new, None, None, 0.0, &value).is_err());
     assert_eq!(store.protected_authority().unwrap(), authority);
     assert_eq!(store.get::<Value>(kind::TOKEN_FILE, &victim).unwrap().unwrap()["path"], "updated");

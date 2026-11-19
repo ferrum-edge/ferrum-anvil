@@ -46,7 +46,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, vault::ProfileHeader, St
         provider: "mock".into(),
         subject: "test".into(),
         email: None,
-        linked_at: chrono::Utc::now(),
+        linked_at: anvil_domain::Timestamp::now(),
         require_fresh_login: true,
     };
     let sealed =

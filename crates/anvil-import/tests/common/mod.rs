@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
+use anvil_domain::Timestamp;
 use anvil_domain::request::{Body, KeyValue, RequestSpec};
 use anvil_domain::workspace::RequestDefinition;
 use anvil_import::{ImportOptions, ImportResult, import};
-use chrono::{TimeZone, Utc};
 
 pub fn fixture(path: &str) -> Vec<u8> {
     let p = format!("{}/tests/fixtures/{path}", env!("CARGO_MANIFEST_DIR"));
@@ -18,7 +18,7 @@ pub fn test_key() -> anvil_import::CredentialKey {
 
 pub fn opts() -> ImportOptions {
     ImportOptions {
-        imported_at: Some(Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap()),
+        imported_at: Some(Timestamp::from_ymd_hms(2026, 1, 2, 3, 4, 5).unwrap()),
         credential_key: Some(test_key()),
         ..Default::default()
     }

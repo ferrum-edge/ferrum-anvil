@@ -77,8 +77,8 @@ fn ferrum_profile() -> IntegrationProfile {
             detail: None,
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -95,8 +95,8 @@ fn tls_profile(root_pem: &str) -> TlsProfile {
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -2743,8 +2743,8 @@ async fn run_load(ctx: ExecutionContext, iterations: u64, concurrency: u64, data
         abort: None,
         seed: 1,
         trusted: true,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let job = anvil_load::LoadJob { requests: std::collections::HashMap::from([(id, ctx)]), dataset };
     let opts = anvil_load::RunOptions { acknowledged: true, ..Default::default() };

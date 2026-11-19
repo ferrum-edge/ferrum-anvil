@@ -11,7 +11,7 @@ use anvil_auth::AuthError;
 use anvil_auth::oauth::{BoxFut, CachedToken, OAuthResolved, TokenCache, TokenHttp, TokenKey};
 use anvil_domain::Id;
 use anvil_domain::auth::OAuthGrant;
-use chrono::{Duration, Utc};
+use anvil_domain::{TimeDelta, Timestamp};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -116,7 +116,7 @@ fn signed_in(access: &str, refresh: &str, expired: bool) -> CachedToken {
     CachedToken {
         access_token: Zeroizing::new(access.into()),
         token_type: "Bearer".into(),
-        expires_at: Some(Utc::now() + Duration::seconds(offset)),
+        expires_at: Some(Timestamp::now() + TimeDelta::seconds(offset)),
         refresh_token: Some(Zeroizing::new(refresh.into())),
     }
 }
@@ -128,7 +128,7 @@ fn sign_in(cache: &TokenCache, cfg: &OAuthResolved, t: CachedToken) {
 }
 
 async fn acquire(cache: &TokenCache, cfg: &OAuthResolved, issuer: &Issuer) -> Result<String, AuthError> {
-    cache.get_or_acquire(&key(cfg), cfg, issuer, Utc::now()).await.map(|t| t.access_token.to_string())
+    cache.get_or_acquire(&key(cfg), cfg, issuer, Timestamp::now()).await.map(|t| t.access_token.to_string())
 }
 
 /// Let spawned tasks on this (current-thread) runtime run until they block.
@@ -598,7 +598,7 @@ async fn clearing_a_partition_during_acquisition_discards_the_late_token_and_spa
     issuer.received.notified().await;
     let other_task = {
         let (cache, issuer, cfg, other) = (cache.clone(), issuer.clone(), cfg.clone(), other.clone());
-        tokio::spawn(async move { cache.get_or_acquire(&other, &cfg, &*issuer, Utc::now()).await })
+        tokio::spawn(async move { cache.get_or_acquire(&other, &cfg, &*issuer, Timestamp::now()).await })
     };
     issuer.received.notified().await;
     cache.clear_partition("workspace");
@@ -642,13 +642,13 @@ async fn an_acquisition_since_a_generation_before_the_clear_is_refused() {
     let before = cache.generation(&k);
     cache.clear_partition("workspace");
     sign_in(&cache, &cfg, signed_in("restored", "rt", false));
-    let Err(e) = cache.get_or_acquire_since(&k, before, &cfg, &issuer, Utc::now()).await else { panic!("served across the clear") };
+    let Err(e) = cache.get_or_acquire_since(&k, before, &cfg, &issuer, Timestamp::now()).await else { panic!("served across the clear") };
     assert!(matches!(e, AuthError::Canceled(_)), "{e:?}");
     assert_eq!(issuer.calls.load(Ordering::SeqCst), 0);
 
     // A sign-in alone since then still serves it (as for `get_or_acquire`).
     let since = cache.generation(&k);
     sign_in(&cache, &cfg, signed_in("newer", "rt", false));
-    let t = cache.get_or_acquire_since(&k, since, &cfg, &issuer, Utc::now()).await.unwrap();
+    let t = cache.get_or_acquire_since(&k, since, &cfg, &issuer, Timestamp::now()).await.unwrap();
     assert_eq!(t.access_token.as_str(), "newer");
 }

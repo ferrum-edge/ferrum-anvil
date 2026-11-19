@@ -1,9 +1,9 @@
 use crate::Id;
+use crate::Timestamp;
 use crate::auth::AuthConfig;
 use crate::request::{AttachmentRef, RequestSpec};
 use crate::secret::SensitiveValue;
 use crate::settings::SettingsOverrides;
-use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -12,13 +12,13 @@ use serde::{Deserialize, Serialize};
 pub struct Meta {
     pub id: Id,
     pub schema_version: u32,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 impl Meta {
     pub fn new() -> Self {
-        let now = Utc::now();
+        let now = Timestamp::now();
         Meta { id: Id::new(), schema_version: crate::SCHEMA_VERSION, created_at: now, updated_at: now }
     }
 }
@@ -146,7 +146,7 @@ pub struct RequestDefinition {
 pub struct RequestRevision {
     pub id: Id,
     pub request_id: Id,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// SHA-256 of the canonical JSON of `spec`.
     pub spec_sha256: String,
     pub spec: RequestSpec,
@@ -246,7 +246,7 @@ pub struct LinkedIdentity {
     pub subject: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
-    pub linked_at: DateTime<Utc>,
+    pub linked_at: Timestamp,
     /// Require a fresh provider authentication before local unlock
     /// (online-only policy; offline unlock then needs the recovery path).
     #[serde(default)]

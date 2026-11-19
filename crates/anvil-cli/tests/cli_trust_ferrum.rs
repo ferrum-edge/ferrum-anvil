@@ -74,7 +74,7 @@ fn shadowed(record: &serde_json::Value) -> bool {
 fn save_gateway(data: &Path, host: &str, port: Option<u16>) {
     let app = open(data);
     let ws = app.find_workspace("Lab").unwrap();
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     app.save_integration(IntegrationProfile {
         id: anvil_domain::Id::new(),
         workspace_id: ws.meta.id,

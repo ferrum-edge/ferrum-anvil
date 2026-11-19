@@ -254,7 +254,7 @@ fn a_load_plan_in_a_sealed_workspace_is_refused_this_devices_workload_identity()
     let ws = source_workspace(&a);
     // A plan that runs the request drawing its JWT-SVID from the Workload API.
     let request = a.requests(&ws).unwrap().into_iter().find(|r| r.name == "workload api").unwrap();
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     let plan = LoadPlan {
         id: Id::new(),
         workspace_id: ws,
@@ -296,7 +296,7 @@ fn a_load_plan_in_a_sealed_workspace_is_refused_this_devices_workload_identity()
 }
 
 fn tls_profile(app: &App, ws: &Id, name: &str, client_identity: Option<ClientIdentity>) -> Id {
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     let p = TlsProfile {
         id: Id::new(),
         workspace_id: *ws,
@@ -317,7 +317,7 @@ fn tls_profile(app: &App, ws: &Id, name: &str, client_identity: Option<ClientIde
 
 /// An HBONE proxy whose own connection uses TLS profile `tls`.
 fn proxy_profile(app: &App, ws: &Id, tls: Id) -> Id {
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     let p = ProxyProfile {
         id: Id::new(),
         workspace_id: *ws,
@@ -423,8 +423,8 @@ fn g01_a_restored_lookup_is_paused_until_the_workspace_is_allowed() {
             detail: Some(lookup.clone()),
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     })
     .unwrap();
     assert_eq!(lookups(&a, &ws), (vec![Some(lookup.clone())], vec![]));

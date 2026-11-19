@@ -109,8 +109,8 @@ impl Lookup<'_> {
             ResponseRef::Invalid(value) => return GatewayDetail::InvalidReference { value },
             ResponseRef::Present(r) => r,
         };
-        let took = chrono::Duration::microseconds(i64::try_from(attempt.duration_us).unwrap_or(i64::MAX));
-        let completed = attempt.started_at.checked_add_signed(took).unwrap_or(attempt.started_at);
+        let took = anvil_domain::TimeDelta::microseconds(i64::try_from(attempt.duration_us).unwrap_or(i64::MAX));
+        let completed = attempt.started_at.checked_add(took).unwrap_or(attempt.started_at);
         let binding = Binding::new(response, reference.clone(), access.namespace.as_deref(), attempt.started_at, completed);
         let (endpoint, channel_authenticated, outcome) = self.ask(access, &binding, redactor, cancel).await;
         GatewayDetail::Looked { reference: reference.value, endpoint, channel_authenticated, outcome }
@@ -245,7 +245,7 @@ impl Lookup<'_> {
         let profile = self.settings.tls_profile_id.and_then(|id| self.ctx.tls_profiles.iter().find(|p| p.id == id));
         let (key, s) = match profile {
             Some(p) => (
-                format!("diagnostics|{}|{}", p.id, p.updated_at.timestamp_millis()),
+                format!("diagnostics|{}|{}", p.id, p.updated_at.unix_millis()),
                 TlsSettings {
                     verify: true,
                     use_system_roots: p.use_system_roots,
@@ -390,8 +390,8 @@ mod tests {
             no_proxy: String::new(),
             tls_profile_id: None,
             hbone: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         };
         let selection = SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: proxy.id }), ..Default::default() };
         let mut ctx = ExecutionContext::standalone(anvil_domain::request::RequestSpec::http("GET", "http://gateway.example/"));
@@ -400,7 +400,7 @@ mod tests {
         let settings = crate::settings::resolve(&ctx.settings_layers);
         let resolver = Resolver::new(vec![], None);
         let lookup = Lookup { engine: &engine, epoch: engine.sensitive_epoch(), ctx: &ctx, settings: &settings, resolver: &resolver };
-        let now = chrono::Utc::now();
+        let now = anvil_domain::Timestamp::now();
         let binding = Binding {
             reference: gd::parse_ref("fd1_3f9c2a7e5b1d4c8a9e0f6b2d7c4a1e5f").unwrap(),
             status: 502,

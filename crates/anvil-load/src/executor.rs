@@ -25,13 +25,13 @@ use crate::protocol::{self, StepUnit};
 use crate::report::{self, RunMeta};
 use crate::schedule;
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::load::*;
 use anvil_domain::settings::{Limits, SettingsOverrides};
 use anvil_engine::context::DATASET_SKIPPED_UNDER_IMPORT_ROOT;
 use anvil_engine::vars::{VarEntry, VarLayer};
 use anvil_engine::{Engine, ExecutionContext};
 use anvil_transport::recorder::EventCtx;
-use chrono::Utc;
 use hdrhistogram::Histogram;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -1154,7 +1154,7 @@ impl LoadRun {
             plan,
             request_revisions: revisions,
             dataset_sha256: dataset.as_ref().map(|d| d.sha256.clone()),
-            started_at: Utc::now(),
+            started_at: Timestamp::now(),
             unit,
         };
         Ok(LoadRun { meta, opts, steps, units, mix_cumulative, dataset, slots: slots.max(1), slot_idle, planned_secs })
@@ -1178,7 +1178,7 @@ impl LoadRun {
         let plan = meta.plan.clone();
         let proto = Engine::new();
         let shard_count = slots.clamp(1, MAX_SHARDS);
-        meta.started_at = Utc::now();
+        meta.started_at = Timestamp::now();
         let sh = Arc::new(Shared {
             run_id: meta.run_id,
             steps,
@@ -1363,7 +1363,7 @@ impl LoadRun {
                 snap.generator.notes.push(format!("Mean generator CPU over the run: {mean:.0} % of one core."));
             }
         }
-        report::assemble(&meta, snap, timeline, completion, Utc::now(), notes)
+        report::assemble(&meta, snap, timeline, completion, Timestamp::now(), notes)
     }
 }
 
@@ -1494,8 +1494,8 @@ mod tests {
             abort: None,
             seed: 0,
             trusted: true,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         };
         let job = || LoadJob { requests: HashMap::new(), dataset: None };
         assert!(matches!(LoadRun::prepare(plan.clone(), job(), RunOptions::default()), Err(LoadError::NotAcknowledged)));

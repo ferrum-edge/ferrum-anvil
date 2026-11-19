@@ -1080,7 +1080,7 @@ async fn run(cli: Cli) -> Result<i32> {
         Cmd::LintSpec(a) => lint::lint_spec(a),
         Cmd::SpecDrift(a) if !a.needs_profile() => drift::spec_drift_files(a),
         Cmd::Jwt { token } => {
-            let i = anvil_auth::jwt::inspect(token, chrono::Utc::now(), 0).map_err(|e| anyhow!(e.to_string()))?;
+            let i = anvil_auth::jwt::inspect(token, anvil_domain::Timestamp::now(), 0).map_err(|e| anyhow!(e.to_string()))?;
             println!("{}", json_safe(&serde_json::to_string_pretty(&i)?));
             Ok(0)
         }
@@ -1320,7 +1320,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                     eprintln!("Ferrum gateway profile '{}' already covers {host}: nothing saved", terminal_safe(&c.name));
                 }
             } else if let Some(host) = &host {
-                let now = chrono::Utc::now();
+                let now = anvil_domain::Timestamp::now();
                 let profile = IntegrationProfile {
                     id: anvil_domain::Id::new(),
                     workspace_id: ws.meta.id,
@@ -1431,7 +1431,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 return Ok(0);
             };
             let r = &last.result;
-            println!("last storage cleanup: {}", last.ran_at.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!("last storage cleanup: {} UTC", last.ran_at.format_date_time());
             println!("  orphaned revisions removed: {}", r.orphaned_revisions);
             println!("  stored files released: {}", r.released_attachments);
             if !r.undecodable.is_empty() {
@@ -1452,7 +1452,7 @@ async fn run_with_app(cli: &Cli) -> Result<i32> {
                 let rec = rec?;
                 println!(
                     "{}  {}  {}",
-                    rec.started_at.format("%Y-%m-%d %H:%M:%S"),
+                    rec.started_at.format_date_time(),
                     terminal_safe(&rec.prepared.url),
                     terminal_safe(&rec.outcome.summary)
                 );

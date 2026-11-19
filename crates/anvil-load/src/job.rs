@@ -489,8 +489,8 @@ impl WorkerJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anvil_domain::Timestamp;
     use anvil_domain::load::{ConnectionMode, Stage, Workload};
-    use chrono::Utc;
 
     fn plan(ids: Vec<Id>) -> LoadPlan {
         LoadPlan {
@@ -507,8 +507,8 @@ mod tests {
             abort: None,
             seed: 0,
             trusted: false,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         }
     }
 
@@ -681,7 +681,7 @@ mod tests {
             ],
         }))
         .unwrap();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let (own_tls, proxy_tls, proxy_id) = (Id::new(), Id::new(), Id::new());
         let tls_profiles: Vec<TlsProfile> = serde_json::from_value(serde_json::json!([
             {

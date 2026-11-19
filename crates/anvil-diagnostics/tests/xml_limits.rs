@@ -21,7 +21,7 @@ fn diagnose_xml(body: &str) -> Diagnosis {
         reason: AttemptReason::Initial,
         method: "POST".into(),
         url: "http://127.0.0.1:18180/soap".into(),
-        started_at: chrono::Utc::now(),
+        started_at: anvil_domain::Timestamp::now(),
         connection: None,
         phases: vec![],
         dispatch: DispatchState::Sent,

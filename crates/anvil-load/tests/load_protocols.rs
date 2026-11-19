@@ -7,6 +7,7 @@
 //! offline. Fixture ground truth confirms what actually reached the server.
 
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::execution::TunnelKind;
 use anvil_domain::load::*;
 use anvil_domain::outcome::ClosedBy;
@@ -27,7 +28,6 @@ use anvil_load::LoadController;
 use anvil_load::report::{check_balance, check_protocol_balance, check_request_balance};
 use anvil_load::{Dataset, DatasetFormat, LoadError, LoadJob, LoadRun, RefusalCode, RunOptions, WorkerJob};
 use bytes::Bytes;
-use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -63,8 +63,8 @@ fn lab_profile() -> TlsProfile {
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
         server_spiffe: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 
@@ -118,8 +118,8 @@ fn plan(workload: Workload, chain: Vec<Id>, mode: ConnectionMode) -> LoadPlan {
         abort: None,
         seed: 1,
         trusted: true,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 
@@ -677,8 +677,8 @@ fn via_hbone_endpoint(url: &str, udp: UdpSpec, ep: &HboneFixture) -> ExecutionCo
             expected_server_spiffe_id: Some(mesh_pki::ZTUNNEL_SPIFFE_ID.into()),
             trust_domain: None,
         }),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     };
     let pid = Id::new();
     c.proxy_profiles.push(ProxyProfile {
@@ -692,8 +692,8 @@ fn via_hbone_endpoint(url: &str, udp: UdpSpec, ep: &HboneFixture) -> ExecutionCo
         no_proxy: String::new(),
         tls_profile_id: Some(svid.id),
         hbone: Some(anvil_domain::tls::HboneOptions { marker: HboneMarker::None, baggage: None, extra_headers: vec![] }),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     });
     c.tls_profiles.push(svid);
     layer(&mut c, SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: pid }), ..Default::default() });
@@ -864,8 +864,8 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
             no_proxy: no_proxy.into(),
             tls_profile_id: None,
             hbone: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         });
         layer(&mut c, SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: pid }), ..Default::default() });
         c
@@ -905,8 +905,8 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
                     no_proxy: String::new(),
                     tls_profile_id: None,
                     hbone: None,
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                 });
                 layer(&mut c, SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: pid }), ..Default::default() });
                 c
@@ -1017,8 +1017,8 @@ async fn load_013_unsupported_combinations_are_refused_typed_before_traffic() {
             no_proxy: no_proxy.into(),
             tls_profile_id: None,
             hbone: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
         });
         layer(&mut c, SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: pid }), ..Default::default() });
         c
@@ -1190,8 +1190,8 @@ fn via_http_proxy(protocol: Protocol, url: &str, no_proxy: &str) -> ExecutionCon
         no_proxy: no_proxy.into(),
         tls_profile_id: None,
         hbone: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     });
     layer(&mut c, SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: pid }), ..Default::default() });
     c

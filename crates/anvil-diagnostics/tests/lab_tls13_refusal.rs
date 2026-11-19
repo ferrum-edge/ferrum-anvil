@@ -47,7 +47,7 @@ fn attempt(s: &Shape) -> AttemptObservation {
         reason: AttemptReason::Initial,
         method: "GET".into(),
         url: "https://localhost:18343/tls/echo".into(),
-        started_at: chrono::Utc::now(),
+        started_at: anvil_domain::Timestamp::now(),
         connection: Some(ConnectionObservation {
             id: 1,
             reused: s.reused,

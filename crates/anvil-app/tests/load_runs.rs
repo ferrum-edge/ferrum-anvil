@@ -36,8 +36,8 @@ fn endless(ws: Id, req: Id) -> LoadPlan {
         abort: None,
         seed: 1,
         trusted: true,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 

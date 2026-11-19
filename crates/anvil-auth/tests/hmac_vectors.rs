@@ -106,7 +106,7 @@ fn full_sign_produces_single_digest_and_fresh_nonces() {
     let names: Vec<_> = a.headers.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
     assert!(names.contains(&"content-digest".to_string()) && !names.contains(&"digest".to_string()));
     // AUTH-020: every send gets a new nonce.
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     let s1 = anvil_auth::hmac_sig::sign(&p, &req, now).unwrap();
     let s2 = anvil_auth::hmac_sig::sign(&p, &req, now).unwrap();
     assert_ne!(s1.nonce, s2.nonce);
@@ -133,9 +133,15 @@ fn auth_019_022_023_guards() {
         headers: vec![],
         body: vec![],
     };
-    assert!(anvil_auth::hmac_sig::sign(&p, &req, chrono::Utc::now()).is_err(), "legacy v1 stays disabled without explicit opt-in");
+    assert!(
+        anvil_auth::hmac_sig::sign(&p, &req, anvil_domain::Timestamp::now()).is_err(),
+        "legacy v1 stays disabled without explicit opt-in"
+    );
     p.profile = HmacProfile::FerrumV2;
     req.headers.push(("Digest".into(), "sha-256=abc".into()));
     req.headers.push(("Content-Digest".into(), "sha-256=:abc:".into()));
-    assert!(anvil_auth::hmac_sig::sign(&p, &req, chrono::Utc::now()).is_err(), "manual/duplicate digest headers are refused, not guessed");
+    assert!(
+        anvil_auth::hmac_sig::sign(&p, &req, anvil_domain::Timestamp::now()).is_err(),
+        "manual/duplicate digest headers are refused, not guessed"
+    );
 }

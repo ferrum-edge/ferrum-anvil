@@ -92,7 +92,7 @@ pub fn to_html(r: &RunReport) -> String {
         "<p class=\"sub\">{} · {} · started {} · {} ms · <span class=\"st {}\">{}</span></p>",
         esc(&source),
         esc(r.environment_name.as_deref().map(|e| format!("environment {e}")).as_deref().unwrap_or("no environment")),
-        esc(&r.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+        esc(&format!("{} UTC", r.started_at.format_date_time())),
         fmt_n(r.duration_ms),
         verdict,
         verdict

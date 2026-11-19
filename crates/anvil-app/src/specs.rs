@@ -75,7 +75,7 @@ fn review_digest(value: &impl Serialize) -> Result<String> {
 /// Normalize only generated metadata, never similarly named source fields
 /// inside request bodies. Stored metadata remains part of reimport approval.
 fn canonical_result(mut result: ImportResult) -> ImportResult {
-    let epoch = chrono::DateTime::UNIX_EPOCH;
+    let epoch = anvil_domain::Timestamp::UNIX_EPOCH;
     let normalize = |meta: &mut Meta| {
         meta.created_at = epoch;
         meta.updated_at = epoch;
@@ -512,7 +512,7 @@ impl App {
             .collect();
         let keep: Vec<Id> = next.iter().map(|q| q.meta.id).collect();
         let deleted: Vec<Id> = previous.iter().map(|q| q.meta.id).filter(|id| !keep.contains(id)).collect();
-        let now = chrono::Utc::now();
+        let now = anvil_domain::Timestamp::now();
         let environments: Vec<Environment> = scope
             .environments
             .iter()

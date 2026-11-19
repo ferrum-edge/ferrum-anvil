@@ -85,8 +85,8 @@ fn profile(roots: &[&str], identity: Option<&Pem>, verify: bool) -> TlsProfile {
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -1658,8 +1658,8 @@ async fn udp_with_a_proxy_fails_before_traffic_and_interactive_udp_works() {
         no_proxy: String::new(),
         tls_profile_id: None,
         hbone: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     });
     run_layer(&mut c, SettingsOverrides { proxy_profile_id: Some(ProxySelection::Profile { id: pid }), ..Default::default() });
     let o = run(&e, &c).await;

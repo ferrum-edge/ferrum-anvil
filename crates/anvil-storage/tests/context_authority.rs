@@ -10,7 +10,16 @@ fn store() -> (tempfile::TempDir, Store) {
     (dir, store)
 }
 fn put(store: &Store, id: &Id, path: &str, order: f64) {
-    store.put(anvil_storage::kind::TOKEN_FILE, id, None, None, order, &json!({"id":id,"path":path,"bound_at":chrono::Utc::now()})).unwrap();
+    store
+        .put(
+            anvil_storage::kind::TOKEN_FILE,
+            id,
+            None,
+            None,
+            order,
+            &json!({"id":id,"path":path,"bound_at":anvil_domain::Timestamp::now()}),
+        )
+        .unwrap();
 }
 #[test]
 fn point_expectations_survive_unrelated_writes_and_refuse_relevant_reseals() {

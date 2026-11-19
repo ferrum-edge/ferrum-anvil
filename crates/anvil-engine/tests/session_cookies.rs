@@ -62,8 +62,8 @@ fn on_test_host(mut c: ExecutionContext) -> ExecutionContext {
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let dns = DnsOverride { host: TEST_HOST.into(), addresses: vec!["127.0.0.1".into()] };
     let run = SettingsOverrides { tls_profile_id: Some(p.id), dns_overrides: vec![dns], ..Default::default() };

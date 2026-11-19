@@ -141,7 +141,7 @@ impl AuthFixtures {
                     &JwtClaims::default(),
                     &claims,
                     Some(ISSUER_KID),
-                    chrono::Utc::now(),
+                    anvil_domain::Timestamp::now(),
                 )
                 .unwrap_or_default()
             }),
@@ -171,7 +171,8 @@ impl AuthFixtures {
             not_before_offset_secs: None,
             extra_json: String::new(),
         };
-        anvil_auth::jwt::sign(JwtAlgorithm::ES256, key, &claims, &extra, Some(kid), chrono::Utc::now()).expect("lab issuer token")
+        anvil_auth::jwt::sign(JwtAlgorithm::ES256, key, &claims, &extra, Some(kid), anvil_domain::Timestamp::now())
+            .expect("lab issuer token")
     }
 
     /// An otherwise valid access token whose `iss` claim is the given JSON
@@ -191,7 +192,7 @@ impl AuthFixtures {
             &claims,
             &serde_json::json!({ "iss": iss }),
             Some(ISSUER_KID),
-            chrono::Utc::now(),
+            anvil_domain::Timestamp::now(),
         )
         .expect("lab issuer token")
     }
@@ -218,7 +219,7 @@ impl AuthFixtures {
             not_before_offset_secs: nbf_offset,
             extra_json: String::new(),
         };
-        anvil_auth::jwt::sign(JwtAlgorithm::HS256, secret, &claims, &extra, None, chrono::Utc::now()).expect("lab hs256 token")
+        anvil_auth::jwt::sign(JwtAlgorithm::HS256, secret, &claims, &extra, None, anvil_domain::Timestamp::now()).expect("lab hs256 token")
     }
 }
 

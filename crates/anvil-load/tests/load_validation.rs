@@ -7,10 +7,10 @@
 //! through `LoadError::Invalid`.
 
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::load::{ConnectionMode, LoadPlan, Stage, Workload};
 use anvil_load::executor::{MAX_CHAIN_STEPS, MAX_DURATION_SECS};
 use anvil_load::{LoadError, validate_plan};
-use chrono::Utc;
 
 fn plan(workload: Workload) -> LoadPlan {
     LoadPlan {
@@ -27,8 +27,8 @@ fn plan(workload: Workload) -> LoadPlan {
         abort: None,
         seed: 0,
         trusted: true,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
     }
 }
 

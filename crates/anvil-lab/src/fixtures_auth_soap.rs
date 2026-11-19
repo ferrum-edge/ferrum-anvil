@@ -20,9 +20,9 @@
 //! identical to the in-context one the gateway computes; the gateway's own
 //! (independent) canonicalizer accepting the result is the cross-check.
 
+use anvil_domain::{SecondsFormat, TimeDelta, Timestamp};
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -166,7 +166,7 @@ fn b64_sha256(s: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(s.as_bytes()))
 }
 
-fn ts(t: DateTime<Utc>) -> String {
+fn ts(t: Timestamp) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
@@ -210,8 +210,8 @@ impl SoapSigning {
 
     /// A SOAP 1.1 envelope whose Body and Timestamp are signed (exclusive
     /// C14N, RSA-SHA256) by `signer`, certificate in `KeyInfo/X509Data`.
-    pub fn signed_envelope(&self, signer: &Signer, payload: &str, now: DateTime<Utc>, ttl_secs: i64) -> Result<String> {
-        let (created, expires) = (ts(now), ts(now + Duration::seconds(ttl_secs)));
+    pub fn signed_envelope(&self, signer: &Signer, payload: &str, now: Timestamp, ttl_secs: i64) -> Result<String> {
+        let (created, expires) = (ts(now), ts(now + TimeDelta::seconds(ttl_secs)));
         let ts_inner = format!(r#"<wsu:Created>{created}</wsu:Created><wsu:Expires>{expires}</wsu:Expires>"#);
         let body_inner = format!(r#"<m:Ping xmlns:m="urn:anvil:lab:soap">{payload}</m:Ping>"#);
         // In-context forms (namespaces inherited from Envelope) and their
@@ -238,7 +238,7 @@ impl SoapSigning {
     /// would issue.
     pub fn saml_assertion(&self, signer: &Signer, a: &SamlSpec) -> Result<String> {
         static N: AtomicU64 = AtomicU64::new(1);
-        let id = format!("_anvil-lab-{}-{}", Utc::now().timestamp_micros(), N.fetch_add(1, Ordering::Relaxed));
+        let id = format!("_anvil-lab-{}-{}", Timestamp::now().unix_micros(), N.fetch_add(1, Ordering::Relaxed));
         let (nb, noa) = (ts(a.not_before), ts(a.not_on_or_after));
         let issue = ts(a.not_before);
         let issuer = format!("<saml:Issuer>{}</saml:Issuer>", a.issuer);
@@ -266,6 +266,6 @@ pub struct SamlSpec {
     pub name_id: String,
     pub audience: String,
     pub recipient: String,
-    pub not_before: DateTime<Utc>,
-    pub not_on_or_after: DateTime<Utc>,
+    pub not_before: Timestamp,
+    pub not_on_or_after: Timestamp,
 }

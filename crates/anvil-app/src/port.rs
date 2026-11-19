@@ -385,7 +385,7 @@ impl App {
         if !proceed() {
             return Err(AppError::Canceled);
         }
-        let imported_at = chrono::Utc::now();
+        let imported_at = anvil_domain::Timestamp::now();
         // A failure rolls back this import's own transaction and nothing else.
         // The checkpoint is never restored automatically: that would also
         // erase whatever other callers saved since it was taken. A refusal
@@ -567,7 +567,7 @@ impl App {
                     continue;
                 }
                 rec.started_at = rec.started_at.min(imported_at);
-                let started_at = rec.started_at.timestamp_millis();
+                let started_at = rec.started_at.unix_millis();
                 s.add_history(&rec.id, rec.workspace_id.as_ref(), rec.request_id.as_ref(), started_at, &rec, None)?;
             }
             // A linked-file binding was chosen for the request or dataset it

@@ -324,7 +324,7 @@ fn stored_ruleset(file_name: &str, bytes: &[u8]) -> Result<StoredRuleset> {
         version,
         text: text.to_string(),
         sha256: hex::encode(Sha256::digest(bytes)),
-        added_at: chrono::Utc::now(),
+        added_at: anvil_domain::Timestamp::now(),
         enabled: true,
     })
 }

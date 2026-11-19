@@ -88,7 +88,7 @@ pub struct LoadReportSummary {
     pub run_id: Id,
     pub plan_id: Id,
     pub plan_name: String,
-    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub started_at: anvil_domain::Timestamp,
     pub completion: anvil_domain::load::RunCompletion,
     pub partial: bool,
     pub achieved_rate_per_sec: f64,
@@ -184,7 +184,7 @@ impl App {
     pub fn save_load_plan(&self, mut p: LoadPlan) -> Result<LoadPlan> {
         validate_plan(&p)?;
         self.check_plan_requests(&p)?;
-        p.updated_at = chrono::Utc::now();
+        p.updated_at = anvil_domain::Timestamp::now();
         self.store.put(kind::LOAD_PLAN, &p.id, Some(&p.workspace_id), None, 0.0, &p)?;
         Ok(p)
     }
@@ -483,7 +483,7 @@ impl App {
             if s.get::<Workspace>(kind::WORKSPACE, &ws)?.is_none() {
                 return Ok(Err(AppError::NotFound("the load run's workspace".into())));
             }
-            s.put_load_report(&r.run_id, Some(&ws), r.started_at.timestamp_millis(), r)?;
+            s.put_load_report(&r.run_id, Some(&ws), r.started_at.unix_millis(), r)?;
             Ok(Ok(()))
         })?
     }

@@ -1141,8 +1141,8 @@ impl<'a, 'r> SampleGen<'a, 'r> {
     fn date_time(&mut self) -> String {
         // 2020-01-01T00:00:00Z .. ~2029-12-31
         let secs = self.rng.range_i128(1_577_836_800, 1_893_455_999) as i64;
-        chrono::DateTime::from_timestamp(secs, 0)
-            .map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        anvil_domain::Timestamp::from_unix_seconds(secs)
+            .map(|d| d.to_rfc3339_opts(anvil_domain::SecondsFormat::Secs, true))
             .unwrap_or_else(|| "2024-01-01T00:00:00Z".into())
     }
 
@@ -1519,7 +1519,7 @@ mod tests {
         let (v, _) = gen_with(&root, &json!({"type": "string", "format": "uuid"}), SampleMode::Sample, false);
         assert!(uuid::Uuid::parse_str(v.unwrap().as_str().unwrap()).is_ok());
         let (v, _) = gen_with(&root, &json!({"type": "string", "format": "date-time"}), SampleMode::Sample, false);
-        assert!(chrono::DateTime::parse_from_rfc3339(v.unwrap().as_str().unwrap()).is_ok());
+        assert!(anvil_domain::Timestamp::parse_rfc3339(v.unwrap().as_str().unwrap()).is_ok());
         let (v, rep) = gen_with(&root, &json!({"type": "string", "format": "password"}), SampleMode::Sample, false);
         assert_eq!(v.unwrap(), json!(""));
         assert!(rep.has_code("credential_left_blank"));

@@ -166,7 +166,7 @@ async fn data_018_fresh_login_policy_is_enforced_in_the_backend() {
         Err(AppError::Vault(VaultError::WrongSecret))
     ));
     let stale = sign_in(&p).await;
-    let later = stale.authenticated_at() + chrono::Duration::minutes(10);
+    let later = stale.authenticated_at() + anvil_domain::TimeDelta::minutes(10);
     assert!(matches!(
         policy_err(ProfileManager::unlock_with_fresh_login_at(&dir, Unlock::Passphrase(SECOND), stale, later)),
         IdentityPolicyError::StaleProof { .. }

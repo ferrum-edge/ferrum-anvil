@@ -10,13 +10,13 @@
 //! secret is redacted before it is stored here.
 
 use crate::Id;
+use crate::Timestamp;
 use crate::assertions::AssertionResult;
 use crate::diagnostics::{Confidence, Severity};
 use crate::execution::DispatchState;
 use crate::outcome::{ApplicationState, AssertionState, TransportState};
 use crate::request::Protocol;
 use crate::workspace::DatasetFormat;
-use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -216,7 +216,7 @@ pub struct RunIteration {
     /// 1-based dataset row used by this iteration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_row: Option<u32>,
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
     pub duration_ms: u64,
     pub status: RunIterationStatus,
     /// Set when `stop_on_failure` ended the iteration early: the index of the
@@ -304,8 +304,8 @@ pub struct RunReport {
     pub dataset: Option<RunDatasetSummary>,
     pub fail_on: FailOn,
     pub stop_on_failure: bool,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: DateTime<Utc>,
+    pub started_at: Timestamp,
+    pub finished_at: Timestamp,
     pub duration_ms: u64,
     pub completion: RunnerCompletion,
     /// True unless every planned iteration ran (cancel / abort).

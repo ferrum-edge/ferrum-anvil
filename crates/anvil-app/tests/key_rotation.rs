@@ -256,7 +256,7 @@ fn reattaching_after_rotation_leaves_no_orphaned_attachment_blob() {
         })
         .expect("its index entry");
     let mut entry: serde_json::Value = app.store.get(anvil_storage::kind::IMPORT_SOURCE, &index).unwrap().unwrap();
-    entry["attached_at"] = (chrono::Utc::now() - chrono::Duration::days(31)).timestamp_millis().into();
+    entry["attached_at"] = (anvil_domain::Timestamp::now() - anvil_domain::TimeDelta::days(31)).unix_millis().into();
     app.store.put(anvil_storage::kind::IMPORT_SOURCE, &index, None, None, 0.0, &entry).unwrap();
     app.delete_request(&req.meta.id).unwrap();
     app.store.prune_history(0, 0).unwrap();

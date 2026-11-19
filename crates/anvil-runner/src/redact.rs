@@ -281,7 +281,7 @@ mod tests {
         let ctx = anvil_engine::ExecutionContext::standalone(anvil_domain::request::RequestSpec::http("GET", "https://example.test/"));
         let resolver = anvil_engine::vars::Resolver::new(vec![], None);
         let failure = TransportFailure::new(Phase::Prepare, FailureKind::InvalidUrl, "not sent");
-        let mut record = anvil_engine::record::local_failure(&ctx, &resolver, chrono::Utc::now(), failure).record;
+        let mut record = anvil_engine::record::local_failure(&ctx, &resolver, anvil_domain::Timestamp::now(), failure).record;
         // `%2D` is not a canonical encoding: exact-value scrubbing misses it,
         // URL redaction does not.
         record.prepared.inferred.push("auth dpop.htu: https://h/u/run%2Dvalue-5e6f/x".into());

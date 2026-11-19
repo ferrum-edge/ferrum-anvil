@@ -208,7 +208,7 @@ mod tests {
             reason: AttemptReason::Initial,
             method: "GET".into(),
             url: "http://127.0.0.1:18193/delay".into(),
-            started_at: chrono::Utc::now(),
+            started_at: anvil_domain::Timestamp::now(),
             connection: None,
             phases: vec![],
             dispatch,

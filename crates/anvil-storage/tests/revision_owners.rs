@@ -69,7 +69,7 @@ fn set_owner_index(dir: &Path, k: &str, id: &Id, owner: &Id) {
 
 fn workspace(store: &Store) -> Id {
     let id = Id::new();
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     let value = json!({"id": id, "schema_version": anvil_domain::SCHEMA_VERSION, "created_at": now, "updated_at": now, "name": "w"});
     store.put(kind::WORKSPACE, &id, None, None, 0.0, &value).unwrap();
     id
@@ -77,7 +77,7 @@ fn workspace(store: &Store) -> Id {
 
 fn request(store: &Store, ws: Id) -> Id {
     let id = Id::new();
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     let value = json!({
         "id": id, "workspace_id": ws, "schema_version": anvil_domain::SCHEMA_VERSION,
         "created_at": now, "updated_at": now, "name": "r", "sort_key": 1.0,
@@ -94,7 +94,7 @@ fn revision(request: Id, sha: &str) -> Value {
         "type": "binary",
         "attachment": {"kind": "stored", "sha256": sha, "size": 3, "file_name": "file"}
     });
-    json!({"id": Id::new(), "request_id": request, "created_at": chrono::Utc::now(), "spec_sha256": "fixture hash", "spec": spec})
+    json!({"id": Id::new(), "request_id": request, "created_at": anvil_domain::Timestamp::now(), "spec_sha256": "fixture hash", "spec": spec})
 }
 
 fn id_of(revision: &Value) -> Id {

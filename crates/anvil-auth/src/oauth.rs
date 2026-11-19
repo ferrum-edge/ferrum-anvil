@@ -32,8 +32,8 @@ use crate::AuthError;
 use anvil_domain::Id;
 use anvil_domain::auth::OAuthGrant;
 use anvil_domain::secret::REDACTED;
+use anvil_domain::{TimeDelta, Timestamp};
 use base64::Engine;
-use chrono::{DateTime, Duration, Utc};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -133,15 +133,15 @@ pub struct CachedToken {
     pub token_type: String,
     /// Always set for a token-endpoint response (see
     /// [`DEFAULT_EXPIRES_IN_SECS`]). A token without one is never reused.
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
     pub refresh_token: Option<Zeroizing<String>>,
 }
 
 impl CachedToken {
     /// Whether the token is still valid `skew` seconds from `now`. A token
     /// without an expiry, or whose expiry cannot be compared, is not.
-    pub fn usable(&self, now: DateTime<Utc>, skew: i64) -> bool {
-        let horizon = Duration::try_seconds(skew).and_then(|skew| now.checked_add_signed(skew));
+    pub fn usable(&self, now: Timestamp, skew: i64) -> bool {
+        let horizon = now.checked_add(TimeDelta::seconds(skew));
         matches!((horizon, self.expires_at), (Some(h), Some(e)) if h < e)
     }
 }
@@ -198,7 +198,7 @@ impl CacheState {
         let current = self.generation(key);
         let only_signed_in = Generation { sign_in: generation.sign_in, ..current } == generation;
         match self.entries.get(key) {
-            Some(t) if only_signed_in && t.usable(Utc::now(), skew) => Ok(t.clone()),
+            Some(t) if only_signed_in && t.usable(Timestamp::now(), skew) => Ok(t.clone()),
             _ => Err(superseded()),
         }
     }
@@ -386,7 +386,7 @@ impl TokenCache {
         key: &TokenKey,
         cfg: &OAuthResolved,
         http: &dyn TokenHttp,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CachedToken, AuthError> {
         let (generation, cached) = self.snapshot(key);
         self.acquire_in(key, generation, cached, cfg, http, now).await
@@ -403,7 +403,7 @@ impl TokenCache {
         since: Generation,
         cfg: &OAuthResolved,
         http: &dyn TokenHttp,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CachedToken, AuthError> {
         let (generation, cached) = self.snapshot(key);
         if generation != since {
@@ -421,7 +421,7 @@ impl TokenCache {
         cached: Option<CachedToken>,
         cfg: &OAuthResolved,
         http: &dyn TokenHttp,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<CachedToken, AuthError> {
         if let Some(t) = cached
             && t.usable(now, cfg.refresh_skew_secs)
@@ -436,7 +436,7 @@ impl TokenCache {
         }
         // Another caller may have refreshed while we waited.
         if let Some(t) = &cached
-            && t.usable(Utc::now(), cfg.refresh_skew_secs)
+            && t.usable(Timestamp::now(), cfg.refresh_skew_secs)
         {
             return Ok(t.clone());
         }
@@ -693,7 +693,7 @@ fn parse_token_response(status: u16, body: &[u8], secrets: &[Zeroizing<String>])
         .get("access_token")
         .and_then(|t| t.as_str())
         .ok_or_else(|| TokenFailure::Malformed("token response has no access_token".into()))?;
-    let expires_at = expiry(v.get("expires_in"), Utc::now())?;
+    let expires_at = expiry(v.get("expires_in"), Timestamp::now())?;
     Ok(CachedToken {
         access_token: Zeroizing::new(access.to_string()),
         token_type: v.get("token_type").and_then(|t| t.as_str()).unwrap_or("Bearer").to_string(),
@@ -707,7 +707,7 @@ fn parse_token_response(status: u16, body: &[u8], secrets: &[Zeroizing<String>])
 /// seconds up to [`MAX_EXPIRES_IN_SECS`], as a JSON number or a decimal
 /// string (some issuers send `"3600"`). Anything else is malformed, never a
 /// token without an expiry.
-fn expiry(expires_in: Option<&serde_json::Value>, now: DateTime<Utc>) -> Result<DateTime<Utc>, TokenFailure> {
+fn expiry(expires_in: Option<&serde_json::Value>, now: Timestamp) -> Result<Timestamp, TokenFailure> {
     let secs = match expires_in {
         None | Some(serde_json::Value::Null) => Some(DEFAULT_EXPIRES_IN_SECS),
         Some(serde_json::Value::Number(n)) => n.as_u64(),
@@ -715,8 +715,7 @@ fn expiry(expires_in: Option<&serde_json::Value>, now: DateTime<Utc>) -> Result<
         Some(_) => None,
     };
     secs.filter(|s| *s <= MAX_EXPIRES_IN_SECS)
-        .and_then(|s| Duration::try_seconds(s as i64))
-        .and_then(|d| now.checked_add_signed(d))
+        .and_then(|s| now.checked_add(TimeDelta::seconds(s as i64)))
         .ok_or_else(|| TokenFailure::Malformed("token response has an invalid expires_in (whole seconds, up to ten years)".into()))
 }
 
@@ -1002,7 +1001,7 @@ mod tests {
         CachedToken {
             access_token: Zeroizing::new("old".into()),
             token_type: "Bearer".into(),
-            expires_at: Some(Utc::now() - Duration::seconds(10)),
+            expires_at: Some(Timestamp::now() - TimeDelta::seconds(10)),
             refresh_token: Some(Zeroizing::new(rt.into())),
         }
     }
@@ -1015,7 +1014,7 @@ mod tests {
         for _ in 0..50 {
             let (c, i) = (cache.clone(), issuer.clone());
             handles.push(tokio::spawn(async move {
-                c.get_or_acquire(&key(&cfg()), &cfg(), i.as_ref(), Utc::now()).await.map(|t| t.access_token.to_string())
+                c.get_or_acquire(&key(&cfg()), &cfg(), i.as_ref(), Timestamp::now()).await.map(|t| t.access_token.to_string())
             }));
         }
         let mut tokens = Vec::new();
@@ -1032,7 +1031,7 @@ mod tests {
             let issuer = FakeIssuer::new();
             let cache = TokenCache::new();
             let c = OAuthResolved { grant, ..pkce_cfg() };
-            let e = cache.get_or_acquire(&key(&c), &c, &issuer, Utc::now()).await.err().expect("must not acquire");
+            let e = cache.get_or_acquire(&key(&c), &c, &issuer, Timestamp::now()).await.err().expect("must not acquire");
             assert!(matches!(e, AuthError::InteractionRequired(_)), "{e:?}");
             assert_eq!(issuer.calls.load(Ordering::SeqCst), 0, "no token request of any grant");
         }
@@ -1044,12 +1043,12 @@ mod tests {
         *issuer.refresh_reply.lock() = Some((200, r#"{"access_token":"fresh","token_type":"Bearer","expires_in":60}"#.into()));
         let cache = TokenCache::new();
         cache.insert(&key(&pkce_cfg()), expired_with_refresh("rt-1"));
-        let t = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Utc::now()).await.unwrap();
+        let t = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Timestamp::now()).await.unwrap();
         assert_eq!(t.access_token.as_str(), "fresh");
         assert_eq!(t.refresh_token.as_deref().map(|s| s.as_str()), Some("rt-1"), "old refresh token stays valid when none is re-issued");
         assert_eq!(*issuer.grants.lock(), vec!["refresh_token".to_string()]);
         // Usable now: no further request.
-        cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Utc::now()).await.unwrap();
+        cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Timestamp::now()).await.unwrap();
         assert_eq!(issuer.calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1059,7 +1058,7 @@ mod tests {
         *issuer.refresh_reply.lock() = Some((400, r#"{"error":"invalid_grant"}"#.into()));
         let cache = TokenCache::new();
         cache.insert(&key(&pkce_cfg()), expired_with_refresh("rt-revoked"));
-        let e = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Utc::now()).await.err().unwrap();
+        let e = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Timestamp::now()).await.err().unwrap();
         assert!(matches!(&e, AuthError::InteractionRequired(m) if m.contains("invalid_grant")), "{e:?}");
         assert!(cache.get(&key(&pkce_cfg())).is_none(), "a rejected refresh token is not retried");
         assert_eq!(*issuer.grants.lock(), vec!["refresh_token".to_string()], "never falls back to client credentials");
@@ -1070,11 +1069,11 @@ mod tests {
         let issuer = FakeIssuer::new(); // refresh → transport failure
         let cache = TokenCache::new();
         cache.insert(&key(&pkce_cfg()), expired_with_refresh("rt-1"));
-        let e = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Utc::now()).await.err().unwrap();
+        let e = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Timestamp::now()).await.err().unwrap();
         assert!(matches!(e, AuthError::Acquisition(_)), "{e:?}");
         assert!(cache.get(&key(&pkce_cfg())).is_some(), "refresh token kept for a later attempt");
         *issuer.refresh_reply.lock() = Some((503, r#"{"error":"temporarily_unavailable"}"#.into()));
-        let e = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Utc::now()).await.err().unwrap();
+        let e = cache.get_or_acquire(&key(&pkce_cfg()), &pkce_cfg(), &issuer, Timestamp::now()).await.err().unwrap();
         assert!(matches!(e, AuthError::Acquisition(_)), "{e:?}");
         assert!(issuer.grants.lock().iter().all(|g| g == "refresh_token"));
     }
@@ -1084,7 +1083,7 @@ mod tests {
         let issuer = FakeIssuer::new(); // refresh fails
         let cache = TokenCache::new();
         cache.insert(&key(&cfg()), expired_with_refresh("rt-1"));
-        let t = cache.get_or_acquire(&key(&cfg()), &cfg(), &issuer, Utc::now()).await.unwrap();
+        let t = cache.get_or_acquire(&key(&cfg()), &cfg(), &issuer, Timestamp::now()).await.unwrap();
         assert!(t.access_token.starts_with('t'));
         assert_eq!(*issuer.grants.lock(), vec!["refresh_token".to_string(), "client_credentials".to_string()]);
     }

@@ -59,8 +59,8 @@ pub use report::{
 pub use util::spec_hash;
 
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::workspace::{Environment, Folder, RequestDefinition, Workspace};
-use chrono::{DateTime, Utc};
 use detect::Parsed;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -126,7 +126,7 @@ pub struct ImportOptions {
     pub id_namespace: Option<Id>,
     /// Timestamp for created objects; `None` uses the current time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub imported_at: Option<DateTime<Utc>>,
+    pub imported_at: Option<Timestamp>,
     /// The key credential placeholder names are derived with
     /// ([`CredentialKey`]). `None` uses a fresh random key, so every name is
     /// new. Never serialized, and not kept in [`ImportedSource::options`].
@@ -186,7 +186,7 @@ pub struct ImportedSource {
     /// SHA-256 (hex) of the exact input bytes.
     pub sha256: String,
     pub size_bytes: u64,
-    pub imported_at: DateTime<Utc>,
+    pub imported_at: Timestamp,
     pub options: ImportOptions,
 }
 

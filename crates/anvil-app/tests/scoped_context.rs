@@ -27,14 +27,14 @@ fn context(app: &App, ws: &Id, spec: RequestSpec) -> ExecutionContext {
 fn tls(app: &App, ws: Id) -> TlsProfile {
     app.save_tls_profile(
         serde_json::from_value(
-            json!({"id":Id::new(),"workspace_id":ws,"name":"trust","created_at":chrono::Utc::now(),"updated_at":chrono::Utc::now()}),
+            json!({"id":Id::new(),"workspace_id":ws,"name":"trust","created_at":anvil_domain::Timestamp::now(),"updated_at":anvil_domain::Timestamp::now()}),
         )
         .unwrap(),
     )
     .unwrap()
 }
 fn proxy(app: &App, ws: Id, tls: Option<Id>) -> ProxyProfile {
-    app.save_proxy_profile(serde_json::from_value(json!({"id":Id::new(),"workspace_id":ws,"name":"proxy","kind":"http","address":"http://127.0.0.1:9","no_proxy":"","tls_profile_id":tls,"created_at":chrono::Utc::now(),"updated_at":chrono::Utc::now()})).unwrap()).unwrap()
+    app.save_proxy_profile(serde_json::from_value(json!({"id":Id::new(),"workspace_id":ws,"name":"proxy","kind":"http","address":"http://127.0.0.1:9","no_proxy":"","tls_profile_id":tls,"created_at":anvil_domain::Timestamp::now(),"updated_at":anvil_domain::Timestamp::now()})).unwrap()).unwrap()
 }
 fn valid(ctx: &ExecutionContext) {
     ctx.secrets.validate_context().unwrap();
@@ -120,7 +120,7 @@ fn negative_default_environment_and_selected_missing_tls_are_captured() {
             };
             app.save_environment(env).unwrap();
         } else {
-            let profile: TlsProfile = serde_json::from_value(json!({"id":missing,"workspace_id":ws.meta.id,"name":"appeared","created_at":chrono::Utc::now(),"updated_at":chrono::Utc::now()})).unwrap();
+            let profile: TlsProfile = serde_json::from_value(json!({"id":missing,"workspace_id":ws.meta.id,"name":"appeared","created_at":anvil_domain::Timestamp::now(),"updated_at":anvil_domain::Timestamp::now()})).unwrap();
             app.save_tls_profile(profile).unwrap();
         }
         stale(&ctx, &app);
@@ -167,7 +167,7 @@ fn deny_presence_and_confinement_configuration_are_dependencies() {
             Some(&ws.meta.id),
             None,
             0.0,
-            &anvil_app::device_identity::DeviceIdentitySeal { workspace_id: ws.meta.id, sealed_at: chrono::Utc::now() },
+            &anvil_app::device_identity::DeviceIdentitySeal { workspace_id: ws.meta.id, sealed_at: anvil_domain::Timestamp::now() },
         )
         .unwrap();
     stale(&ctx, &app);
@@ -299,8 +299,8 @@ fn gateway_candidate_order_and_dynamic_diagnostic_aliases_are_dependencies() {
                 }),
                 console_url: None,
             },
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         })
         .unwrap();
     // No explicit integration id: engine selects by the eventual expanded host.
@@ -337,7 +337,7 @@ fn linked_permission_query_is_referrer_scoped_and_cached_file_reads_refuse_revoc
         id: Id::new(),
         referrer: LinkedFileReferrer::Request { id: Id::new() },
         path: path.display().to_string(),
-        bound_at: chrono::Utc::now(),
+        bound_at: anvil_domain::Timestamp::now(),
     };
     app.store.put(kind::LINKED_FILE, &other.id, None, None, 0.0, &other).unwrap();
     valid(&ctx);
@@ -387,8 +387,8 @@ fn worker_admission_keeps_plan_dataset_and_request_dependencies_without_global_r
             abort: None,
             seed: 1,
             trusted: true,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         })
         .unwrap();
     let (worker, authority) = app.worker_job_with_authority(&plan, true).unwrap();
@@ -470,8 +470,8 @@ fn stored_attachment_index_and_load_dataset_remain_live_dependencies() {
             abort: None,
             seed: 1,
             trusted: true,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         })
         .unwrap();
     let job = app.load_job(&plan).unwrap();

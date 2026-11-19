@@ -17,6 +17,7 @@ use crate::vars::Resolver;
 use crate::{Engine, SensitiveEpoch};
 use anvil_auth::AuthError;
 use anvil_auth::oauth::{BoxFut, CachedToken, Generation, OAuthResolved, TokenHttp, TokenKey};
+use anvil_domain::Timestamp;
 use anvil_domain::auth::{OAuth2Config, OAuthClientAuth, OAuthGrant};
 use anvil_domain::execution::{AttemptReason, FailureKind, Phase, TransportFailure};
 use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy};
@@ -25,7 +26,6 @@ use anvil_transport::http::HttpPlan;
 use anvil_transport::recorder::EventCtx;
 use base64::Engine as _;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -477,8 +477,8 @@ mod endpoint_tests {
             no_proxy: "localhost,127.0.0.1:8443,[::1]".into(),
             tls_profile_id: None,
             hbone: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         };
         let id = profile.id;
         ctx.proxy_profiles.push(profile);
@@ -555,9 +555,9 @@ pub(crate) async fn acquire(
     let uncached = anvil_auth::oauth::TokenCache::new();
     let r = async {
         if workspace_deleted_since(engine, epoch, ctx) {
-            uncached.get_or_acquire(key, cfg, &http, Utc::now()).await
+            uncached.get_or_acquire(key, cfg, &http, Timestamp::now()).await
         } else {
-            engine.tokens.get_or_acquire_since(key, since, cfg, &http, Utc::now()).await
+            engine.tokens.get_or_acquire_since(key, since, cfg, &http, Timestamp::now()).await
         }
     };
     tokio::select! {
@@ -617,7 +617,7 @@ impl InteractiveOAuth {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TokenSummary {
     pub token_type: String,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<Timestamp>,
     pub refresh_token_available: bool,
 }
 

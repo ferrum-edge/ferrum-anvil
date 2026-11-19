@@ -11,6 +11,7 @@ use crate::vars::Resolver;
 use crate::{Engine, SensitiveEpoch};
 use anvil_auth::{ResolvedAuth, SignableRequest};
 use anvil_diagnostics::FerrumTrust;
+use anvil_domain::Timestamp;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::execution::*;
 use anvil_domain::integration::{DiagnosticDetailAccess, IntegrationKind, IntegrationProfile};
@@ -22,7 +23,6 @@ use anvil_transport::http::{AttemptOutput, HttpPlan};
 use anvil_transport::recorder::EventCtx;
 use anvil_transport::tls::{ClientIdentityMaterial, PreparedTls, TlsSettings};
 use bytes::Bytes;
-use chrono::Utc;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -283,7 +283,7 @@ pub(crate) fn prepared_from_profile(
     let key = format!(
         "{}|{}|{}|{}",
         p.id,
-        p.updated_at.timestamp_millis(),
+        p.updated_at.unix_millis(),
         s.client_identity.is_some(),
         anvil_transport::certs::sha256_hex(material.as_bytes())
     );
@@ -850,7 +850,7 @@ pub(crate) async fn execute_viewing(
     view: Option<record::BodyView<'_>>,
     keep: Option<&parking_lot::Mutex<Option<Redactor>>>,
 ) -> crate::ExecutionOutput {
-    let started_at = Utc::now();
+    let started_at = Timestamp::now();
     // Taken first, or when the context was built (`ExecutionContext::epoch`):
     // what this execution prepares or receives after a lock (a new epoch) or
     // a delete of its workspace is not kept: its prepared TLS material, its
@@ -931,7 +931,7 @@ pub(crate) async fn execute_viewing(
         let mut query = current.target.query.clone();
         let mut body = current.body.clone();
         if current.with_credentials {
-            let applied = anvil_auth::apply_hiding(&prep.auth, &signable, Utc::now(), &prep.auth_hidden)
+            let applied = anvil_auth::apply_hiding(&prep.auth, &signable, Timestamp::now(), &prep.auth_hidden)
                 .map_err(|e| TransportFailure::new(Phase::Prepare, FailureKind::AuthPreparationFailed, e.to_string()).with_field("auth"))
                 .and_then(|a| check_auth_headers(&a).map(|()| a));
             match applied {

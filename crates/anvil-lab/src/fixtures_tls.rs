@@ -123,7 +123,7 @@ impl TlsFixtures {
             extra_json: String::new(),
         };
         let extra = serde_json::json!({"cnf": {"x5t#S256": x5t_s256(cert_pem)}});
-        anvil_auth::jwt::sign(JwtAlgorithm::ES256, &self.issuer_key, &claims, &extra, Some(ISSUER_KID), chrono::Utc::now())
+        anvil_auth::jwt::sign(JwtAlgorithm::ES256, &self.issuer_key, &claims, &extra, Some(ISSUER_KID), anvil_domain::Timestamp::now())
             .expect("lab token")
     }
 }

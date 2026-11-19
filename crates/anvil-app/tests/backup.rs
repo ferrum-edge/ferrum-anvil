@@ -139,8 +139,8 @@ fn plan(ws: Id, req: Id) -> LoadPlan {
         abort: None,
         seed: 1,
         trusted: true,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     }
 }
 
@@ -177,7 +177,7 @@ async fn populated(root: &std::path::Path, fixture_url: &str, token_file: &std::
     other.auth = AuthConfig::Bearer { token: SensitiveValue::Secret { secret: profile_secret }, prefix: "Bearer".into() };
     a.create_request(&ws.meta.id, None, "Profile secret user", other).unwrap();
 
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     let common = |name: &str| json!({"id": Id::new(), "workspace_id": ws.meta.id, "name": name, "created_at": now, "updated_at": now});
     a.save_tls_profile(serde_json::from_value(common("lab tls")).unwrap()).unwrap();
     let mut proxy = common("lab proxy");
@@ -231,9 +231,9 @@ async fn populated(root: &std::path::Path, fixture_url: &str, token_file: &std::
             for i in 0..1_050i64 {
                 let mut r = rec.clone();
                 r.id = Id::new();
-                r.started_at = chrono::DateTime::from_timestamp_millis(now.timestamp_millis() - i).unwrap();
+                r.started_at = anvil_domain::Timestamp::from_unix_millis(now.unix_millis() - i).unwrap();
                 let body = format!("{}-{i}", MARKERS[7]);
-                let (ws_id, req_id, at) = (r.workspace_id, r.request_id, r.started_at.timestamp_millis());
+                let (ws_id, req_id, at) = (r.workspace_id, r.request_id, r.started_at.unix_millis());
                 tx.add_history(&r.id, ws_id.as_ref(), req_id.as_ref(), at, &r, Some(body.as_bytes()))?;
             }
             Ok(())
@@ -666,7 +666,7 @@ fn authentic_contents_are_still_validated_and_normalised() {
     let root = tempfile::tempdir().unwrap();
     let a = small(root.path(), "a");
     let ws = a.workspaces().unwrap().remove(0);
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     let tls = json!({"id": Id::new(), "workspace_id": ws.meta.id, "name": "bypass", "verify": false, "created_at": now, "updated_at": now});
     a.save_tls_profile(serde_json::from_value(tls).unwrap()).unwrap();
     let bytes = export(&a);
@@ -1092,23 +1092,23 @@ async fn a_restored_history_record_is_never_dated_after_its_restore() {
     a.send(Some(request.meta.id), &ws.meta.id, None, opts, EventCtx::none(), CancellationToken::new()).await.unwrap();
     // A backup whose only record is dated far in the future, where age-based
     // retention would never reach it.
-    let future = chrono::DateTime::parse_from_rfc3339("2999-01-01T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+    let future = anvil_domain::Timestamp::parse_rfc3339("2999-01-01T00:00:00Z").unwrap();
     let bytes = resealed(&export(&a), |_, c| {
         assert_eq!(c.history.len(), 1);
-        c.history[0].started_at = future.timestamp_millis();
+        c.history[0].started_at = future.unix_millis();
         c.history[0].record["started_at"] = json!(future);
     });
 
     let b = new_app(root.path(), "b");
-    let before = chrono::Utc::now();
+    let before = anvil_domain::Timestamp::now();
     b.restore(&bytes, Some(PASS), ConflictPolicy::Replace).unwrap();
-    let after = chrono::Utc::now();
+    let after = anvil_domain::Timestamp::now();
     let stored = b.store.list_history(Some(&ws.meta.id), None, 10).unwrap();
     assert_eq!(stored.len(), 1);
     let at = stored[0].started_at;
-    assert!(before.timestamp_millis() <= at && at <= after.timestamp_millis(), "stored at {at}");
+    assert!(before.unix_millis() <= at && at <= after.unix_millis(), "stored at {at}");
     let (record, _) = b.store.get_history::<ExecutionRecord>(&stored[0].id).unwrap().unwrap();
-    assert_eq!(record.started_at.timestamp_millis(), at);
+    assert_eq!(record.started_at.unix_millis(), at);
 }
 
 #[test]

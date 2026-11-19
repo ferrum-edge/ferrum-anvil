@@ -8,8 +8,8 @@ use crate::workspace::{
 };
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_storage::{StoreError, StoreRead, StoreTx, kind};
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -99,7 +99,7 @@ pub struct RemovedRevisions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageCleanupRecord {
     /// When it ran.
-    pub ran_at: DateTime<Utc>,
+    pub ran_at: Timestamp,
     /// What it did.
     pub result: StorageCleanup,
 }
@@ -187,13 +187,13 @@ impl App {
     /// and nothing it read has changed since: it would find the same, and
     /// release nothing. `None` when no pass ran.
     pub fn clean_up_storage_if_due(&self) -> Result<Option<StorageCleanup>> {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let due = self.store.read_consistently(|s| {
             let Some(last) = kept_in(s)? else { return Ok(true) };
-            let since = now.signed_duration_since(last.record.ran_at).num_milliseconds();
+            let since = (now - last.record.ran_at).whole_milliseconds();
             // A pass recorded later than now (the clock was set back) does
             // not hold off the next one.
-            if (0..CLEANUP_INTERVAL.as_millis() as i64).contains(&since) {
+            if (0..CLEANUP_INTERVAL.as_millis() as i128).contains(&since) {
                 return Ok(false);
             }
             match last.rows {
@@ -384,7 +384,7 @@ fn plan_in(s: &StoreRead<'_>, cutoff: i64) -> anvil_storage::store::Result<Plan>
 fn apply_in(s: &StoreTx<'_>, plan: Plan) -> anvil_storage::store::Result<StorageCleanup> {
     let mut done = StorageCleanup::default();
     // Stamping releases nothing, so it happens even when nothing else does.
-    let now = Utc::now().timestamp_millis();
+    let now = Timestamp::now().unix_millis();
     let stamped = !plan.unstamped.is_empty();
     for e in plan.unstamped {
         let aging = AttachmentIndex { attached_at: Some(now), ..e };
@@ -423,7 +423,7 @@ fn apply_in(s: &StoreTx<'_>, plan: Plan) -> anvil_storage::store::Result<Storage
 
 /// Keep `done` as the last pass, run now.
 fn keep_in(s: &StoreTx<'_>, done: &StorageCleanup, rows: Option<String>, settled: Option<String>) -> anvil_storage::store::Result<()> {
-    let kept = KeptPass { record: StorageCleanupRecord { ran_at: Utc::now(), result: done.clone() }, rows, settled };
+    let kept = KeptPass { record: StorageCleanupRecord { ran_at: Timestamp::now(), result: done.clone() }, rows, settled };
     s.put_note(LAST_PASS_NOTE, &serde_json::to_string(&kept)?)
 }
 

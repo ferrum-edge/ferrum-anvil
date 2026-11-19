@@ -15,12 +15,12 @@ use crate::fence::Generations;
 use crate::recorder::{EventCtx, Recorder};
 use crate::stats::ConnStats;
 use crate::tls::PreparedTls;
+use anvil_domain::Timestamp;
 use anvil_domain::events::ExecutionEvent;
 use anvil_domain::execution::*;
 use anvil_domain::settings::{HttpVersionPolicy, Limits, Timeouts};
 use anvil_domain::tls::ProxyKind;
 use bytes::{Bytes, BytesMut};
-use chrono::Utc;
 use http::{HeaderName, HeaderValue, Method, Request, Uri};
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, Incoming, SizeHint};
@@ -831,7 +831,7 @@ impl HttpTransport {
         early: &mut Option<EarlyAttempt>,
         destination: Option<(&crate::destination::DestinationPolicy, bool)>,
     ) -> (AttemptOutput, Option<ClosedUnder>) {
-        let started_at = Utc::now();
+        let started_at = Timestamp::now();
         // A resend after a reused connection was found closed goes out on a
         // new connection, never on a pooled or kept one.
         let fresh = matches!(reason, AttemptReason::ReusedConnectionClosed { .. });

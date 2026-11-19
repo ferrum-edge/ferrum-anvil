@@ -129,7 +129,7 @@ async fn protected_catalogue_cost_scales_with_touched_records() {
                             let rev = RequestRevision {
                                 id: Id::new(),
                                 request_id: r.meta.id,
-                                created_at: chrono::Utc::now(),
+                                created_at: anvil_domain::Timestamp::now(),
                                 spec_sha256: hex::encode(Sha256::digest(serde_json::to_vec(&spec).unwrap())),
                                 spec,
                             };

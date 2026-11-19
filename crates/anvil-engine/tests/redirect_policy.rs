@@ -105,8 +105,8 @@ fn lab_tls(ctx: &mut ExecutionContext, client_cert: bool) {
         min_version: Default::default(),
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let id = p.id;
     ctx.tls_profiles.push(p);
@@ -659,8 +659,8 @@ fn with_proxy(ctx: &mut ExecutionContext, address: &str, no_proxy: &str) {
         no_proxy: no_proxy.into(),
         tls_profile_id: None,
         hbone: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     let id = p.id;
     ctx.proxy_profiles.push(p);
@@ -797,8 +797,8 @@ fn gateway(ctx: &mut ExecutionContext, name: &str, host: &str, port: u16, compat
             detail: None,
             console_url: None,
         },
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     });
 }
 

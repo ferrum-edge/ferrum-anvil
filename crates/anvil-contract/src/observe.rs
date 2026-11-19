@@ -1,8 +1,8 @@
 //! What was seen on the wire, independent of where it was recorded (Anvil's
 //! history, a HAR capture).
 
+use anvil_domain::Timestamp;
 use base64::Engine as _;
-use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 /// Response bodies larger than this are not parsed for schema checks.
@@ -54,7 +54,7 @@ pub fn count_values(v: &Value, max: usize) -> usize {
 pub struct Observation {
     /// Where it came from: a history record id, `har:<index>`.
     pub id: String,
-    pub at: Option<DateTime<Utc>>,
+    pub at: Option<Timestamp>,
     /// Upper case.
     pub method: String,
     /// As sent (credentials already redacted by the recorder).
@@ -303,11 +303,7 @@ pub fn from_har(bytes: &[u8]) -> Result<HarCapture, String> {
         });
         out.push(Observation {
             id: format!("har:{i}"),
-            at: e
-                .get("startedDateTime")
-                .and_then(Value::as_str)
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|d| d.with_timezone(&Utc)),
+            at: e.get("startedDateTime").and_then(Value::as_str).and_then(|s| Timestamp::parse_rfc3339(s).ok()),
             method: method.to_ascii_uppercase(),
             url: url.to_string(),
             operation_hint: None,

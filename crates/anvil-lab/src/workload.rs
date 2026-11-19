@@ -132,8 +132,8 @@ impl Env {
                     detail: None,
                     console_url: None,
                 },
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
+                created_at: anvil_domain::Timestamp::now(),
+                updated_at: anvil_domain::Timestamp::now(),
             });
         }
         c.settings_layers.push((
@@ -170,8 +170,8 @@ impl Env {
             min_version: TlsMinVersion::Tls12,
             server_name_override: None,
             server_spiffe: Some(ServerSpiffeIdentity { expected_server_spiffe_id: Some(SVC_ID.into()), trust_domain: None }),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: anvil_domain::Timestamp::now(),
+            updated_at: anvil_domain::Timestamp::now(),
         };
         if let Some((_, o)) = c.settings_layers.last_mut() {
             o.tls_profile_id = Some(tls.id);
@@ -619,7 +619,7 @@ fn wl008(env: &Env) -> Fut<'_> {
         let (from, b0) = (env.proxy.log_lines().len(), env.api_backend.log.count_requests());
         let kid = env.kid.clone();
         let key = anvil_auth::dpop::generate_key_pem().expect("P-256 key");
-        let now = chrono::Utc::now().timestamp();
+        let now = anvil_domain::Timestamp::now().unix_seconds();
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
         header.kid = Some(kid);
         header.typ = Some("JWT".into());

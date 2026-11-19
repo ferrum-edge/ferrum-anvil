@@ -126,7 +126,7 @@ impl App {
     }
 
     pub fn save_workspace(&self, mut w: Workspace) -> Result<Workspace> {
-        w.meta.updated_at = chrono::Utc::now();
+        w.meta.updated_at = anvil_domain::Timestamp::now();
         self.store.put(kind::WORKSPACE, &w.meta.id, None, None, 0.0, &w)?;
         Ok(w)
     }
@@ -225,7 +225,7 @@ impl App {
             f.import_root = stored.as_ref().is_some_and(|s| s.import_root);
             f.import_environment_ids = stored.as_ref().map(|s| s.import_environment_ids.clone()).unwrap_or_default();
             f.use_workspace_scope = stored.as_ref().is_some_and(|s| s.use_workspace_scope);
-            f.meta.updated_at = chrono::Utc::now();
+            f.meta.updated_at = anvil_domain::Timestamp::now();
             s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)
         })?;
         Ok(f)
@@ -244,7 +244,7 @@ impl App {
                 return Ok(Err(AppError::Invalid("only the root folder of an imported collection has a scope of its own".into())));
             }
             f.use_workspace_scope = allow;
-            f.meta.updated_at = chrono::Utc::now();
+            f.meta.updated_at = anvil_domain::Timestamp::now();
             s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
             Ok(Ok(f))
         })?
@@ -307,7 +307,7 @@ impl App {
             }
             f.parent_id = new_parent;
             f.sort_key = sort_key;
-            f.meta.updated_at = chrono::Utc::now();
+            f.meta.updated_at = anvil_domain::Timestamp::now();
             s.put(kind::FOLDER, &f.meta.id, Some(&f.workspace_id), f.parent_id.as_ref(), f.sort_key, &f)?;
             Ok(Ok(Move::Moved(f)))
         })?
@@ -485,14 +485,14 @@ impl App {
                 let rev = RequestRevision {
                     id: Id::new(),
                     request_id: r.meta.id,
-                    created_at: chrono::Utc::now(),
+                    created_at: anvil_domain::Timestamp::now(),
                     spec_sha256: hash,
                     spec: r.spec.clone(),
                 };
                 s.put(kind::REVISION, &rev.id, Some(&r.workspace_id), Some(&r.meta.id), 0.0, &rev)?;
                 r.revision_id = Some(rev.id);
             }
-            r.meta.updated_at = chrono::Utc::now();
+            r.meta.updated_at = anvil_domain::Timestamp::now();
             s.put(kind::REQUEST, &r.meta.id, Some(&r.workspace_id), r.folder_id.as_ref(), r.sort_key, &r)?;
             Ok(Ok(()))
         })??;
@@ -546,7 +546,7 @@ impl App {
             }
             r.folder_id = folder;
             r.sort_key = sort_key;
-            r.meta.updated_at = chrono::Utc::now();
+            r.meta.updated_at = anvil_domain::Timestamp::now();
             s.put(kind::REQUEST, &r.meta.id, Some(&r.workspace_id), r.folder_id.as_ref(), r.sort_key, &r)?;
             Ok(Ok(Move::Moved(r)))
         })?
@@ -664,7 +664,7 @@ impl App {
     }
 
     pub fn save_environment(&self, mut e: Environment) -> Result<Environment> {
-        e.meta.updated_at = chrono::Utc::now();
+        e.meta.updated_at = anvil_domain::Timestamp::now();
         self.store.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, &e)?;
         Ok(e)
     }
@@ -677,7 +677,7 @@ impl App {
                 && ws.active_environment_id == Some(*id)
             {
                 ws.active_environment_id = None;
-                ws.meta.updated_at = chrono::Utc::now();
+                ws.meta.updated_at = anvil_domain::Timestamp::now();
                 s.put(kind::WORKSPACE, &ws.meta.id, None, None, 0.0, &ws)?;
             }
             Ok(())
@@ -704,7 +704,7 @@ impl App {
             s.put(kind::ENVIRONMENT, &e.meta.id, Some(ws), None, 0.0, &e)?;
             if activate {
                 w.active_environment_id = Some(e.meta.id);
-                w.meta.updated_at = chrono::Utc::now();
+                w.meta.updated_at = anvil_domain::Timestamp::now();
                 s.put(kind::WORKSPACE, &w.meta.id, None, None, 0.0, &w)?;
             }
             Ok(Ok(e))
@@ -752,7 +752,7 @@ impl App {
                 }
                 None => e.variables.push(Variable { name: name.into(), value: stored, secret, enabled: true, description: String::new() }),
             }
-            e.meta.updated_at = chrono::Utc::now();
+            e.meta.updated_at = anvil_domain::Timestamp::now();
             s.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, &e)?;
             Ok(Ok(e))
         })?
@@ -770,7 +770,7 @@ impl App {
             e.variables.retain(|v| v.name != name);
             let removed = e.variables.len() != before;
             if removed {
-                e.meta.updated_at = chrono::Utc::now();
+                e.meta.updated_at = anvil_domain::Timestamp::now();
                 s.put(kind::ENVIRONMENT, &e.meta.id, Some(&e.workspace_id), None, 0.0, &e)?;
             }
             Ok(Ok((e, removed)))
@@ -792,7 +792,7 @@ impl App {
                 }
             }
             w.active_environment_id = env.copied();
-            w.meta.updated_at = chrono::Utc::now();
+            w.meta.updated_at = anvil_domain::Timestamp::now();
             s.put(kind::WORKSPACE, &w.meta.id, None, None, 0.0, &w)?;
             Ok(Ok(w))
         })?
@@ -843,7 +843,7 @@ impl App {
     }
 
     pub fn save_tls_profile(&self, mut p: TlsProfile) -> Result<TlsProfile> {
-        p.updated_at = chrono::Utc::now();
+        p.updated_at = anvil_domain::Timestamp::now();
         self.store.put(kind::TLS_PROFILE, &p.id, Some(&p.workspace_id), None, 0.0, &p)?;
         Ok(p)
     }
@@ -853,7 +853,7 @@ impl App {
     }
 
     pub fn save_proxy_profile(&self, mut p: ProxyProfile) -> Result<ProxyProfile> {
-        p.updated_at = chrono::Utc::now();
+        p.updated_at = anvil_domain::Timestamp::now();
         self.store.put(kind::PROXY_PROFILE, &p.id, Some(&p.workspace_id), None, 0.0, &p)?;
         Ok(p)
     }
@@ -864,7 +864,7 @@ impl App {
 
     pub fn save_integration(&self, mut p: IntegrationProfile) -> Result<IntegrationProfile> {
         check_console_link(&p)?;
-        p.updated_at = chrono::Utc::now();
+        p.updated_at = anvil_domain::Timestamp::now();
         self.store.put(kind::INTEGRATION, &p.id, Some(&p.workspace_id), None, 0.0, &p)?;
         Ok(p)
     }
@@ -875,7 +875,7 @@ impl App {
     /// so concurrent saves for one host leave one profile.
     pub fn save_gateway_unless_covered(&self, mut p: IntegrationProfile, host: &str) -> Result<GatewaySave> {
         check_console_link(&p)?;
-        p.updated_at = chrono::Utc::now();
+        p.updated_at = anvil_domain::Timestamp::now();
         Ok(self.store.atomically(|s| {
             let saved: Vec<IntegrationProfile> = s.list(kind::INTEGRATION, Some(&p.workspace_id))?;
             if let Some(c) = saved.into_iter().find(|i| covers_host(i, host)) {
@@ -1093,7 +1093,7 @@ pub(crate) struct AttachmentIndex {
 /// The time, in unix milliseconds, before which a file a user attached has
 /// waited [`ATTACHMENT_GRACE`].
 pub(crate) fn grace_cutoff() -> i64 {
-    chrono::Utc::now().timestamp_millis().saturating_sub(ATTACHMENT_GRACE.as_millis() as i64)
+    anvil_domain::Timestamp::now().unix_millis().saturating_sub(ATTACHMENT_GRACE.as_millis() as i64)
 }
 
 /// Whether a user attached `entry` at `cutoff` ([`grace_cutoff`]) or later:
@@ -1156,7 +1156,7 @@ pub(crate) fn index_attachment_in(s: &StoreTx<'_>, sha: &str, blob: &str, user: 
         s.release_blob(previous)?;
     }
     let (user, attached_at) = match held {
-        _ if user => (true, Some(chrono::Utc::now().timestamp_millis())),
+        _ if user => (true, Some(anvil_domain::Timestamp::now().unix_millis())),
         Some(h) if h.user => (true, h.attached_at),
         _ => (false, None),
     };

@@ -176,7 +176,7 @@ pub struct BackupManifest {
     pub format_version: u32,
     pub kind: BundleKind,
     pub mode: ExportMode,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: anvil_domain::Timestamp,
     pub app_version: String,
     pub schema_version: u32,
     pub db_schema_version: i64,
@@ -816,7 +816,7 @@ fn build_manifest(snap: &Snapshot) -> BackupManifest {
         format_version: FORMAT_VERSION,
         kind: BundleKind::Backup,
         mode: ExportMode::FullBackup,
-        created_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
         app_version: env!("CARGO_PKG_VERSION").into(),
         schema_version: anvil_domain::SCHEMA_VERSION,
         db_schema_version: DB_SCHEMA_VERSION,
@@ -1449,7 +1449,7 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
         w.put(kind::SPEC_SOURCE, &x.source.import_id, Some(&x.workspace_id), None, 0.0, x)?;
     }
     for x in &d.run_reports {
-        w.put(kind::RUN_REPORT, &x.run_id, Some(&x.workspace_id), None, x.started_at.timestamp_millis() as f64, x)?;
+        w.put(kind::RUN_REPORT, &x.run_id, Some(&x.workspace_id), None, x.started_at.unix_millis() as f64, x)?;
     }
     // A linked-file binding was chosen for the request or dataset it names;
     // one this restore overwrites is not that object any more.
@@ -1473,18 +1473,18 @@ fn write(w: &Writer<'_, '_>, d: &Decoded) -> anvil_storage::store::Result<()> {
     }
     // A record is never dated after its restore, so age-based retention
     // always reaches it, as after a bundle import.
-    let restored_at = chrono::Utc::now();
+    let restored_at = anvil_domain::Timestamp::now();
     for (rec, body) in &d.history {
         if !w.keep(HISTORY, &rec.id.to_string()) {
             let mut rec = rec.clone();
             rec.started_at = rec.started_at.min(restored_at);
-            let started_at = rec.started_at.timestamp_millis();
+            let started_at = rec.started_at.unix_millis();
             w.tx.add_history(&rec.id, rec.workspace_id.as_ref(), rec.request_id.as_ref(), started_at, &rec, body.as_deref())?;
         }
     }
     for r in &d.load_reports {
         if !w.keep(LOAD_REPORT, &r.run_id.to_string()) {
-            w.tx.put_load_report(&r.run_id, Some(&r.plan.workspace_id), r.started_at.timestamp_millis(), r)?;
+            w.tx.put_load_report(&r.run_id, Some(&r.plan.workspace_id), r.started_at.unix_millis(), r)?;
         }
     }
     Ok(())

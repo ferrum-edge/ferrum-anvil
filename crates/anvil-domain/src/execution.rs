@@ -5,12 +5,12 @@
 //! is recorded as `reused` / `not_applicable` — never as a zero duration.
 
 use crate::Id;
+use crate::Timestamp;
 use crate::assertions::AssertionResult;
 use crate::diagnostics::DiagnosticFinding;
 use crate::outcome::{ApplicationState, ExecutionOutcome, TransportState};
 use crate::request::Protocol;
 use crate::settings::EffectiveSettings;
-use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -736,7 +736,7 @@ pub struct AttemptObservation {
     pub method: String,
     /// Redacted URL.
     pub url: String,
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<ConnectionObservation>,
     pub phases: Vec<PhaseTiming>,
@@ -961,8 +961,8 @@ pub struct ExecutionRecord {
     pub revision_id: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_id: Option<Id>,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: DateTime<Utc>,
+    pub started_at: Timestamp,
+    pub finished_at: Timestamp,
     pub prepared: PreparedSummary,
     pub attempts: Vec<AttemptObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -986,7 +986,7 @@ pub struct ExecutionRecord {
 pub struct ExecutionListing {
     #[serde(default)]
     pub request_id: Option<Id>,
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
     pub prepared: ListedPrepared,
     #[serde(default)]
     pub response: Option<ListedResponse>,

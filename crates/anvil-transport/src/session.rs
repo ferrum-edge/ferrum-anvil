@@ -23,6 +23,7 @@ use crate::dns::DnsConfig;
 use crate::errors::{HyperStage, classify_hyper};
 use crate::http::{AttemptOutput, sleep_until_opt};
 use crate::recorder::{EventCtx, Recorder};
+use anvil_domain::Timestamp;
 use anvil_domain::events::{ExecutionEvent, SessionCommand};
 use anvil_domain::execution::*;
 use anvil_domain::outcome::ProtocolStatus;
@@ -30,7 +31,6 @@ use anvil_domain::request::{PayloadEncoding, StreamPayload};
 use anvil_domain::settings::{Limits, Timeouts};
 use base64::Engine;
 use bytes::Bytes;
-use chrono::Utc;
 use hyper::body::Body;
 use hyper::client::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -435,7 +435,7 @@ pub fn new_attempt(index: u32, reason: AttemptReason, method: &str, url: &str) -
         reason,
         method: method.to_string(),
         url: url.to_string(),
-        started_at: Utc::now(),
+        started_at: Timestamp::now(),
         connection: None,
         phases: vec![],
         dispatch: DispatchState::NotDispatched,

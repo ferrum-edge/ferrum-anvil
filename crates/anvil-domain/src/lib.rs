@@ -32,11 +32,13 @@ pub mod runner;
 pub mod schema;
 pub mod secret;
 pub mod settings;
+pub mod timestamp;
 pub mod tls;
 pub mod workload;
 pub mod workspace;
 
 pub use ids::Id;
+pub use timestamp::{SecondsFormat, TimeDelta, Timestamp};
 
 /// Version of the persisted/exported object schema. Bump with a migration.
 pub const SCHEMA_VERSION: u32 = 1;

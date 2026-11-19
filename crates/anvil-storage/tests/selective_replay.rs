@@ -12,7 +12,7 @@ fn profile() -> (tempfile::TempDir, Store, anvil_storage::Key) {
     (dir, store, created.dek)
 }
 fn workspace(id: Id) -> Value {
-    json!({"id":id,"schema_version":anvil_domain::SCHEMA_VERSION,"created_at":chrono::Utc::now(),"updated_at":chrono::Utc::now(),"name":"test"})
+    json!({"id":id,"schema_version":anvil_domain::SCHEMA_VERSION,"created_at":anvil_domain::Timestamp::now(),"updated_at":anvil_domain::Timestamp::now(),"name":"test"})
 }
 
 #[test]
@@ -42,7 +42,9 @@ fn authentic_older_value_and_missing_deny_record_fail_closed() {
     assert!(matches!(store.get_secret(&id), Err(StoreError::Integrity)));
     let ws = Id::new();
     store.put(kind::WORKSPACE, &ws, None, None, 0.0, &workspace(ws)).unwrap();
-    store.put(kind::DEVICE_IDENTITY_SEAL, &ws, Some(&ws), None, 0.0, &json!({"workspace_id":ws,"sealed_at":chrono::Utc::now()})).unwrap();
+    store
+        .put(kind::DEVICE_IDENTITY_SEAL, &ws, Some(&ws), None, 0.0, &json!({"workspace_id":ws,"sealed_at":anvil_domain::Timestamp::now()}))
+        .unwrap();
     raw.execute("DELETE FROM objects WHERE kind=?1 AND id=?2", params![kind::DEVICE_IDENTITY_SEAL, ws.to_string()]).unwrap();
     assert!(matches!(store.get::<Value>(kind::DEVICE_IDENTITY_SEAL, &ws), Err(StoreError::Integrity)));
     assert!(store.list::<Value>(kind::DEVICE_IDENTITY_SEAL, Some(&ws)).is_err());
@@ -99,7 +101,9 @@ fn altered_index_and_order_cannot_hide_or_reorder_protected_policy() {
     let (dir, store, _) = profile();
     let ws = Id::new();
     store.put(kind::WORKSPACE, &ws, None, None, 0.0, &workspace(ws)).unwrap();
-    store.put(kind::DEVICE_IDENTITY_SEAL, &ws, Some(&ws), None, 0.0, &json!({"workspace_id":ws,"sealed_at":chrono::Utc::now()})).unwrap();
+    store
+        .put(kind::DEVICE_IDENTITY_SEAL, &ws, Some(&ws), None, 0.0, &json!({"workspace_id":ws,"sealed_at":anvil_domain::Timestamp::now()}))
+        .unwrap();
     let raw = Connection::open(dir.path().join(DB_FILE)).unwrap();
     raw.execute(
         "UPDATE objects SET workspace_id=?1 WHERE kind=?2 AND id=?3",

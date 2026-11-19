@@ -24,7 +24,7 @@
 use crate::facts::{EXCERPT_LOOKAHEAD_BYTES, Redact, excerpt};
 use anvil_domain::execution::{ConnectionObservation, ResponseRecord};
 use anvil_domain::secret::floor_char_boundary;
-use chrono::{DateTime, SecondsFormat, Utc};
+use anvil_domain::{SecondsFormat, Timestamp};
 use serde::Deserialize;
 
 /// Response header carrying the reference.
@@ -224,21 +224,15 @@ pub struct Binding {
     /// The namespace the profile expects, when it names one.
     pub namespace: Option<String>,
     /// The record must have been created inside this window.
-    pub not_before: DateTime<Utc>,
-    pub not_after: DateTime<Utc>,
+    pub not_before: Timestamp,
+    pub not_after: Timestamp,
 }
 
 impl Binding {
     /// Bind response `r`, whose request was sent at `sent_at` and which was
     /// complete at `received_by` (the recorded attempt's end, never the time
     /// of a later lookup), to its reference.
-    pub fn new(
-        r: &ResponseRecord,
-        reference: DiagnosticRef,
-        namespace: Option<&str>,
-        sent_at: DateTime<Utc>,
-        received_by: DateTime<Utc>,
-    ) -> Self {
+    pub fn new(r: &ResponseRecord, reference: DiagnosticRef, namespace: Option<&str>, sent_at: Timestamp, received_by: Timestamp) -> Self {
         // Headers and trailers, as `rules::ferrum_rules` reads the marker.
         let raw: Vec<&str> = r.header_values("x-gateway-error").into_iter().chain(r.trailer_values("x-gateway-error")).collect();
         let mut tokens: Vec<String> = Vec::new();
@@ -250,7 +244,7 @@ impl Binding {
                 }
             }
         }
-        let skew = chrono::Duration::seconds(CLOCK_SKEW_SECS);
+        let skew = anvil_domain::TimeDelta::seconds(CLOCK_SKEW_SECS);
         Binding {
             reference,
             status: r.status,
@@ -370,8 +364,8 @@ fn is_status(s: u16) -> bool {
 
 impl RefView {
     /// When the gateway created the record.
-    pub fn created(&self) -> Option<DateTime<Utc>> {
-        DateTime::parse_from_rfc3339(&self.created_at).ok().map(|t| t.with_timezone(&Utc))
+    pub fn created(&self) -> Option<Timestamp> {
+        Timestamp::parse_rfc3339(&self.created_at).ok()
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -385,9 +379,9 @@ impl RefView {
         if !text_ok(&self.namespace) {
             return Err("namespace is not a bounded text".into());
         }
-        let expires = DateTime::parse_from_rfc3339(&self.expires_at).map_err(|_| "expires_at is not an RFC 3339 time")?;
+        let expires = Timestamp::parse_rfc3339(&self.expires_at).map_err(|_| "expires_at is not an RFC 3339 time")?;
         match self.created() {
-            Some(created) if expires.with_timezone(&Utc) >= created => {}
+            Some(created) if expires >= created => {}
             Some(_) => return Err("expires_at is before created_at".into()),
             None => return Err("created_at is not an RFC 3339 time".into()),
         }
@@ -537,7 +531,7 @@ pub fn check_binding(view: &RefView, b: &Binding) -> Result<(), Mismatch> {
         Some(t) if t >= b.not_before && t <= b.not_after => Ok(()),
         _ => {
             // Milliseconds keep the window within a quote's cut.
-            let at = |t: DateTime<Utc>| t.to_rfc3339_opts(SecondsFormat::Millis, true);
+            let at = |t: Timestamp| t.to_rfc3339_opts(SecondsFormat::Millis, true);
             mismatch("created_at", format!("between {} and {}", at(b.not_before), at(b.not_after)), &view.created_at)
         }
     }
@@ -632,8 +626,8 @@ mod tests {
     }
 
     fn binding(r: &ResponseRecord, namespace: Option<&str>) -> Binding {
-        let now = Utc::now();
-        Binding::new(r, parse_ref(REF).unwrap(), namespace, now - chrono::Duration::seconds(1), now)
+        let now = Timestamp::now();
+        Binding::new(r, parse_ref(REF).unwrap(), namespace, now - anvil_domain::TimeDelta::seconds(1), now)
     }
 
     #[test]
@@ -700,7 +694,7 @@ mod tests {
     #[test]
     fn a_record_binds_only_to_its_own_response() {
         let r = response(502, "HTTP/1.1", &[("x-gateway-error", "connection_failure"), ("x-ferrum-diagnostic-ref", REF)]);
-        let now = Utc::now().to_rfc3339();
+        let now = Timestamp::now().to_rfc3339();
         let view = parse_view(record(&now).as_bytes()).expect("valid record");
         assert_eq!(check_binding(&view, &binding(&r, None)), Ok(()));
         assert_eq!(check_binding(&view, &binding(&r, Some("ferrum"))), Ok(()));
@@ -748,7 +742,7 @@ mod tests {
             (b.gateway_error.as_deref(), b.gateway_error_shown.as_deref()),
             (Some("connection_failure"), Some("connection_failure"))
         );
-        let view = parse_view(record(&Utc::now().to_rfc3339()).as_bytes()).expect("valid record");
+        let view = parse_view(record(&Timestamp::now().to_rfc3339()).as_bytes()).expect("valid record");
         assert_eq!(check_binding(&view, &b), Ok(()));
         // A header and a trailer that disagree are two references, never either one.
         let other = "fd1_00000000000000000000000000000000";
@@ -759,7 +753,7 @@ mod tests {
 
     #[test]
     fn every_required_key_must_be_present() {
-        let good = record(&Utc::now().to_rfc3339());
+        let good = record(&Timestamp::now().to_rfc3339());
         for key in ["\"gateway_error\":\"connection_failure\",", "\"proxy_id\":\"core\",", "\"body_error_class\":null,"] {
             let bad = good.replacen(key, "", 1);
             assert_ne!(bad, good, "{key} not found");
@@ -769,7 +763,7 @@ mod tests {
 
     #[test]
     fn error_classes_outside_the_pinned_vocabulary_are_named() {
-        let good = record(&Utc::now().to_rfc3339());
+        let good = record(&Timestamp::now().to_rfc3339());
         assert!(unknown_error_classes(&parse_view(good.as_bytes()).unwrap()).is_empty());
         let future = good.replace("connection_refused", "quantum_tunnel_collapse");
         let view = parse_view(future.as_bytes()).expect("a label outside the vocabulary is still a well-formed record");
@@ -781,7 +775,7 @@ mod tests {
 
     #[test]
     fn only_closed_vocabularies_are_accepted() {
-        let now = Utc::now().to_rfc3339();
+        let now = Timestamp::now().to_rfc3339();
         let good = record(&now);
         assert!(parse_view(good.as_bytes()).is_ok());
         for (from, to) in [

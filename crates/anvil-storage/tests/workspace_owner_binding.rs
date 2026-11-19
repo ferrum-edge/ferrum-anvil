@@ -29,7 +29,7 @@ impl Object {
 
 fn fixture(k: &'static str, ws: Id, request: Id) -> Object {
     let id = if k == kind::DEVICE_IDENTITY_SEAL { ws } else { Id::new() };
-    let now = chrono::Utc::now();
+    let now = anvil_domain::Timestamp::now();
     let mut value = json!({
         "id": id,
         "workspace_id": ws,
