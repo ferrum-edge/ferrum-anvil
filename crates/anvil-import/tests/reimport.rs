@@ -702,10 +702,10 @@ fn auth_reference(r: &RequestDefinition, field: &str) -> String {
     serde_json::to_value(&r.spec.auth).unwrap()[field]["value"].as_str().unwrap_or_default().to_string()
 }
 
-/// Review of #586 (sol F1): an auth config's placeholders follow its owner's
-/// stable id, not the order the source lists items in, so reordering the
-/// source keeps every request on the variable the user filled for it, and
-/// never hands one host another's secret.
+/// Review of #586 (sol F1): an auth config's placeholders are bound to the
+/// literal they replaced, not to the order the source lists items in, so
+/// reordering the source keeps every request on the variable the user filled
+/// for it, and never hands one host another's secret.
 #[test]
 fn reordering_items_keeps_each_auth_config_on_its_own_variables() {
     let postman_item = |id: &str| {
@@ -732,7 +732,7 @@ fn reordering_items_keeps_each_auth_config_on_its_own_variables() {
         .to_string()
     };
     // Review of #586, round 2: these two ids collided under the 32-bit digest
-    // (sol F2), and URL userinfo is named from the request's key too (dsf F1).
+    // (sol F2); URL userinfo is literal-bound too (dsf F1).
     let userinfo_item = |id: &str| {
         serde_json::json!({ "id": id, "name": id, "request": { "method": "GET",
             "url": format!("https://user-{id}:tok-SENSITIVE-{id}@{id}.example.invalid/v1") } })
@@ -784,13 +784,14 @@ fn reordering_items_keeps_each_auth_config_on_its_own_variables() {
     }
 }
 
-/// Review of #586, round 2 (sol F1, dsf F1): a request matched only by its
-/// position (a Postman item without an id) that carries credentials, its
-/// own, from URL userinfo or inherited from its folder, is never updated
-/// silently: reordering the source holds every such request for review, so
-/// no request ends up on variables filled for another one.
+/// Review of #586, round 2 (sol F1, dsf F1): requests matched only by their
+/// position (Postman items without ids) carrying credentials, their own,
+/// from URL userinfo or inherited from their folder, and reordered: each
+/// position takes the other request's URL together with that request's
+/// literal-bound names, so applying the plan as by default sends every
+/// filled credential only to the host it was filled for.
 #[test]
-fn reordered_items_without_ids_are_held_for_review() {
+fn reordered_items_without_ids_keep_each_credential_with_its_host() {
     let folder = |n: &str| {
         serde_json::json!({ "name": format!("Folder {n}"),
             "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": format!("tok-SENSITIVE-folder-{n}") }] },
@@ -815,36 +816,15 @@ fn reordered_items_without_ids_are_held_for_review() {
     };
     let first = import(doc(["a", "b"]).as_bytes(), &opts()).unwrap();
     let fresh = reimport(&first, &doc(["b", "a"]));
-    assert_credentials_stay("items without ids", &first, &fresh);
-    let plan = diff(&first, &first.requests, &fresh);
-    assert!(
-        plan.updated.is_empty(),
-        "a credentialed request moved silently: {:?}",
-        plan.updated.iter().map(|c| &c.operation_key).collect::<Vec<_>>()
-    );
-    assert_eq!(
-        plan.conflicts.len(),
-        6,
-        "every moved request is held: {:?}",
-        plan.conflicts.iter().map(|c| &c.operation_key).collect::<Vec<_>>()
-    );
-    assert!(plan.conflicts.iter().all(|c| c.credential_review && !c.user_edited && c.conflicting_fields == c.upstream_fields));
-    // Declined, as by default: every request keeps the URL and references it
-    // had, so the variables filled for it still go to its own host.
-    let applied = plan.apply(&first.requests, &ReimportApproval::default());
-    for (before, after) in first.requests.iter().zip(&applied) {
-        assert_eq!(before.meta.id, after.meta.id);
-        assert_eq!(before.spec, after.spec, "a held request changed");
-    }
+    let plan = assert_credentials_stay("items without ids", &first, &fresh);
+    assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts.iter().map(|c| &c.operation_key).collect::<Vec<_>>());
 }
 
-/// Review of #586, round 2: a request whose import-made credential
-/// placeholders were renamed upstream (here: a request imported by an
-/// earlier build, under an older naming) keeps the references it has, so
-/// it stays on the variables the user filled, and is not reported as
-/// changed.
+/// Round 4: a request imported under an older naming (here `{{r_token}}`)
+/// moves to the literal-bound name on reimport: a new, unfilled variable the
+/// user is asked for, never one filled for another literal.
 #[test]
-fn renamed_credential_placeholders_keep_the_existing_references() {
+fn a_request_under_an_older_naming_is_asked_for_again() {
     let doc = serde_json::json!({
         "info": { "name": "One", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
         "item": [{ "id": "r1", "name": "r", "request": { "method": "GET", "url": "https://r.example.invalid/v1",
@@ -857,20 +837,14 @@ fn renamed_credential_placeholders_keep_the_existing_references() {
     let hash = anvil_import::spec_hash(&legacy.spec);
     legacy.spec.source.as_mut().unwrap().generated_hash = hash;
     let fresh = reimport(&first, &doc);
-    assert!(is_auth_ref(&auth_reference(&fresh.requests[0], "token"), "token"), "the fresh import uses the current naming");
     let plan = diff(&first, &first.requests, &fresh);
-    assert_eq!(plan.unchanged, vec![first.requests[0].meta.id], "{plan:?}");
-    let applied = plan.apply(&first.requests, &ReimportApproval::default());
-    assert_eq!(auth_reference(&applied[0], "token"), "{{r_token}}");
-
-    // The URL changes upstream too: the update keeps the reference.
-    let moved = reimport(&first, &doc.replace("https://r.example.invalid/v1", "https://r.example.invalid/v2"));
-    let plan = diff(&first, &first.requests, &moved);
     assert_eq!(plan.updated.len(), 1, "{plan:?}");
     let applied = plan.apply(&first.requests, &ReimportApproval::default());
-    assert!(applied[0].spec.url.ends_with("/v2"));
-    assert_eq!(auth_reference(&applied[0], "token"), "{{r_token}}");
-    assert_eq!(anvil_import::spec_hash(&applied[0].spec), applied[0].spec.source.as_ref().unwrap().generated_hash, "applied as generated");
+    let reference = auth_reference(&applied[0], "token");
+    assert!(is_auth_ref(&reference, "token"), "the reference was not renamed");
+    let name = reference.trim_start_matches("{{").trim_end_matches("}}");
+    assert!(fresh.credential_names.contains_key(name));
+    assert!(fresh.report.required_variables.iter().any(|v| v.name == name && v.secret), "the new name is not asked for");
 }
 
 // ------------------------------------- credential continuity (#584, round 3)
@@ -1034,32 +1008,116 @@ fn a_curl_command_for_another_url_never_reuses_the_filled_credentials() {
     assert_credentials_stay("cURL quarantined URL", &first, &fresh);
 }
 
-/// Invariant 3 on its own: an added request that would reference an
-/// allocated name a stored variable defines gets a fresh, unused name, so it
-/// can never resolve another request's value (here the fresh import is made
-/// to hand it such a name, as a faulty allocator would).
+/// Round 4: a name is bound to its literal, not to a destination. The source
+/// sending the same literal to a new host (a request that moved, a new
+/// request holding that secret) keeps the name, and the variable filled for
+/// it follows: the source itself sends that secret there. Allowed.
 #[test]
-fn an_added_request_never_takes_a_filled_allocated_name() {
-    let first = import(postman_items(vec![bearer_item(Some("r1"), "a.example.test")]).as_bytes(), &opts()).unwrap();
-    let filled = auth_reference(req(&first, "postman:r1"), "token");
-    let mut fresh =
-        reimport(&first, &postman_items(vec![bearer_item(Some("r1"), "a.example.test"), bearer_item(Some("r2"), "b.example.test")]));
-    let r2 = fresh.requests.iter_mut().find(|q| q.spec.source.as_ref().is_some_and(|s| s.operation_key == "postman:r2")).unwrap();
-    r2.spec.auth = AuthConfig::Bearer { token: SensitiveValue::template(filled.clone()), prefix: "Bearer".into() };
-    let hash = anvil_import::spec_hash(&r2.spec);
-    r2.spec.source.as_mut().unwrap().generated_hash = hash;
-    let plan = assert_credentials_stay("added request", &first, &fresh);
-    let added = auth_reference(&plan.added[0], "token");
-    assert_eq!(added, filled.replace("}}", "_new}}"), "the added request was not given a fresh name");
-    assert_eq!(anvil_import::spec_hash(&plan.added[0].spec), plan.added[0].spec.source.as_ref().unwrap().generated_hash);
+fn the_same_literal_for_a_new_host_keeps_its_name() {
+    let item = |id: &str, host: &str| {
+        serde_json::json!({ "id": id, "name": id, "request": { "method": "GET", "url": format!("https://{host}/v1"),
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "tok-SENSITIVE-shared" }] } } })
+    };
+    let first = import(postman_items(vec![item("r1", "a.example.test")]).as_bytes(), &opts()).unwrap();
+    let name = auth_reference(req(&first, "postman:r1"), "token");
+    assert!(first.credential_names.contains_key(name.trim_start_matches("{{").trim_end_matches("}}")));
+    let fresh = reimport(&first, &postman_items(vec![item("r1", "b.example.test"), item("r2", "c.example.test")]));
+    let plan = diff(&first, &first.requests, &fresh);
+    let applied = plan.apply(&first.requests, &ReimportApproval::default());
+    let moved = applied.iter().find(|q| q.meta.id == first.requests[0].meta.id).expect("the request");
+    assert!(moved.spec.url.contains("b.example.test"), "the move was not applied");
+    assert_eq!(auth_reference(moved, "token"), name);
+    assert_eq!(plan.added.len(), 1, "{plan:?}");
+    assert_eq!(auth_reference(&plan.added[0], "token"), name, "the same literal got another name");
+}
+
+/// Round 4: without the key that named the first import's placeholders (a
+/// fresh clone, another profile: here `None`, a random key) every name is
+/// new, so nothing the user filled resolves and every credential is asked
+/// for again.
+#[test]
+fn a_missing_credential_key_asks_for_every_credential_again() {
+    let source = postman_items(vec![
+        bearer_item(Some("r1"), "a.example.test"),
+        bearer_item(None, "b.example.test"),
+        serde_json::json!({ "name": "ui", "request": { "method": "GET", "url": "https://u:tok-SENSITIVE-ui@c.example.test/v1" } }),
+        serde_json::json!({ "name": "q", "request": { "method": "GET", "url": "https://api.{{region}}.d.example.test/v1?to=a@b" } }),
+    ]);
+    let first = import(source.as_bytes(), &opts()).unwrap();
+    let fresh = import(source.as_bytes(), &ImportOptions { id_namespace: Some(first.source.id_namespace), credential_key: None, ..opts() })
+        .unwrap();
+    assert!(!fresh.credential_names.is_empty());
+    assert!(fresh.credential_names.keys().all(|n| !first.credential_names.contains_key(n)), "a name survived without the key");
+    let plan = assert_credentials_stay("missing key", &first, &fresh);
+    let applied = plan.apply(&first.requests, &ReimportApproval::default());
+    for q in &applied {
+        let mut refs = vec![];
+        references_in(&serde_json::to_value(&q.spec).unwrap(), &mut refs);
+        assert!(refs.iter().all(|r| !first.credential_names.contains_key(r)), "{}: kept a name filled under the old key", q.name);
+        assert!(refs.iter().any(|r| fresh.credential_names.contains_key(r)), "{}: no new placeholder", q.name);
+    }
+    assert!(
+        fresh.credential_names.keys().all(|n| fresh.report.required_variables.iter().any(|v| &v.name == n)),
+        "a new placeholder is not asked for"
+    );
+}
+
+/// Round 4: a source that names a variable or reference in the shape of a
+/// literal-bound placeholder (as written, percent-encoded, as a path
+/// parameter, a collection variable, an Insomnia or a cURL reference) is
+/// refused, so a source can never point a request at a variable filled for
+/// one of them. Names merely like it are accepted.
+#[test]
+fn a_source_name_in_the_reserved_shape_is_refused() {
+    let with_header = |value: &str| {
+        postman_items(vec![serde_json::json!({ "name": "r", "request": { "method": "GET", "url": "https://api.example.test/v1",
+            "header": [{ "key": "X-Id", "value": value }] } })])
+    };
+    let insomnia = |value: &str| {
+        serde_json::json!({ "_type": "export", "__export_format": 4, "resources": [
+            { "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" },
+            { "_id": "req_1", "_type": "request", "parentId": "wrk_1", "name": "r", "method": "GET", "url": "https://api.example.test/v1",
+              "headers": [{ "name": "X-Id", "value": value }] }
+        ] })
+        .to_string()
+    };
+    for name in ["auth_0123456789abcdef_token", "secret_0123456789abcdef", "url_0123456789ABCDEF"] {
+        let cases = [
+            ("reference", with_header(&format!("{{{{{name}}}}}"))),
+            ("percent-encoded", with_header(&format!("{{{{{}}}}}", name.replacen('_', "%5F", 1)))),
+            (
+                "path parameter",
+                postman_items(vec![serde_json::json!({ "name": "r", "request": { "method": "GET",
+                    "url": { "raw": format!("https://api.example.test/items/:{name}") } } })]),
+            ),
+            (
+                "collection variable",
+                serde_json::json!({ "info": { "name": "C", "schema": PM }, "variable": [{ "key": name, "value": "x" }],
+                    "item": [{ "name": "r", "request": { "method": "GET", "url": "https://api.example.test/v1" } }] })
+                .to_string(),
+            ),
+            ("Insomnia", insomnia(&format!("{{{{ _.{name} }}}}"))),
+            ("cURL", format!("curl -H 'X-Id: {{{{{name}}}}}' https://api.example.test/v1")),
+        ];
+        for (label, source) in cases {
+            match import(source.as_bytes(), &opts()) {
+                Err(e) => assert!(e.to_string().contains("reserves"), "{label} {name}: {e}"),
+                Ok(_) => panic!("{label} {name}: a reserved name was accepted"),
+            }
+        }
+    }
+    for name in ["auth_token", "secret_0123", "url_0123456789abcdefg", "auth_0123456789abcdeg_token", "api_0123456789abcdef"] {
+        assert!(import(with_header(&format!("{{{{{name}}}}}")).as_bytes(), &opts()).is_ok(), "{name} was refused");
+    }
 }
 
 /// Round 3, sol F2: folders known only by their position whose requests'
 /// specs stay identical (`{{host}}/v1`, inherited auth) while their `host`
-/// variables move: every changed unit of such a folder is held with its
-/// auth, so no token reaches the other folder's host.
+/// variables move: each folder's auth names move with the literals, so
+/// applying both plans as by default sends no token to the other folder's
+/// host.
 #[test]
-fn positional_folders_hold_their_destination_variables_with_their_auth() {
+fn positional_folders_keep_their_auth_with_their_hosts() {
     let folder = |n: &str| {
         serde_json::json!({ "name": format!("Folder {n}"),
             "variable": [{ "key": "host", "value": format!("https://{n}.example.test") }],
@@ -1069,21 +1127,12 @@ fn positional_folders_hold_their_destination_variables_with_their_auth() {
     let first = import(postman_items(vec![folder("a"), folder("b")]).as_bytes(), &opts()).unwrap();
     let fresh = reimport(&first, &postman_items(vec![folder("b"), folder("a")]));
     let plan = assert_credentials_stay("positional folders", &first, &fresh);
-    assert!(
-        plan.scope_updated.iter().all(|c| !c.key.starts_with("folders/")),
-        "a guarded folder unit was applied: {:?}",
-        keys(&plan.scope_updated)
-    );
-    assert!(
-        plan.scope_conflicts.iter().any(|c| c.credential_review && c.key.ends_with("/variables/host")),
-        "{:?}",
-        keys(&plan.scope_conflicts)
-    );
+    assert!(plan.scope_conflicts.is_empty(), "{:?}", keys(&plan.scope_conflicts));
 }
 
 /// Round 3, sol F3: reordering a stable request's sensitive headers keeps
-/// each header on its own placeholder (they are named after the field and
-/// never kept by position).
+/// each header on its own placeholder (bound to its literal, never kept by
+/// position).
 #[test]
 fn reordered_sensitive_headers_keep_their_own_placeholders() {
     let item = |headers: [(&str, &str); 2]| {
@@ -1099,22 +1148,22 @@ fn reordered_sensitive_headers_keep_their_own_placeholders() {
         reimport(&first, &postman_items(vec![item([("X-Auth-Token", "tok-SENSITIVE-beta"), ("X-Api-Key", "tok-SENSITIVE-alpha")])]));
     let plan = diff(&first, &first.requests, &fresh);
     let applied = plan.apply(&first.requests, &ReimportApproval::default());
-    let spec = &applied[0].spec;
-    assert_eq!(header(spec, "X-Api-Key").unwrap().value, "{{X_Api_Key}}");
-    assert_eq!(header(spec, "X-Auth-Token").unwrap().value, "{{X_Auth_Token}}");
+    let (spec, before) = (&applied[0].spec, &first.requests[0].spec);
+    for h in ["X-Api-Key", "X-Auth-Token"] {
+        assert!(is_secret_ref(&header(before, h).unwrap().value), "{h}");
+        assert_eq!(header(spec, h).unwrap().value, header(before, h).unwrap().value, "{h} changed placeholder");
+    }
 }
 
 /// Round 3, dsf F2: repeated or empty item ids identify nothing; such items
-/// are positional, so a reorder never swaps their filled credentials.
+/// are positional, and a reorder never swaps their filled credentials.
 #[test]
 fn repeated_and_empty_ids_are_positional() {
     for id in ["dup", ""] {
         let items = |hosts: [&str; 2]| postman_items(hosts.iter().map(|h| bearer_item(Some(id), h)).collect());
         let first = import(items(["a.example.test", "b.example.test"]).as_bytes(), &opts()).unwrap();
         let fresh = reimport(&first, &items(["b.example.test", "a.example.test"]));
-        let plan = assert_credentials_stay(&format!("id {id:?}"), &first, &fresh);
-        assert_eq!(plan.conflicts.len(), 2, "id {id:?}");
-        assert!(plan.conflicts.iter().all(|c| c.credential_review), "id {id:?}");
+        assert_credentials_stay(&format!("id {id:?}"), &first, &fresh);
     }
 }
 
@@ -1145,8 +1194,8 @@ fn source_designated_references_follow_the_source() {
     assert_eq!(auth_reference(&applied[0], "token"), "{{tokenB}}", "the variable switch was not applied");
 }
 
-/// Quarantined URLs: named from their request's key, so stable items keep
-/// theirs across a reorder, and items without ids are held.
+/// Quarantined URLs: bound to the URL they replaced, so a reorder, with or
+/// without ids, keeps each with its own request.
 #[test]
 fn quarantined_urls_stay_with_their_requests() {
     let item = |id: Option<&str>, host: &str| {

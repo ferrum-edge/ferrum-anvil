@@ -297,18 +297,12 @@ fn leaks(text: &str) -> bool {
     text.contains(MARKER) || text.contains(NUMBER)
 }
 
-/// Whether `text` is a quarantined URL's placeholder,
-/// `{{url-needs-review-<16 hex digits>}}` (named from its owner's key).
+/// Whether `text` is a quarantined URL's placeholder, `{{url_<16 hex
+/// digits>}}` (bound to the URL's text).
 fn is_quarantined(text: &str) -> bool {
-    text.strip_prefix("{{url-needs-review-")
+    text.strip_prefix("{{url_")
         .and_then(|t| t.strip_suffix("}}"))
         .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
-/// The name inside a quarantined URL's placeholder.
-fn quarantine_name(url: &str) -> String {
-    assert!(is_quarantined(url), "not a quarantine placeholder");
-    url.trim_start_matches("{{").trim_end_matches("}}").to_string()
 }
 
 /// Import `source` both ways and check the outcome `export` describes.
@@ -519,31 +513,51 @@ fn curl_diagnostics_never_echo_credentials() {
     }
 }
 
-/// Final gate of #575 (dsf F4): the quarantine placeholder never takes a
-/// name the source references or derives (a path parameter, an explicit
-/// reference), so it cannot bind another request's variable. Its name comes
-/// from the request's key (#584); a source that uses exactly that name pushes
-/// it to the next free one.
+/// Final gate of #575 (dsf F4), sol F5 and dsf F1, under literal-bound
+/// names (#584): a source that uses a name in the shape of an import
+/// placeholder (`url_`, `auth_` or `secret_` and 16 hex digits) is refused
+/// however it spells it (an explicit or JSON-escaped reference,
+/// percent-encoding, shell quoting, a path parameter in its raw or its
+/// sanitized spelling), in either mode. So no placeholder can take a source
+/// name, and no source name can resolve a filled placeholder.
 #[test]
-fn the_quarantine_placeholder_never_binds_a_source_name() {
+fn a_source_name_in_the_placeholder_shape_is_refused() {
     let quarantined = "https://api.{{region}}.example.test/v1?to=a@b";
-    let neutral = postman_doc_items(json!([
-        { "name": "a", "request": { "method": "GET", "url": "https://api.example.test/" } },
-        { "name": "b", "request": { "method": "GET", "url": quarantined } },
-    ]));
-    let name = quarantine_name(&import(&neutral, &ImportOptions::default()).unwrap().requests[1].spec.url);
-    let path = postman_doc_items(json!([
-        { "name": "a", "request": { "method": "GET", "url": { "raw": format!("https://api.example.test/items/:{name}") } } },
-        { "name": "b", "request": { "method": "GET", "url": quarantined } },
-    ]));
-    let r = import(&path, &ImportOptions::default()).unwrap();
-    assert_eq!(r.requests[1].spec.url, format!("{{{{{name}_2}}}}"), "a path parameter took the quarantine placeholder");
-    let explicit = postman_doc_items(json!([
-        { "name": "a", "request": { "method": "GET", "url": "https://api.example.test/", "header": [{ "key": "X-Id", "value": format!("{{{{{name}}}}}") }] } },
-        { "name": "b", "request": { "method": "GET", "url": quarantined } },
-    ]));
-    let r = import(&explicit, &ImportOptions::default()).unwrap();
-    assert_eq!(r.requests[1].spec.url, format!("{{{{{name}_2}}}}"), "an explicit reference was not reserved");
+    let name = "url_0123456789abcdef";
+    let with_header = |value: &str| {
+        postman_doc_items(json!([
+            { "name": "a", "request": { "method": "GET", "url": "https://api.example.test/", "header": [{ "key": "X-Id", "value": value }] } },
+            { "name": "b", "request": { "method": "GET", "url": quarantined } },
+        ]))
+    };
+    let with_path = |url: String| {
+        postman_doc_items(json!([
+            { "name": "a", "request": { "method": "GET", "url": { "raw": url } } },
+            { "name": "b", "request": { "method": "GET", "url": quarantined } },
+        ]))
+    };
+    let json_escaped = format!(
+        r#"{{"info":{{"name":"c","schema":"{POSTMAN_SCHEMA}"}},"item":[{{"name":"a","request":{{"method":"GET","url":"https://api.example.test/","header":[{{"key":"X-Id","value":"\u007b\u007b{name}\u007d\u007d"}}]}}}},{{"name":"b","request":{{"method":"GET","url":"{quarantined}"}}}}]}}"#
+    );
+    let cases: [(&str, Vec<u8>); 6] = [
+        ("explicit reference", with_header(&format!("{{{{{name}}}}}"))),
+        ("JSON escape", json_escaped.into_bytes()),
+        ("percent-encoding", with_header(&format!("{{{{{}}}}}", name.replace('_', "%5F")))),
+        ("path parameter", with_path(format!("https://api.example.test/items/:{name}"))),
+        ("raw path parameter", with_path(format!("https://api.example.test/items/:{}", name.replace('_', "-")))),
+        ("shell quoting", format!("curl -H 'X-Id: {{{{url_'\"0123456789abcdef}}}}\" '{quarantined}'").into_bytes()),
+    ];
+    for (label, source) in cases {
+        for include_credentials in [false, true] {
+            match import(&source, &ImportOptions { include_credentials, ..ImportOptions::default() }) {
+                Err(e) => assert!(e.to_string().contains("reserves"), "{label}: {e}"),
+                Ok(_) => panic!("{label}: a name in the placeholder shape was accepted ({include_credentials})"),
+            }
+        }
+    }
+    // The import's own placeholder is not refused.
+    let r = import(&with_header("plain"), &ImportOptions::default()).unwrap();
+    assert!(is_quarantined(&r.requests[1].spec.url));
 }
 
 fn postman_doc_items(items: Value) -> Vec<u8> {
@@ -553,10 +567,6 @@ fn postman_doc_items(items: Value) -> Vec<u8> {
     })
     .to_string()
     .into_bytes()
-}
-
-fn header_value<'r>(r: &'r ImportResult, name: &str) -> Option<&'r str> {
-    r.requests[0].spec.headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.as_str())
 }
 
 /// Final gate of #575: the userinfo placeholders never take a path
@@ -593,8 +603,8 @@ fn userinfo_placeholders_never_take_a_path_parameter_name() {
             let with_userinfo = r.requests.iter().find(|q| q.spec.url.contains("/items/")).expect("the userinfo request");
             let auth = serde_json::to_string(&with_userinfo.spec.auth).unwrap();
             assert!(with_userinfo.spec.url.ends_with("/items/{{username}}"), "{importer}: the path parameter changed");
-            // Named after the request's stable key (`auth_<digest>_…`), never a
-            // path parameter's name.
+            // Bound to its literal (`auth_<digest>_…`), never a path
+            // parameter's name.
             assert!(
                 auth.contains("{{auth_") && auth.contains("_username}}"),
                 "{importer}: the user name placeholder took a path parameter's name"
@@ -761,54 +771,6 @@ fn credential_placeholders_never_bind_a_source_variable() {
         assert!(password.starts_with("{{") && !defined.contains(&password), "{importer}: the placeholder binds a source variable");
         assert_nothing_readable(&source, importer);
     }
-}
-
-/// sol F5: a reference the source escaped (a JSON \u escape, percent-encoding,
-/// shell quoting) is reserved by its decoded spelling.
-#[test]
-fn escaped_references_are_reserved() {
-    let quarantined = "https://api.{{region}}.example.test/v1?to=a@b";
-    let neutral = postman_doc_items(json!([
-        { "name": "a", "request": { "method": "GET", "url": "https://api.example.test/" } },
-        { "name": "b", "request": { "method": "GET", "url": quarantined } },
-    ]));
-    let name = quarantine_name(&import(&neutral, &ImportOptions::default()).unwrap().requests[1].spec.url);
-    let json_escaped = format!(
-        r#"{{"info":{{"name":"c","schema":"{POSTMAN_SCHEMA}"}},"item":[{{"name":"a","request":{{"method":"GET","url":"https://api.example.test/","header":[{{"key":"X-Id","value":"\u007b\u007b{name}\u007d\u007d"}}]}}}},{{"name":"b","request":{{"method":"GET","url":"{quarantined}"}}}}]}}"#
-    );
-    let percent = postman_doc_items(json!([
-        { "name": "a", "request": { "method": "GET", "url": "https://api.example.test/", "header": [{ "key": "X-Id", "value": format!("{{{{{}}}}}", name.replace('-', "%2D")) }] } },
-        { "name": "b", "request": { "method": "GET", "url": quarantined } },
-    ]));
-    for (label, source) in [("JSON escape", json_escaped.into_bytes()), ("percent-encoding", percent)] {
-        let r = import(&source, &ImportOptions::default()).unwrap();
-        assert_eq!(r.requests[1].spec.url, format!("{{{{{name}_2}}}}"), "{label}: an escaped reference was not reserved");
-    }
-    let curl_name =
-        quarantine_name(&import(format!("curl '{quarantined}'").as_bytes(), &ImportOptions::default()).unwrap().requests[0].spec.url);
-    let rest = &curl_name["url-".len()..];
-    let shell = format!("curl -H 'X-Id: {{{{url-'\"{rest}}}}}\" '{quarantined}'");
-    let r = import(shell.as_bytes(), &ImportOptions::default()).unwrap();
-    assert_eq!(header_value(&r, "X-Id"), Some(format!("{{{{{curl_name}}}}}").as_str()));
-    assert_eq!(r.requests[0].spec.url, format!("{{{{{curl_name}_2}}}}"), "shell quoting hid a reference");
-}
-
-/// dsf F1: a path parameter is reserved by its raw spelling as well as the
-/// sanitized one its placeholder takes. That is fail-safe: no placeholder
-/// can bind the parameter under either spelling, at the cost of a suffix.
-#[test]
-fn a_path_parameter_reserves_its_raw_spelling() {
-    let quarantined = "https://api.{{region}}.example.test/v1?to=a@b";
-    let doc = |a_url: &str| {
-        postman_doc_items(json!([
-            { "name": "a", "request": { "method": "GET", "url": { "raw": a_url } } },
-            { "name": "b", "request": { "method": "GET", "url": quarantined } },
-        ]))
-    };
-    let name = quarantine_name(&import(&doc("https://api.example.test/items"), &ImportOptions::default()).unwrap().requests[1].spec.url);
-    let r = import(&doc(&format!("https://api.example.test/items/:{name}")), &ImportOptions::default()).unwrap();
-    assert_eq!(r.requests[0].spec.url, format!("https://api.example.test/items/{{{{{}}}}}", name.replace('-', "_")));
-    assert_eq!(r.requests[1].spec.url, format!("{{{{{name}_2}}}}"));
 }
 
 /// #579: a retained script keeps no credential literal in the report.

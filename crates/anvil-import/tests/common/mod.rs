@@ -10,8 +10,18 @@ pub fn fixture(path: &str) -> Vec<u8> {
     std::fs::read(&p).unwrap_or_else(|e| panic!("read {p}: {e}"))
 }
 
+/// The credential key tests name placeholders with (the app derives one from
+/// the profile's data key).
+pub fn test_key() -> anvil_import::CredentialKey {
+    anvil_import::CredentialKey::from_bytes([7; 32])
+}
+
 pub fn opts() -> ImportOptions {
-    ImportOptions { imported_at: Some(Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap()), ..Default::default() }
+    ImportOptions {
+        imported_at: Some(Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap()),
+        credential_key: Some(test_key()),
+        ..Default::default()
+    }
 }
 
 pub fn run(path: &str, o: &ImportOptions) -> ImportResult {
@@ -85,10 +95,18 @@ pub fn template_of(v: &anvil_domain::secret::SensitiveValue) -> &str {
     }
 }
 
-/// Whether `text` is a quarantined URL's placeholder,
-/// `{{url-needs-review-<16 hex digits>}}`.
+/// Whether `text` is a quarantined URL's placeholder, `{{url_<16 hex digits>}}`
+/// (bound to the URL's text).
 pub fn is_quarantined(text: &str) -> bool {
-    text.strip_prefix("{{url-needs-review-")
+    text.strip_prefix("{{url_")
+        .and_then(|t| t.strip_suffix("}}"))
+        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Whether `text` is exactly the placeholder a redacted header, query, form,
+/// body, path or environment value gets: `{{secret_<16 hex digits>}}`.
+pub fn is_secret_ref(text: &str) -> bool {
+    text.strip_prefix("{{secret_")
         .and_then(|t| t.strip_suffix("}}"))
         .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }

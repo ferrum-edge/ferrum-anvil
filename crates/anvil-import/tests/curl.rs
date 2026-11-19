@@ -20,7 +20,7 @@ fn fixture_command() {
     assert_eq!(s.method, "POST");
     assert_eq!(s.url, "https://shop.example.com/api/orders");
     assert_eq!(param(s, "dry_run").unwrap().value, "true");
-    assert_eq!(param(s, "token").unwrap().value, "{{token}}", "credential-like query value redacted");
+    assert!(is_secret_ref(&param(s, "token").unwrap().value), "credential-like query value redacted");
     // `$SHOP_TOKEN` becomes a variable, which is not a literal secret.
     assert_eq!(header(s, "Authorization").unwrap().value, "Bearer {{SHOP_TOKEN}}");
     assert!(r.report.required_variables.iter().any(|v| v.name == "SHOP_TOKEN" && v.secret));
@@ -32,7 +32,7 @@ fn fixture_command() {
     match &s.auth {
         AuthConfig::Basic { username, password } => {
             assert_eq!(username, "shop-bot");
-            assert_eq!(password, &SensitiveValue::template("{{password}}"));
+            assert!(is_auth_ref(template_of(password), "password"));
         }
         other => panic!("{other:?}"),
     }
@@ -87,7 +87,7 @@ fn form_data_and_defaults() {
     match &s.body {
         Body::FormUrlEncoded { fields } => {
             assert_eq!(fields[0].name, "user");
-            assert_eq!(fields[1].value, "{{password}}");
+            assert!(is_secret_ref(&fields[1].value));
             assert_eq!(fields[2].value, "a b&c");
         }
         other => panic!("{other:?}"),
@@ -134,7 +134,7 @@ fn methods_head_and_misc_flags() {
     assert_eq!(s.method, "DELETE");
     assert_eq!(header(s, "User-Agent").unwrap().value, "agent/1");
     assert_eq!(header(s, "Referer").unwrap().value, "https://ref.example.com");
-    assert_eq!(header(s, "Cookie").unwrap().value, "{{Cookie}}");
+    assert!(is_secret_ref(&header(s, "Cookie").unwrap().value));
     let r = curl("curl --http3-only --location-trusted --digest -u a:b --proxy http://p:8080 https://example.com");
     let s = &r.requests[0].spec;
     assert_eq!(s.settings.http_version, Some(HttpVersionPolicy::Http3Only));
@@ -366,7 +366,7 @@ fn credentials_in_a_verbatim_query_become_sensitive_parameters() {
     let s = &r.requests[0].spec;
     assert_eq!(s.url, "https://example.test/a?flag&page=2");
     let p = param(s, "api_key").unwrap();
-    assert!(p.value == "{{api_key}}" && p.sensitive);
+    assert!(is_secret_ref(&p.value) && p.sensitive);
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
     assert_eq!(r.report.redactions.len(), 1);
     // Kept with include_credentials, decoded and marked sensitive.
@@ -395,7 +395,7 @@ fn json_data_is_scanned_under_the_node_budget() {
     assert!(has_at(&r, "body_not_scanned", "/args#json"));
     // Within the budget, credential members are still redacted.
     let r = import(br#"curl --json '{"password":"placeholder-secret"}' https://example.test"#, &o).unwrap();
-    assert_eq!(json_body(&r.requests[0].spec)["password"], "{{password}}");
+    assert!(json_body(&r.requests[0].spec)["password"].as_str().is_some_and(is_secret_ref));
 }
 
 #[test]
@@ -431,7 +431,7 @@ fn numeric_credentials_and_unscannable_data() {
 fn get_data_with_a_bare_flag_keeps_the_credential_policy() {
     let r = curl("curl -G -d 'flag&api_key=placeholder-secret' https://example.test");
     let s = &r.requests[0].spec;
-    assert_eq!(param(s, "api_key").map(|p| p.value.as_str()), Some("{{api_key}}"));
+    assert!(param(s, "api_key").is_some_and(|p| is_secret_ref(&p.value)));
     assert!(param(s, "flag").is_some());
     assert!(!serde_json::to_string(&r.requests).unwrap().contains("placeholder-secret"));
 }
