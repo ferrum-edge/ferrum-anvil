@@ -85,11 +85,12 @@
 
   It stays linear. Auth placeholder names no longer carry any part of a collection, folder or
   request name, which could repeat a credential URL.
-- RUSTSEC-2026-0543 marks `chrono` unmaintained (all versions, no patched release; not a known
-  vulnerability). `deny.toml` ignores it with an exit condition, because chrono is a direct
-  dependency of 16 workspace crates and also comes in through `schemars` and `serde_with`.
-  Replacing it with `jiff` or `time` without changing any stored or published timestamp format is
-  tracked in #576.
+- `chrono` is no longer a dependency (RUSTSEC-2026-0543, unmaintained), and the `deny.toml`
+  ignore is removed (#576). Timestamps now use `anvil_domain::Timestamp`, built on `time` 0.3. It
+  writes exactly what chrono wrote (RFC 3339 in UTC with `Z` and a 0/3/6/9-digit fraction) and reads
+  everything chrono read, except years outside -9999..=9999, which Anvil never writes. chrono still
+  appears in `Cargo.lock` through `serde_with`'s optional features (via `tauri-utils`) but is not
+  built.
 - quinn-udp is updated from 0.5.15 to 0.5.16 for RUSTSEC-2026-0538 (GHSA-6pp4-4cxf-xf88): on
   targets that read one datagram per `recvmsg` (Apple platforms without `fast-apple-datapath`,
   the BSDs, Solaris and illumos), the receive loop could spin after a truncated datagram instead
