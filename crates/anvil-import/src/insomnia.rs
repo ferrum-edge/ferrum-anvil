@@ -702,7 +702,9 @@ fn request(
             // credential-named pairs, which become sensitive parameters.
             if url.contains('?') { redact_raw_query(b, &url, &ptr(at, "url"), "query") } else { (url, vec![]) }
         }
-        None => (quarantine_url(b, &templated, &ptr(at, "url")), vec![]),
+        // Bound to the URL as the source wrote it (`templated` is empty unless
+        // credentials are included, when it is the URL kept as written).
+        None => (quarantine_url(b, if b.opts.include_credentials { templated.as_str() } else { source_url }, &ptr(at, "url")), vec![]),
     };
     params.extend(query_params(b, r.get("parameters"), &ptr(at, "parameters")));
     let mut spec = RequestSpec::http(&method, &url);

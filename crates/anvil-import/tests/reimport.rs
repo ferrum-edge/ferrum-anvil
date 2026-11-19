@@ -1223,3 +1223,95 @@ fn quarantined_urls_stay_with_their_requests() {
         assert_credentials_stay(&format!("quarantined, ids {ids:?}"), &first, &fresh);
     }
 }
+
+// ---------------------------------------------------------- round 5 (#586)
+
+/// Sol F1: a name the source designates (here an OpenAPI security scheme's
+/// key) equal to a placeholder the import also makes is refused, in a new
+/// import and a reimport. So the request it names can never resolve the
+/// value filled for that placeholder.
+#[test]
+fn a_designated_name_equal_to_a_made_placeholder_is_refused() {
+    let doc = |evil: Option<&str>| {
+        let mut schemes = serde_json::json!({ "cc": { "type": "oauth2", "flows": { "clientCredentials": {
+            "tokenUrl": "https://{{tenant}}.issuer.example.test/token?to=a@b", "scopes": {} } } } });
+        let mut paths =
+            serde_json::json!({ "/a": { "get": { "security": [{ "cc": [] }], "responses": { "200": { "description": "ok" } } } } });
+        if let Some(name) = evil {
+            schemes[name] = serde_json::json!({ "type": "http", "scheme": "bearer" });
+            paths["/evil"] = serde_json::json!({ "get": { "security": [{ name: [] }], "servers": [{ "url": "https://evil.example.test" }],
+                "responses": { "200": { "description": "ok" } } } });
+        }
+        serde_json::json!({ "openapi": "3.0.3", "info": { "title": "t", "version": "1" }, "servers": [{ "url": "https://api.example.test" }],
+            "components": { "securitySchemes": schemes }, "paths": paths })
+        .to_string()
+    };
+    let first = import(doc(None).as_bytes(), &opts()).unwrap();
+    let name = first.credential_names.iter().find(|(_, c)| c.kind == "url").map(|(n, _)| n.clone()).expect("the token URL is quarantined");
+    let evil = doc(Some(&name));
+    for (label, o) in [("import", opts()), ("reimport", ImportOptions { id_namespace: Some(first.source.id_namespace), ..opts() })] {
+        match import(evil.as_bytes(), &o) {
+            Err(e) => assert!(e.to_string().contains("reserves"), "{label}: {e}"),
+            Ok(_) => panic!("{label}: a scheme named like the quarantine placeholder was accepted"),
+        }
+    }
+}
+
+/// Sol F2: an Insomnia quarantined URL is bound to its own text: two URLs
+/// get two placeholders, and a changed URL a new one, so a value filled for
+/// one never resolves for another.
+#[test]
+fn insomnia_quarantined_urls_are_bound_to_their_text() {
+    let doc = |requests: &[(&str, &str)]| {
+        let mut resources =
+            vec![serde_json::json!({ "_id": "wrk_1", "_type": "workspace", "parentId": null, "name": "W", "scope": "collection" })];
+        resources.extend(requests.iter().map(
+            |(id, url)| serde_json::json!({ "_id": id, "_type": "request", "parentId": "wrk_1", "name": id, "method": "GET", "url": url }),
+        ));
+        serde_json::json!({ "_type": "export", "__export_format": 4, "resources": resources }).to_string()
+    };
+    let (a, b) = ("https://a.{{ region }}.example.test/v1?to=a@b", "https://b.{{ region }}.example.test/v1?to=c@d");
+    let both = import(doc(&[("req_a", a), ("req_b", b)]).as_bytes(), &opts()).unwrap();
+    let urls: Vec<&str> = both.requests.iter().map(|q| q.spec.url.as_str()).collect();
+    assert!(urls.iter().all(|u| is_quarantined(u)), "{urls:?}");
+    assert_ne!(urls[0], urls[1], "two URLs share a placeholder");
+    let first = import(doc(&[("req_a", a)]).as_bytes(), &opts()).unwrap();
+    let fresh = reimport(&first, &doc(&[("req_a", b)]));
+    assert_ne!(fresh.requests[0].spec.url, first.requests[0].spec.url, "a changed URL kept its placeholder");
+    assert_credentials_stay("Insomnia quarantined URL changed", &first, &fresh);
+}
+
+/// Sol F3: the HMAC input is length-prefixed, so a field and literal that
+/// would join to the same text (`password\0a` = `b`, `password` = `a\0b`)
+/// get different names.
+#[test]
+fn field_and_literal_never_run_together() {
+    let body = |raw: &str| {
+        postman_items(vec![
+            serde_json::json!({ "id": "r1", "name": "r", "request": { "method": "POST", "url": "https://api.example.test/v1",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": raw, "options": { "raw": { "language": "json" } } } } }),
+        ])
+    };
+    let placeholder = |r: &ImportResult| {
+        let v = json_body(&r.requests[0].spec);
+        v.as_object()
+            .and_then(|m| m.values().find_map(|x| x.as_str().filter(|s| is_secret_ref(s)).map(str::to_string)))
+            .expect("a placeholder")
+    };
+    let one = import(body(r#"{"password\u0000a":"b"}"#).as_bytes(), &opts()).unwrap();
+    let two = import(body(r#"{"password":"a\u0000b"}"#).as_bytes(), &opts()).unwrap();
+    assert_ne!(placeholder(&one), placeholder(&two), "two different literals share a placeholder");
+}
+
+/// Sol F4: a name whose 17th byte falls inside a character is not of the
+/// reserved shape, and checking it does not panic.
+#[test]
+fn a_name_with_a_multibyte_character_at_byte_sixteen_imports() {
+    for name in ["auth_aaaaaaaaaaaaaaaé", "secret_0123456789abcdeé", "url_é"] {
+        let doc = serde_json::json!({ "info": { "name": name, "schema": PM },
+            "variable": [{ "key": name, "value": "x" }],
+            "item": [{ "name": name, "request": { "method": "GET", "url": format!("https://api.example.test/{{{{{name}}}}}") } }] });
+        assert!(import(doc.to_string().as_bytes(), &opts()).is_ok(), "a multibyte name was refused");
+    }
+}

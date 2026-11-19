@@ -16,8 +16,8 @@ use serde_json::Value;
 /// Credential placeholders are bound to the literal they replace (#584): a
 /// literal of a field becomes `{{<kind>_<16 hex>}}` (`{{auth_<16 hex>_<field>}}`
 /// for an auth secret), the digits from
-/// HMAC-SHA256(this import's key, kind | field | literal)
-/// ([`crate::CredentialKey`]). Equal names therefore mean the same source
+/// HMAC-SHA256(this import's key, kind | field | literal), each part
+/// length-prefixed so no two tuples encode alike ([`crate::CredentialKey`]). Equal names therefore mean the same source
 /// literal: a variable the user filled resolves only where the source holds
 /// exactly the secret it replaced, whatever moved, was inserted, repeated or
 /// rotated, and a different literal gets a new, unfilled name. No owner, no
@@ -25,9 +25,10 @@ use serde_json::Value;
 /// recorded in [`crate::ImportResult::credential_names`].
 pub fn literal_name(b: &mut Builder, kind: &'static str, field: &str, suffix: Option<&'static str>, literal: &str) -> String {
     let field = field.to_ascii_lowercase();
-    let mac = hex::encode(crate::util::hmac_sha256(&b.credential_key, format!("{kind}\0{field}\0{literal}").as_bytes()));
-    if let Some(name) = b.literal_names.get(&mac) {
-        return name.clone();
+    let mac = hex::encode(crate::util::hmac_sha256(&b.credential_key, &hmac_input(&[kind, &field, literal])));
+    if let Some(name) = b.literal_names.get(&mac).cloned() {
+        *b.placeholders_written.entry(name.clone()).or_default() += 1;
+        return name;
     }
     let base = match suffix {
         Some(f) => format!("{kind}_{}_{f}", &mac[..16]),
@@ -38,7 +39,20 @@ pub fn literal_name(b: &mut Builder, kind: &'static str, field: &str, suffix: Op
     let name = b.env_names.name_verbatim(&base);
     b.literal_names.insert(mac, name.clone());
     b.credential_names.insert(name.clone(), crate::CredentialName { kind: kind.to_string(), field });
+    *b.placeholders_written.entry(name.clone()).or_default() += 1;
     name
+}
+
+/// The HMAC input for `parts`: each part's byte length (8 bytes, big
+/// endian), then its bytes. Unambiguous whatever the parts hold (a NUL
+/// included), unlike joining them with a separator.
+pub fn hmac_input(parts: &[&str]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(parts.iter().map(|p| p.len() + 8).sum());
+    for part in parts {
+        out.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        out.extend_from_slice(part.as_bytes());
+    }
+    out
 }
 
 /// Whether `name` has the shape of a placeholder [`literal_name`] makes
@@ -47,46 +61,71 @@ pub fn literal_name(b: &mut Builder, kind: &'static str, field: &str, suffix: Op
 /// never point a request at a variable filled for one of these.
 pub fn generated_shape(name: &str) -> bool {
     let Some((kind, rest)) = name.split_once('_') else { return false };
-    if !matches!(kind, "auth" | "secret" | "url") || rest.len() < 16 {
-        return false;
-    }
-    let (digits, tail) = rest.split_at(16);
-    digits.bytes().all(|b| b.is_ascii_hexdigit()) && (tail.is_empty() || tail.starts_with('_'))
+    // Bytes, not a string split: byte 16 may fall inside a character.
+    let rest = rest.as_bytes();
+    matches!(kind, "auth" | "secret" | "url")
+        && rest.len() >= 16
+        && rest[..16].iter().all(u8::is_ascii_hexdigit)
+        && rest.get(16).is_none_or(|&c| c == b'_')
 }
 
-/// Whether the imported objects use a name of [`generated_shape`] the import
-/// did not allocate itself: a source-designated variable or reference that
-/// would read as a literal-bound placeholder. Every string is checked whole
-/// and for each `{{…}}` it holds, so no importer path can let one through.
-/// Linear in the objects.
-pub fn uses_reserved_name(result: &crate::ImportResult) -> bool {
-    fn walk(v: &Value, allocated: &std::collections::BTreeMap<String, crate::CredentialName>) -> bool {
-        // By its spelling and, as names are reserved, its percent-decoded one.
-        let foreign = |name: &str| {
-            let reserved = |n: &str| generated_shape(n) && !allocated.contains_key(n);
-            reserved(name) || (name.contains('%') && percent_encoding::percent_decode_str(name).decode_utf8().is_ok_and(|d| reserved(&d)))
-        };
+/// Whether the imported objects use a name of [`generated_shape`] anywhere
+/// the import did not write it itself (#584). A name the import made
+/// ([`literal_name`]) is written only as a `{{name}}` reference, once per
+/// placeholder (`written`). So a name of that shape in any spelling is
+/// refused when the import did not make it, when it appears whole or
+/// percent-encoded, or when it appears in more `{{…}}` references than the
+/// import wrote. This last case covers a source that designates such a
+/// name (an OpenAPI security scheme's key, a path parameter, a variable)
+/// equal to one the import also made. One rule for every importer, applied
+/// to its output. Every string is checked whole and for each `{{…}}` it
+/// holds. The required variables are checked by name. Linear in the
+/// objects.
+pub fn uses_reserved_name(result: &crate::ImportResult, written: &std::collections::HashMap<String, usize>) -> bool {
+    use std::collections::HashMap;
+    let decoded = |name: &str| -> Option<String> {
+        if !name.contains('%') {
+            return None;
+        }
+        percent_encoding::percent_decode_str(name).decode_utf8().ok().map(|d| d.into_owned())
+    };
+    // Any spelling of a reserved-shape name, as written or percent-decoded.
+    let shaped = |name: &str| generated_shape(name) || decoded(name).is_some_and(|d| generated_shape(&d));
+    fn walk(v: &Value, check: &mut dyn FnMut(&str) -> bool) -> bool {
         match v {
-            Value::String(s) => {
-                if foreign(s.trim()) {
-                    return true;
-                }
-                let mut rest = s.as_str();
-                while let Some(open) = rest.find("{{") {
-                    let after = &rest[open + 2..];
-                    let Some(close) = after.find("}}") else { break };
-                    let inner = after[..close].trim();
-                    if foreign(inner.strip_prefix("_.").unwrap_or(inner)) {
-                        return true;
-                    }
-                    rest = &after[close + 2..];
-                }
-                false
-            }
-            Value::Array(items) => items.iter().any(|x| walk(x, allocated)),
-            Value::Object(m) => m.values().any(|x| walk(x, allocated)),
+            Value::String(s) => check(s),
+            Value::Array(items) => items.iter().any(|x| walk(x, check)),
+            Value::Object(m) => m.iter().any(|(k, x)| check(k) || walk(x, check)),
             _ => false,
         }
+    }
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    let mut check = |s: &str| -> bool {
+        if shaped(s.trim()) {
+            return true;
+        }
+        let mut rest = s;
+        while let Some(open) = rest.find("{{") {
+            let after = &rest[open + 2..];
+            let Some(close) = after.find("}}") else { break };
+            let inner = after[..close].trim();
+            let name = inner.strip_prefix("_.").unwrap_or(inner);
+            rest = &after[close + 2..];
+            if !shaped(name) {
+                continue;
+            }
+            // Only the exact name, as the import writes it.
+            let Some((made, _)) = result.credential_names.get_key_value(name) else { return true };
+            let count = seen.entry(made.as_str()).or_default();
+            *count += 1;
+            if *count > written.get(name).copied().unwrap_or(0) {
+                return true;
+            }
+        }
+        false
+    };
+    if result.report.required_variables.iter().any(|v| shaped(&v.name) && !result.credential_names.contains_key(&v.name)) {
+        return true;
     }
     let to_json = |v: serde_json::Result<Value>| v.unwrap_or(Value::Null);
     [
@@ -94,11 +133,9 @@ pub fn uses_reserved_name(result: &crate::ImportResult) -> bool {
         to_json(serde_json::to_value(&result.folders)),
         to_json(serde_json::to_value(&result.requests)),
         to_json(serde_json::to_value(&result.environments)),
-        // A dropped secret variable is listed only here.
-        to_json(serde_json::to_value(&result.report.required_variables)),
     ]
     .iter()
-    .any(|v| walk(v, &result.credential_names))
+    .any(|v| walk(v, &mut check))
 }
 
 /// The policy for a credential `value` of field `field`:

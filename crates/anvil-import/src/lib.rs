@@ -347,11 +347,12 @@ pub fn import(bytes: &[u8], opts: &ImportOptions) -> Result<ImportResult, Import
             return Err(ImportError::Unrecognized { message: format!("{} input could not be dispatched", detected.dialect) });
         }
     }
+    let written = std::mem::take(&mut b.placeholders_written);
     let result = b.finish(&detected, sha, bytes.len());
     // A source may never name a variable the way the import names the
     // placeholders bound to literals: it could point a request at a value
     // filled for one of those (#584).
-    if common::uses_reserved_name(&result) {
+    if common::uses_reserved_name(&result, &written) {
         return Err(ImportError::Invalid {
             dialect: detected.dialect,
             pointer: "/".into(),

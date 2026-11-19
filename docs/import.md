@@ -115,7 +115,8 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     `auth` (an auth secret or URL userinfo, followed by `_<field>`:
     `auth_3f9a0c12d4e5b6a7_password`) or `url` (a quarantined URL), and
     the digits are the start of HMAC-SHA256(key, kind | field | literal),
-    the field being the auth field or the source field's name, lowercased.
+    each part length-prefixed (so no field and literal run together), the
+    field being the auth field or the source field's name, lowercased.
     So the same literal in the same field gets the same name in every
     request of the import and in every reimport, and another literal gets
     another name. No owner (no collection, folder or request name or key),
@@ -141,7 +142,12 @@ content-addressed attachment keyed by `ImportedSource::sha256`, and saves.
     shape itself, in a reference or as a variable, is refused
     (`ImportError::Invalid`: rename it; see above for the spellings
     covered), so a source can never point a request at a value filled for
-    a placeholder.
+    a placeholder. The check runs on what the import produced, for every
+    importer: a name the import made appears only as a `{{name}}`
+    reference, as often as the import wrote it. Any other occurrence is
+    the source's, and refused. That includes a name it designates (an
+    OpenAPI security scheme's key, a path or server variable) that happens
+    to equal a placeholder of the same import.
 - Credential-named Postman path variables and Insomnia path parameters
   (`:webhook_token`, `:api_key`) follow the same policy. So does every value
   (string, number or boolean) under a credential-named member of an Insomnia
