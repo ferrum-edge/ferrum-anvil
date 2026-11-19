@@ -12,6 +12,7 @@ use crate::provider::{Availability, IdentityProvider, ProviderInfo, VerifiedIden
 use crate::{BrowserOpener, FlowError, FlowEvent, FlowObserver, FlowOptions, failed, is_literal_loopback, require_secure_endpoint};
 use anvil_auth::oauth::{BoxFut, OAuthResolved, exchange_code};
 use anvil_domain::Id;
+use anvil_domain::Timestamp;
 use anvil_domain::auth::{AuthConfig, OAuthGrant};
 use anvil_domain::request::RequestSpec;
 use anvil_domain::secret::{SecretRef, SensitiveValue};
@@ -19,7 +20,6 @@ use anvil_engine::context::MemorySecrets;
 use anvil_engine::oauth_http::EngineTokenHttp;
 use anvil_engine::{Engine, ExecutionContext};
 use anvil_transport::recorder::EventCtx;
-use chrono::Utc;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -140,7 +140,7 @@ impl MockProvider {
             return Err(FlowError::Verification("the userinfo response has no usable subject".into()));
         };
         let email = v.get("email").and_then(|e| e.as_str()).filter(|e| e.len() <= 320).map(str::to_string);
-        Ok(VerifiedIdentity::new(MOCK_PROVIDER_ID, sub.to_string(), email, Utc::now()))
+        Ok(VerifiedIdentity::new(MOCK_PROVIDER_ID, sub.to_string(), email, Timestamp::now()))
     }
 }
 
@@ -205,7 +205,7 @@ mod tests {
         assert_eq!(id.provider(), "mock");
         assert_eq!(id.subject(), "fixture-user-1");
         assert_eq!(id.email(), Some("fixture-user-1@idp.anvil.test"));
-        assert!((Utc::now() - id.authenticated_at()).num_seconds() < 5);
+        assert!((Timestamp::now() - id.authenticated_at()).whole_seconds() < 5);
         assert_eq!(idp.grants_seen(), vec!["authorization_code".to_string()]);
         let ev = events.lock().unwrap().clone();
         assert!(matches!(ev.last(), Some(FlowEvent::Completed)), "{ev:?}");

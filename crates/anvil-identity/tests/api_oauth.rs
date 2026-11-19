@@ -440,8 +440,8 @@ async fn code_exchange_uses_the_request_tls_profile() {
         min_version: TlsMinVersion::Tls12,
         server_name_override: None,
         server_spiffe: None,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: anvil_domain::Timestamp::now(),
+        updated_at: anvil_domain::Timestamp::now(),
     };
     ctx.settings_layers.push(("run".into(), SettingsOverrides { tls_profile_id: Some(profile.id), ..Default::default() }));
     ctx.tls_profiles.push(profile);

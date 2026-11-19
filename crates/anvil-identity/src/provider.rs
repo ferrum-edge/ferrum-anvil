@@ -14,7 +14,7 @@
 
 use crate::{BrowserOpener, FlowError, FlowObserver, FlowOptions};
 use anvil_auth::oauth::BoxFut;
-use chrono::{DateTime, Utc};
+use anvil_domain::Timestamp;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
@@ -27,12 +27,12 @@ pub struct VerifiedIdentity {
     provider: String,
     subject: String,
     email: Option<String>,
-    authenticated_at: DateTime<Utc>,
+    authenticated_at: Timestamp,
 }
 
 impl VerifiedIdentity {
     #[cfg_attr(not(any(test, feature = "mock-provider")), allow(dead_code))]
-    pub(crate) fn new(provider: &str, subject: String, email: Option<String>, authenticated_at: DateTime<Utc>) -> Self {
+    pub(crate) fn new(provider: &str, subject: String, email: Option<String>, authenticated_at: Timestamp) -> Self {
         VerifiedIdentity { provider: provider.to_string(), subject, email, authenticated_at }
     }
 
@@ -46,7 +46,7 @@ impl VerifiedIdentity {
     pub fn email(&self) -> Option<&str> {
         self.email.as_deref()
     }
-    pub fn authenticated_at(&self) -> DateTime<Utc> {
+    pub fn authenticated_at(&self) -> Timestamp {
         self.authenticated_at
     }
     pub fn summary(&self) -> IdentitySummary {
@@ -75,7 +75,7 @@ pub struct IdentitySummary {
     pub provider: String,
     pub subject: String,
     pub email: Option<String>,
-    pub authenticated_at: DateTime<Utc>,
+    pub authenticated_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
