@@ -174,9 +174,14 @@ fn references_only(value: &str) -> bool {
 ///   (with nothing attached), empty, or a plain word (`none`, `true`, …);
 /// - the token after an auth scheme word (`Bearer …`, `Basic …`, after any
 ///   whitespace) when it looks like one (16 characters, or 8 with both
-///   letters and digits). When a credential-named pair's value is an auth
-///   scheme word (`Authorization: Bearer …`), the token after it is part of
-///   the value;
+///   letters and digits) and is not exactly plain references. When a
+///   credential-named pair's value is an auth scheme word
+///   (`Authorization: Bearer …`), the token after it is part of the value.
+///   Either way the token runs to the same boundary as an unquoted pair's
+///   value (whitespace or a delimiter, a `{{…}}` inside included), or,
+///   quoted, to its closing quote past escaped ones, so punctuation inside
+///   it (`:`, `!`, `@`, `#`, `$`, `%`, `*`, `?`) never leaves a suffix
+///   readable (GHSA-84pr-239v-mv8x);
 /// - a JWT.
 ///
 /// Each becomes `<redacted>`.
@@ -189,7 +194,6 @@ fn redact_credential_text(text: &str) -> String {
     let bytes = text.as_bytes();
     let n = bytes.len();
     let name_byte = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.');
-    let token_byte = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'~' | b'+' | b'/' | b'=');
     // Whitespace is `char::is_whitespace` throughout (vertical tabs and
     // Unicode spaces included; review of #586, dsf F1). The length of the
     // whitespace character starting at `k`, or 0.
@@ -244,6 +248,37 @@ fn redact_credential_text(text: &str) -> String {
             }
         };
         (found < n).then_some(found)
+    };
+    // The token after a scheme word, from `t`: (content start, content end,
+    // span end). Quoted, to the closing quote past escaped ones (an
+    // unterminated one runs to the end), the quotes in the span; otherwise
+    // to the boundary an unquoted pair's value ends at, a `{{…}}` inside
+    // being part of it (GHSA-84pr-239v-mv8x). Each byte is scanned once per
+    // scheme word before it.
+    let scheme_token = |t: usize, next_close: &mut dyn FnMut(usize) -> Option<usize>| -> (usize, usize, usize) {
+        if t < n && matches!(bytes[t], b'"' | b'\'') {
+            let q = bytes[t];
+            let mut k = t + 1;
+            while k < n && bytes[k] != q {
+                k += if bytes[k] == b'\\' { 2 } else { 1 };
+            }
+            let k = k.min(n);
+            return (t + 1, k, (k + 1).min(n));
+        }
+        let mut k = t;
+        while k < n {
+            if bytes[k..].starts_with(b"{{")
+                && let Some(close) = next_close(k + 2)
+            {
+                k = close + 2;
+                continue;
+            }
+            if unquoted_end(k) {
+                break;
+            }
+            k += 1;
+        }
+        (t, k, k)
     };
     let mut cuts: Vec<(usize, usize)> = vec![];
     let mut i = 0;
@@ -323,15 +358,23 @@ fn redact_credential_text(text: &str) -> String {
                 let word = value.len() <= 7
                     && matches!(value.to_ascii_lowercase().as_str(), "none" | "null" | "true" | "false" | "inherit" | "off" | "on");
                 // `Authorization: Bearer <token>`: the token after the scheme
-                // is part of the value.
+                // is part of the value, to the value's boundary
+                // (GHSA-84pr-239v-mv8x). A token of plain references
+                // (`Bearer {{token}}`) keeps the whole value.
+                let mut references = false;
                 if !quoted && scheme(value.as_bytes()) {
                     let t = skip_space(to);
-                    let t_end = (t..n).find(|&k| !token_byte(bytes[k])).unwrap_or(n);
-                    if t > to && t_end > t {
-                        to = t_end;
+                    if t > to && t < n {
+                        let (c0, c1, end) = scheme_token(t, &mut next_close);
+                        if references_only(&text[c0..c1]) {
+                            references = true;
+                            to = end;
+                        } else if end > t {
+                            to = end;
+                        }
                     }
                 }
-                let exempt = value.is_empty() || word || REDACTION_MARKERS.contains(&value) || references_only(value);
+                let exempt = references || value.is_empty() || word || REDACTION_MARKERS.contains(&value) || references_only(value);
                 if !exempt {
                     cuts.push((from, to));
                 }
@@ -346,11 +389,11 @@ fn redact_credential_text(text: &str) -> String {
             let word_end = (i..n).find(|&k| !bytes[k].is_ascii_alphabetic()).unwrap_or(n);
             if scheme(&bytes[i..word_end]) && space_at(word_end) > 0 {
                 let t = skip_space(word_end);
-                let t_end = (t..n).find(|&k| !token_byte(bytes[k])).unwrap_or(n);
-                let token = &bytes[t..t_end];
+                let (c0, c1, t_end) = scheme_token(t, &mut next_close);
+                let token = &bytes[c0..c1];
                 let digits = token.iter().any(|b| b.is_ascii_digit());
                 let letters = token.iter().any(|b| b.is_ascii_alphabetic());
-                if token.len() >= 16 || (token.len() >= 8 && digits && letters) {
+                if !references_only(&text[c0..c1]) && (token.len() >= 16 || (token.len() >= 8 && digits && letters)) {
                     cuts.push((t, t_end));
                     i = t_end;
                     continue;
@@ -907,6 +950,38 @@ mod tests {
         }
     }
 
+    /// GHSA-84pr-239v-mv8x: the token after an auth scheme word runs to the
+    /// value's boundary (whitespace or a delimiter) or, quoted, to its
+    /// closing quote, so punctuation inside it leaves no suffix readable, in
+    /// a credential pair and standalone. Nothing after the scheme survives
+    /// up to the boundary; what follows the boundary is kept.
+    #[test]
+    fn scheme_tokens_are_redacted_to_the_value_boundary() {
+        for p in [':', '!', '@', '#', '$', '%', '*', '?'] {
+            let token = format!("tok-SENSITIVE-s1{p}rest-of-the-secret{p}x");
+            for (text, expected) in [
+                (format!("Authorization: Bearer {token}"), "Authorization: <redacted>".to_string()),
+                (format!("Authorization: Bearer {token}, next"), "Authorization: <redacted>, next".to_string()),
+                (format!("header Authorization=Basic {token} ok"), "header Authorization=<redacted> ok".to_string()),
+                (format!("Authorization: Bearer \"{token}\""), "Authorization: <redacted>".to_string()),
+                (format!("Authorization: Bearer 'a\\'{token}' ok"), "Authorization: <redacted> ok".to_string()),
+                (format!("see Bearer {token} here"), "see Bearer <redacted> here".to_string()),
+                (format!("see Token {token}; next"), "see Token <redacted>; next".to_string()),
+                (format!("see Bearer \"{token}\" here"), "see Bearer <redacted> here".to_string()),
+                (format!("see Bearer 'a\\'{token}' here"), "see Bearer <redacted> here".to_string()),
+            ] {
+                let out = redact_for_report(&text);
+                assert_eq!(out, expected, "punctuation {p:?}");
+                assert!(!out.contains("rest-of-the-secret"), "a suffix survived after {p:?}");
+            }
+        }
+        // A token of plain references is kept, paired and standalone.
+        for text in ["Authorization: Bearer {{token}}", "see Bearer {{a_long_reference_name}} here", "Authorization: Bearer \"{{token}}\""]
+        {
+            assert_eq!(redact_for_report(text), text);
+        }
+    }
+
     /// #584 (sol F6, dsf F5): a pointer token that is only a JWT is
     /// redacted; plain tokens keep the fast path.
     #[test]
@@ -1011,6 +1086,15 @@ mod tests {
             "password=<redacted>x",
             "password\u{a0}=\u{a0}",
             "Bearer\u{3000}",
+            // GHSA-84pr-239v-mv8x: scheme tokens to the value boundary,
+            // quoted and unterminated.
+            "Authorization: Bearer '",
+            "Authorization: Bearer a:",
+            "Authorization: Bearer {{",
+            "Bearer '",
+            "Bearer \"",
+            "Bearer a:b!",
+            "Bearer {{",
         ] {
             let text = unit.repeat((1 << 20) / unit.len());
             let started = std::time::Instant::now();
