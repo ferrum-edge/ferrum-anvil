@@ -557,15 +557,21 @@ pub struct ImportReport {
 }
 
 /// De-duplication and lookup indexes. Not part of the report's value:
-/// always compares equal and is never serialized.
-#[derive(Debug, Clone, Default)]
+/// always compares equal, is never serialized, never shows its contents in
+/// `Debug`, and is cleared when the report is finished
+/// ([`ImportReport::finalize_counts`]), so neither the key nor anything
+/// derived from a source reference outlives the import
+/// (GHSA-84pr-239v-mv8x).
+#[derive(Clone, Default)]
 struct Seen {
     /// (code, clipped pointer) of every finding kept.
     findings: HashSet<(String, String)>,
     /// Findings kept per code (`u:` prefix for unsupported ones).
     per_code: HashMap<String, usize>,
-    /// External reference → its index in `external_refs` and its pointers.
-    refs: HashMap<String, (usize, HashSet<String>)>,
+    /// External reference, by the keyed HMAC of the reference as written
+    /// (never the reference itself) → its index in `external_refs` and its
+    /// pointers.
+    refs: HashMap<[u8; 32], (usize, HashSet<String>)>,
     /// Required variable name → its index in `required_variables` and its pointers.
     vars: HashMap<String, (usize, HashSet<String>)>,
     /// Redactions made, including those past the list's limit.
@@ -573,6 +579,18 @@ struct Seen {
     /// The key of the digests that keep distinct references distinct once
     /// redacted ([`ImportReport::with_digest_key`]).
     digest_key: [u8; 32],
+}
+
+impl std::fmt::Debug for Seen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Sizes only: never the key, the reference digests or the pointers.
+        f.debug_struct("Seen")
+            .field("findings", &self.findings.len())
+            .field("refs", &self.refs.len())
+            .field("vars", &self.vars.len())
+            .field("redactions", &self.redactions)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PartialEq for Seen {
@@ -653,21 +671,24 @@ impl ImportReport {
     /// redacted, else the redacted text and a keyed digest of the original,
     /// so distinct originals stay distinct.
     pub(crate) fn distinct_redaction(key: &[u8; 32], purpose: &str, original: &str) -> String {
+        Self::shown_with_digest(original, &crate::util::hmac_sha256(key, &crate::common::hmac_input(&[purpose, original])))
+    }
+
+    /// `original` redacted, with the first 16 hex digits of `mac` (its keyed
+    /// HMAC) when redaction changed it.
+    fn shown_with_digest(original: &str, mac: &[u8; 32]) -> String {
         let shown = redact_for_report(original);
-        if shown == original {
-            return shown;
-        }
-        let mac = crate::util::hmac_sha256(key, &crate::common::hmac_input(&[purpose, original]));
-        format!("{shown}#{}", &hex::encode(mac)[..16])
+        if shown == original { shown } else { format!("{shown}#{}", &hex::encode(mac)[..16]) }
     }
 
     pub fn external_ref(&mut self, reference: &str, pointer: &str) {
-        // Indexed by the reference as written (kept in memory only), shown
-        // redacted with a digest, so distinct references never merge.
-        let original = reference;
-        let reference = &Self::distinct_redaction(&self.seen.digest_key, "external reference", original);
+        // Indexed by the keyed HMAC of the reference as written, shown
+        // redacted with a digest of it, so distinct references never merge
+        // and the reference itself is never kept.
+        let mac = crate::util::hmac_sha256(&self.seen.digest_key, &crate::common::hmac_input(&["external reference", reference]));
+        let reference = &Self::shown_with_digest(reference, &mac);
         let pointer = bounded_pointer(pointer);
-        if let Some((i, seen)) = self.seen.refs.get_mut(original) {
+        if let Some((i, seen)) = self.seen.refs.get_mut(&mac) {
             let e = &mut self.external_refs[*i];
             if e.pointers.len() < MAX_POINTERS_PER_ENTRY && seen.insert(pointer.clone()) {
                 e.pointers.push(pointer);
@@ -682,7 +703,7 @@ impl ImportReport {
         } else {
             ExternalRefKind::Other
         };
-        self.seen.refs.insert(original.to_string(), (self.external_refs.len(), HashSet::from([pointer.clone()])));
+        self.seen.refs.insert(mac, (self.external_refs.len(), HashSet::from([pointer.clone()])));
         self.external_refs.push(ExternalRef { reference: reference.to_string(), kind, pointers: vec![pointer], requires_approval: true });
     }
 
@@ -778,12 +799,38 @@ impl ImportReport {
         c.inactive_settings = self.inactive_settings.len();
         c.redactions = self.seen.redactions;
         c.required_variables = self.required_variables.len();
+        // The report is finished: drop the indexes and zero the key, so the
+        // caller's credential key is never handed back in the result.
+        self.seen.digest_key.fill(0);
+        self.seen = Seen::default();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::redact_for_report;
+
+    /// Follow-up to GHSA-84pr-239v-mv8x (review of #595, Neon F1): the report
+    /// keeps neither the digest key nor a reference as written, and `Debug`
+    /// shows neither, before or after it is finished.
+    #[test]
+    fn the_report_keeps_no_key_or_reference_as_written() {
+        let key = [0x5a_u8; 32];
+        let mut report = super::ImportReport::with_digest_key(key);
+        report.external_ref("https://example.test/schema?token=tok-SENSITIVE-dbg1&version=1", "/a");
+        report.external_ref("https://example.test/schema?token=tok-SENSITIVE-dbg1&version=1", "/b");
+        let key_text = format!("{key:?}");
+        let key_part = &key_text[1..key_text.len() / 4];
+        for stage in ["recording", "finished"] {
+            let shown = format!("{report:?}");
+            assert!(!shown.contains("tok-SENSITIVE"), "{stage}: a reference as written is shown");
+            assert!(!shown.contains(key_part) && !shown.contains("digest_key"), "{stage}: the key is shown");
+            report.finalize_counts();
+        }
+        assert_eq!(report.external_refs.len(), 1);
+        assert_eq!(report.external_refs[0].pointers.len(), 2);
+        assert!(report.seen.digest_key.iter().all(|&b| b == 0) && report.seen.refs.is_empty(), "the indexes outlived the report");
+    }
 
     #[test]
     fn report_text_never_holds_url_credentials_or_literal_expressions() {
