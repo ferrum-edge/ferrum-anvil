@@ -163,6 +163,14 @@ fn references_only(value: &str) -> bool {
     true
 }
 
+/// Whether `text` holds a JWT: a run of name bytes (letters, digits, `_`,
+/// `-`, `.`) starting with `eyJ`, 20 bytes or more, with two dots or more.
+/// One pass over the runs.
+fn holds_jwt(text: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .any(|run| run.len() >= 20 && run.starts_with("eyJ") && run.bytes().filter(|&b| b == b'.').count() >= 2)
+}
+
 /// The credential redaction of [`redact_for_report`], for text that is not a
 /// URL or a template (GHSA-84pr-239v-mv8x). It fails closed: from the
 /// first credential indicator, everything to the end of the text becomes
@@ -173,19 +181,24 @@ fn references_only(value: &str) -> bool {
 ///   whitespace (`char::is_whitespace`) between them. The value starts after
 ///   the separator and any whitespace;
 /// - an auth scheme word (`Bearer`, `Basic`, `Token`, `Digest`, any case) at
-///   a word boundary, followed by whitespace and not by a separator (then it
-///   is a name, as above). The value starts at the next word.
+///   a word boundary, followed by whitespace or a separator. The value
+///   starts at the next word, or past a separator and whitespace after it
+///   (`Bearer : x`).
+///
+/// An operator is one unit (`:`, `:=`, `=`, `==`, `===`); a `:` after `=`
+/// is value.
 ///
 /// The text before the value (and so the name, the separator and the scheme
 /// word) is kept. The rest is kept only when the whole of it is exactly
-/// plain `{{…}}` references or exactly a redaction marker. A JWT before the
-/// first indicator is redacted on its own. No quote, escape or pair is
+/// plain `{{…}}` references holding no JWT, or exactly a redaction marker.
+/// A JWT before the first indicator is redacted on its own. No quote, escape or pair is
 /// parsed after the indicator, so nothing in the value can end the
 /// redaction early. These strings are names, pointer tokens and
 /// references, where over-redaction is harmless.
 ///
 /// Linear: one pass to the first indicator, a name looked for at most 128
-/// bytes back from each separator, and each word and JWT scanned once.
+/// bytes back from each separator past any whitespace (each whitespace run
+/// walked from at most four separators), and each word and JWT scanned once.
 fn redact_credential_text(text: &str) -> String {
     let bytes = text.as_bytes();
     let n = bytes.len();
@@ -226,6 +239,15 @@ fn redact_credential_text(text: &str) -> String {
         }
     };
     let separator = |c: u8| matches!(c, b'=' | b':');
+    // Past the operator starting at `k` (a separator), as one unit: `:`,
+    // `:=`, `=`, `==` or `===`; anything after it is value (`password=:x`).
+    let past_operator = |k: usize| -> usize {
+        if bytes[k] == b':' {
+            if bytes.get(k + 1) == Some(&b'=') { k + 2 } else { k + 1 }
+        } else {
+            k + 1 + bytes[k + 1..].iter().take(2).take_while(|&&c| c == b'=').count()
+        }
+    };
     let scheme =
         |word: &[u8]| word.len() <= 6 && ["bearer", "basic", "token", "digest"].iter().any(|s| word.eq_ignore_ascii_case(s.as_bytes()));
     let mut cuts: Vec<(usize, usize)> = vec![];
@@ -241,8 +263,10 @@ fn redact_credential_text(text: &str) -> String {
             while end > 0 && i - end < 3 && matches!(bytes[end - 1], b'!' | b'=' | b'+' | b'|' | b'&' | b'?' | b':') {
                 end -= 1;
             }
-            let space_floor = end.saturating_sub(128);
-            while end > space_floor {
+            // The whole whitespace run, however long: it ends at most three
+            // operator bytes before a separator, so each run is walked from
+            // at most four separators, and the scan stays linear.
+            loop {
                 let len = space_before(end);
                 if len == 0 {
                     break;
@@ -258,11 +282,7 @@ fn redact_credential_text(text: &str) -> String {
                 start -= 1;
             }
             if start < end && crate::util::is_credential_name(&text[start..end]) {
-                let mut v = i + 1;
-                while v < n && separator(bytes[v]) {
-                    v += 1;
-                }
-                value = Some(skip_space(v));
+                value = Some(skip_space(past_operator(i)));
                 break;
             }
             i += 1;
@@ -270,13 +290,12 @@ fn redact_credential_text(text: &str) -> String {
         }
         if c.is_ascii_alphabetic() && (i == 0 || !name_byte(bytes[i - 1])) {
             let word_end = (i..n).find(|&k| !bytes[k].is_ascii_alphabetic()).unwrap_or(n);
-            if scheme(&bytes[i..word_end]) && space_at(word_end) > 0 {
+            if scheme(&bytes[i..word_end]) && (space_at(word_end) > 0 || bytes.get(word_end).is_some_and(|&c| separator(c))) {
+                // An indicator whatever follows: after a separator
+                // (`Bearer : x`, `token = x`), the value starts past it.
                 let after = skip_space(word_end);
-                // `token = …` names a pair: its separator is the indicator.
-                if after >= n || !separator(bytes[after]) {
-                    value = Some(after);
-                    break;
-                }
+                value = Some(if after < n && separator(bytes[after]) { skip_space(past_operator(after)) } else { after });
+                break;
             }
             if bytes[i..].starts_with(b"eyJ") {
                 // The JWT alphabet (base64url and dots) is all name bytes, so
@@ -297,7 +316,8 @@ fn redact_credential_text(text: &str) -> String {
         && v < n
     {
         let rest = text[v..].trim_end();
-        if !(references_only(rest) || REDACTION_MARKERS.contains(&rest)) {
+        // A JWT inside a reference is no reference.
+        if !(references_only(rest) || REDACTION_MARKERS.contains(&rest)) || holds_jwt(rest) {
             cuts.push((v, n));
         }
     }
@@ -550,6 +570,9 @@ struct Seen {
     vars: HashMap<String, (usize, HashSet<String>)>,
     /// Redactions made, including those past the list's limit.
     redactions: usize,
+    /// The key of the digests that keep distinct references distinct once
+    /// redacted ([`ImportReport::with_digest_key`]).
+    digest_key: [u8; 32],
 }
 
 impl PartialEq for Seen {
@@ -618,10 +641,33 @@ impl ImportReport {
         });
     }
 
+    /// A report whose redacted references carry digests keyed by `key` (the
+    /// import's credential key), so a digest reveals nothing without it.
+    pub(crate) fn with_digest_key(key: [u8; 32]) -> Self {
+        let mut report = ImportReport::default();
+        report.seen.digest_key = key;
+        report
+    }
+
+    /// `original` as shown once redacted: unchanged when nothing was
+    /// redacted, else the redacted text and a keyed digest of the original,
+    /// so distinct originals stay distinct.
+    pub(crate) fn distinct_redaction(key: &[u8; 32], purpose: &str, original: &str) -> String {
+        let shown = redact_for_report(original);
+        if shown == original {
+            return shown;
+        }
+        let mac = crate::util::hmac_sha256(key, &crate::common::hmac_input(&[purpose, original]));
+        format!("{shown}#{}", &hex::encode(mac)[..16])
+    }
+
     pub fn external_ref(&mut self, reference: &str, pointer: &str) {
-        let reference = &redact_for_report(reference);
+        // Indexed by the reference as written (kept in memory only), shown
+        // redacted with a digest, so distinct references never merge.
+        let original = reference;
+        let reference = &Self::distinct_redaction(&self.seen.digest_key, "external reference", original);
         let pointer = bounded_pointer(pointer);
-        if let Some((i, seen)) = self.seen.refs.get_mut(reference) {
+        if let Some((i, seen)) = self.seen.refs.get_mut(original) {
             let e = &mut self.external_refs[*i];
             if e.pointers.len() < MAX_POINTERS_PER_ENTRY && seen.insert(pointer.clone()) {
                 e.pointers.push(pointer);
@@ -636,7 +682,7 @@ impl ImportReport {
         } else {
             ExternalRefKind::Other
         };
-        self.seen.refs.insert(reference.to_string(), (self.external_refs.len(), HashSet::from([pointer.clone()])));
+        self.seen.refs.insert(original.to_string(), (self.external_refs.len(), HashSet::from([pointer.clone()])));
         self.external_refs.push(ExternalRef { reference: reference.to_string(), kind, pointers: vec![pointer], requires_approval: true });
     }
 
@@ -821,6 +867,54 @@ mod tests {
         }
         // A JWT before any indicator is redacted on its own.
         assert_eq!(redact_for_report("id eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl ok"), "id <redacted> ok");
+    }
+
+    /// Review round 2 of #595: a scheme word is an indicator whatever
+    /// follows it (Neon F1, Sol F1); whitespace of any length before a
+    /// separator (Sol F2, DSF F1, Neon F2); a JWT inside an exact reference
+    /// (Sol F3); a `:` after `=` is value (Sol F5).
+    #[test]
+    fn round_two_bypasses_are_closed() {
+        let spaces = " ".repeat(129);
+        let wide = "\u{3000}".repeat(44);
+        for (text, kept) in [
+            ("see Bearer :tok-SENSITIVE-q1".to_string(), "see Bearer :".to_string()),
+            ("see Bearer =tok-SENSITIVE-q2".to_string(), "see Bearer =".to_string()),
+            ("see Basic =tok-SENSITIVE-q3==".to_string(), "see Basic =".to_string()),
+            ("see Digest :tok-SENSITIVE-q4".to_string(), "see Digest :".to_string()),
+            ("Bearer : tok-SENSITIVE-q5".to_string(), "Bearer : ".to_string()),
+            ("Basic = tok-SENSITIVE-q6".to_string(), "Basic = ".to_string()),
+            ("Bearer:tok-SENSITIVE-q7".to_string(), "Bearer:".to_string()),
+            (format!("Token{spaces}= tok-SENSITIVE-q8"), format!("Token{spaces}= ")),
+            (format!("password{spaces}= tok-SENSITIVE-w1"), format!("password{spaces}= ")),
+            (format!("password{wide}= tok-SENSITIVE-w2"), format!("password{wide}= ")),
+            (format!("\"password\"{spaces}= tok-SENSITIVE-w3"), format!("\"password\"{spaces}= ")),
+            ("password=:tok-SENSITIVE-x1".to_string(), "password=".to_string()),
+            ("password=:<redacted>".to_string(), "password=".to_string()),
+            ("token :=: tok-SENSITIVE-x2".to_string(), "token :=".to_string()),
+        ] {
+            redacts_to(&text, &kept);
+        }
+        let jwt = "see Bearer {{eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl}}";
+        assert_eq!(redact_for_report(jwt), "see Bearer <redacted>");
+        assert_eq!(redact_for_report("password: {{eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl}}"), "password: <redacted>");
+    }
+
+    /// Review round 2 of #595 (Sol F6): references that redact alike stay
+    /// distinct, each shown redacted with a keyed digest of the original.
+    #[test]
+    fn distinct_redacted_references_stay_distinct() {
+        let mut report = super::ImportReport::default();
+        report.external_ref("https://example.test/schema?token=tok-SENSITIVE-e1&version=1", "/a");
+        report.external_ref("https://example.test/schema?token=tok-SENSITIVE-e1&version=2", "/b");
+        report.external_ref("https://example.test/schema?token=tok-SENSITIVE-e1&version=1", "/c");
+        report.external_ref("https://example.test/plain.yaml", "/d");
+        assert_eq!(report.external_refs.len(), 3);
+        assert_ne!(report.external_refs[0].reference, report.external_refs[1].reference);
+        assert_eq!(report.external_refs[0].pointers, vec!["/a".to_string(), "/c".to_string()]);
+        assert!(report.external_refs[0].reference.starts_with("https://example.test/schema?token=<redacted>#"));
+        assert_eq!(report.external_refs[2].reference, "https://example.test/plain.yaml");
+        assert!(report.external_refs.iter().all(|r| !r.reference.contains("tok-SENSITIVE") && !r.reference.contains("version")));
     }
 
     /// The rest after an indicator is kept only when the whole of it is
@@ -1048,11 +1142,20 @@ mod tests {
             "Authorization: Bearer\npassword= ",
             "Bearer <redacted>",
             "o'brien Bearer '",
+            // Review round 2 of #595: whitespace runs before separators.
+            "                =",
+            "Bearer : ",
+            "password=:",
         ] {
             let text = unit.repeat((1 << 20) / unit.len());
             let started = std::time::Instant::now();
             let _ = redact_for_report(&text);
             assert!(started.elapsed() < std::time::Duration::from_secs(20), "{unit:?} took too long");
         }
+        // One long whitespace run before many separators.
+        let text = " ".repeat(1 << 19) + &"=".repeat(1 << 19);
+        let started = std::time::Instant::now();
+        let _ = redact_for_report(&text);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "a long whitespace run took too long");
     }
 }

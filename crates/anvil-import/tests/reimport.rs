@@ -1422,3 +1422,36 @@ fn reserved_looking_text_that_is_not_a_name_imports() {
         Ok(r) => assert!(!r.requests[0].spec.url.contains("{{"), "a percent-encoded reference became live: {}", r.requests[0].spec.url),
     }
 }
+
+/// Review round 2 of #595 (Sol F4): operation keys that redact alike carry
+/// a keyed digest of the original, so dropping the first of two such
+/// operations upstream removes it and leaves the second linked to itself.
+#[test]
+fn redacted_operation_keys_stay_distinct_across_reimports() {
+    let doc = |ops: &[(&str, &str)]| {
+        let mut paths = serde_json::Map::new();
+        for (path, id) in ops {
+            paths.insert(
+                path.to_string(),
+                serde_json::json!({ "get": { "operationId": id, "responses": { "200": { "description": "ok" } } } }),
+            );
+        }
+        serde_json::json!({ "openapi": "3.0.3", "info": { "title": "t", "version": "1" }, "servers": [{ "url": "https://api.example.test" }],
+            "paths": paths })
+        .to_string()
+    };
+    let first = import(doc(&[("/a", "Basic profile"), ("/b", "Basic devices")]).as_bytes(), &opts()).unwrap();
+    let key_of = |r: &ImportResult, path: &str| {
+        let q = r.requests.iter().find(|q| q.spec.url.ends_with(path)).expect("the request");
+        (q.meta.id, q.spec.source.as_ref().unwrap().operation_key.clone())
+    };
+    let ((a, key_a), (b, key_b)) = (key_of(&first, "/a"), key_of(&first, "/b"));
+    assert_ne!(key_a, key_b, "two operations share a link");
+    assert!(key_a.starts_with("Basic <redacted>#") && !key_a.contains("profile") && !key_b.contains("devices"));
+    let fresh = reimport(&first, &doc(&[("/b", "Basic devices")]));
+    assert_eq!(key_of(&fresh, "/b").1, key_b, "the key changed across imports");
+    let plan = diff(&first, &first.requests, &fresh);
+    assert_eq!(plan.removed.iter().map(|c| c.existing_id).collect::<Vec<_>>(), vec![a], "{plan:?}");
+    assert_eq!(plan.unchanged, vec![b], "{plan:?}");
+    assert!(plan.updated.is_empty() && plan.conflicts.is_empty(), "{plan:?}");
+}

@@ -279,15 +279,31 @@ Report text never carries a credential, in either mode (#584):
     `<url redacted>`;
   - replaces a `{{…}}` that is not a plain name (an identifier, a dotted
     path or an argument-free `$helper`) with `{{…}}`;
-  - by credential-name heuristics, replaces with `<redacted>` the value of a
-    `name=value` or `name: value` pair whose name is a credential name
-    (`==`, `!=`, `:=` and `+=` count, any whitespace, Unicode spaces and
-    vertical tabs included, may surround the separator, a quoted value
-    runs to its unescaped closing quote or the end of the text, and only a
-    value that is exactly references, exactly a redaction marker with
-    nothing attached, or a plain word such as `none` is kept), the token
-    after `Bearer`, `Basic`, `Token` or `Digest` when it looks like one, and
-    a JWT, including a bare JWT pointer token. It is linear in the text.
+  - fails closed on credentials (GHSA-84pr-239v-mv8x): from the first
+    credential indicator, everything to the end of the text becomes
+    `<redacted>`. An indicator is a credential name (possibly quoted)
+    followed by a separator, with any whitespace between them (Unicode
+    spaces and vertical tabs included), or an auth scheme word (`Bearer`,
+    `Basic`, `Token`, `Digest`, any case) at a word boundary followed by
+    whitespace or a separator. An operator is one unit (`:`, `:=`, `=`,
+    `==`, `===`). The value starts after it and any whitespace, or at the
+    word after a scheme word. The text before the value is kept, so
+    `Authorization: Bearer x` becomes `Authorization: <redacted>` and
+    `see Bearer x, y` becomes `see Bearer <redacted>`. The rest is kept only
+    when the whole of it is exactly plain `{{…}}` references holding no
+    JWT, or exactly a redaction marker. Nothing in a value (a quote, an
+    escape, padding, a marker, another field) can end the redaction
+    early. Nor is a plain word kept: `auth: none` becomes
+    `auth: <redacted>`;
+  - redacts a JWT before the first indicator on its own, including a bare
+    JWT pointer token.
+
+  Over-redaction is the price: an imported name such as `Basic auth`
+  becomes `Basic <redacted>`. An operation key or an external reference
+  that redaction changed carries a digest of the original, keyed by the
+  import's credential key (`#<16 hex digits>`), so two operations or two
+  references never merge into one. The redaction is linear in the
+  text.
 
 Codes are stable strings (for example `recursive_schema`,
 `composition_first_branch`, `contradictory_schema`, `openapi32_construct`,
