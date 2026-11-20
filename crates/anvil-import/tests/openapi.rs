@@ -179,6 +179,27 @@ fn data_009_external_refs_are_reported_never_fetched() {
     assert_eq!(r.report.external_refs[0].kind, anvil_import::ExternalRefKind::Url);
 }
 
+/// Follow-up to GHSA-84pr-239v-mv8x (review of #595, Neon F1): an import
+/// result, its report included, keeps neither a reference as written nor the
+/// credential key, and `Debug` shows neither.
+#[test]
+fn the_result_keeps_no_key_or_reference_as_written() {
+    let doc = json!({
+        "openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+        "paths": {"/a": {"post": {"operationId": "a", "requestBody": {"content": {"application/json": {"schema":
+            {"$ref": "https://example.test/schema.yaml?token=tok-SENSITIVE-dbg2&version=1#/x"}}}}, "responses": {}}}}
+    });
+    let key = [0x5a_u8; 32];
+    let r =
+        import(doc.to_string().as_bytes(), &ImportOptions { credential_key: Some(anvil_import::CredentialKey::from_bytes(key)), ..opts() })
+            .unwrap();
+    assert_eq!(r.report.external_refs.len(), 1, "the reference was not reported");
+    let shown = format!("{r:?}");
+    let key_text = format!("{key:?}");
+    assert!(!shown.contains("tok-SENSITIVE"), "a reference as written is shown");
+    assert!(!shown.contains(&key_text[1..key_text.len() / 4]) && !shown.contains("digest_key"), "the key is shown");
+}
+
 #[test]
 fn security_schemes_become_placeholders() {
     let r = run(PETSTORE, &opts());

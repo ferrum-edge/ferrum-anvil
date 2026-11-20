@@ -1347,3 +1347,25 @@ fn reviewed_plan_changes_when_source_body_fields_named_like_metadata_change() {
     assert_ne!(binding.source_sha256, other.source_sha256);
     assert_ne!(binding.plan_sha256, other.plan_sha256);
 }
+
+/// Follow-up to GHSA-84pr-239v-mv8x (review of #595, Neon F1): a preview and
+/// an import keep neither a reference as written nor the profile's
+/// credential key in their reports, and `Debug` shows neither.
+#[test]
+fn previews_and_imports_keep_no_key_or_reference_as_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = new_app(dir.path());
+    let doc = serde_json::json!({
+        "openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+        "paths": {"/a": {"post": {"operationId": "a", "requestBody": {"content": {"application/json": {"schema":
+            {"$ref": "https://example.test/schema.yaml?token=tok-SENSITIVE-dbg3&version=1#/x"}}}}, "responses": {}}}}
+    })
+    .to_string();
+    let preview = app.spec_preview(doc.as_bytes(), &ImportOptions::default()).unwrap();
+    let imported = app.spec_import(doc.as_bytes(), "openapi.json", &ImportOptions::default(), SpecTarget::NewWorkspace).unwrap();
+    assert_eq!((preview.report.external_refs.len(), imported.report.external_refs.len()), (1, 1));
+    for (label, shown) in [("preview", format!("{preview:?}")), ("import", format!("{imported:?}"))] {
+        assert!(!shown.contains("tok-SENSITIVE"), "{label}: a reference as written is shown");
+        assert!(!shown.contains("digest_key"), "{label}: the key is shown");
+    }
+}
