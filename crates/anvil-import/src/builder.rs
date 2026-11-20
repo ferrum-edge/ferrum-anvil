@@ -103,7 +103,7 @@ impl<'o> Builder<'o> {
             text_left: opts.max_bytes.saturating_mul(TEXT_BYTES_PER_INPUT_BYTE),
             embedded_nodes_left: opts.max_nodes,
             environments: vec![],
-            report: ImportReport::default(),
+            report: ImportReport::with_digest_key(credential_key),
             next_sort: HashMap::new(),
             title: None,
             limit_warned: false,
@@ -273,7 +273,9 @@ impl<'o> Builder<'o> {
     ) -> &mut RequestDefinition {
         // Provenance is stored and exported as written: a key derived from a
         // URL never carries its credentials ([`crate::report::redact_for_report`]).
-        let operation_key = &crate::report::redact_for_report(operation_key);
+        // A redacted key carries a keyed digest of the original, so distinct
+        // operations never share one link for reimport.
+        let operation_key = &ImportReport::distinct_redaction(&self.credential_key, "operation key", operation_key);
         let text = operation_key.len().saturating_add(name.len()).saturating_add(spec.url.len()).saturating_add(pointer.len());
         self.charge_text(pointer, text);
         let mut key = operation_key.to_string();

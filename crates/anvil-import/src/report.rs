@@ -117,7 +117,9 @@ impl From<&'static str> for Message {
 ///   text, possibly a credential, and is replaced, through the text's last
 ///   `}}` (a quoted `}}` cannot end it early), by `{{…}}`; an unterminated
 ///   `{{` hides the rest of the text.
-/// - Credential-name heuristics ([`redact_credential_text`]).
+/// - Credentials, failing closed ([`redact_credential_text`]): from the
+///   first credential name with a separator, or auth scheme word, to the
+///   end of the text.
 ///
 /// Over-redaction is preferred: the entry's pointer locates the source.
 /// Linear in the text.
@@ -161,42 +163,49 @@ fn references_only(value: &str) -> bool {
     true
 }
 
-/// The credential-name heuristics of [`redact_for_report`], for text that is
-/// not a URL or a template:
+/// Whether `text` holds a JWT: a run of name bytes (letters, digits, `_`,
+/// `-`, `.`) starting with `eyJ`, 20 bytes or more, with two dots or more.
+/// One pass over the runs.
+fn holds_jwt(text: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .any(|run| run.len() >= 20 && run.starts_with("eyJ") && run.bytes().filter(|&b| b == b'.').count() >= 2)
+}
+
+/// The credential redaction of [`redact_for_report`], for text that is not a
+/// URL or a template (GHSA-84pr-239v-mv8x). It fails closed: from the
+/// first credential indicator, everything to the end of the text becomes
+/// `<redacted>`. An indicator is:
 ///
-/// - the value of a `name=value` or `name: value` pair whose name is a
-///   credential name ([`crate::util::is_credential_name`]), quoted
-///   (`"password": "…"`, escapes honoured, an unterminated string running to
-///   the end) or not. Any whitespace (`char::is_whitespace`: spaces, tabs,
-///   vertical tabs, newlines, Unicode spaces) may surround the separator,
-///   and `==`, `===`, `:=`, `!=`, `+=` count as separators. A value is kept
-///   only when it is exactly plain references, exactly a redaction marker
-///   (with nothing attached), empty, or a plain word (`none`, `true`, …);
-/// - the token after an auth scheme word (`Bearer …`, `Basic …`, after any
-///   whitespace) when it looks like one (16 characters, or 8 with both
-///   letters and digits) and is not exactly plain references. When a
-///   credential-named pair's value is an auth scheme word
-///   (`Authorization: Bearer …`), the token after it is part of the value.
-///   Either way the token runs to the same boundary as an unquoted pair's
-///   value (whitespace or a delimiter, a `{{…}}` inside included), or,
-///   quoted, to its closing quote past escaped ones, so punctuation inside
-///   it (`:`, `!`, `@`, `#`, `$`, `%`, `*`, `?`) never leaves a suffix
-///   readable (GHSA-84pr-239v-mv8x);
-/// - a JWT.
+/// - a credential name ([`crate::util::is_credential_name`], possibly quoted)
+///   followed by a separator (`=`, `:`, `==`, `:=`, `!=`, `+=`, …), with any
+///   whitespace (`char::is_whitespace`) between them. The value starts after
+///   the separator and any whitespace;
+/// - an auth scheme word (`Bearer`, `Basic`, `Token`, `Digest`, any case) at
+///   a word boundary, followed by whitespace or a separator. The value
+///   starts at the next word, or past a separator and whitespace after it
+///   (`Bearer : x`).
 ///
-/// Each becomes `<redacted>`.
+/// An operator is one unit (`:`, `:=`, `=`, `==`, `===`); a `:` after `=`
+/// is value.
 ///
-/// Strictly linear: a name is looked for at most 128 bytes back, every
-/// inspected value is skipped once inspected, the next `}}` is found from a
-/// cached answer, and a word, token or JWT span is scanned a bounded number
-/// of times.
+/// The text before the value (and so the name, the separator and the scheme
+/// word) is kept. The rest is kept only when the whole of it is exactly
+/// plain `{{…}}` references holding no JWT, or exactly a redaction marker.
+/// A JWT before the first indicator is redacted on its own. No quote, escape or pair is
+/// parsed after the indicator, so nothing in the value can end the
+/// redaction early. These strings are names, pointer tokens and
+/// references, where over-redaction is harmless.
+///
+/// Linear: one pass to the first indicator, a name looked for at most 128
+/// bytes back from each separator past any whitespace (each whitespace run
+/// walked from at most four separators), and each word and JWT scanned once.
 fn redact_credential_text(text: &str) -> String {
     let bytes = text.as_bytes();
     let n = bytes.len();
     let name_byte = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.');
     // Whitespace is `char::is_whitespace` throughout (vertical tabs and
-    // Unicode spaces included; review of #586, dsf F1). The length of the
-    // whitespace character starting at `k`, or 0.
+    // Unicode spaces included). The length of the whitespace character
+    // starting at `k`, or 0.
     let space_at = |k: usize| -> usize {
         match bytes.get(k) {
             None => 0,
@@ -229,68 +238,34 @@ fn redact_credential_text(text: &str) -> String {
             k += len;
         }
     };
-    // Where an unquoted value ends: whitespace or a delimiter.
-    let unquoted_end =
-        |k: usize| space_at(k) > 0 || matches!(bytes[k], b'&' | b',' | b';' | b'"' | b'\'' | b'}' | b']' | b')' | b'>' | b'`');
+    let separator = |c: u8| matches!(c, b'=' | b':');
+    // Past the operator starting at `k` (a separator), as one unit: `:`,
+    // `:=`, `=`, `==` or `===`; anything after it is value (`password=:x`).
+    let past_operator = |k: usize| -> usize {
+        if bytes[k] == b':' {
+            if bytes.get(k + 1) == Some(&b'=') { k + 2 } else { k + 1 }
+        } else {
+            k + 1 + bytes[k + 1..].iter().take(2).take_while(|&&c| c == b'=').count()
+        }
+    };
     let scheme =
         |word: &[u8]| word.len() <= 6 && ["bearer", "basic", "token", "digest"].iter().any(|s| word.eq_ignore_ascii_case(s.as_bytes()));
-    // The next `}}` at or after a position, from one cached answer: a query
-    // inside the span a previous search covered reuses its result, so no
-    // byte is searched twice.
-    let mut close_cache: Option<(usize, usize)> = None;
-    let mut next_close = |from: usize| -> Option<usize> {
-        let found = match close_cache {
-            Some((searched, found)) if searched <= from && from <= found => found,
-            _ => {
-                let found = bytes[from.min(n)..].windows(2).position(|w| w == b"}}").map_or(n, |k| from + k);
-                close_cache = Some((from, found));
-                found
-            }
-        };
-        (found < n).then_some(found)
-    };
-    // The token after a scheme word, from `t`: (content start, content end,
-    // span end). Quoted, to the closing quote past escaped ones (an
-    // unterminated one runs to the end), the quotes in the span; otherwise
-    // to the boundary an unquoted pair's value ends at, a `{{…}}` inside
-    // being part of it (GHSA-84pr-239v-mv8x). Each byte is scanned once per
-    // scheme word before it.
-    let scheme_token = |t: usize, next_close: &mut dyn FnMut(usize) -> Option<usize>| -> (usize, usize, usize) {
-        if t < n && matches!(bytes[t], b'"' | b'\'') {
-            let q = bytes[t];
-            let mut k = t + 1;
-            while k < n && bytes[k] != q {
-                k += if bytes[k] == b'\\' { 2 } else { 1 };
-            }
-            let k = k.min(n);
-            return (t + 1, k, (k + 1).min(n));
-        }
-        let mut k = t;
-        while k < n {
-            if bytes[k..].starts_with(b"{{")
-                && let Some(close) = next_close(k + 2)
-            {
-                k = close + 2;
-                continue;
-            }
-            if unquoted_end(k) {
-                break;
-            }
-            k += 1;
-        }
-        (t, k, k)
-    };
     let mut cuts: Vec<(usize, usize)> = vec![];
+    // Where the first indicator's value starts.
+    let mut value: Option<usize> = None;
     let mut i = 0;
     while i < n {
         let c = bytes[i];
-        // `name=value` / `name: value` (not the `:` of a `scheme://`).
-        if (c == b'=' || c == b':') && !bytes[i..].starts_with(b"://") {
+        if separator(c) {
+            // The name before it: past the rest of an operator (`!=`, `+=`,
+            // `||=`, `??=`), whitespace and a closing quote.
             let mut end = i;
-            // The rest of an operator: `!=`, `+=`, `||=`, `??=`.
             while end > 0 && i - end < 3 && matches!(bytes[end - 1], b'!' | b'=' | b'+' | b'|' | b'&' | b'?' | b':') {
                 end -= 1;
             }
+            // The whole whitespace run, however long: it ends at most three
+            // operator bytes before a separator, so each run is walked from
+            // at most four separators, and the scan stays linear.
             loop {
                 let len = space_before(end);
                 if len == 0 {
@@ -307,97 +282,20 @@ fn redact_credential_text(text: &str) -> String {
                 start -= 1;
             }
             if start < end && crate::util::is_credential_name(&text[start..end]) {
-                // `==`, `===`, `:=`.
-                let mut v = i + 1;
-                while v < n && bytes[v] == b'=' {
-                    v += 1;
-                }
-                let v = skip_space(v);
-                if v >= n {
-                    break;
-                }
-                // A redaction marker is exempt only as the whole value: literal
-                // text right after it makes the value literal (review of #586,
-                // sol F2), scanned on from the marker's end, which holds a
-                // space or a `>` of its own.
-                let marker_end = REDACTION_MARKERS.iter().find(|m| bytes[v..].starts_with(m.as_bytes())).map(|m| v + m.len());
-                if let Some(after) = marker_end
-                    && (after >= n || unquoted_end(after))
-                {
-                    i = after;
-                    continue;
-                }
-                let quoted = marker_end.is_none() && matches!(bytes[v], b'"' | b'\'');
-                let (from, mut to) = if quoted {
-                    // To the closing quote, past escaped ones; an
-                    // unterminated string runs to the end.
-                    let q = bytes[v];
-                    let mut k = v + 1;
-                    while k < n && bytes[k] != q {
-                        k += if bytes[k] == b'\\' { 2 } else { 1 };
-                    }
-                    (v + 1, k.min(n))
-                } else {
-                    // To a delimiter; a `{{…}}` inside is part of the value.
-                    let mut k = marker_end.unwrap_or(v);
-                    while k < n {
-                        if bytes[k..].starts_with(b"{{")
-                            && let Some(close) = next_close(k + 2)
-                        {
-                            k = close + 2;
-                            continue;
-                        }
-                        if unquoted_end(k) {
-                            break;
-                        }
-                        k += 1;
-                    }
-                    (v, k)
-                };
-                let value = &text[from..to];
-                let word = value.len() <= 7
-                    && matches!(value.to_ascii_lowercase().as_str(), "none" | "null" | "true" | "false" | "inherit" | "off" | "on");
-                // `Authorization: Bearer <token>`: the token after the scheme
-                // is part of the value, to the value's boundary
-                // (GHSA-84pr-239v-mv8x). A token of plain references
-                // (`Bearer {{token}}`) keeps the whole value.
-                let mut references = false;
-                if !quoted && scheme(value.as_bytes()) {
-                    let t = skip_space(to);
-                    if t > to && t < n {
-                        let (c0, c1, end) = scheme_token(t, &mut next_close);
-                        if references_only(&text[c0..c1]) {
-                            references = true;
-                            to = end;
-                        } else if end > t {
-                            to = end;
-                        }
-                    }
-                }
-                let exempt = references || value.is_empty() || word || REDACTION_MARKERS.contains(&value) || references_only(value);
-                if !exempt {
-                    cuts.push((from, to));
-                }
-                // Past the value either way: nothing inspected is scanned
-                // again.
-                i = to.max(i + 1);
-                continue;
+                value = Some(skip_space(past_operator(i)));
+                break;
             }
+            i += 1;
+            continue;
         }
-        // `Bearer <token>` and a JWT, at the start of a word.
         if c.is_ascii_alphabetic() && (i == 0 || !name_byte(bytes[i - 1])) {
             let word_end = (i..n).find(|&k| !bytes[k].is_ascii_alphabetic()).unwrap_or(n);
-            if scheme(&bytes[i..word_end]) && space_at(word_end) > 0 {
-                let t = skip_space(word_end);
-                let (c0, c1, t_end) = scheme_token(t, &mut next_close);
-                let token = &bytes[c0..c1];
-                let digits = token.iter().any(|b| b.is_ascii_digit());
-                let letters = token.iter().any(|b| b.is_ascii_alphabetic());
-                if !references_only(&text[c0..c1]) && (token.len() >= 16 || (token.len() >= 8 && digits && letters)) {
-                    cuts.push((t, t_end));
-                    i = t_end;
-                    continue;
-                }
+            if scheme(&bytes[i..word_end]) && (space_at(word_end) > 0 || bytes.get(word_end).is_some_and(|&c| separator(c))) {
+                // An indicator whatever follows: after a separator
+                // (`Bearer : x`, `token = x`), the value starts past it.
+                let after = skip_space(word_end);
+                value = Some(if after < n && separator(bytes[after]) { skip_space(past_operator(after)) } else { after });
+                break;
             }
             if bytes[i..].starts_with(b"eyJ") {
                 // The JWT alphabet (base64url and dots) is all name bytes, so
@@ -413,6 +311,15 @@ fn redact_credential_text(text: &str) -> String {
             continue;
         }
         i += 1;
+    }
+    if let Some(v) = value
+        && v < n
+    {
+        let rest = text[v..].trim_end();
+        // A JWT inside a reference is no reference.
+        if !(references_only(rest) || REDACTION_MARKERS.contains(&rest)) || holds_jwt(rest) {
+            cuts.push((v, n));
+        }
     }
     if cuts.is_empty() {
         return text.to_string();
@@ -663,6 +570,9 @@ struct Seen {
     vars: HashMap<String, (usize, HashSet<String>)>,
     /// Redactions made, including those past the list's limit.
     redactions: usize,
+    /// The key of the digests that keep distinct references distinct once
+    /// redacted ([`ImportReport::with_digest_key`]).
+    digest_key: [u8; 32],
 }
 
 impl PartialEq for Seen {
@@ -731,10 +641,33 @@ impl ImportReport {
         });
     }
 
+    /// A report whose redacted references carry digests keyed by `key` (the
+    /// import's credential key), so a digest reveals nothing without it.
+    pub(crate) fn with_digest_key(key: [u8; 32]) -> Self {
+        let mut report = ImportReport::default();
+        report.seen.digest_key = key;
+        report
+    }
+
+    /// `original` as shown once redacted: unchanged when nothing was
+    /// redacted, else the redacted text and a keyed digest of the original,
+    /// so distinct originals stay distinct.
+    pub(crate) fn distinct_redaction(key: &[u8; 32], purpose: &str, original: &str) -> String {
+        let shown = redact_for_report(original);
+        if shown == original {
+            return shown;
+        }
+        let mac = crate::util::hmac_sha256(key, &crate::common::hmac_input(&[purpose, original]));
+        format!("{shown}#{}", &hex::encode(mac)[..16])
+    }
+
     pub fn external_ref(&mut self, reference: &str, pointer: &str) {
-        let reference = &redact_for_report(reference);
+        // Indexed by the reference as written (kept in memory only), shown
+        // redacted with a digest, so distinct references never merge.
+        let original = reference;
+        let reference = &Self::distinct_redaction(&self.seen.digest_key, "external reference", original);
         let pointer = bounded_pointer(pointer);
-        if let Some((i, seen)) = self.seen.refs.get_mut(reference) {
+        if let Some((i, seen)) = self.seen.refs.get_mut(original) {
             let e = &mut self.external_refs[*i];
             if e.pointers.len() < MAX_POINTERS_PER_ENTRY && seen.insert(pointer.clone()) {
                 e.pointers.push(pointer);
@@ -749,7 +682,7 @@ impl ImportReport {
         } else {
             ExternalRefKind::Other
         };
-        self.seen.refs.insert(reference.to_string(), (self.external_refs.len(), HashSet::from([pointer.clone()])));
+        self.seen.refs.insert(original.to_string(), (self.external_refs.len(), HashSet::from([pointer.clone()])));
         self.external_refs.push(ExternalRef { reference: reference.to_string(), kind, pointers: vec![pointer], requires_approval: true });
     }
 
@@ -878,107 +811,213 @@ mod tests {
         }
     }
 
-    /// Final scope of GHSA-c236 (#579): literals outside a URL or a template,
-    /// by the credential-name heuristics.
-    #[test]
-    fn report_text_never_holds_credential_literals() {
-        for (text, expected) in [
-            ("Postman body mode 'password=tok-SENSITIVE-r7' is not supported", "Postman body mode 'password=<redacted>' is not supported"),
-            ("const password = 'tok-SENSITIVE-r8';", "const password = '<redacted>';"),
-            (r#"{"api_key": "tok-SENSITIVE-r9", "note": "ok"}"#, r#"{"api_key": "<redacted>", "note": "ok"}"#),
-            ("Insomnia auth type 'Bearer tok-SENSITIVE-r10' is not supported", "Insomnia auth type 'Bearer <redacted>' is not supported"),
-            ("token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl here", "token <redacted> here"),
-            ("password: {{password}} and token={{ _.token }}", "password: {{password}} and token={{ _.token }}"),
-            ("see email=a@b and Basic authentication", "see email=a@b and Basic authentication"),
-            ("Postman setting `strictSSL` is not imported", "Postman setting `strictSSL` is not imported"),
-            ("imported without credentials (auth: none)", "imported without credentials (auth: none)"),
-            // Review of #583 (dsf F1): a scheme word as a pair's value.
-            ("Authorization: Bearer opaque-tok-SENSITIVE-r12", "Authorization: <redacted>"),
-            ("header Authorization=Basic dXNlcjpwYXNz ok", "header Authorization=<redacted> ok"),
-        ] {
-            assert_eq!(redact_for_report(text), expected, "{expected:?}");
-        }
+    /// `text` redacts to `kept` followed by `<redacted>`, with no canary left.
+    fn redacts_to(text: &str, kept: &str) {
+        let out = redact_for_report(text);
+        assert_eq!(out, format!("{kept}<redacted>"), "kept {kept:?}");
+        assert!(!out.contains("tok-SENSITIVE"), "a canary survived after {kept:?}");
     }
 
-    /// #584 (review of #583, sol F3-F5, dsf F4): whitespace around a
-    /// separator, an escaped quote, a reference beside a literal and an
-    /// angle-bracketed literal no longer keep a credential readable.
+    /// GHSA-84pr-239v-mv8x (final form): from the first credential
+    /// indicator, a credential name and a separator or an auth scheme word,
+    /// everything to the end of the text is redacted. The text before the
+    /// value is kept. These are the inputs of every earlier redaction test
+    /// (#579, #583, #584, #586), now in their canonical form.
     #[test]
-    fn credential_pairs_survive_no_whitespace_escape_or_reference_trick() {
-        for (text, expected) in [
-            // Tabs and newlines around the separator, and between a scheme and
-            // its token (sol F4).
-            ("const password =\n\"tok-SENSITIVE-r13\";", "const password =\n\"<redacted>\";"),
-            ("const password\t=\t\"tok-SENSITIVE-r14\";", "const password\t=\t\"<redacted>\";"),
-            ("const password\n  = 'tok-SENSITIVE-r15';", "const password\n  = '<redacted>';"),
-            ("a diagnostic with Bearer  tok-SENSITIVE-r16 in it", "a diagnostic with Bearer  <redacted> in it"),
-            ("Authorization:\tBearer\ttok-SENSITIVE-r17", "Authorization:\t<redacted>"),
-            // Escaped quotes do not end the value (sol F5, dsf F4).
-            (r#"const password = "\"tok-SENSITIVE-r18";"#, r#"const password = "<redacted>";"#),
-            (r"const password = 'ab\'tok-SENSITIVE-r19';", r"const password = '<redacted>';"),
-            (r#"{"password": "a\"tok-SENSITIVE-r20", "note": "ok"}"#, r#"{"password": "<redacted>", "note": "ok"}"#),
-            (r#"{"password": "a\\", "note": "ok"}"#, r#"{"password": "<redacted>", "note": "ok"}"#),
-            // An unterminated string runs to the end.
-            (r#"password = "tok-SENSITIVE-r21\" and more"#, r#"password = "<redacted>"#),
-            // Only exact references or markers are exempt (sol F3).
-            (r#"const password = "{{tenant}}-tok-SENSITIVE-r22";"#, r#"const password = "<redacted>";"#),
-            ("password={{tenant}}tok-SENSITIVE-r23 ok", "password=<redacted> ok"),
-            (r#"password="<tok-SENSITIVE-r24>""#, r#"password="<redacted>""#),
-            ("password=<tok-SENSITIVE-r25> ok", "password=<redacted>> ok"),
-            ("password={{a}}{{ _.b }} ok", "password={{a}}{{ _.b }} ok"),
-            ("password: <redacted> and token=<url redacted>", "password: <redacted> and token=<url redacted>"),
-            (r#""api_key": "{{api_key}}""#, r#""api_key": "{{api_key}}""#),
-            // Comparisons and compound assignments are separators too.
-            (r#"if (password === "tok-SENSITIVE-r26") {}"#, r#"if (password === "<redacted>") {}"#),
-            (r#"if (password != 'tok-SENSITIVE-r27') {}"#, r#"if (password != '<redacted>') {}"#),
-            ("token := tok-SENSITIVE-r28", "token := <redacted>"),
-            // Review of #586 (sol F2): a marker is exempt only as the whole
-            // value.
-            ("password=<redacted>tok-SENSITIVE-r36", "password=<redacted>"),
-            ("token=<url redacted>tok-SENSITIVE-r37 ok", "token=<redacted> ok"),
-            ("password=<redacted>{{a}}tok-SENSITIVE-r43 ok", "password=<redacted> ok"),
-            // Review of #586 (dsf F1): vertical tabs and Unicode spaces are
-            // whitespace too.
-            ("password=\u{0b}\"tok-SENSITIVE-r38\"", "password=\u{0b}\"<redacted>\""),
-            ("password\u{0b}=\u{0b}tok-SENSITIVE-r39", "password\u{0b}=\u{0b}<redacted>"),
-            ("password\u{a0}=\u{3000}'tok-SENSITIVE-r40'", "password\u{a0}=\u{3000}'<redacted>'"),
-            ("see Bearer\u{a0}tok-SENSITIVE-abcdefgh here", "see Bearer\u{a0}<redacted> here"),
-            ("password=tok-SENSITIVE-r41\u{2028}next", "password=<redacted>\u{2028}next"),
-            ("é password\u{2003}= 'tok-SENSITIVE-r44' é", "é password\u{2003}= '<redacted>' é"),
+    fn credential_indicators_redact_to_the_end() {
+        for (text, kept) in [
+            ("Postman body mode 'password=tok-SENSITIVE-r7' is not supported", "Postman body mode 'password="),
+            ("const password = 'tok-SENSITIVE-r8';", "const password = "),
+            (r#"{"api_key": "tok-SENSITIVE-r9", "note": "ok"}"#, r#"{"api_key": "#),
+            ("Insomnia auth type 'Bearer tok-SENSITIVE-r10' is not supported", "Insomnia auth type 'Bearer "),
+            ("token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl here", "token "),
+            ("password: {{password}} and token=tok-SENSITIVE-r11", "password: "),
+            ("see email=a@b and Basic authentication tok-SENSITIVE-r29", "see email=a@b and Basic "),
+            ("imported without credentials (auth: none) tok-SENSITIVE-r30", "imported without credentials (auth: "),
+            ("Authorization: Bearer opaque-tok-SENSITIVE-r12", "Authorization: "),
+            ("header Authorization=Basic dXNlcjpwYXNz ok", "header Authorization="),
+            ("const password =\n\"tok-SENSITIVE-r13\";", "const password =\n"),
+            ("const password\t=\t\"tok-SENSITIVE-r14\";", "const password\t=\t"),
+            ("const password\n  = 'tok-SENSITIVE-r15';", "const password\n  = "),
+            ("a diagnostic with Bearer  tok-SENSITIVE-r16 in it", "a diagnostic with Bearer  "),
+            ("Authorization:\tBearer\ttok-SENSITIVE-r17", "Authorization:\t"),
+            (r#"const password = "\"tok-SENSITIVE-r18";"#, "const password = "),
+            (r"const password = 'ab\'tok-SENSITIVE-r19';", "const password = "),
+            (r#"{"password": "a\"tok-SENSITIVE-r20", "note": "ok"}"#, r#"{"password": "#),
+            (r#"password = "tok-SENSITIVE-r21\" and more"#, "password = "),
+            (r#"const password = "{{tenant}}-tok-SENSITIVE-r22";"#, "const password = "),
+            ("password={{tenant}}tok-SENSITIVE-r23 ok", "password="),
+            (r#"password="<tok-SENSITIVE-r24>""#, "password="),
+            ("password=<tok-SENSITIVE-r25> ok", "password="),
+            (r#"if (password === "tok-SENSITIVE-r26") {}"#, "if (password === "),
+            (r#"if (password != 'tok-SENSITIVE-r27') {}"#, "if (password != "),
+            ("token := tok-SENSITIVE-r28", "token := "),
+            ("password=<redacted>tok-SENSITIVE-r36", "password="),
+            ("token=<url redacted>tok-SENSITIVE-r37 ok", "token="),
+            ("password=<redacted>{{a}}tok-SENSITIVE-r43 ok", "password="),
+            ("password=\u{0b}\"tok-SENSITIVE-r38\"", "password=\u{0b}"),
+            ("password\u{0b}=\u{0b}tok-SENSITIVE-r39", "password\u{0b}=\u{0b}"),
+            ("password\u{a0}=\u{3000}'tok-SENSITIVE-r40'", "password\u{a0}=\u{3000}"),
+            ("see Bearer\u{a0}tok-SENSITIVE-abcdefgh here", "see Bearer\u{a0}"),
+            ("password=tok-SENSITIVE-r41\u{2028}next", "password="),
+            ("é password\u{2003}= 'tok-SENSITIVE-r44' é", "é password\u{2003}= "),
+            (r#""api_key": "{{api_key}}" tok-SENSITIVE-r31"#, r#""api_key": "#),
         ] {
-            assert_eq!(redact_for_report(text), expected, "{expected:?}");
+            redacts_to(text, kept);
         }
+        // A JWT before any indicator is redacted on its own.
+        assert_eq!(redact_for_report("id eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl ok"), "id <redacted> ok");
     }
 
-    /// GHSA-84pr-239v-mv8x: the token after an auth scheme word runs to the
-    /// value's boundary (whitespace or a delimiter) or, quoted, to its
-    /// closing quote, so punctuation inside it leaves no suffix readable, in
-    /// a credential pair and standalone. Nothing after the scheme survives
-    /// up to the boundary; what follows the boundary is kept.
+    /// Review round 2 of #595: a scheme word is an indicator whatever
+    /// follows it (Neon F1, Sol F1); whitespace of any length before a
+    /// separator (Sol F2, DSF F1, Neon F2); a JWT inside an exact reference
+    /// (Sol F3); a `:` after `=` is value (Sol F5).
     #[test]
-    fn scheme_tokens_are_redacted_to_the_value_boundary() {
+    fn round_two_bypasses_are_closed() {
+        let spaces = " ".repeat(129);
+        let wide = "\u{3000}".repeat(44);
+        for (text, kept) in [
+            ("see Bearer :tok-SENSITIVE-q1".to_string(), "see Bearer :".to_string()),
+            ("see Bearer =tok-SENSITIVE-q2".to_string(), "see Bearer =".to_string()),
+            ("see Basic =tok-SENSITIVE-q3==".to_string(), "see Basic =".to_string()),
+            ("see Digest :tok-SENSITIVE-q4".to_string(), "see Digest :".to_string()),
+            ("Bearer : tok-SENSITIVE-q5".to_string(), "Bearer : ".to_string()),
+            ("Basic = tok-SENSITIVE-q6".to_string(), "Basic = ".to_string()),
+            ("Bearer:tok-SENSITIVE-q7".to_string(), "Bearer:".to_string()),
+            (format!("Token{spaces}= tok-SENSITIVE-q8"), format!("Token{spaces}= ")),
+            (format!("password{spaces}= tok-SENSITIVE-w1"), format!("password{spaces}= ")),
+            (format!("password{wide}= tok-SENSITIVE-w2"), format!("password{wide}= ")),
+            (format!("\"password\"{spaces}= tok-SENSITIVE-w3"), format!("\"password\"{spaces}= ")),
+            ("password=:tok-SENSITIVE-x1".to_string(), "password=".to_string()),
+            ("password=:<redacted>".to_string(), "password=".to_string()),
+            ("token :=: tok-SENSITIVE-x2".to_string(), "token :=".to_string()),
+        ] {
+            redacts_to(&text, &kept);
+        }
+        let jwt = "see Bearer {{eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl}}";
+        assert_eq!(redact_for_report(jwt), "see Bearer <redacted>");
+        assert_eq!(redact_for_report("password: {{eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl}}"), "password: <redacted>");
+    }
+
+    /// Review round 2 of #595 (Sol F6): references that redact alike stay
+    /// distinct, each shown redacted with a keyed digest of the original.
+    #[test]
+    fn distinct_redacted_references_stay_distinct() {
+        let mut report = super::ImportReport::default();
+        report.external_ref("https://example.test/schema?token=tok-SENSITIVE-e1&version=1", "/a");
+        report.external_ref("https://example.test/schema?token=tok-SENSITIVE-e1&version=2", "/b");
+        report.external_ref("https://example.test/schema?token=tok-SENSITIVE-e1&version=1", "/c");
+        report.external_ref("https://example.test/plain.yaml", "/d");
+        assert_eq!(report.external_refs.len(), 3);
+        assert_ne!(report.external_refs[0].reference, report.external_refs[1].reference);
+        assert_eq!(report.external_refs[0].pointers, vec!["/a".to_string(), "/c".to_string()]);
+        assert!(report.external_refs[0].reference.starts_with("https://example.test/schema?token=<redacted>#"));
+        assert_eq!(report.external_refs[2].reference, "https://example.test/plain.yaml");
+        assert!(report.external_refs.iter().all(|r| !r.reference.contains("tok-SENSITIVE") && !r.reference.contains("version")));
+    }
+
+    /// The rest after an indicator is kept only when the whole of it is
+    /// exactly plain references or exactly a redaction marker; text without
+    /// an indicator is kept.
+    #[test]
+    fn exact_references_and_markers_are_kept() {
+        for text in [
+            "password: {{password}}",
+            "password={{a}}{{ _.b }}",
+            "password: <redacted>",
+            "token=<url redacted>",
+            "see Bearer {{token}}",
+            "see Bearer <redacted>",
+            "Authorization: {{auth}}",
+            "Postman setting `strictSSL` is not imported",
+            "see Basic",
+            "header Authorization",
+        ] {
+            assert_eq!(redact_for_report(text), text);
+        }
+        // Anything beside them is redacted.
+        redacts_to("password: {{password}} tok-SENSITIVE-k1", "password: ");
+        redacts_to("see Bearer <redacted> tok-SENSITIVE-k2", "see Bearer ");
+    }
+
+    /// GHSA-84pr-239v-mv8x (#593): punctuation inside a scheme token never
+    /// leaves a suffix readable, paired, standalone or quoted.
+    #[test]
+    fn scheme_tokens_with_punctuation_are_redacted() {
         for p in [':', '!', '@', '#', '$', '%', '*', '?'] {
             let token = format!("tok-SENSITIVE-s1{p}rest-of-the-secret{p}x");
-            for (text, expected) in [
-                (format!("Authorization: Bearer {token}"), "Authorization: <redacted>".to_string()),
-                (format!("Authorization: Bearer {token}, next"), "Authorization: <redacted>, next".to_string()),
-                (format!("header Authorization=Basic {token} ok"), "header Authorization=<redacted> ok".to_string()),
-                (format!("Authorization: Bearer \"{token}\""), "Authorization: <redacted>".to_string()),
-                (format!("Authorization: Bearer 'a\\'{token}' ok"), "Authorization: <redacted> ok".to_string()),
-                (format!("see Bearer {token} here"), "see Bearer <redacted> here".to_string()),
-                (format!("see Token {token}; next"), "see Token <redacted>; next".to_string()),
-                (format!("see Bearer \"{token}\" here"), "see Bearer <redacted> here".to_string()),
-                (format!("see Bearer 'a\\'{token}' here"), "see Bearer <redacted> here".to_string()),
+            for (text, kept) in [
+                (format!("Authorization: Bearer {token}"), "Authorization: "),
+                (format!("Authorization: Bearer {token}, next"), "Authorization: "),
+                (format!("header Authorization=Basic {token} ok"), "header Authorization="),
+                (format!("Authorization: Bearer \"{token}\""), "Authorization: "),
+                (format!("Authorization: Bearer 'a\\'{token}' ok"), "Authorization: "),
+                (format!("see Bearer {token} here"), "see Bearer "),
+                (format!("see Token {token}; next"), "see Token "),
+                (format!("see Bearer \"{token}\" here"), "see Bearer "),
+                (format!("see Bearer 'a\\'{token}' here"), "see Bearer "),
             ] {
-                let out = redact_for_report(&text);
-                assert_eq!(out, expected, "punctuation {p:?}");
-                assert!(!out.contains("rest-of-the-secret"), "a suffix survived after {p:?}");
+                redacts_to(&text, kept);
+                assert!(!redact_for_report(&text).contains("rest-of-the-secret"), "a suffix survived after {p:?}");
             }
         }
-        // A token of plain references is kept, paired and standalone.
-        for text in ["Authorization: Bearer {{token}}", "see Bearer {{a_long_reference_name}} here", "Authorization: Bearer \"{{token}}\""]
-        {
-            assert_eq!(redact_for_report(text), text);
+    }
+
+    /// Every scenario of the reviews of #593 (Neon) and #595 (Sol, DSF, Neon):
+    /// quotes around or inside scheme tokens, following pairs with or without
+    /// space, padded tokens, markers, apostrophes (ASCII and not) and nested
+    /// quotes. None can end the redaction early any more.
+    #[test]
+    fn review_scenarios_leave_no_canary() {
+        for (text, kept) in [
+            // #593, Neon F1-F3.
+            (r#"const prefix = "Bearer "; const password = "tok-SENSITIVE-n1";"#, r#"const prefix = "Bearer "#),
+            (r#""Authorization: Bearer ", password="tok-SENSITIVE-n2""#, r#""Authorization: "#),
+            ("const prefix = 'Bearer '; const password = 'tok-SENSITIVE-n3';", "const prefix = 'Bearer "),
+            (r#"prefix is "Bearer " for API calls to /v1/users"#, r#"prefix is "Bearer "#),
+            ("o'brien uses Bearer 'tok-SENSITIVE-n14' here", "o'brien uses Bearer "),
+            ("Authorization: Bearer\nX-Api-Key: tok-SENSITIVE-n5", "Authorization: "),
+            ("Authorization: Bearer X-Api-Key: tok-SENSITIVE-n6", "Authorization: "),
+            ("scheme: Bearer\nProxy-Authorization: tok-SENSITIVE-n7", "scheme: Bearer\n"),
+            ("Authorization: Bearer\npassword= tok-SENSITIVE-n8", "Authorization: "),
+            ("Authorization: Bearer token:= tok-SENSITIVE-n9", "Authorization: "),
+            ("Authorization: Bearer secret_part:tok-SENSITIVE-n10", "Authorization: "),
+            ("header Authorization=Basic dXNlcjpwYXNz== ok", "header Authorization="),
+            ("Authorization: Bearer <redacted>tok-SENSITIVE-n15", "Authorization: "),
+            ("Authorization: Bearer <url redacted>tok-SENSITIVE-n16 ok", "Authorization: "),
+            ("see Bearer <redacted>tok-SENSITIVE-n17", "see Bearer "),
+            ("see Bearer <url redacted>tok-SENSITIVE-n18 ok", "see Bearer "),
+            ("Authorization: Bearer tok://u:tok-SENSITIVE-n11@host:tok-SENSITIVE-n12", "Authorization: "),
+            ("Authorization: Bearer https://{{a}}:tok-SENSITIVE-n13@host/p", "Authorization: "),
+            ("Authorization: Bearer <redacted>", "Authorization: "),
+            ("see Bearer <redacted> here", "see Bearer "),
+            // #595, Sol F1-F4.
+            ("Authorization: Bearer eHh4tokenDemo4A=", "Authorization: "),
+            ("const prefix = \"Bearer '\"; const password = 'tok-SENSITIVE-p1';", "const prefix = \"Bearer "),
+            ("Authorization: Bearer\nX-Api-Key:\"tok-SENSITIVE-p2\"", "Authorization: "),
+            ("café's request uses Bearer 'tok-SENSITIVE-p3-1234'", "café's request uses Bearer "),
+            // #595, DSF F1-F3.
+            (r#""password = 'abc" ' Bearer "tok-SENSITIVE-p4""#, r#""password = "#),
+            ("René's notes Bearer 'tok-SENSITIVE-p5'", "René's notes Bearer "),
+            ("Authorization: Bearer X-Api-Key:\"tok-SENSITIVE-p6\"", "Authorization: "),
+            // #595, Neon F1-F3.
+            ("Authorization: Bearer\npassword=\"tok-SENSITIVE-p7\"", "Authorization: "),
+            ("Authorization: Bearer\nX-Api-Key:\"tok-SENSITIVE-p8\"", "Authorization: "),
+            ("Authorization: Bearer api_key='tok-SENSITIVE-p9'", "Authorization: "),
+            ("scheme: Bearer\nProxy-Authorization:\"tok-SENSITIVE-p10\"", "scheme: Bearer\n"),
+            ("Authorization: Bearer token_dG9rLVNFTlNJVElWRQ==", "Authorization: "),
+            ("Authorization: Bearer secret_aGVsbG8td29ybGQ= ok", "Authorization: "),
+            ("see Bearer session_YWJjZGVmZ2hpamtsbW5vcA== here", "see Bearer "),
+            ("\"const prefix = 'Bearer '; const password = 'tok-SENSITIVE-p11';\"", "\"const prefix = 'Bearer "),
+            (r#"'"Authorization: Bearer ", password="tok-SENSITIVE-p12"'"#, r#"'"Authorization: "#),
+            ("José's prefix = \"Bearer \"; const password = \"tok-SENSITIVE-p13\";", "José's prefix = \"Bearer "),
+            (
+                "// 'til ready\nconst prefix = \"Bearer \"; const password = \"tok-SENSITIVE-p14\";",
+                "// 'til ready\nconst prefix = \"Bearer ",
+            ),
+        ] {
+            redacts_to(text, kept);
         }
     }
 
@@ -1095,11 +1134,28 @@ mod tests {
             "Bearer \"",
             "Bearer a:b!",
             "Bearer {{",
+            // Review of #593: quotes around scheme words, following pairs and
+            // markers.
+            "\"Bearer \" ",
+            "'Bearer ' ",
+            "Bearer X-Api-Key: ",
+            "Authorization: Bearer\npassword= ",
+            "Bearer <redacted>",
+            "o'brien Bearer '",
+            // Review round 2 of #595: whitespace runs before separators.
+            "                =",
+            "Bearer : ",
+            "password=:",
         ] {
             let text = unit.repeat((1 << 20) / unit.len());
             let started = std::time::Instant::now();
             let _ = redact_for_report(&text);
             assert!(started.elapsed() < std::time::Duration::from_secs(20), "{unit:?} took too long");
         }
+        // One long whitespace run before many separators.
+        let text = " ".repeat(1 << 19) + &"=".repeat(1 << 19);
+        let started = std::time::Instant::now();
+        let _ = redact_for_report(&text);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "a long whitespace run took too long");
     }
 }
