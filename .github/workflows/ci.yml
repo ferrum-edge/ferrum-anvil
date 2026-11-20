@@ -200,6 +200,7 @@ jobs:
         run: |
           python3 -I .agents/skills/_lib/test_resolve_agent_bin.py
           python3 -I .agents/skills/sol-agents/scripts/test_dispatch.py
+          python3 -I .agents/skills/antigravity-neon-agents/scripts/test_dispatch.py
       - name: Release dependency graph has no WebDriver plugin / e2e feature
         run: scripts/release-check.sh
 
