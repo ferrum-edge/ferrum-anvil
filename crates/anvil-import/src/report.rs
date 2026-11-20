@@ -249,14 +249,40 @@ fn redact_credential_text(text: &str) -> String {
         };
         (found < n).then_some(found)
     };
+    // Whether the text at `t` begins a credential pair the way a following
+    // header or assignment does: a credential name, then a separator
+    // (`:`, `=`, `:=`, `==`, `!=`, `+=`, …) followed by whitespace or the end
+    // (`X-Api-Key: …`, `password= …`). A separator inside a token
+    // (`prefix:secret`, `abc==`) is followed by more of it, so it never
+    // counts, and a name past the token's start would follow a delimiter,
+    // where the token ends anyway. Scans the name once.
+    let pair_starts = |t: usize| -> bool {
+        // A name of at most 128 bytes, as the main loop reads one.
+        let k = (t..n.min(t + 129)).find(|&k| !name_byte(bytes[k])).unwrap_or(n);
+        if k == t || k >= n || k - t > 128 || bytes[k..].starts_with(b"://") {
+            return false;
+        }
+        let mut e = k;
+        while e < n && e - k < 3 && matches!(bytes[e], b'!' | b'=' | b'+' | b'|' | b'&' | b'?' | b':') {
+            e += 1;
+        }
+        e > k && matches!(bytes[e - 1], b':' | b'=') && (e == n || space_at(e) > 0) && crate::util::is_credential_name(&text[t..k])
+    };
     // The token after a scheme word, from `t`: (content start, content end,
-    // span end). Quoted, to the closing quote past escaped ones (an
-    // unterminated one runs to the end), the quotes in the span; otherwise
-    // to the boundary an unquoted pair's value ends at, a `{{…}}` inside
-    // being part of it (GHSA-84pr-239v-mv8x). Each byte is scanned once per
-    // scheme word before it.
-    let scheme_token = |t: usize, next_close: &mut dyn FnMut(usize) -> Option<usize>| -> (usize, usize, usize) {
+    // span end), by the rules a pair's value follows (GHSA-84pr-239v-mv8x):
+    // - a quote opens a quoted token only when it can open one, that is,
+    //   unless it closes the string the scheme word is in (`open`). Then it
+    //   runs to its closing quote past escaped ones (an unterminated one
+    //   runs to the end), the quotes in the span;
+    // - otherwise to the boundary an unquoted value ends at, a `{{…}}` and a
+    //   redaction marker inside being part of it. A following credential
+    //   pair (`X-Api-Key: …`, `token:= …`) is no token ([`pair_starts`]).
+    // Each byte is scanned once per scheme word before it.
+    let scheme_token = |t: usize, open: Option<u8>, next_close: &mut dyn FnMut(usize) -> Option<usize>| -> (usize, usize, usize) {
         if t < n && matches!(bytes[t], b'"' | b'\'') {
+            if open == Some(bytes[t]) {
+                return (t, t, t);
+            }
             let q = bytes[t];
             let mut k = t + 1;
             while k < n && bytes[k] != q {
@@ -264,6 +290,11 @@ fn redact_credential_text(text: &str) -> String {
             }
             let k = k.min(n);
             return (t + 1, k, (k + 1).min(n));
+        }
+        // A following pair's name is no token: the pair is the main
+        // loop's to redact.
+        if pair_starts(t) {
+            return (t, t, t);
         }
         let mut k = t;
         while k < n {
@@ -273,6 +304,10 @@ fn redact_credential_text(text: &str) -> String {
                 k = close + 2;
                 continue;
             }
+            if let Some(m) = REDACTION_MARKERS.iter().find(|m| bytes[k..].starts_with(m.as_bytes())) {
+                k += m.len();
+                continue;
+            }
             if unquoted_end(k) {
                 break;
             }
@@ -280,6 +315,15 @@ fn redact_credential_text(text: &str) -> String {
         }
         (t, k, k)
     };
+    // A token kept as written: exactly plain references or exactly a
+    // redaction marker, as a pair's value would be.
+    let kept = |token: &str| references_only(token) || REDACTION_MARKERS.contains(&token);
+    // The quote of the string the main loop is in, from the quotes it has
+    // passed (a pair's quoted value and a quoted token are skipped whole, so
+    // they leave it as it was). An apostrophe inside or at the end of a word
+    // (`o'brien`, `users'`) opens nothing, and inside a word closes nothing;
+    // an escaped quote does neither.
+    let mut open: Option<u8> = None;
     let mut cuts: Vec<(usize, usize)> = vec![];
     let mut i = 0;
     while i < n {
@@ -358,29 +402,28 @@ fn redact_credential_text(text: &str) -> String {
                 let word = value.len() <= 7
                     && matches!(value.to_ascii_lowercase().as_str(), "none" | "null" | "true" | "false" | "inherit" | "off" | "on");
                 // `Authorization: Bearer <token>`: the token after the scheme
-                // is part of the value, to the value's boundary
-                // (GHSA-84pr-239v-mv8x). A token of plain references
-                // (`Bearer {{token}}`) keeps the whole value.
-                let mut references = false;
+                // is part of the value ([`scheme_token`]). A token kept as
+                // written (`Bearer {{token}}`, `Bearer <redacted>`) keeps the
+                // whole value.
+                let mut token_kept = false;
                 if !quoted && scheme(value.as_bytes()) {
                     let t = skip_space(to);
                     if t > to && t < n {
-                        let (c0, c1, end) = scheme_token(t, &mut next_close);
-                        if references_only(&text[c0..c1]) {
-                            references = true;
-                            to = end;
-                        } else if end > t {
+                        let (c0, c1, end) = scheme_token(t, open, &mut next_close);
+                        if end > t {
+                            token_kept = kept(&text[c0..c1]);
                             to = end;
                         }
                     }
                 }
-                let exempt = references || value.is_empty() || word || REDACTION_MARKERS.contains(&value) || references_only(value);
+                let exempt = token_kept || value.is_empty() || word || REDACTION_MARKERS.contains(&value) || references_only(value);
                 if !exempt {
                     cuts.push((from, to));
                 }
-                // Past the value either way: nothing inspected is scanned
-                // again.
-                i = to.max(i + 1);
+                // Past the value either way, its closing quote included:
+                // nothing inspected is scanned again, and the quote state is
+                // as before the value.
+                i = if quoted && to < n { to + 1 } else { to.max(i + 1) };
                 continue;
             }
         }
@@ -389,11 +432,11 @@ fn redact_credential_text(text: &str) -> String {
             let word_end = (i..n).find(|&k| !bytes[k].is_ascii_alphabetic()).unwrap_or(n);
             if scheme(&bytes[i..word_end]) && space_at(word_end) > 0 {
                 let t = skip_space(word_end);
-                let (c0, c1, t_end) = scheme_token(t, &mut next_close);
+                let (c0, c1, t_end) = scheme_token(t, open, &mut next_close);
                 let token = &bytes[c0..c1];
                 let digits = token.iter().any(|b| b.is_ascii_digit());
                 let letters = token.iter().any(|b| b.is_ascii_alphabetic());
-                if !references_only(&text[c0..c1]) && (token.len() >= 16 || (token.len() >= 8 && digits && letters)) {
+                if !kept(&text[c0..c1]) && (token.len() >= 16 || (token.len() >= 8 && digits && letters)) {
                     cuts.push((t, t_end));
                     i = t_end;
                     continue;
@@ -411,6 +454,17 @@ fn redact_credential_text(text: &str) -> String {
             }
             i = word_end.max(i + 1);
             continue;
+        }
+        if matches!(c, b'"' | b'\'') {
+            // Odd backslashes before it escape it; each run is counted once.
+            let escaped = bytes[..i].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 1;
+            let word_before = i > 0 && bytes[i - 1].is_ascii_alphanumeric();
+            let word_after = bytes.get(i + 1).is_some_and(u8::is_ascii_alphanumeric);
+            match open {
+                Some(q) if q == c && !escaped && !(c == b'\'' && word_before && word_after) => open = None,
+                None if !escaped && !(c == b'\'' && word_before) => open = Some(c),
+                _ => {}
+            }
         }
         i += 1;
     }
@@ -982,6 +1036,50 @@ mod tests {
         }
     }
 
+    /// Review of #593 (GHSA-84pr-239v-mv8x follow-up): the scheme token
+    /// follows the rules a pair's value does. A quote that closes the string
+    /// the scheme word is in opens no token (F1). A following credential pair
+    /// is no token (F2). Redaction markers are honoured (F3). Each of these
+    /// inputs was redacted on `main` before #593 and is again, now keeping
+    /// the following pair's name readable where #593's predecessor cut it.
+    #[test]
+    fn scheme_tokens_respect_strings_pairs_and_markers() {
+        for (text, expected) in [
+            // F1: a closing quote after a scheme word and a trailing space.
+            (
+                r#"const prefix = "Bearer "; const password = "tok-SENSITIVE-n1";"#,
+                r#"const prefix = "Bearer "; const password = "<redacted>";"#,
+            ),
+            (r#""Authorization: Bearer ", password="tok-SENSITIVE-n2""#, r#""Authorization: <redacted> ", password="<redacted>""#),
+            ("const prefix = 'Bearer '; const password = 'tok-SENSITIVE-n3';", "const prefix = 'Bearer '; const password = '<redacted>';"),
+            (r#"prefix is "Bearer " for API calls to /v1/users"#, r#"prefix is "Bearer " for API calls to /v1/users"#),
+            // An apostrophe in a word opens no string.
+            ("o'brien uses Bearer 'tok-SENSITIVE-n14' here", "o'brien uses Bearer <redacted> here"),
+            // F2: a following credential pair is no token.
+            ("Authorization: Bearer\nX-Api-Key: tok-SENSITIVE-n5", "Authorization: <redacted>\nX-Api-Key: <redacted>"),
+            ("Authorization: Bearer X-Api-Key: tok-SENSITIVE-n6", "Authorization: <redacted> X-Api-Key: <redacted>"),
+            ("scheme: Bearer\nProxy-Authorization: tok-SENSITIVE-n7", "scheme: Bearer\nProxy-Authorization: <redacted>"),
+            ("Authorization: Bearer\npassword= tok-SENSITIVE-n8", "Authorization: <redacted>\npassword= <redacted>"),
+            ("Authorization: Bearer token:= tok-SENSITIVE-n9", "Authorization: <redacted> token:= <redacted>"),
+            // Separators inside a token stay part of it.
+            ("Authorization: Bearer secret_part:tok-SENSITIVE-n10", "Authorization: <redacted>"),
+            ("header Authorization=Basic dXNlcjpwYXNz== ok", "header Authorization=<redacted> ok"),
+            // F3: markers, attached text and redact_urls output.
+            ("Authorization: Bearer <redacted>tok-SENSITIVE-n15", "Authorization: <redacted>"),
+            ("Authorization: Bearer <url redacted>tok-SENSITIVE-n16 ok", "Authorization: <redacted> ok"),
+            ("see Bearer <redacted>tok-SENSITIVE-n17", "see Bearer <redacted>"),
+            ("see Bearer <url redacted>tok-SENSITIVE-n18 ok", "see Bearer <redacted> ok"),
+            ("Authorization: Bearer tok://u:tok-SENSITIVE-n11@host:tok-SENSITIVE-n12", "Authorization: <redacted>"),
+            ("Authorization: Bearer https://{{a}}:tok-SENSITIVE-n13@host/p", "Authorization: Bearer <url redacted>"),
+            ("Authorization: Bearer <redacted>", "Authorization: Bearer <redacted>"),
+            ("see Bearer <redacted> here", "see Bearer <redacted> here"),
+        ] {
+            let out = redact_for_report(text);
+            assert_eq!(out, expected, "{expected:?}");
+            assert!(!out.contains("tok-SENSITIVE"), "{expected:?}");
+        }
+    }
+
     /// #584 (sol F6, dsf F5): a pointer token that is only a JWT is
     /// redacted; plain tokens keep the fast path.
     #[test]
@@ -1095,6 +1193,14 @@ mod tests {
             "Bearer \"",
             "Bearer a:b!",
             "Bearer {{",
+            // Review of #593: quotes around scheme words, following pairs and
+            // markers.
+            "\"Bearer \" ",
+            "'Bearer ' ",
+            "Bearer X-Api-Key: ",
+            "Authorization: Bearer\npassword= ",
+            "Bearer <redacted>",
+            "o'brien Bearer '",
         ] {
             let text = unit.repeat((1 << 20) / unit.len());
             let started = std::time::Instant::now();
