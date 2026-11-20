@@ -72,19 +72,24 @@
 ### Security
 
 - Import report text and imported names no longer leak a credential through the free-text
-  redaction's edge cases (#584). Report entries no longer quote source values at all. The redaction
-  that remains for pointer tokens, external references, redaction field names and imported names
-  now:
-  - treats any whitespace (`char::is_whitespace`, vertical tabs and Unicode spaces included) around
-    a separator or after `Bearer`/`Basic`/`Token`/`Digest` as part of the pair;
-  - follows a quoted value past escaped quotes to its real end, or to the end of the text;
-  - keeps a value only when it is exactly plain references, exactly a redaction marker with nothing
-    attached, or a plain word;
-  - counts `==`, `!=`, `:=` and `+=` as separators;
-  - redacts a pointer token that is a bare JWT.
+  redaction (#584, #593, #595, #596, GHSA-84pr-239v-mv8x). Report entries no longer quote source
+  values at all. The redaction that remains for pointer tokens, external references, redaction
+  field names and imported names fails closed: from the first credential indicator, everything to
+  the end of the text becomes `<redacted>`.
+  - An indicator is a credential name (possibly quoted) followed by a separator (`:`, `:=`, `=`,
+    `==`, `===`, with any whitespace between them, Unicode spaces and vertical tabs included), or
+    an auth scheme word (`Bearer`, `Basic`, `Token`, `Digest`, any case) followed by whitespace or
+    a separator.
+  - The rest is kept only when the whole of it is exactly plain `{{…}}` references holding no JWT,
+    or exactly a redaction marker. Nothing in a value (a quote, an escape, punctuation, padding, a
+    marker, another field) can end the redaction early, and a plain word is not kept.
+  - A JWT before the first indicator, including a bare JWT pointer token, is redacted on its own.
 
   It stays linear. Auth placeholder names no longer carry any part of a collection, folder or
   request name, which could repeat a credential URL.
+- An import's report no longer keeps the credential key or external references as written in
+  memory, and debug formatting of import results, previews and imports shows neither (#596,
+  GHSA-84pr-239v-mv8x).
 - `chrono` is no longer a dependency (RUSTSEC-2026-0543, unmaintained), and the `deny.toml`
   ignore is removed (#576). Timestamps now use `anvil_domain::Timestamp`, built on `time` 0.3. It
   writes exactly what chrono wrote (RFC 3339 in UTC with `Z` and a 0/3/6/9-digit fraction) and reads
@@ -246,6 +251,13 @@
 
 ### Changed
 
+- BREAKING: import report text and imported names with a credential indicator are redacted to the
+  end of the text, not just to the end of the value (#595, GHSA-84pr-239v-mv8x). Over-redaction is
+  the price: an imported name such as `Basic auth` becomes `Basic <redacted>`, and `auth: none`
+  becomes `auth: <redacted>`. An operation key or external reference that redaction changes now
+  ends in a keyed digest (`#<16 hex digits>`), so distinct ones never merge. Requests imported by
+  an earlier build whose operation keys held a credential indicator get new keys on reimport: they
+  show as removed and added.
 - BREAKING: import reports are structured (#584). Messages, required-variable reasons and
   inactive-setting values are the importer's own words plus the counts and limits it computed. They
   never quote a source value: no option, header or setting name, media type, body mode, auth type,

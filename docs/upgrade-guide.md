@@ -43,6 +43,18 @@
   `{{url-needs-review}}` placeholders described under "Import behaviour changes"
   below.
 
+### Import report redaction to end of text (GHSA-84pr-239v-mv8x)
+
+- Report text and imported names are redacted from the first credential
+  indicator (a credential name with a separator, or `Bearer`, `Basic`, `Token`
+  or `Digest`) to the end of the text. Names such as `Basic auth` now read
+  `Basic <redacted>`; rename them after import if you want them back.
+- An operation key or external reference that redaction changes now ends in
+  `#<16 hex digits>`, keyed by your profile's credential key. Requests imported
+  by an earlier build whose operation keys held a credential indicator get new
+  keys on the first reimport after upgrading, so the reimport plan shows them
+  as removed and added. Review that plan before applying it.
+
 ### Load runs: exit codes and CSV (#565, #566)
 
 `anvil load run` now decides its exit code from the send ledger. A chained
