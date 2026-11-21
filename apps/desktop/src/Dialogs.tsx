@@ -1008,6 +1008,9 @@ export function displayLinkedFile(entry: string): string {
 
 const NON_FILE_NAME_CHARS = /[^\w.-]+/g;
 
+/** How the backend's note for the data of a dataset with sensitive columns it did not store begins. */
+const SENSITIVE_DATA_NOTE = "The data of a dataset with sensitive columns in the file is not stored here";
+
 export function ExportDialog(props: { workspace: Workspace | null; onClose: () => void; notify: (m: string) => void }) {
   const [mode, setMode] = useState("share_safely");
   const [scope, setScope] = useState<"workspace" | "all">(props.workspace ? "workspace" : "all");
@@ -1278,7 +1281,9 @@ export function ImportDialog(props: {
       const approved = intoExisting ? existing.map((w) => w.id) : [];
       const r = await api.importApply(file.token, pass || null, preview.plan.policy, approved, preview.bundle_sha256, a);
       props.onImported(r.workspace_ids);
-      const added = (r.warnings ?? []).filter((w) => !preview.warnings.includes(w));
+      // Only a note the profile's change since the preview can cause (data of a dataset with sensitive
+      // columns not stored) keeps the dialog open; other notes repeat the preview's, perhaps reworded.
+      const added = (r.warnings ?? []).filter((w) => w.startsWith(SENSITIVE_DATA_NOTE) && !preview.warnings.includes(w));
       if (added.length > 0) {
         // The import is done: the preview and approval it used cannot be applied again.
         setPreview(null);
