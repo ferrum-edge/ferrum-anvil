@@ -699,6 +699,10 @@ fn path_listings_are_capped() {
     let listed = g.token_files();
     assert_eq!(listed.len(), anvil_portability::graph::MAX_LISTED_PATHS + 1);
     assert_eq!(listed.last().unwrap(), "… and 5 more");
+    // An export preview still lists every one.
+    let preview = bundle::preview_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
+    assert!(preview.linked_files.iter().any(|l| l.ends_with(&format!("/t/{}.jwt", anvil_portability::graph::MAX_LISTED_PATHS + 4))));
+    assert!(!preview.linked_files.iter().any(|l| l.contains("more")), "{:?}", preview.linked_files.last());
 }
 
 #[test]

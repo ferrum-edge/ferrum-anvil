@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Entries [`PortableGraph::token_files`] and [`PortableGraph::revision_files`]
-/// list at most; past it the last entry counts the rest. A listing is for
-/// people to read, and a crafted file could otherwise name millions of paths.
+/// list at most (the import warnings); past it the last entry counts the
+/// rest, since a crafted file could otherwise name millions of paths. An
+/// export preview ([`PortableGraph::local_files`]) lists every path.
 pub const MAX_LISTED_PATHS: usize = 200;
 
 /// `entries` cut to [`MAX_LISTED_PATHS`], with a last entry counting the rest.
@@ -122,6 +123,10 @@ impl PortableGraph {
     /// never exported.
     /// At most [`MAX_LISTED_PATHS`] are listed (see [`capped`]).
     pub fn token_files(&self) -> Vec<String> {
+        self.token_files_up_to(MAX_LISTED_PATHS)
+    }
+
+    fn token_files_up_to(&self, limit: usize) -> Vec<String> {
         let (mut out, mut total) = (Vec::new(), 0);
         let owners = self
             .workspaces
@@ -132,7 +137,7 @@ impl PortableGraph {
         for (kind, name, auth) in owners {
             for p in token_file_paths([auth]) {
                 total += 1;
-                if out.len() < MAX_LISTED_PATHS {
+                if out.len() < limit {
                     out.push(format!("{kind} '{name}' token file: {p}"));
                 }
             }
@@ -161,21 +166,28 @@ impl PortableGraph {
     /// the bundle like any object.
     /// At most [`MAX_LISTED_PATHS`] are listed (see [`capped`]).
     pub fn revision_files(&self) -> Vec<String> {
+        self.revision_files_up_to(MAX_LISTED_PATHS)
+    }
+
+    fn revision_files_up_to(&self, limit: usize) -> Vec<String> {
         let current: HashMap<_, _> = self.requests.iter().map(|r| (r.meta.id, r)).collect();
         // Per request: the linked and token paths seen so far, starting with
         // those of its current spec (read once).
-        let mut seen: HashMap<Id, (HashSet<String>, HashSet<String>)> = HashMap::new();
+        // Keyed by request id, or by revision id (`false`) for a revision whose
+        // request the graph lacks, so the two never share an entry.
+        let mut seen: HashMap<(bool, Id), (HashSet<String>, HashSet<String>)> = HashMap::new();
         let (mut out, mut total) = (Vec::new(), 0);
         for v in &self.revisions {
             let owner = current.get(&v.request_id);
-            let (linked_seen, tokens_seen) = seen.entry(owner.map_or(v.id, |r| r.meta.id)).or_insert_with(|| match owner {
-                Some(r) => {
-                    let mut linked = HashSet::new();
-                    linked_paths_into(&serde_json::to_value(&r.spec).unwrap_or_default(), &mut linked, &mut Vec::new());
-                    (linked, token_file_paths([&r.spec.auth]).into_iter().collect())
-                }
-                None => (HashSet::new(), HashSet::new()),
-            });
+            let (linked_seen, tokens_seen) =
+                seen.entry(owner.map_or((false, v.id), |r| (true, r.meta.id))).or_insert_with(|| match owner {
+                    Some(r) => {
+                        let mut linked = HashSet::new();
+                        linked_paths_into(&serde_json::to_value(&r.spec).unwrap_or_default(), &mut linked, &mut Vec::new());
+                        (linked, token_file_paths([&r.spec.auth]).into_iter().collect())
+                    }
+                    None => (HashSet::new(), HashSet::new()),
+                });
             let mut fresh = Vec::new();
             linked_paths_into(&serde_json::to_value(&v.spec).unwrap_or_default(), linked_seen, &mut fresh);
             let tokens: Vec<String> = token_file_paths([&v.spec.auth]).into_iter().filter(|p| tokens_seen.insert(p.clone())).collect();
@@ -186,7 +198,7 @@ impl PortableGraph {
             for (suffix, paths) in [("", fresh), (" token file", tokens)] {
                 for p in paths {
                     total += 1;
-                    if out.len() < MAX_LISTED_PATHS {
+                    if out.len() < limit {
                         out.push(label(suffix, &p));
                     }
                 }
@@ -198,16 +210,16 @@ impl PortableGraph {
     /// Whether a saved revision names a path its request's current spec does
     /// not ([`Self::revision_files`] is not empty).
     pub fn has_revision_files(&self) -> bool {
-        !self.revisions.is_empty() && !self.revision_files().is_empty()
+        !self.revisions.is_empty() && !self.revision_files_up_to(0).is_empty()
     }
 
     /// Every local file path the graph carries: [`Self::linked_files`], then
-    /// [`Self::token_files`], then [`Self::revision_files`]. This is what an
-    /// export preview lists.
+    /// [`Self::token_files`], then [`Self::revision_files`], each in full.
+    /// This is what an export preview lists.
     pub fn local_files(&self) -> Vec<String> {
         let mut out = self.linked_files();
-        out.extend(self.token_files());
-        out.extend(self.revision_files());
+        out.extend(self.token_files_up_to(usize::MAX));
+        out.extend(self.revision_files_up_to(usize::MAX));
         out
     }
 }
