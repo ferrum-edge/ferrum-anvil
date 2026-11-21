@@ -40,6 +40,15 @@ fn try_files_under(root: &Path, base: &Path) -> Result<BTreeSet<String>, String>
     Ok(files)
 }
 
+/// `contracts/ferrum-contracts` under the checkout `root`, once its
+/// `contracts` parent is known to be a real directory: a link there would
+/// move the whole vendored tree out of the checkout without any link inside
+/// it. [`try_files_under`] checks the vendored directory itself and below.
+fn try_vendored_dir(root: &Path) -> Result<PathBuf, String> {
+    real_dir(&root.join("contracts"))?;
+    Ok(root.join("contracts/ferrum-contracts"))
+}
+
 fn real_dir(path: &Path) -> Result<(), String> {
     let kind = std::fs::symlink_metadata(path).map_err(|error| format!("reading {}: {error}", path.display()))?.file_type();
     if kind.is_symlink() {
@@ -266,7 +275,7 @@ fn assert_catalog_matches_pin(root: &Path, compatibility_id: &str, errors: &Valu
 #[test]
 fn pinned_contract_hashes_and_anvil_copies_match() {
     let root = repo_root();
-    let vendor = root.join("contracts/ferrum-contracts");
+    let vendor = try_vendored_dir(&root).unwrap_or_else(|error| panic!("{error}"));
     // Walk the tree first: PIN is read only once it is known to be a regular
     // file in a tree with no links.
     let vendored_files = files_under(&vendor, &vendor);
@@ -473,7 +482,7 @@ fn local(values: &[&str]) -> BTreeSet<String> {
 /// fixtures are accepted or refused by both.
 #[test]
 fn pinned_diagnostic_ref_contract_matches_anvils_reader() {
-    let vendor = repo_root().join("contracts/ferrum-contracts");
+    let vendor = try_vendored_dir(&repo_root()).unwrap_or_else(|error| panic!("{error}"));
     // Refuse a link or special file anywhere in the tree before reading any.
     files_under(&vendor, &vendor);
     assert_diagnostic_ref_contract_matches_anvils_reader(&vendor, Some(22));
@@ -817,6 +826,22 @@ fn a_linked_scan_root_is_refused() {
         let error = listed.expect_err("a linked root was followed");
         assert!(error.contains("symbolic link"), "{error}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_contracts_parent_is_refused() {
+    let dir = scratch_dir("parent");
+    std::fs::create_dir_all(dir.join("moved/ferrum-contracts")).unwrap();
+    std::os::unix::fs::symlink(dir.join("moved"), dir.join("contracts")).unwrap();
+    let linked = try_vendored_dir(&dir);
+    std::fs::remove_file(dir.join("contracts")).unwrap();
+    std::fs::rename(dir.join("moved"), dir.join("contracts")).unwrap();
+    let real = try_vendored_dir(&dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let error = linked.expect_err("a linked contracts directory was followed");
+    assert!(error.contains("symbolic link"), "{error}");
+    assert_eq!(real.unwrap(), dir.join("contracts/ferrum-contracts"));
 }
 
 /// A `\` in a Unix file name is part of the name, not a separator, so such
