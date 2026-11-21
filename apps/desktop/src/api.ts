@@ -198,7 +198,8 @@ export interface ExportPreview {
   /**
    * Each local file path the bundle carries: linked files with the request or dataset that names them
    * (`request 'Upload': /path/to/file`), then JWT-SVID token files with the workspace, folder or request
-   * that names them (`request 'Orders' token file: /run/spire/jwt.token`). A full-backup preview leaves it out.
+   * that names them (`request 'Orders' token file: /run/spire/jwt.token`), then paths only a saved request
+   * revision names (`saved revision of request 'Upload': /path/to/file`). A full-backup preview leaves it out.
    */
   linked_files?: string[];
 }
