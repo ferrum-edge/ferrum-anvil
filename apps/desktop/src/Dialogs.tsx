@@ -1216,6 +1216,7 @@ export function ImportDialog(props: {
         setPreview(null);
         setIntoExisting(false);
         setNotice(null);
+        setAppliedNotes(null);
       }
     } catch (e) {
       setErr(String((e as Error).message));
@@ -1226,6 +1227,7 @@ export function ImportDialog(props: {
     const a = uid();
     setErr(null);
     setNotice(null);
+    setAppliedNotes(null);
     setCanceling(false);
     setAttempt(a);
     setBusy(what);
@@ -1269,10 +1271,11 @@ export function ImportDialog(props: {
       const approved = intoExisting ? existing.map((w) => w.id) : [];
       const r = await api.importApply(file.token, pass || null, preview.plan.policy, approved, preview.bundle_sha256, a);
       props.onImported(r.workspace_ids);
-      const added = r.warnings.filter((w) => !preview.warnings.includes(w));
+      const added = (r.warnings ?? []).filter((w) => !preview.warnings.includes(w));
       if (added.length > 0) {
-        // The import is done: the preview it used cannot be applied again.
+        // The import is done: the preview and approval it used cannot be applied again.
         setPreview(null);
+        setIntoExisting(false);
         setAppliedNotes(added);
         return;
       }
@@ -1362,6 +1365,7 @@ export function ImportDialog(props: {
             value={policy}
             onChange={(e) => {
               setPolicy(e.target.value);
+              setAppliedNotes(null);
               setPreview(null);
               setIntoExisting(false);
             }}
