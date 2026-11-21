@@ -32,8 +32,9 @@ gateway to v0.9.20.
   is one of `prerequest`, `test`, `after_response`, `unit_test` or `other`.
   `language` is `javascript` or `other`. `bytes` and `lines` are new. Read a
   script's body from the source file at the entry's `pointer`.
-- Credential placeholders made by an import are now bound to the secret they
-  replaced: `{{secret_<16 hex digits>}}` for header, query, form, body, path and
+- Placeholders an import makes for a redacted credential are now bound to the
+  secret they replaced (a credential the source never supplied, such as an
+  OpenAPI security scheme's key, keeps its scheme-derived name): `{{secret_<16 hex digits>}}` for header, query, form, body, path and
   environment values, `{{auth_<16 hex digits>_<field>}}` for auth secrets and
   URL userinfo, and `{{url_<16 hex digits>}}` for quarantined URLs. They replace
   field-named placeholders (`{{Authorization}}`, `{{api_key}}`), owner-named

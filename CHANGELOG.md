@@ -691,7 +691,9 @@ unchanged from 0.1.7.
   longer carries the script body (`source`) or the owner's name. It has `owner` (`collection`,
   `folder`, `request`, `test_suite`), `event` and `language` from a fixed vocabulary (`other`
   otherwise), `bytes` and `lines`.
-- Every credential placeholder an import makes is bound to the literal it replaced (#584).
+- Every placeholder an import makes for a redacted credential literal is bound to the literal it
+  replaced (#584). A credential the source never supplied, such as an OpenAPI or Swagger security
+  scheme's key, keeps its scheme-derived variable name.
   Sensitive header, query, form, body, path and environment values import as `{{secret_<16 hex
   digits>}}` instead of a name taken from the field (`{{Authorization}}`, `{{api_key}}`, `{{pin}}`,
   `_2`, …). Postman and Insomnia auth secrets, URL userinfo (every importer) and cURL `-u` /
@@ -700,7 +702,8 @@ unchanged from 0.1.7.
   digits>}}` instead of `{{url-needs-review}}`. The digits are the start of HMAC-SHA256 over the
   kind, the field and the literal, keyed by a key derived from the profile's data key. That key is
   never stored in workspace files or exports. The same secret in the same field shares one variable
-  across the import and every reimport; a changed secret gets a new variable to fill in. Empty
+  across the import and every reimport while the credential key stays the same (the same
+  profile and data key); a changed secret gets a new variable to fill in. Empty
   secrets are left empty. `ImportResult::credential_names` lists the names the import made. A
   secret variable definition keeps its own name: its literal is dropped and the variable is listed
   as required.
