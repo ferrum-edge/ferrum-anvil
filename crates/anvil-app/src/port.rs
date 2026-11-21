@@ -187,16 +187,11 @@ impl App {
         g.workspaces = wss;
         // The data of every dataset with sensitive columns in the profile:
         // a bundle never carries it as a plaintext entry, also when only a
-        // request of an exported workspace uses the same file.
-        for w in self.workspaces()? {
-            for d in self.datasets(&w.meta.id)? {
-                if let anvil_domain::request::AttachmentRef::Stored { sha256, .. } = d.attachment
-                    && !d.sensitive_columns.is_empty()
-                {
-                    g.withheld.insert(sha256);
-                }
-            }
-        }
+        // request of an exported workspace uses the same file. Read before
+        // the files (their size check concerns plaintext entries only) and
+        // again after: an import stores a dataset before its file, so a file
+        // read here whose sensitive dataset arrived meanwhile is classified.
+        let withheld_before = self.sensitive_dataset_hashes()?;
         // Attachments referenced anywhere in the graph. One whose content
         // cannot be read here travels without it, and the export lists it
         // among its excluded items.
@@ -206,11 +201,31 @@ impl App {
             if sha.len() == 64
                 && let Some(b) = self.get_attachment(&sha)?
             {
-                check_attachment_size(&g, &sha, b.len() as u64, bundle::MAX_ENTRY_BYTES)?;
+                if !withheld_before.contains(&sha) {
+                    check_attachment_size(&g, &sha, b.len() as u64, bundle::MAX_ENTRY_BYTES)?;
+                }
                 g.attachments.insert(sha, b);
             }
         }
+        g.withheld = withheld_before;
+        g.withheld.extend(self.sensitive_dataset_hashes()?);
         Ok(g)
+    }
+
+    /// The content hash of the stored data of every dataset with sensitive
+    /// columns in the profile.
+    fn sensitive_dataset_hashes(&self) -> Result<std::collections::BTreeSet<String>> {
+        let mut out = std::collections::BTreeSet::new();
+        for w in self.workspaces()? {
+            for d in self.datasets(&w.meta.id)? {
+                if let anvil_domain::request::AttachmentRef::Stored { sha256, .. } = d.attachment
+                    && !d.sensitive_columns.is_empty()
+                {
+                    out.insert(sha256);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// What [`App::export_with_standards`] would write. A full backup is

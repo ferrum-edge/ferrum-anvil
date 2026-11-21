@@ -210,35 +210,69 @@ fn plaintext_attachments(graph: &PortableGraph) -> impl Iterator<Item = (&String
     graph.attachments.iter().filter(move |(hash, _)| !withheld.contains(hash.as_str()))
 }
 
-/// The datasets whose stored data an export of `mode` leaves out: in the
-/// bundle each names a linked file instead (its file name), so it is chosen
-/// on the target machine rather than resolving to whatever content with that
-/// hash the importing device holds. As `dataset 'Users': users.csv`.
-fn unlinked_datasets(graph: &PortableGraph, mode: ExportMode) -> Vec<String> {
+/// The stored attachments of the graph's requests and datasets whose data an
+/// export of `mode` leaves out: in the bundle each names a linked file
+/// instead (its file name), so the file is chosen on the target machine
+/// rather than resolving to whatever content with that hash the importing
+/// device holds or later stores. As `dataset 'Users': users.csv` or
+/// `request 'Upload': users.csv`.
+fn unlinked_files(graph: &PortableGraph, mode: ExportMode) -> Vec<String> {
     let dropped = dropped_hashes(graph, mode);
-    graph
-        .datasets
+    if dropped.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let items = graph
+        .requests
         .iter()
-        .filter_map(|d| match &d.attachment {
-            AttachmentRef::Stored { sha256, file_name, .. } if dropped.contains(sha256.as_str()) => {
-                Some(format!("dataset '{}': {file_name}", d.name))
-            }
-            _ => None,
-        })
-        .collect()
+        .map(|r| ("request", &r.name, serde_json::to_value(&r.spec)))
+        .chain(graph.datasets.iter().map(|d| ("dataset", &d.name, serde_json::to_value(&d.attachment))));
+    for (what, name, value) in items {
+        let mut names = Vec::new();
+        dropped_file_names(&value.unwrap_or_default(), &dropped, &mut names);
+        out.extend(names.into_iter().map(|f| format!("{what} '{name}': {f}")));
+    }
+    out
 }
 
-/// In a bundle's objects, each dataset whose stored data is in `dropped`
-/// names a linked file instead ([`unlinked_datasets`]).
-fn unlink_datasets(objects: &mut serde_json::Value, dropped: &BTreeSet<&str>) {
-    let Some(datasets) = objects.get_mut("datasets").and_then(|d| d.as_array_mut()) else { return };
-    for d in datasets {
-        let Some(attachment) = d.get_mut("attachment") else { continue };
-        let stored = attachment.get("kind").and_then(|k| k.as_str()) == Some("stored");
-        if stored && attachment.get("sha256").and_then(|h| h.as_str()).is_some_and(|h| dropped.contains(h)) {
-            let file_name = attachment.get("file_name").and_then(|f| f.as_str()).unwrap_or_default().to_string();
-            *attachment = serde_json::json!({ "kind": "linked_file", "path": file_name });
+/// The file name of every stored attachment in `v` whose hash is in
+/// `dropped`, each once.
+fn dropped_file_names(v: &serde_json::Value, dropped: &BTreeSet<&str>, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(o) => {
+            if let Some(f) = dropped_attachment(o, dropped)
+                && !out.contains(&f)
+            {
+                out.push(f);
+            }
+            o.values().for_each(|x| dropped_file_names(x, dropped, out));
         }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| dropped_file_names(x, dropped, out)),
+        _ => {}
+    }
+}
+
+/// The file name of `o` when it is a stored attachment whose hash is in `dropped`.
+fn dropped_attachment(o: &serde_json::Map<String, serde_json::Value>, dropped: &BTreeSet<&str>) -> Option<String> {
+    let stored = o.get("kind").and_then(|k| k.as_str()) == Some("stored");
+    let hash = o.get("sha256").and_then(|h| h.as_str())?;
+    (stored && dropped.contains(hash)).then(|| o.get("file_name").and_then(|f| f.as_str()).unwrap_or_default().to_string())
+}
+
+/// In a bundle's objects (requests, their revisions and datasets), each
+/// stored attachment whose data is in `dropped` names a linked file instead
+/// ([`unlinked_files`]).
+fn unlink_dropped(v: &mut serde_json::Value, dropped: &BTreeSet<&str>) {
+    match v {
+        serde_json::Value::Object(o) => {
+            if let Some(file_name) = dropped_attachment(o, dropped) {
+                *v = serde_json::json!({ "kind": "linked_file", "path": file_name });
+                return;
+            }
+            o.values_mut().for_each(|x| unlink_dropped(x, dropped));
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(|x| unlink_dropped(x, dropped)),
+        _ => {}
     }
 }
 
@@ -350,7 +384,13 @@ pub fn prepare_redacting(
     }
     charge_total_bytes(sealed_len, &mut remaining)?;
     let mut objects = serde_json::to_value(graph)?;
-    unlink_datasets(&mut objects, &dropped);
+    if !dropped.is_empty() {
+        for list in ["requests", "revisions", "datasets"] {
+            if let Some(items) = objects.get_mut(list) {
+                unlink_dropped(items, &dropped);
+            }
+        }
+    }
     let san = sanitize::sanitize(&mut objects, redaction_names);
     let mut excluded = graph.omitted.clone();
     // Stored files whose content could not be read here travel without it.
@@ -383,7 +423,7 @@ pub fn prepare_redacting(
                 "the data of dataset '{name}' (the same file is the data of a dataset with sensitive columns, which this bundle does not carry; choose its file on the target machine)"
             ),
             _ => format!(
-                "a stored file of request '{name}' (it is the data of a dataset with sensitive columns, which this bundle does not carry; it fails until the file is attached again)"
+                "a stored file of request '{name}' (it is the data of a dataset with sensitive columns, which this bundle does not carry; choose its file on the target machine)"
             ),
         };
         if !excluded.contains(&entry) {
@@ -397,6 +437,17 @@ pub fn prepare_redacting(
     if encrypted {
         vault.secrets = graph.secrets.clone();
         vault.literals = san.extracted.clone();
+        // The vault's exact size, with each sealed file as its base64 length,
+        // before any of it is encoded.
+        vault.attachments = sealed.iter().map(|h| ((*h).to_string(), String::new())).collect();
+        let skeleton = serde_json::to_vec(&vault)?.len() as u64;
+        if skeleton.saturating_add(sealed_len).saturating_add(VAULT_ENVELOPE_OVERHEAD) > MAX_ENTRY_BYTES {
+            return Err(BundleError::Limits(format!(
+                "the encrypted vault with the data of the datasets with sensitive columns ({} MiB) exceeds {} MiB; export a full backup instead",
+                (skeleton + sealed_len) / (1024 * 1024),
+                MAX_ENTRY_BYTES / (1024 * 1024)
+            )));
+        }
         for hash in &sealed {
             let data = &graph.attachments[*hash];
             if sha256(data) != *hash {
@@ -448,7 +499,7 @@ pub fn prepare_redacting(
             .collect(),
         device_bindings: {
             let mut notes = device_bindings(graph);
-            if graph.linked_files().is_empty() && !unlinked_datasets(graph, opts.mode).is_empty() {
+            if graph.linked_files().is_empty() && !unlinked_files(graph, opts.mode).is_empty() {
                 notes.insert(
                     0,
                     "Requests or datasets name linked local files; attach them, or choose them again on the target machine.".into(),
@@ -671,7 +722,7 @@ fn preview_prepared(
         literals_moved: vault.literals.len(),
         linked_files: {
             let mut files = graph.linked_files();
-            files.extend(unlinked_datasets(graph, opts.mode));
+            files.extend(unlinked_files(graph, opts.mode));
             files
         },
     })
@@ -784,7 +835,7 @@ fn write_prepared(
         literals_moved: vault.literals.len(),
         linked_files: {
             let mut files = graph.linked_files();
-            files.extend(unlinked_datasets(graph, opts.mode));
+            files.extend(unlinked_files(graph, opts.mode));
             files
         },
     };
