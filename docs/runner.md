@@ -104,7 +104,10 @@ the run's exact-value redactor, and the column names are added to the
 redaction name list for that run. The report shows only the dataset's name,
 format, SHA-256, row count and column names. A sensitive column that is not
 in the dataset is reported (and rejected by `App::create_dataset` and the
-CLI), never silently ignored.
+CLI), never silently ignored. A workspace bundle never writes such a dataset's data as a
+plaintext entry: an encrypted transfer seals it in the vault, and a
+share-safe bundle leaves it out (see
+[storage-and-recovery.md](storage-and-recovery.md)).
 
 ## Step outcome and "failed"
 

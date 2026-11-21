@@ -10,7 +10,7 @@ use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workload::JwtSvidSource;
 use anvil_domain::workspace::{Dataset, Environment, Folder, RequestDefinition, RequestRevision, Scenario, Workspace};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Entries [`PortableGraph::token_files`] and [`PortableGraph::revision_files`]
 /// list at most (the import warnings); past it the last entry counts the
@@ -88,6 +88,12 @@ pub struct PortableGraph {
     /// the bundle's excluded items. Never written as an object.
     #[serde(skip)]
     pub omitted: Vec<String>,
+    /// Content hashes of the stored data of datasets with sensitive columns
+    /// anywhere in the exporting profile, also outside this graph: a bundle
+    /// never writes them as plaintext entries, whatever references them.
+    /// Never written as an object.
+    #[serde(skip)]
+    pub withheld: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

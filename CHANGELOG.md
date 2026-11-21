@@ -99,6 +99,12 @@ cannot read them, so keep a copy of each profile if you may need to downgrade.
 
 ### Security
 
+- Workspace bundles no longer write the stored data of a dataset with `sensitive_columns` as a
+  plaintext `attachments/` entry, in either mode and even when a request uses the same file
+  (GHSA-7p29-5g2w-wwq4). An encrypted transfer carries it inside the encrypted vault and restores
+  it on import. A share-safe bundle leaves it out and lists the dataset (and any such request)
+  among its excluded items; the imported dataset names a linked file to choose on the target
+  machine. An Anvil without this change opens such an encrypted transfer without that data.
 - Import report text and imported names no longer leak a credential through the free-text
   redaction (#584, #593, #595, #596, GHSA-84pr-239v-mv8x). Report entries no longer quote source
   values at all. The redaction that remains for pointer tokens, external references, redaction
