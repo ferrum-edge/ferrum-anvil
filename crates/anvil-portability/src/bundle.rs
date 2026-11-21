@@ -173,12 +173,19 @@ pub struct ExportPreview {
     pub manifest: Manifest,
     pub secrets_included: usize,
     pub literals_moved: usize,
-    /// Every linked local file the exported requests and datasets name, as
-    /// `request 'Upload': /path/to/file` ([`PortableGraph::linked_files`]).
-    /// The bundle carries these paths of this machine (user names, folder
-    /// layout), so the preview lists them rather than only warning that
-    /// there are some. Not written into the bundle's manifest.
+    /// Every local file path the export carries ([`PortableGraph::local_files`]):
+    /// each linked local file the exported requests and datasets name, as
+    /// `request 'Upload': /path/to/file`, then each JWT-SVID token file the
+    /// exported workspaces, folders and requests name, as
+    /// `request 'Orders' token file: /run/spire/jwt.token`, then each path only
+    /// a saved request revision names. The bundle carries
+    /// these paths of this machine (user names, folder layout), so the
+    /// preview lists them rather than only warning that there are some. Not
+    /// written into the bundle's manifest.
     pub linked_files: Vec<String>,
+    /// The same paths as [`Self::linked_files`], each apart from what names
+    /// it, so a display can format the path alone.
+    pub local_files: Vec<crate::graph::LocalFile>,
 }
 
 fn sha256(b: &[u8]) -> String {
@@ -189,6 +196,15 @@ fn device_bindings(graph: &PortableGraph) -> Vec<String> {
     let mut out = Vec::new();
     if !graph.linked_files().is_empty() {
         out.push("Requests or datasets name linked local files; attach them, or choose them again on the target machine.".into());
+    }
+    if graph.has_token_files() {
+        out.push("JWT-SVID auth names token files by their path on this machine; check each path on the target machine, where the desktop reads a token file only once it is chosen there.".into());
+    }
+    if graph.has_revision_files() {
+        out.push(
+            "Saved request revisions name local file paths of this machine; revisions are never sent, so nothing needs choosing for them."
+                .into(),
+        );
     }
     out.push("OS keychain entries, local master keys and signed-in provider sessions are device-bound and are never exported.".into());
     out
@@ -521,7 +537,8 @@ fn preview_prepared(
         manifest,
         secrets_included: vault.secrets.len(),
         literals_moved: vault.literals.len(),
-        linked_files: graph.linked_files(),
+        linked_files: graph.local_files(),
+        local_files: graph.local_file_entries(),
     })
 }
 
@@ -630,7 +647,8 @@ fn write_prepared(
         manifest,
         secrets_included: vault.secrets.len(),
         literals_moved: vault.literals.len(),
-        linked_files: graph.linked_files(),
+        linked_files: graph.local_files(),
+        local_files: graph.local_file_entries(),
     };
     Ok((bytes, preview))
 }

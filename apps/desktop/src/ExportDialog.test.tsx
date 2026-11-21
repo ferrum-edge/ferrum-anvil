@@ -96,6 +96,18 @@ describe("export linked files", () => {
     expect(list.textContent).not.toContain("\\\\?\\");
   });
 
+  it("formats only the path of a structured entry", async () => {
+    const entries = [
+      { owner: "request 'Up' token file", path: "/home/a/build' token file: \\\\?\\jwt" },
+      { owner: "request 'Up'", path: "\\\\?\\C:\\Users\\me\\a.bin" },
+    ];
+    backend({ ...preview(entries.map((e) => `${e.owner}: ${e.path}`)), local_files: entries });
+    render(<ExportDialog workspace={WORKSPACE} onClose={vi.fn()} notify={vi.fn()} />);
+    const list = await screen.findByTestId("export-linked-files");
+    const items = Array.from(list.querySelectorAll("li")).map((li) => li.textContent);
+    expect(items).toEqual(["request 'Up' token file: /home/a/build' token file: \\\\?\\jwt", "request 'Up': C:\\Users\\me\\a.bin"]);
+  });
+
   it("shows no list when the preview has none", async () => {
     backend(preview());
     render(<ExportDialog workspace={null} onClose={vi.fn()} notify={vi.fn()} />);
@@ -108,5 +120,10 @@ describe("export linked files", () => {
     expect(displayLinkedFile("request 'a': b': \\\\?\\C:\\x")).toBe("request 'a': b': C:\\x");
     expect(displayLinkedFile("request 'Up': C:\\Users\\me\\a.bin")).toBe("request 'Up': C:\\Users\\me\\a.bin");
     expect(displayLinkedFile("request 'Up': /tmp/a.bin")).toBe("request 'Up': /tmp/a.bin");
+    expect(displayLinkedFile("request 'Up' token file: \\\\?\\C:\\run\\jwt")).toBe("request 'Up' token file: C:\\run\\jwt");
+    expect(displayLinkedFile("saved revision of request 'Up': \\\\?\\C:\\x")).toBe("saved revision of request 'Up': C:\\x");
+    expect(displayLinkedFile("saved revision 0b1d-ef: \\\\?\\C:\\x")).toBe("saved revision 0b1d-ef: C:\\x");
+    // A POSIX path that merely contains the prefix text is shown as it is.
+    expect(displayLinkedFile("request 'Up' token file: /home/a/build: \\\\?\\jwt")).toBe("request 'Up' token file: /home/a/build: \\\\?\\jwt");
   });
 });
