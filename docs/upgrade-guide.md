@@ -3,8 +3,13 @@
 ## 0.1.8
 
 0.1.8 opens 0.1.7 profiles without a new migration or enrollment: the profile
-database stays at schema 6. The changes below affect imports, load-run
-scripts, gateway profiles and gateway diagnostics.
+database stays at schema 6. Going back is not supported: 0.1.8 no longer
+stores the unused `autosave`, `lock.run_policy` and
+`lock.clear_clipboard_on_lock` settings (#529), and 0.1.7 requires them, so
+once 0.1.8 saves the app settings (any Settings change), 0.1.7 cannot read
+them. If you may need to downgrade, keep a copy of each profile, or a full
+backup made with 0.1.7, before upgrading. The changes below affect imports,
+load-run scripts, gateway profiles and gateway diagnostics.
 
 ### Ferrum Edge v0.9.20 only (#481)
 

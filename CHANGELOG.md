@@ -19,8 +19,9 @@ token. Earlier releases are no longer supported; the previously supported ones k
 diagnostics catalogs. A changed spec or collection can be reimported into the import it came from,
 and workspaces and load datasets can be deleted. Import placeholders and reports, `anvil load run`
 exit codes and CSVs, and gateway console links change incompatibly: read the Breaking section below
-and the [upgrade guide](docs/upgrade-guide.md#018) before upgrading. The profile database format is
-unchanged from 0.1.7.
+and the [upgrade guide](docs/upgrade-guide.md#018) before upgrading. 0.1.7 profiles open without a
+migration or enrollment, but going back is not supported: once 0.1.8 saves the app settings, 0.1.7
+cannot read them, so keep a copy of each profile if you may need to downgrade.
 
 ### Added
 
