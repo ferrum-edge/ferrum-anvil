@@ -1,6 +1,20 @@
 # Upgrade guide
 
-## Unreleased
+## 0.1.8
+
+0.1.8 opens 0.1.7 profiles as they are: the profile database format is
+unchanged and no enrollment or migration runs. The changes below affect
+imports, load-run scripts, gateway profiles and gateway diagnostics.
+
+### Ferrum Edge v0.9.20 only (#481)
+
+Ferrum Edge v0.9.20 is the only supported release. New gateway profiles and
+the lab default to it; existing profiles keep the release they declare, and
+their diagnostics catalogs stay embedded, so diagnoses for an earlier release
+still work. `anvil-lab --release` refuses v0.9.5 to v0.9.15. Against an Edge
+listener older than v0.9.20, DTLS 1.3 with a client certificate times out
+again (`client.dtls.handshake_timeout`); DTLS 1.2, and listeners that do not
+request a certificate, are unaffected. Upgrade the gateway to v0.9.20.
 
 ### Import reports and auth placeholder names (#584)
 
