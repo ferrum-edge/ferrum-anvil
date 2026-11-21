@@ -29,8 +29,8 @@ use refs::Refs;
 use schema::SampleGen;
 use serde_json::{Map, Value, json};
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) struct Ctx<'a> {
     pub root: &'a Value,
@@ -281,9 +281,10 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
 /// server variables are replaced by their defaults (operation/path-level
 /// overrides); otherwise they become `{{variables}}` defined in the
 /// environment. Each variable is rendered once however often the URL uses it
-/// (its default, the check against its `enum`, its description), and the
-/// text read and written is charged to the import's text budget: an
-/// operation-level server is converted for every operation that uses it.
+/// (its default, the check against its `enum`, its description), under its
+/// own `{{variable}}` name ([`server_aliases`]), and the text read and
+/// written is charged to the import's text budget: an operation-level server
+/// is converted for every operation that uses it.
 fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, Vec<Variable>) {
     let raw = str_of(s, "url").unwrap_or("/").trim();
     let empty = Map::new();
@@ -292,6 +293,10 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
     let mut out = String::new();
     let mut rendered: HashMap<&str, String> = HashMap::new();
     let mut rest = if b.charge_text(sptr, raw.len()) { raw } else { "" };
+    // The environment also holds `baseUrl`, and a relative URL is prefixed
+    // with `{{origin}}` (a URL starting with a variable is not relative).
+    let relative = !rest.contains("://") && !(rest.starts_with('{') && rest.contains('}'));
+    let aliases = server_aliases(rest, if relative { &["baseUrl", "origin"] } else { &["baseUrl"] });
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
@@ -304,7 +309,7 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
         rest = &after[close + 1..];
         let text = match rendered.entry(name) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(server_variable(b, decl, name, sptr, inline, &mut vars)),
+            Entry::Vacant(e) => e.insert(server_variable(b, decl, name, &aliases[name], sptr, inline, &mut vars)),
         };
         if !b.charge_text(sptr, text.len()) {
             rest = "";
@@ -328,10 +333,53 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
     (url, vars)
 }
 
-/// Render server variable `name` of `decl` once: the text the URL gets for
-/// it, with its `Variable` (or required variable) recorded. Every `enum`
-/// value read is charged.
-fn server_variable(b: &mut Builder, decl: &Map<String, Value>, name: &str, sptr: &str, inline: bool, vars: &mut Vec<Variable>) -> String {
+/// A distinct `{{variable}}` name for each variable a server URL uses, so
+/// each keeps its own value: its sanitized name ([`sanitize_var`]), or, when
+/// that is taken, the next free `_2`, `_3`, … suffix. `{release-name}` and
+/// `{release_name}` both sanitize to `release_name`; the variable already
+/// spelled that way keeps it and the other gets `release_name_2`. Names in
+/// `taken` (the environment's own) are never given. The same URL always
+/// gets the same names.
+fn server_aliases<'a>(url: &'a str, taken: &[&str]) -> HashMap<&'a str, String> {
+    let mut names: Vec<&str> = vec![];
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut rest = url;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else { break };
+        let name = &after[..close];
+        if seen.insert(name) {
+            names.push(name);
+        }
+        rest = &after[close + 1..];
+    }
+    let mut used = crate::common::PlaceholderNames::default();
+    taken.iter().for_each(|t| used.reserve(t));
+    let mut aliases = HashMap::with_capacity(names.len());
+    // Names already in sanitized form first, so they keep their spelling.
+    for exact in [true, false] {
+        for &name in &names {
+            let base = sanitize_var(name);
+            if (base == name) == exact {
+                aliases.insert(name, used.name_verbatim(&base));
+            }
+        }
+    }
+    aliases
+}
+
+/// Render server variable `name` of `decl` once, as `{{alias}}`: the text
+/// the URL gets for it, with its `Variable` (or required variable) recorded.
+/// Every `enum` value read is charged.
+fn server_variable(
+    b: &mut Builder,
+    decl: &Map<String, Value>,
+    name: &str,
+    alias: &str,
+    sptr: &str,
+    inline: bool,
+    vars: &mut Vec<Variable>,
+) -> String {
     let vptr = ptr(&ptr(sptr, "variables"), name);
     let d = decl.get(name);
     if d.is_none() {
@@ -360,10 +408,10 @@ fn server_variable(b: &mut Builder, decl: &Map<String, Value>, name: &str, sptr:
     if inline && let Some(dv) = def {
         return dv;
     }
-    let v = sanitize_var(name);
+    let v = alias;
     match def {
         Some(dv) => {
-            let mut var = Variable::plain(&v, &dv);
+            let mut var = Variable::plain(v, &dv);
             if let Some(e) = values {
                 let mut listed = vec![];
                 for x in e {
@@ -381,7 +429,7 @@ fn server_variable(b: &mut Builder, decl: &Map<String, Value>, name: &str, sptr:
             }
             vars.push(var);
         }
-        None => b.report.require_var(&v, false, "server variable without a default", &vptr),
+        None => b.report.require_var(v, false, "server variable without a default", &vptr),
     }
     format!("{{{{{v}}}}}")
 }

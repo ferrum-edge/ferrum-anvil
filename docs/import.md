@@ -810,8 +810,14 @@ other version (for example 3.3 or 4.0) is refused with
 
 **Structure.** `info.title`/`version`/`summary`/`description` → workspace.
 Each server becomes an environment with `baseUrl` and the server variables
-(defaults as values, enums and descriptions in the variable description);
-3.2 server `name` is the environment name; `server_index` picks the active
+(defaults as values, enums and descriptions in the variable description).
+A variable's environment name is its name with characters other than ASCII
+letters, digits and `_` replaced by `_`; when that name is taken by another
+variable of the server, by `baseUrl` or (for a relative URL) by `origin`,
+it gets the next free `_2`, `_3`, … suffix, a variable already spelled that
+way keeping the plain name (`{release-name}/{release_name}` becomes
+`{{release_name_2}}/{{release_name}}`). The same document always gets the
+same names. 3.2 server `name` is the environment name; `server_index` picks the active
 one. Relative server URLs become `{{origin}}/…` with `origin` required.
 Swagger 2.0 `schemes` × `host` + `basePath` become environments (https is
 assumed and reported when `schemes` is missing). Path- and operation-level
