@@ -209,6 +209,31 @@ fn request_variable_names(root: &Value, max_depth: usize) -> HashSet<String> {
             scan.out.insert(format!("{v}{suffix}"));
         }
     }
+    // Every `{{name}}` a decoded string of the document writes (JSON or YAML
+    // escapes can hide one from the raw-text reservation), as written and
+    // as a placeholder would spell it.
+    let mut stack = vec![root];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::String(text) if text.contains("{{") => {
+                let mut rest = text.as_str();
+                while let Some(open) = rest.find("{{") {
+                    let after = &rest[open + 2..];
+                    let Some(close) = after.find("}}") else { break };
+                    let expr = after[..close].trim();
+                    let name = expr.strip_prefix("_.").unwrap_or(expr);
+                    if !name.is_empty() && name.len() <= 256 {
+                        scan.out.insert(name.to_string());
+                        scan.out.insert(sanitize_var(name));
+                    }
+                    rest = &after[close + 2..];
+                }
+            }
+            Value::Array(a) => stack.extend(a.iter()),
+            Value::Object(o) => stack.extend(o.values()),
+            _ => {}
+        }
+    }
     scan.out
 }
 
@@ -571,7 +596,11 @@ fn server_aliases<'a>(
 ) -> HashMap<&'a str, String> {
     let names: Vec<&str> = server_url_names(url, decl, inline).into_iter().filter(|(_, named)| *named).map(|(n, _)| n).collect();
     let mut used = crate::common::PlaceholderNames::default();
-    used.reserve("baseUrl");
+    // A document-level server's environment holds `baseUrl`; an operation-
+    // level server may refer to it, as `{baseUrl}`, and keeps that name.
+    if !inline {
+        used.reserve("baseUrl");
+    }
     if renders_relative(url, decl, inline, budget) {
         used.reserve("origin");
     }
