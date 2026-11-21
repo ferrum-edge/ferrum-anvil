@@ -94,40 +94,85 @@ fn is_32(d: Dialect) -> bool {
 /// operation and component level), and each security scheme's credential
 /// names, all sanitized as the importer names them.
 fn request_variable_names(root: &Value) -> HashSet<String> {
+    // A local `$ref` (a shared Path Item or parameter), followed a few times.
+    fn local<'a>(root: &'a Value, mut v: &'a Value) -> Option<&'a Value> {
+        for _ in 0..8 {
+            match v.get("$ref").and_then(Value::as_str) {
+                Some(r) => v = root.pointer(r.strip_prefix('#')?)?,
+                None => return Some(v),
+            }
+        }
+        None
+    }
+    let resolve = |v| local(root, v);
     let mut out = HashSet::new();
-    let paths = root.get("paths").and_then(Value::as_object);
-    for path in paths.into_iter().flat_map(|p| p.keys()) {
-        let mut rest = path.as_str();
+    let template_names = |path: &str, out: &mut HashSet<String>| {
+        let mut rest = path;
         while let Some(open) = rest.find('{') {
             let after = &rest[open + 1..];
             let Some(close) = after.find('}') else { break };
             out.insert(sanitize_var(&after[..close]));
             rest = &after[close + 1..];
         }
-    }
-    let mut lists: Vec<&Value> = vec![];
-    for item in paths.into_iter().flat_map(|p| p.values()) {
-        lists.extend(item.get("parameters"));
+    };
+    let mut parameter_lists: Vec<&Value> = vec![];
+    let mut operations: Vec<&Value> = vec![];
+    let paths = root.get("paths").and_then(Value::as_object);
+    for (path, item) in paths.into_iter().flatten() {
+        template_names(path, &mut out);
+        let Some(item) = resolve(item) else { continue };
+        parameter_lists.extend(item.get("parameters"));
         if let Some(o) = item.as_object() {
-            lists.extend(o.values().filter_map(|op| op.get("parameters")));
+            operations.extend(o.values().filter(|v| v.is_object()));
+            // OpenAPI 3.2 `additionalOperations`.
+            operations.extend(o.get("additionalOperations").and_then(Value::as_object).into_iter().flat_map(|a| a.values()));
         }
     }
-    for p in lists.into_iter().filter_map(Value::as_array).flatten() {
-        if let Some(name) = p.get("name").and_then(Value::as_str) {
-            out.insert(sanitize_var(name));
-        }
+    for op in &operations {
+        parameter_lists.extend(op.get("parameters"));
     }
     let components = root.pointer("/components/parameters").or_else(|| root.get("parameters")).and_then(Value::as_object);
-    for p in components.into_iter().flat_map(|c| c.values()) {
-        if let Some(name) = p.get("name").and_then(Value::as_str) {
+    let declared = parameter_lists.into_iter().filter_map(Value::as_array).flatten().chain(components.into_iter().flat_map(|c| c.values()));
+    for p in declared {
+        if let Some(name) = resolve(p).and_then(|p| p.get("name")).and_then(Value::as_str) {
             out.insert(sanitize_var(name));
         }
     }
-    let schemes = root.pointer("/components/securitySchemes").or_else(|| root.get("securityDefinitions")).and_then(Value::as_object);
-    for key in schemes.into_iter().flat_map(|s| s.keys()) {
+    // Every security scheme's credential names, by the scheme keys and by
+    // the requirement keys that name them (OpenAPI 3.2 allows a URI).
+    let mut schemes: Vec<&str> = vec![];
+    let defined = root.pointer("/components/securitySchemes").or_else(|| root.get("securityDefinitions")).and_then(Value::as_object);
+    schemes.extend(defined.into_iter().flat_map(|s| s.keys()).map(String::as_str));
+    for list in std::iter::once(root.get("security")).chain(operations.iter().map(|op| op.get("security"))) {
+        for requirement in list.and_then(Value::as_array).into_iter().flatten() {
+            schemes.extend(requirement.as_object().into_iter().flat_map(|r| r.keys()).map(String::as_str));
+        }
+    }
+    for key in schemes {
         let v = sanitize_var(key);
         for suffix in ["", "_username", "_password", "_client_id", "_client_secret"] {
             out.insert(format!("{v}{suffix}"));
+        }
+    }
+    // The placeholders of path- and operation-level servers (their variables
+    // without a default): a document-level server never takes one as a suffix.
+    let mut override_servers: Vec<&Value> = vec![];
+    for (_, item) in paths.into_iter().flatten() {
+        let Some(item) = resolve(item) else { continue };
+        override_servers.extend(item.get("servers"));
+    }
+    override_servers.extend(operations.iter().filter_map(|op| op.get("servers")));
+    for server in override_servers.into_iter().filter_map(Value::as_array).flatten() {
+        let (Some(url), decl) = (server.get("url").and_then(Value::as_str), server.get("variables")) else { continue };
+        let mut rest = url;
+        while let Some(open) = rest.find('{') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('}') else { break };
+            let name = &after[..close];
+            if decl.and_then(|d| d.get(name)).and_then(|d| d.get("default")).is_none() {
+                out.insert(sanitize_var(name));
+            }
+            rest = &after[close + 1..];
         }
     }
     out
@@ -300,7 +345,6 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
             if s.get("name").is_some() && !is_32(ctx.dialect) {
                 only_32(ctx, b, &ptr(&sptr, "name"), "server `name`");
             }
-            b.server_variable_names.extend(vars.iter().map(|v| v.name.clone()));
             let mut all = vec![Variable::plain("baseUrl", &url)];
             all.extend(vars);
             envs.push((name, url, all));
@@ -347,8 +391,13 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool, avoid: &Hash
     let mut rest = if b.charge_text(sptr, raw.len()) { raw } else { "" };
     // An operation-level server's placeholders sit beside the document's
     // server environment, so its names are avoided too.
-    let env_names = if inline { b.server_variable_names.clone() } else { HashSet::new() };
-    let aliases = server_aliases(rest, decl, inline, b.text_left(), &[avoid, &env_names]);
+    let none = HashSet::new();
+    let env_names = if inline { &b.server_variable_names } else { &none };
+    let aliases = server_aliases(rest, decl, inline, b.text_left(), &[avoid, env_names]);
+    if !inline {
+        // Every name a document-level server gives, required ones included.
+        b.server_variable_names.extend(aliases.values().cloned());
+    }
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
@@ -503,15 +552,21 @@ fn server_aliases<'a>(
             }
         }
     }
-    // A suffixed name is never one in `avoid` (reserved only when a
-    // suffix is needed).
-    let mut avoided = false;
+    // A suffixed name is never one this server holds or one in `avoid`
+    // (looked up there, never copied).
+    let mut next: HashMap<String, usize> = HashMap::new();
     for &name in &names {
         if !aliases.contains_key(name) {
-            if !std::mem::replace(&mut avoided, true) {
-                avoid.iter().flat_map(|set| set.iter()).for_each(|n| used.reserve(n));
-            }
-            aliases.insert(name, used.name_verbatim(&sanitize_var(name)));
+            let base = sanitize_var(name);
+            let n = next.entry(base.clone()).or_insert(2);
+            let alias = loop {
+                let candidate = format!("{base}_{n}");
+                *n += 1;
+                if !avoid.iter().any(|set| set.contains(&candidate)) && used.claim(&candidate) {
+                    break candidate;
+                }
+            };
+            aliases.insert(name, alias);
         }
     }
     aliases
