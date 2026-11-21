@@ -1,6 +1,28 @@
 # Upgrade guide
 
-## Unreleased
+## 0.1.8
+
+0.1.8 opens 0.1.7 profiles without a new migration or enrollment: the profile
+database stays at schema 6. Going back is not supported: 0.1.8 no longer
+stores the unused `autosave`, `lock.run_policy` and
+`lock.clear_clipboard_on_lock` settings (#529), and 0.1.7 requires them, so
+once 0.1.8 saves the app settings (for example after a Settings change),
+0.1.7 cannot read them. If you may need to downgrade, keep a copy of each profile, or a full
+backup made with 0.1.7, before upgrading. The changes below affect imports,
+load-run scripts, gateway profiles and gateway diagnostics.
+
+### Ferrum Edge v0.9.20 only (#481)
+
+Ferrum Edge v0.9.20 is the only supported release. New gateway profiles and
+the lab default to it, and existing profiles keep the release they declare. A
+profile or import that names an earlier release with an embedded diagnostics
+catalog (v0.9.5, v0.9.7 to v0.9.11, v0.9.14, v0.9.15) keeps its diagnoses.
+`anvil-lab --release` refuses v0.9.5 to v0.9.15. Against an Edge listener
+older than v0.9.20 that requests a client certificate (it sends an empty
+`certificate_authorities` list), DTLS 1.3 with a client certificate fails
+again: the handshake times out (`client.dtls.handshake_timeout`). DTLS 1.2,
+and listeners that do not request a certificate, are unaffected. Upgrade the
+gateway to v0.9.20.
 
 ### Import reports and auth placeholder names (#584)
 
@@ -15,13 +37,16 @@
   is one of `prerequest`, `test`, `after_response`, `unit_test` or `other`.
   `language` is `javascript` or `other`. `bytes` and `lines` are new. Read a
   script's body from the source file at the entry's `pointer`.
-- Credential placeholders made by an import are now bound to the secret they
-  replaced: `{{secret_<16 hex digits>}}` for header, query, form, body, path and
+- Placeholders an import makes for a redacted credential are now bound to the
+  secret they replaced (a credential the source never supplied, such as an
+  OpenAPI security scheme's key, keeps its scheme-derived name): `{{secret_<16 hex digits>}}` for header, query, form, body, path and
   environment values, `{{auth_<16 hex digits>_<field>}}` for auth secrets and
   URL userinfo, and `{{url_<16 hex digits>}}` for quarantined URLs. They replace
   field-named placeholders (`{{Authorization}}`, `{{api_key}}`), owner-named
   ones (`{{<collection>_password}}`), `{{username}}` / `{{password}}` and
-  `{{url-needs-review}}`. The report's required variables list them.
+  `{{url-needs-review}}`. The report lists the `secret_` and `auth_` names
+  under required variables and a quarantined URL's `url_` name in
+  `redactions[].placeholder`.
 - The first reimport after upgrading moves requests imported by an earlier build
   to the new names, so their credentials are asked for again once. After that, a
   credential you fill stays with the secret it replaced across reimports, and a
@@ -39,9 +64,8 @@
   in the source.
 - `ReimportChange` and `ScopeChange` are unchanged; no reimport change is held
   for credential review.
-- These names supersede the `{{username}}` / `{{password}}` and
-  `{{url-needs-review}}` placeholders described under "Import behaviour changes"
-  below.
+- These names also apply to the URL userinfo and quarantined URLs described
+  under "Import behaviour changes" below.
 
 ### Import report redaction to end of text (GHSA-84pr-239v-mv8x)
 
@@ -93,18 +117,16 @@ version is `2026.11.17-1`.
   than before:
   - A URL with `user:password@` imports with Basic auth. A userinfo of exactly
     variable references is kept; anything else, a literal user name included,
-    becomes required `{{username}}` and `{{password}}` variables.
+    becomes required `{{auth_<16 hex digits>_<field>}}` variables (see above).
   - A URL with a template before the end of its host part and an `@` anywhere
     (`https://{{tenant}}.example.com/x?to=a@b`) imports as
-    `{{url-needs-review}}` with a `url_quarantined` warning: re-enter it. With
+    `{{url_<16 hex digits>}}` (listed in `redactions[].placeholder`) with a
+    `url_quarantined` warning: re-enter it. With
     credentials included it is kept as written. `{{baseUrl}}/x?email=a@b` is
     kept as written.
   - An OAuth 2 token or authorization URL with credentials in it (Postman,
     Insomnia, OpenAPI, Swagger) imports without them; supply them as the
     client credentials.
-  - A redacted credential whose natural placeholder name the source already
-    uses (a variable, a reference, a path parameter) imports as `{{name_2}}`;
-    supply that variable.
   - A cURL `-u`, or a request's own or disabled auth, wins over URL userinfo.
   - Credential-named path variables and credential members of Insomnia
     environment arrays become required `{{placeholders}}` unless credentials
@@ -112,8 +134,9 @@ version is `2026.11.17-1`.
   - Postman and Insomnia query values with exactly re-encodable escapes are
     stored decoded.
   - cURL `-d @file` imports as POST.
-- Import reports and imported names no longer carry credential material:
-  tooling that reads report messages, pointers or retained script sources sees
+- Import report messages no longer quote source values, and report pointers
+  and imported names redact recognised credential patterns:
+  tooling that reads report pointers, external references or imported names sees
   `<redacted>`, `<url redacted>` or `{{…}}` there, and a pointer token that
   was redacted ends in `#` and a digest. cURL diagnostics no longer quote the
   ignored URL, option value or command tail; use the pointer.

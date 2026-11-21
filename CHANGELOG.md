@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-21
+
+Security release: it fixes five Anvil advisories. The default Postman, Insomnia, cURL and HAR
+import redacts URL userinfo and credential-named fields, import report messages no longer quote
+source values, report pointers and imported names redact recognised credential patterns, and
+share-safely and encrypted-transfer exports extract more credential-named
+fields and URL credentials from the readable `workspace/objects.json` (GHSA-c236-7r9g-c9p2,
+GHSA-8fmc-h49v-mh7f, GHSA-84pr-239v-mv8x). A credential in free text, such as an XML or SOAP
+body or a variable not marked secret, can still be kept as written. A server under test can no longer crash Anvil with a long QUIC
+close reason or a large DTLS certificate (GHSA-c825-hqr8-8gj8, GHSA-62g8-g8px-5xm3), and CLI text
+and JSON output no longer pass on GitHub Actions workflow commands or terminal escapes from the
+traffic. The supported Ferrum Edge release moves to v0.9.20, now the lab and new-profile default,
+with a source-audited catalog of 620 outcomes and wording for the `loop_detected` gateway error
+token. Earlier releases are no longer supported; the previously supported ones keep their embedded
+diagnostics catalogs. A changed spec or collection can be reimported into the import it came from,
+and workspaces and load datasets can be deleted. Import placeholders and reports, `anvil load run`
+exit codes and CSVs, and gateway console links change incompatibly: read the Breaking section below
+and the [upgrade guide](docs/upgrade-guide.md#018) before upgrading. 0.1.7 profiles open without a
+migration or enrollment, but going back is not supported: once 0.1.8 saves the app settings, 0.1.7
+cannot read them, so keep a copy of each profile if you may need to downgrade.
+
 ### Added
 
 - A weekly, non-required **Edge main drift** workflow (`.github/workflows/edge-main-drift.yml`)
@@ -218,7 +239,8 @@
     collection, folder and environment variables, `{{…}}` references (also when a JSON or YAML
     escape, shell quoting or percent-encoding hides them), path parameters and cURL `$NAME`
     variables. It takes a suffix instead (`{{password_2}}`), so a source variable can never fill a
-    redacted credential. One field name still gets one placeholder across the import.
+    redacted credential. One field name still gets one placeholder across the import. (#584 then
+    replaced these names with ones bound to the literal; see Breaking.)
   - A credential moved out of a query kept in the URL keeps an escaped name encoded, and its
     placeholder is named after the name as written, so escaped braces never make it read an existing
     variable.
@@ -229,7 +251,8 @@
     redacted>`, a `{{…}}` that is not a plain name `{{…}}`, and the value of a credential-named
     `name=value` or `name: value` pair, the token after `Bearer`, `Basic`, `Token` or `Digest`, and
     a JWT become `<redacted>`. cURL diagnostics no longer echo an ignored URL, a connection option's
-    value (a proxy password) or the rest of the command line.
+    value (a proxy password) or the rest of the command line. (#584 then stopped quoting source
+    values in report messages and dropped retained script bodies; see Breaking.)
   - Each redaction is listed in `report.redactions` unless `include_credentials` is set.
   - Before, such a password, key or token was stored in the request or shown in the report, and left
     the machine in share-safely and encrypted-transfer exports. Re-import affected collections, and
@@ -256,40 +279,10 @@
   `grep -E '^[0-9a-f]{64}  ' PIN | sha256sum -c` checks it. `contracts_adoption.rs` now parses it
   strictly and refuses duplicate, unsorted or legacy `sha256 ` rows, a `PIN` self-row, and a
   symbolic link or other non-regular entry under the vendored tree (#591).
-- BREAKING: import report text and imported names with a credential indicator are redacted to the
-  end of the text, not just to the end of the value (#595, GHSA-84pr-239v-mv8x). Over-redaction is
-  the price: an imported name such as `Basic auth` becomes `Basic <redacted>`, and `auth: none`
-  becomes `auth: <redacted>`. An operation key or external reference that redaction changes now
-  ends in a keyed digest (`#<16 hex digits>`), so distinct ones never merge. Requests imported by
-  an earlier build whose operation keys held a credential indicator get new keys on reimport: they
-  show as removed and added.
-- BREAKING: import reports are structured (#584). Messages, required-variable reasons and
-  inactive-setting values are the importer's own words plus the counts and limits it computed. They
-  never quote a source value: no option, header or setting name, media type, body mode, auth type,
-  grant, resource type, template, version, scheme, `$ref`, pattern, constraint, default, location or
-  URL. The entry's pointer locates what it is about, and codes and pointers are unchanged. A
-  callback's inactive-setting value is now a count of its URL expressions. `report.scripts[]` no
-  longer carries the script body (`source`) or the owner's name. It has `owner` (`collection`,
-  `folder`, `request`, `test_suite`), `event` and `language` from a fixed vocabulary (`other`
-  otherwise), `bytes` and `lines`.
-- BREAKING: every credential placeholder an import makes is bound to the literal it replaced (#584).
-  Sensitive header, query, form, body, path and environment values import as `{{secret_<16 hex
-  digits>}}` instead of a name taken from the field (`{{Authorization}}`, `{{api_key}}`, `{{pin}}`,
-  `_2`, …). Postman and Insomnia auth secrets, URL userinfo (every importer) and cURL `-u` /
-  `--oauth2-bearer` import as `{{auth_<16 hex digits>_<field>}}` instead of `{{<owner
-  name>_password}}`, `{{username}}` and `{{password}}`. Quarantined URLs import as `{{url_<16 hex
-  digits>}}` instead of `{{url-needs-review}}`. The digits are the start of HMAC-SHA256 over the
-  kind, the field and the literal, keyed by a key derived from the profile's data key. That key is
-  never stored in workspace files or exports. The same secret in the same field shares one variable
-  across the import and every reimport; a changed secret gets a new variable to fill in. Empty
-  secrets are left empty. `ImportResult::credential_names` lists the names the import made.
 - Reimport keeps every filled credential with the secret it was filled for, whatever the source
   reordered, inserted, repeated or moved, with or without item ids (#584). A request imported by an
   earlier build moves to the new names and asks for its credentials again. So does every request
   after a reimport in another profile, or after a library import with no `credential_key`.
-- BREAKING: importing a source that itself uses a variable or reference named `auth_`, `secret_` or
-  `url_` followed by 16 hex digits now fails with an invalid-document error asking to rename it
-  (#584).
 - New Ferrum gateway profiles and the lab default to Ferrum Edge v0.9.20
   (`ferrum-edge-0.9.20`); existing profiles keep the release they declare.
 - `auth.browser_session_required` fires on a 401 only when every `WWW-Authenticate` challenge it
@@ -332,7 +325,7 @@
   working notes, with the two that contradicted the outcome corrected (#545).
 - The gitleaks allowlist for the soap_ws_security mechanism names covers only the 0.9.20 catalog
   and the `generic-api-key` rule.
-- Diagnostics catalog version 2026.11.03-1.
+- Diagnostics catalog version 2026.11.17-1.
 - The History panel and `anvil history` decrypt each listed record once and read only the fields
   they show, instead of decrypting it again with its stored response body. The listing still
   fails on a record that does not authenticate, naming it. Two kinds of entry the History panel
@@ -369,17 +362,14 @@
 - The AUTH-X04/X05, AUTH-017 and 425 diagnostics regression tests run against every embedded Ferrum
   catalog, not only 0.9.5/0.9.7 (#540).
 - `docs/completion-report.md` dates its source and website rows 2026-11-10 (#545).
-- BREAKING: a gateway profile's console link must be an absolute `https` or `http` URL with a host
-  and no user name or password; any other link is refused when the profile is saved (#567).
-- BREAKING: `anvil load run` can now exit 2 where it exited 1 (chained plans), and the summary CSV
-  writes empty cells instead of `0` for unmeasured values (#565, #566).
 - Import placeholders and report text (#575, #583): a credential placeholder whose natural name the
   source already uses gets a suffix (`{{password_2}}`); an ambiguous request URL imports as
   `{{url-needs-review}}` (with `{{url-needs-review_2}}` when the source uses that name, a
   `:url-needs-review` path segment included); and report messages, pointers, retained scripts and
   imported names show `<redacted>`, `<url redacted>` or `{{…}}` where the source had credential
   material. A changed pointer token carries a `#` and a digest of the original. See the Security
-  entries.
+  entries. #584 then replaced the placeholder names with literal-bound ones and made the report
+  messages and retained-script entries structured (see Breaking).
 
 ### Removed
 
@@ -682,6 +672,56 @@
 - A cURL command whose data is read from a file (`-d @order.json`, `--json @order.json`,
   `--data-urlencode comment@notes.txt`) imports as POST, as curl sends it, instead of GET. The file
   is still not read (`curl_data_file`); `-G`, `-I` and an explicit `-X` keep precedence (#564).
+
+### Breaking
+
+- Import report text and imported names with a credential indicator are redacted to the
+  end of the text, not just to the end of the value (#595, GHSA-84pr-239v-mv8x). Over-redaction is
+  the price: an imported name such as `Basic auth` becomes `Basic <redacted>`, and `auth: none`
+  becomes `auth: <redacted>`. An operation key or external reference that redaction changes now
+  ends in a keyed digest (`#<16 hex digits>`), so distinct ones never merge. Requests imported by
+  an earlier build whose operation keys held a credential indicator get new keys on reimport: they
+  show as removed and added.
+- Import reports are structured (#584). Messages, required-variable reasons and
+  inactive-setting values are the importer's own words plus the counts and limits it computed. They
+  never quote a source value: no option, header or setting name, media type, body mode, auth type,
+  grant, resource type, template, version, scheme, `$ref`, pattern, constraint, default, location or
+  URL. The entry's pointer locates what it is about, and codes and pointers are unchanged (apart from
+  the pointer-token redaction described under Security). A
+  callback's inactive-setting value is now a count of its URL expressions. `report.scripts[]` no
+  longer carries the script body (`source`) or the owner's name. It has `owner` (`collection`,
+  `folder`, `request`, `test_suite`), `event` and `language` from a fixed vocabulary (`other`
+  otherwise), `bytes` and `lines`.
+- Every placeholder an import makes for a redacted credential literal is bound to the literal it
+  replaced (#584). A credential the source never supplied, such as an OpenAPI or Swagger security
+  scheme's key, keeps its scheme-derived variable name.
+  Sensitive header, query, form, body, path and environment values import as `{{secret_<16 hex
+  digits>}}` instead of a name taken from the field (`{{Authorization}}`, `{{api_key}}`, `{{pin}}`,
+  `_2`, …). Postman and Insomnia auth secrets, URL userinfo (every importer) and cURL `-u` /
+  `--oauth2-bearer` import as `{{auth_<16 hex digits>_<field>}}` instead of `{{<owner
+  name>_password}}`, `{{username}}` and `{{password}}`. Quarantined URLs import as `{{url_<16 hex
+  digits>}}` instead of `{{url-needs-review}}`. The digits are the start of HMAC-SHA256 over the
+  kind, the field and the literal, keyed by a key derived from the profile's data key. That key is
+  never stored in workspace files or exports. The same secret in the same field shares one variable
+  across the import and every reimport while the credential key stays the same (the same
+  profile and data key); a changed secret gets a new variable to fill in. Empty
+  secrets are left empty. `ImportResult::credential_names` lists the names the import made. A
+  secret variable definition keeps its own name: its literal is dropped and the variable is listed
+  as required.
+- Importing a source that itself uses a variable or reference named `auth_`, `secret_` or
+  `url_` followed by 16 hex digits now fails with an invalid-document error asking to rename it
+  (#584).
+- A gateway profile's console link must be an absolute `https` or `http` URL with a host
+  and no user name or password; any other link is refused when the profile is saved (#567).
+- `anvil load run` can now exit 2 where it exited 1 (chained plans), and the summary CSV
+  writes empty cells instead of `0` for unmeasured values (#565, #566).
+- Ferrum Edge v0.9.20 is the only supported release (#481). `anvil-lab --release` refuses v0.9.5
+  to v0.9.15. With the vendored dimpl gone, DTLS 1.3 with a client certificate fails again against
+  an Edge listener older than v0.9.20 that requests one (it sends an empty
+  `certificate_authorities` list): the handshake times out (`client.dtls.handshake_timeout`)
+  without presenting the identity. Profiles and imports that name an earlier release with an
+  embedded catalog (v0.9.5, v0.9.7 to v0.9.11, v0.9.14, v0.9.15) keep its diagnoses. See Removed
+  in the CHANGELOG.
 
 ## [0.1.7] - 2026-11-03
 
