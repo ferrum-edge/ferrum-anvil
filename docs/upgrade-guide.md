@@ -2,19 +2,22 @@
 
 ## 0.1.8
 
-0.1.8 opens 0.1.7 profiles as they are: the profile database format is
-unchanged and no enrollment or migration runs. The changes below affect
-imports, load-run scripts, gateway profiles and gateway diagnostics.
+0.1.8 opens 0.1.7 profiles without a new migration or enrollment: the profile
+database stays at schema 6. The changes below affect imports, load-run
+scripts, gateway profiles and gateway diagnostics.
 
 ### Ferrum Edge v0.9.20 only (#481)
 
 Ferrum Edge v0.9.20 is the only supported release. New gateway profiles and
-the lab default to it; existing profiles keep the release they declare, and
-their diagnostics catalogs stay embedded, so diagnoses for an earlier release
-still work. `anvil-lab --release` refuses v0.9.5 to v0.9.15. Against an Edge
-listener older than v0.9.20, DTLS 1.3 with a client certificate times out
-again (`client.dtls.handshake_timeout`); DTLS 1.2, and listeners that do not
-request a certificate, are unaffected. Upgrade the gateway to v0.9.20.
+the lab default to it, and existing profiles keep the release they declare. A
+profile or import that names an earlier release with an embedded diagnostics
+catalog (v0.9.5, v0.9.7 to v0.9.11, v0.9.14, v0.9.15) keeps its diagnoses.
+`anvil-lab --release` refuses v0.9.5 to v0.9.15. Against an Edge listener
+older than v0.9.20 that requests a client certificate (it sends an empty
+`certificate_authorities` list), DTLS 1.3 with a client certificate fails
+again: the handshake times out (`client.dtls.handshake_timeout`). DTLS 1.2,
+and listeners that do not request a certificate, are unaffected. Upgrade the
+gateway to v0.9.20.
 
 ### Import reports and auth placeholder names (#584)
 
@@ -53,9 +56,8 @@ request a certificate, are unaffected. Upgrade the gateway to v0.9.20.
   in the source.
 - `ReimportChange` and `ScopeChange` are unchanged; no reimport change is held
   for credential review.
-- These names supersede the `{{username}}` / `{{password}}` and
-  `{{url-needs-review}}` placeholders described under "Import behaviour changes"
-  below.
+- These names also apply to the URL userinfo and quarantined URLs described
+  under "Import behaviour changes" below.
 
 ### Import report redaction to end of text (GHSA-84pr-239v-mv8x)
 
@@ -107,18 +109,15 @@ version is `2026.11.17-1`.
   than before:
   - A URL with `user:password@` imports with Basic auth. A userinfo of exactly
     variable references is kept; anything else, a literal user name included,
-    becomes required `{{username}}` and `{{password}}` variables.
+    becomes required `{{auth_<16 hex digits>_<field>}}` variables (see above).
   - A URL with a template before the end of its host part and an `@` anywhere
     (`https://{{tenant}}.example.com/x?to=a@b`) imports as
-    `{{url-needs-review}}` with a `url_quarantined` warning: re-enter it. With
+    `{{url_<16 hex digits>}}` with a `url_quarantined` warning: re-enter it. With
     credentials included it is kept as written. `{{baseUrl}}/x?email=a@b` is
     kept as written.
   - An OAuth 2 token or authorization URL with credentials in it (Postman,
     Insomnia, OpenAPI, Swagger) imports without them; supply them as the
     client credentials.
-  - A redacted credential whose natural placeholder name the source already
-    uses (a variable, a reference, a path parameter) imports as `{{name_2}}`;
-    supply that variable.
   - A cURL `-u`, or a request's own or disabled auth, wins over URL userinfo.
   - Credential-named path variables and credential members of Insomnia
     environment arrays become required `{{placeholders}}` unless credentials
@@ -127,7 +126,7 @@ version is `2026.11.17-1`.
     stored decoded.
   - cURL `-d @file` imports as POST.
 - Import reports and imported names no longer carry credential material:
-  tooling that reads report messages, pointers or retained script sources sees
+  tooling that reads report messages or pointers sees
   `<redacted>`, `<url redacted>` or `{{…}}` there, and a pointer token that
   was redacted ends in `#` and a digest. cURL diagnostics no longer quote the
   ignored URL, option value or command tail; use the pointer.

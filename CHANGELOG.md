@@ -4,9 +4,10 @@
 
 ## [0.1.8] - 2026-11-21
 
-Security release: imports and workspace exports no longer keep or show literal credentials
-(URL userinfo, credential-named fields and import report text; GHSA-c236-7r9g-c9p2,
-GHSA-8fmc-h49v-mh7f, GHSA-84pr-239v-mv8x), a server under test can no longer crash Anvil with a
+Security release: the default Postman, Insomnia, cURL and HAR import no longer keeps URL
+userinfo or credential-named values as plaintext, import reports and imported names no longer show
+them, and share-safely and encrypted-transfer exports no longer leave such credentials readable in
+`workspace/objects.json` (GHSA-c236-7r9g-c9p2, GHSA-8fmc-h49v-mh7f, GHSA-84pr-239v-mv8x); a server under test can no longer crash Anvil with a
 long QUIC close reason or a large DTLS certificate (GHSA-c825-hqr8-8gj8, GHSA-62g8-g8px-5xm3), and
 CLI text and JSON output no longer pass on GitHub Actions workflow commands or terminal escapes
 from the traffic. The supported Ferrum Edge release moves to v0.9.20, now the lab and new-profile
@@ -234,7 +235,8 @@ format is unchanged from 0.1.7.
     collection, folder and environment variables, `{{…}}` references (also when a JSON or YAML
     escape, shell quoting or percent-encoding hides them), path parameters and cURL `$NAME`
     variables. It takes a suffix instead (`{{password_2}}`), so a source variable can never fill a
-    redacted credential. One field name still gets one placeholder across the import.
+    redacted credential. One field name still gets one placeholder across the import. (#584 then
+    replaced these names with ones bound to the literal; see Breaking.)
   - A credential moved out of a query kept in the URL keeps an escaped name encoded, and its
     placeholder is named after the name as written, so escaped braces never make it read an existing
     variable.
@@ -361,7 +363,7 @@ format is unchanged from 0.1.7.
   `:url-needs-review` path segment included); and report messages, pointers, retained scripts and
   imported names show `<redacted>`, `<url redacted>` or `{{…}}` where the source had credential
   material. A changed pointer token carries a `#` and a digest of the original. See the Security
-  entries.
+  entries. The placeholder names were then replaced by #584's literal-bound names (see Breaking).
 
 ### Removed
 
@@ -702,9 +704,12 @@ format is unchanged from 0.1.7.
 - `anvil load run` can now exit 2 where it exited 1 (chained plans), and the summary CSV
   writes empty cells instead of `0` for unmeasured values (#565, #566).
 - Ferrum Edge v0.9.20 is the only supported release (#481). `anvil-lab --release` refuses v0.9.5
-  to v0.9.15, and with the vendored dimpl gone, DTLS 1.3 with a client certificate against an Edge
-  listener older than v0.9.20 times out (`client.dtls.handshake_timeout`) again. Profiles and
-  imports that name an earlier release keep its diagnoses. See Removed.
+  to v0.9.15. With the vendored dimpl gone, DTLS 1.3 with a client certificate fails again against
+  an Edge listener older than v0.9.20 that requests one (it sends an empty
+  `certificate_authorities` list): the handshake times out (`client.dtls.handshake_timeout`)
+  without presenting the identity. Profiles and imports that name an earlier release with an
+  embedded catalog (v0.9.5, v0.9.7 to v0.9.11, v0.9.14, v0.9.15) keep its diagnoses. See Removed
+  in the CHANGELOG.
 
 ## [0.1.7] - 2026-11-03
 
