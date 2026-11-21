@@ -137,7 +137,7 @@ struct Template {
     /// Sum of [`Seg::score`].
     score: usize,
     ops: Vec<usize>,
-    /// The templates whose segments are the same as this one's once empty
+    /// The templates whose path is the same as this one's once empty
     /// segments are dropped (`/items` and `/items/`), by [`empty_shape`]:
     /// an index into [`Router::siblings`] when it has any.
     siblings: Option<usize>,
@@ -185,8 +185,8 @@ pub struct Router<'a> {
     /// Template indexes by segment count.
     by_len: HashMap<usize, Vec<usize>>,
     /// For each set of templates that differ only in empty segments, the
-    /// templates of each [`empty_shape`], in document order.
-    siblings: Vec<HashMap<Vec<bool>, Vec<usize>>>,
+    /// template of each [`empty_shape`].
+    siblings: Vec<HashMap<Vec<bool>, usize>>,
     bases: Vec<Base>,
     pub servers: Vec<Server>,
     /// Server URLs whose base path was not kept ([`MAX_BASES`]).
@@ -255,21 +255,22 @@ impl<'a> Router<'a> {
         for (i, t) in templates.iter().enumerate() {
             by_len.entry(t.segs.len()).or_default().push(i);
         }
-        // Templates that are the same once empty segments are dropped
-        // (`/items`, `/items/`; `/a/b`, `/a//b`), grouped by where their
-        // empty segments are.
-        let mut alike: HashMap<String, Vec<usize>> = HashMap::new();
+        // Templates whose path is the same once empty segments are dropped
+        // (`/items`, `/items/`; `/a/b`, `/a//b`), compared as written, by where
+        // their empty segments are. Each path is declared once, so each shape
+        // names one template.
+        let mut alike: HashMap<Vec<&str>, Vec<usize>> = HashMap::new();
         for (i, t) in templates.iter().enumerate() {
-            alike.entry(t.segs.iter().map(Seg::canonical).collect::<Vec<_>>().join("/")).or_default().push(i);
+            alike.entry(t.path.split('/').filter(|s| !s.is_empty()).collect()).or_default().push(i);
         }
         let mut alike: Vec<Vec<usize>> = alike.into_values().filter(|group| group.len() > 1).collect();
         alike.sort_unstable();
-        let mut siblings: Vec<HashMap<Vec<bool>, Vec<usize>>> = vec![];
+        let mut siblings: Vec<HashMap<Vec<bool>, usize>> = vec![];
         for group in alike {
-            let mut by_shape: HashMap<Vec<bool>, Vec<usize>> = HashMap::new();
+            let mut by_shape: HashMap<Vec<bool>, usize> = HashMap::new();
             for &i in &group {
                 templates[i].siblings = Some(siblings.len());
-                by_shape.entry(empty_shape(&templates[i].path)).or_default().push(i);
+                by_shape.entry(empty_shape(&templates[i].path)).or_insert(i);
             }
             siblings.push(by_shape);
         }
@@ -510,10 +511,7 @@ impl<'a> Router<'a> {
                     0 => 0,
                     n => shape.iter().enumerate().filter(|(_, empty)| !**empty).nth(n - 1).map_or(shape.len(), |(i, _)| i + 1),
                 };
-                match self.siblings[g].get(&shape[from..]) {
-                    Some(exact) if !exact.contains(&ti) => exact.iter().copied().find(|&i| hinted(i)).unwrap_or(exact[0]),
-                    _ => ti,
-                }
+                self.siblings[g].get(&shape[from..]).copied().unwrap_or(ti)
             }
             None => ti,
         };
@@ -699,6 +697,24 @@ mod tests {
         assert_eq!(op_of(&r, r.route("GET", "http://localhost/users/summary/", Some("getUser"))), "getUser @");
         assert_eq!(op_of(&r, r.route("GET", "http://localhost/users/summary/", None)), "getUser @");
         assert_eq!(op_of(&r, r.route("POST", "http://localhost/users/summary/", Some("postSummary"))), "postSummary @");
+    }
+
+    /// Only paths written alike apart from empty segments are siblings: an
+    /// escaped `/` or `:` inside a segment keeps two paths apart.
+    #[test]
+    fn escaped_segments_are_not_empty_segment_siblings() {
+        let s = spec(
+            r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},
+              "paths":{
+                "/a%2Fl%3Ab/c":{"get":{"operationId":"escaped"}},
+                "/a/b%2Fl%3Ac/":{"get":{"operationId":"other"}},
+                "/files/a:b":{"get":{"operationId":"colon"}},
+                "/files/a%3Ab/":{"get":{"operationId":"escapedColon"}}
+              }}"#,
+        );
+        let r = Router::new(&s);
+        assert_eq!(op_of(&r, r.route("GET", "http://localhost/a%2Fl%3Ab/c/", None)), "escaped @");
+        assert_eq!(op_of(&r, r.route("GET", "http://localhost/files/a:b/", None)), "colon @");
     }
 
     #[test]
