@@ -961,6 +961,16 @@ fn server_variables_that_sanitize_alike_keep_distinct_names() {
     let names: Vec<&str> = r.environments[0].variables.iter().map(|v| v.name.as_str()).collect();
     assert_eq!(names, ["baseUrl", "release_name_3", "release_name"]);
 
+    // Nor a security scheme's credential name.
+    let doc = json!({"openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+        "servers": [{"url": "https://example.test/{release-name}/{release_name}",
+            "variables": {"release-name": {"default": "v1"}, "release_name": {"default": "v2"}}}],
+        "components": {"securitySchemes": {"release_name_2": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}}},
+        "paths": {"/items": {"get": {"responses": {}}}}});
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    let names: Vec<&str> = r.environments[0].variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["baseUrl", "release_name_3", "release_name"]);
+
     // Operation-level servers inline their defaults: only the variables left
     // as placeholders take names, and `origin` is kept for the rendered URL.
     let op_server = |url: &str, vars: serde_json::Value| {

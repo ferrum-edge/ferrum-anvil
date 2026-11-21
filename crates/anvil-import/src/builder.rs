@@ -66,6 +66,9 @@ pub(crate) struct Builder<'o> {
     pub sentinel_nonce: String,
     /// The name of each sentinel, by index ([`crate::common::finalize`]).
     pub placeholder_names: Vec<String>,
+    /// The variables the OpenAPI importer's document-level servers define,
+    /// which an operation-level server's placeholders never take.
+    pub server_variable_names: std::collections::HashSet<String>,
 }
 
 impl<'o> Builder<'o> {
@@ -119,6 +122,7 @@ impl<'o> Builder<'o> {
                 hex::encode(bytes)
             },
             placeholder_names: vec![],
+            server_variable_names: Default::default(),
         }
     }
 

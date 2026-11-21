@@ -41,9 +41,11 @@ pub(crate) struct Ctx<'a> {
     /// Swagger 2.0 document-level `produces` and `consumes`, read once rather
     /// than by every operation that inherits them.
     pub swagger_defaults: SwaggerDefaults,
-    /// The `{{name}}` of every path template parameter (`/items/{id}` gives
-    /// `id`): a server variable never takes one as a suffixed name.
-    pub path_parameter_names: HashSet<String>,
+    /// The `{{name}}`s a request of the document can use besides its server
+    /// variables: path template and declared parameters, and the security
+    /// schemes' credentials. A server variable never takes one as a suffixed
+    /// name ([`server_aliases`]).
+    pub request_variable_names: HashSet<String>,
 }
 
 /// What an operation without its own `produces`/`consumes` inherits.
@@ -86,16 +88,46 @@ fn is_32(d: Dialect) -> bool {
     d == Dialect::OpenApi32
 }
 
-/// The sanitized names of the `{…}` segments of every path template.
-fn path_parameter_names(root: &Value) -> HashSet<String> {
+/// The `{{name}}`s a request of the document can use besides its server
+/// variables ([`Ctx::request_variable_names`]): the `{…}` segments of every
+/// path template, every declared parameter's name (path, path item,
+/// operation and component level), and each security scheme's credential
+/// names, all sanitized as the importer names them.
+fn request_variable_names(root: &Value) -> HashSet<String> {
     let mut out = HashSet::new();
-    for path in root.get("paths").and_then(Value::as_object).into_iter().flat_map(|p| p.keys()) {
+    let paths = root.get("paths").and_then(Value::as_object);
+    for path in paths.into_iter().flat_map(|p| p.keys()) {
         let mut rest = path.as_str();
         while let Some(open) = rest.find('{') {
             let after = &rest[open + 1..];
             let Some(close) = after.find('}') else { break };
             out.insert(sanitize_var(&after[..close]));
             rest = &after[close + 1..];
+        }
+    }
+    let mut lists: Vec<&Value> = vec![];
+    for item in paths.into_iter().flat_map(|p| p.values()) {
+        lists.extend(item.get("parameters"));
+        if let Some(o) = item.as_object() {
+            lists.extend(o.values().filter_map(|op| op.get("parameters")));
+        }
+    }
+    for p in lists.into_iter().filter_map(Value::as_array).flatten() {
+        if let Some(name) = p.get("name").and_then(Value::as_str) {
+            out.insert(sanitize_var(name));
+        }
+    }
+    let components = root.pointer("/components/parameters").or_else(|| root.get("parameters")).and_then(Value::as_object);
+    for p in components.into_iter().flat_map(|c| c.values()) {
+        if let Some(name) = p.get("name").and_then(Value::as_str) {
+            out.insert(sanitize_var(name));
+        }
+    }
+    let schemes = root.pointer("/components/securitySchemes").or_else(|| root.get("securityDefinitions")).and_then(Value::as_object);
+    for key in schemes.into_iter().flat_map(|s| s.keys()) {
+        let v = sanitize_var(key);
+        for suffix in ["", "_username", "_password", "_client_id", "_client_secret"] {
+            out.insert(format!("{v}{suffix}"));
         }
     }
     out
@@ -123,7 +155,7 @@ pub(crate) fn import(root: &Value, dialect: Dialect, b: &mut Builder) -> Result<
         } else {
             SwaggerDefaults::default()
         },
-        path_parameter_names: path_parameter_names(root),
+        request_variable_names: request_variable_names(root),
     };
 
     // Info.
@@ -258,7 +290,7 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
             .unwrap_or_else(|| vec![json!({"url": "/"})]);
         for (i, s) in servers.iter().enumerate() {
             let sptr = format!("/servers/{i}");
-            let (url, vars) = server_url(b, s, &sptr, false, &ctx.path_parameter_names);
+            let (url, vars) = server_url(b, s, &sptr, false, &ctx.request_variable_names);
             let name = str_of(s, "name")
                 .filter(|_| is_32(ctx.dialect))
                 .or_else(|| str_of(s, "description"))
@@ -268,6 +300,7 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
             if s.get("name").is_some() && !is_32(ctx.dialect) {
                 only_32(ctx, b, &ptr(&sptr, "name"), "server `name`");
             }
+            b.server_variable_names.extend(vars.iter().map(|v| v.name.clone()));
             let mut all = vec![Variable::plain("baseUrl", &url)];
             all.extend(vars);
             envs.push((name, url, all));
@@ -312,7 +345,10 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool, avoid: &Hash
     let mut out = String::new();
     let mut rendered: HashMap<&str, String> = HashMap::new();
     let mut rest = if b.charge_text(sptr, raw.len()) { raw } else { "" };
-    let aliases = server_aliases(rest, decl, inline, b.text_left(), avoid);
+    // An operation-level server's placeholders sit beside the document's
+    // server environment, so its names are avoided too.
+    let env_names = if inline { b.server_variable_names.clone() } else { HashSet::new() };
+    let aliases = server_aliases(rest, decl, inline, b.text_left(), &[avoid, &env_names]);
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
@@ -441,14 +477,14 @@ fn renders_relative(url: &str, decl: &Map<String, Value>, inline: bool, budget: 
 /// `{release-name}` beside them becomes `release_name_2` only when no
 /// `{release-name-2}` claims that name. The environment's own names are
 /// never given: `baseUrl`, and `origin` when the URL renders relative, nor
-/// is a path parameter's name in `avoid` as a suffixed one. A variable whose
+/// is a name in `avoid` (other variables a request can use) a suffixed one. A variable whose
 /// default is inlined needs no name. The same URL always gets the same names.
 fn server_aliases<'a>(
     url: &'a str,
     decl: &Map<String, Value>,
     inline: bool,
     budget: usize,
-    avoid: &HashSet<String>,
+    avoid: &[&HashSet<String>],
 ) -> HashMap<&'a str, String> {
     let names: Vec<&str> = server_url_names(url, decl, inline).into_iter().filter(|(_, named)| *named).map(|(n, _)| n).collect();
     let mut used = crate::common::PlaceholderNames::default();
@@ -467,10 +503,14 @@ fn server_aliases<'a>(
             }
         }
     }
-    // A suffixed name is never one a path parameter of the document uses.
-    avoid.iter().for_each(|n| used.reserve(n));
+    // A suffixed name is never one in `avoid` (reserved only when a
+    // suffix is needed).
+    let mut avoided = false;
     for &name in &names {
         if !aliases.contains_key(name) {
+            if !std::mem::replace(&mut avoided, true) {
+                avoid.iter().flat_map(|set| set.iter()).for_each(|n| used.reserve(n));
+            }
             aliases.insert(name, used.name_verbatim(&sanitize_var(name)));
         }
     }
@@ -1035,7 +1075,7 @@ fn import_operation(
                 &p,
                 "operation/path-level server overrides the environment baseUrl (variables use their defaults)",
             );
-            server_url(b, s0, &format!("{p}/0"), true, &ctx.path_parameter_names).0
+            server_url(b, s0, &format!("{p}/0"), true, &ctx.request_variable_names).0
         }
         None => "{{baseUrl}}".to_string(),
     };
