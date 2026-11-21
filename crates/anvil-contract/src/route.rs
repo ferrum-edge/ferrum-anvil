@@ -259,9 +259,12 @@ impl<'a> Router<'a> {
         // (`/items`, `/items/`; `/a/b`, `/a//b`), compared as written, by where
         // their empty segments are. Each path is declared once, so each shape
         // names one template.
-        let mut alike: HashMap<Vec<&str>, Vec<usize>> = HashMap::new();
+        // A key without its leading `/` (which the importer warns about) is
+        // kept apart from the one with it.
+        let mut alike: HashMap<(bool, Vec<&str>), Vec<usize>> = HashMap::new();
         for (i, t) in templates.iter().enumerate() {
-            alike.entry(t.path.split('/').filter(|s| !s.is_empty()).collect()).or_default().push(i);
+            let key = (t.path.starts_with('/'), t.path.split('/').filter(|s| !s.is_empty()).collect());
+            alike.entry(key).or_default().push(i);
         }
         let mut alike: Vec<Vec<usize>> = alike.into_values().filter(|group| group.len() > 1).collect();
         alike.sort_unstable();
@@ -715,6 +718,13 @@ mod tests {
         let r = Router::new(&s);
         assert_eq!(op_of(&r, r.route("GET", "http://localhost/a%2Fl%3Ab/c/", None)), "escaped @");
         assert_eq!(op_of(&r, r.route("GET", "http://localhost/files/a:b/", None)), "colon @");
+        // A key missing its leading `/` is not a sibling of the one with it.
+        let s = spec(
+            r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},
+              "paths":{"items":{"get":{"operationId":"relativeItems"}},"/items":{"get":{"operationId":"absoluteItems"}}}}"#,
+        );
+        let r = Router::new(&s);
+        assert_eq!(op_of(&r, r.route("GET", "https://api.example/items", Some("absoluteItems"))), "absoluteItems @");
     }
 
     #[test]
