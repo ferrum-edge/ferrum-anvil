@@ -196,10 +196,14 @@ export interface ExportPreview {
   secrets_included: number;
   literals_moved: number;
   /**
-   * Each linked local file path the bundle carries, with the request or dataset that names it
-   * (`request 'Upload': /path/to/file`). A full-backup preview leaves it out.
+   * Each local file path the bundle carries: linked files with the request or dataset that names them
+   * (`request 'Upload': /path/to/file`), then JWT-SVID token files with the workspace, folder or request
+   * that names them (`request 'Orders' token file: /run/spire/jwt.token`), then paths only a saved request
+   * revision names (`saved revision of request 'Upload': /path/to/file`). A full-backup preview leaves it out.
    */
   linked_files?: string[];
+  /** The same paths, each apart from what names it (`owner` is `request 'Upload'` and the like). */
+  local_files?: { owner: string; path: string }[];
 }
 export interface ImportReport {
   plan: {

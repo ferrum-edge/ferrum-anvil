@@ -424,6 +424,11 @@
   distinct name (`release_name_2`, `release_name`), never reusing `baseUrl` or, for a relative URL,
   `origin`. Both used to be written as `release_name`, so a request ran against the wrong path
   (#580).
+- Workspace bundle export previews list every JWT-SVID token-file path (`file` source) the exported
+  workspaces, folders and requests name, nested multi-auth sets included, and every linked-file or
+  token-file path only a saved request revision names. The manifest's device bindings note that
+  token-file paths are this machine's, and opening such a bundle lists them in a warning. They
+  were exported with no listing or note (#590).
 - Spec drift attributes traffic to the declared path whose empty segments match the request's
   (`GET /items/` to `/items/`, `GET /a//b` to `/a//b`) when the description declares both that
   path and one without them. Matching dropped empty segments, so the other operation took the

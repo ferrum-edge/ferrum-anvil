@@ -36,6 +36,9 @@ use std::collections::{HashMap, HashSet};
 
 pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, BundleError> {
     let mut warnings = Vec::new();
+    // Read before revisions of requests outside the file are left out: the
+    // file carried their paths all the same.
+    let revision_files = g.revision_files();
     validate_ruleset_limits(g, "bundle")?;
     let ws: HashSet<Id> = g.workspaces.iter().map(|w| w.meta.id).collect();
     // Import writes each object under the workspace it names, and a Duplicate
@@ -355,6 +358,19 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
             "{} linked local file(s) name files on the machine that made the bundle and stay unused until chosen on this device (or attach the files instead): {}",
             linked.len(),
             linked.join("; ")
+        ));
+    }
+    let token_files = g.token_files();
+    if !token_files.is_empty() {
+        warnings.push(format!(
+            "JWT-SVID auth names token files by their path on the machine that made the file; check each path here (the desktop reads a token file only once it is chosen on this device): {}",
+            token_files.join("; ")
+        ));
+    }
+    if !revision_files.is_empty() {
+        warnings.push(format!(
+            "Saved request revisions in the file name local paths of the machine that made it; revisions are never sent: {}",
+            revision_files.join("; ")
         ));
     }
     Ok(warnings)
