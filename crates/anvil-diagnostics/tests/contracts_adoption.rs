@@ -26,14 +26,17 @@ fn files_under(root: &Path, base: &Path) -> BTreeSet<String> {
 /// never followed.
 fn try_files_under(root: &Path, base: &Path) -> Result<BTreeSet<String>, String> {
     let below = root.strip_prefix(base).map_err(|_| format!("{} is outside {}", root.display(), base.display()))?;
-    let mut dir = base.to_path_buf();
+    // Rebuilt from its components, so a trailing `/` or `/.` cannot make
+    // `symlink_metadata` resolve a linked last component.
+    let base: PathBuf = base.components().collect();
+    let mut dir = base.clone();
     real_dir(&dir)?;
     for component in below.components() {
         dir.push(component);
         real_dir(&dir)?;
     }
     let mut files = BTreeSet::new();
-    walk_files(root, base, &mut files)?;
+    walk_files(&dir, &base, &mut files)?;
     Ok(files)
 }
 
@@ -470,7 +473,10 @@ fn local(values: &[&str]) -> BTreeSet<String> {
 /// fixtures are accepted or refused by both.
 #[test]
 fn pinned_diagnostic_ref_contract_matches_anvils_reader() {
-    assert_diagnostic_ref_contract_matches_anvils_reader(&repo_root().join("contracts/ferrum-contracts"), Some(22));
+    let vendor = repo_root().join("contracts/ferrum-contracts");
+    // Refuse a link or special file anywhere in the tree before reading any.
+    files_under(&vendor, &vendor);
+    assert_diagnostic_ref_contract_matches_anvils_reader(&vendor, Some(22));
 }
 
 /// The `ferrum.diagnostic_ref.v1` schema, error classes and fixtures in
@@ -800,9 +806,14 @@ fn a_linked_scan_root_is_refused() {
     std::os::unix::fs::symlink(&dir, &link).unwrap();
     let as_base = try_files_under(&link, &link);
     let as_parent = try_files_under(&link.join("schemas"), &link);
+    let mut slashed = link.clone().into_os_string();
+    slashed.push("/");
+    let slashed = PathBuf::from(slashed);
+    let with_slash = try_files_under(&slashed, &slashed);
+    let with_dot = try_files_under(&link.join("."), &link.join("."));
     std::fs::remove_file(&link).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
-    for listed in [as_base, as_parent] {
+    for listed in [as_base, as_parent, with_slash, with_dot] {
         let error = listed.expect_err("a linked root was followed");
         assert!(error.contains("symbolic link"), "{error}");
     }
