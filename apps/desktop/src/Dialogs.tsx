@@ -994,11 +994,12 @@ const MODES = [
   { id: "full_backup", label: "Full backup", desc: "Everything including history and settings, encrypted. Restores into a clean install without this computer's keychain." },
 ];
 
-const VERBATIM_LINKED_FILE = /^(\w+ '.*': )(\\\\\?\\.*)$/s;
+const VERBATIM_LINKED_FILE = /^(.*: )(\\\\\?\\.*)$/s;
 
 /**
- * An export preview's linked file entry (`request 'Upload': /path/to/file`) as shown: its path
- * without the Windows `\\?\` verbatim prefix, as `displayPath` shows it.
+ * An export preview's local file entry (`request 'Upload': /path/to/file`, `request 'Orders' token file: …`,
+ * `saved revision of request 'Upload': …`) as shown: its path without the Windows `\\?\` verbatim prefix,
+ * as `displayPath` shows it.
  */
 export function displayLinkedFile(entry: string): string {
   const m = VERBATIM_LINKED_FILE.exec(entry);

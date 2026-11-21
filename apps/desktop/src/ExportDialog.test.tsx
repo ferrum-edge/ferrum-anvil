@@ -108,5 +108,7 @@ describe("export linked files", () => {
     expect(displayLinkedFile("request 'a': b': \\\\?\\C:\\x")).toBe("request 'a': b': C:\\x");
     expect(displayLinkedFile("request 'Up': C:\\Users\\me\\a.bin")).toBe("request 'Up': C:\\Users\\me\\a.bin");
     expect(displayLinkedFile("request 'Up': /tmp/a.bin")).toBe("request 'Up': /tmp/a.bin");
+    expect(displayLinkedFile("request 'Up' token file: \\\\?\\C:\\run\\jwt")).toBe("request 'Up' token file: C:\\run\\jwt");
+    expect(displayLinkedFile("saved revision of request 'Up': \\\\?\\C:\\x")).toBe("saved revision of request 'Up': C:\\x");
   });
 });

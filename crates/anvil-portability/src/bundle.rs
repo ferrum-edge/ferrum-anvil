@@ -194,8 +194,14 @@ fn device_bindings(graph: &PortableGraph) -> Vec<String> {
     if !graph.linked_files().is_empty() {
         out.push("Requests or datasets name linked local files; attach them, or choose them again on the target machine.".into());
     }
-    if !graph.token_files().is_empty() {
+    if graph.has_token_files() {
         out.push("JWT-SVID auth names token files by their path on this machine; check each path on the target machine, where the desktop reads a token file only once it is chosen there.".into());
+    }
+    if !graph.revision_files().is_empty() {
+        out.push(
+            "Saved request revisions name local file paths of this machine; revisions are never sent, so nothing needs choosing for them."
+                .into(),
+        );
     }
     out.push("OS keychain entries, local master keys and signed-in provider sessions are device-bound and are never exported.".into());
     out

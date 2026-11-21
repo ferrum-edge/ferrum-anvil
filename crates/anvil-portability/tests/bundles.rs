@@ -646,10 +646,30 @@ fn export_previews_list_jwt_svid_token_files() {
         expected.extend(historical.iter().cloned());
         assert_eq!(preview.linked_files, expected, "{mode:?}");
         let (bytes, _) = bundle::write_redacting(&g, &opts(mode, pass), &[]).unwrap();
+        assert!(
+            preview.manifest.device_bindings.iter().any(|d| d.contains("Saved request revisions")),
+            "{:?}",
+            preview.manifest.device_bindings
+        );
         let opened = bundle::open(&bytes, pass).unwrap();
         assert_eq!(opened.graph.revision_files(), historical);
         assert!(opened.graph.linked_files().is_empty(), "a revision-only path is not one to choose");
+        assert!(
+            opened.warnings.iter().any(|w| w.contains("saved request revisions") && w.contains("/home/alice/old.jwt")),
+            "{:?}",
+            opened.warnings
+        );
     }
+    // With no current token file, only the revision note is made.
+    let mut quiet = g.clone();
+    quiet.requests[0].spec.auth = AuthConfig::None;
+    assert!(!quiet.has_token_files() && quiet.token_files().is_empty());
+    let preview = bundle::preview_redacting(&quiet, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
+    let notes = &preview.manifest.device_bindings;
+    assert!(notes.iter().any(|d| d.contains("Saved request revisions")) && !notes.iter().any(|d| d.contains("JWT-SVID")), "{notes:?}");
+    // A second revision repeating a historical path lists it once.
+    quiet.revisions.push(revision(quiet.requests[0].meta.id, old.clone()));
+    assert_eq!(quiet.revision_files().len(), 3, "{:?}", quiet.revision_files());
     // A revision whose request is not in the graph is still disclosed.
     let orphan = revision(Id::new(), old);
     let label = format!("saved revision {}", orphan.id);

@@ -360,9 +360,17 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
     let token_files = g.token_files();
     if !token_files.is_empty() {
         warnings.push(format!(
-            "{} JWT-SVID token file path(s) name files by their path on the machine that made the bundle; check each path here (the desktop reads a token file only once it is chosen on this device): {}",
+            "{} JWT-SVID token file path(s) name files by their path on the machine that made the file; check each path here (the desktop reads a token file only once it is chosen on this device): {}",
             token_files.len(),
             token_files.join("; ")
+        ));
+    }
+    let revision_files = g.revision_files();
+    if !revision_files.is_empty() {
+        warnings.push(format!(
+            "{} path(s) in saved request revisions name files on the machine that made the file; revisions are never sent: {}",
+            revision_files.len(),
+            revision_files.join("; ")
         ));
     }
     Ok(warnings)

@@ -1,5 +1,6 @@
 //! The portable object graph carried by bundles.
 
+use anvil_domain::Id;
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::load::LoadPlan;
@@ -9,7 +10,7 @@ use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workload::JwtSvidSource;
 use anvil_domain::workspace::{Dataset, Environment, Folder, RequestDefinition, RequestRevision, Scenario, Workspace};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PortableGraph {
@@ -121,8 +122,20 @@ impl PortableGraph {
         out
     }
 
-    /// The linked-file and token-file paths only saved revisions name: each
-    /// revision's paths that its request's current spec does not, as
+    /// Whether a workspace, folder or request names a JWT-SVID token file
+    /// ([`Self::token_files`] is not empty), without listing them.
+    pub fn has_token_files(&self) -> bool {
+        self.workspaces
+            .iter()
+            .map(|w| &w.auth)
+            .chain(self.folders.iter().map(|f| &f.auth))
+            .chain(self.requests.iter().map(|r| &r.spec.auth))
+            .any(names_token_file)
+    }
+
+    /// The linked-file and token-file paths only saved revisions name: the
+    /// paths of each revision that neither its request's current spec nor an
+    /// earlier revision of it names, as
     /// `saved revision of request 'Upload': /path/to/file` or
     /// `saved revision of request 'Orders' token file: /run/spire/jwt.token`
     /// (`saved revision <id>` when the graph lacks its request). Revisions
@@ -130,25 +143,32 @@ impl PortableGraph {
     /// the bundle like any object.
     pub fn revision_files(&self) -> Vec<String> {
         let current: HashMap<_, _> = self.requests.iter().map(|r| (r.meta.id, r)).collect();
+        // Per request: its label and the linked and token paths listed so far,
+        // starting with those of its current spec (read once).
+        let mut seen: HashMap<Id, (String, HashSet<String>, HashSet<String>)> = HashMap::new();
         let mut out = Vec::new();
         for v in &self.revisions {
-            let (owner, mut linked, mut tokens) = match current.get(&v.request_id) {
-                Some(r) => {
+            let (owner, linked_seen, tokens_seen) = match current.get(&v.request_id) {
+                Some(r) => seen.entry(r.meta.id).or_insert_with(|| {
                     let mut linked = Vec::new();
                     linked_paths(&serde_json::to_value(&r.spec).unwrap_or_default(), &mut linked);
-                    (format!("saved revision of request '{}'", r.name), linked, token_file_paths([&r.spec.auth]))
-                }
-                None => (format!("saved revision {}", v.id), Vec::new(), Vec::new()),
+                    let tokens = token_file_paths([&r.spec.auth]);
+                    (format!("saved revision of request '{}'", r.name), linked.into_iter().collect(), tokens.into_iter().collect())
+                }),
+                None => seen.entry(v.id).or_insert_with(|| (format!("saved revision {}", v.id), HashSet::new(), HashSet::new())),
             };
-            let (known_linked, known_tokens) = (linked.len(), tokens.len());
+            let mut linked = Vec::new();
             linked_paths(&serde_json::to_value(&v.spec).unwrap_or_default(), &mut linked);
-            for p in token_file_paths([&v.spec.auth]) {
-                if !tokens.contains(&p) {
-                    tokens.push(p);
+            for p in linked {
+                if linked_seen.insert(p.clone()) {
+                    out.push(format!("{owner}: {p}"));
                 }
             }
-            out.extend(linked.drain(known_linked..).map(|p| format!("{owner}: {p}")));
-            out.extend(tokens.drain(known_tokens..).map(|p| format!("{owner} token file: {p}")));
+            for p in token_file_paths([&v.spec.auth]) {
+                if tokens_seen.insert(p.clone()) {
+                    out.push(format!("{owner} token file: {p}"));
+                }
+            }
         }
         out
     }
@@ -165,24 +185,33 @@ impl PortableGraph {
 }
 
 /// The token-file paths of the JWT-SVID `file` sources in `auths`, nested
-/// multi-auth sets included, each listed once.
+/// multi-auth sets included, each listed once, in first-seen order.
 fn token_file_paths<'a>(auths: impl IntoIterator<Item = &'a AuthConfig>) -> Vec<String> {
-    fn walk(auth: &AuthConfig, out: &mut Vec<String>) {
+    fn walk<'a>(auth: &'a AuthConfig, seen: &mut HashSet<&'a str>, out: &mut Vec<String>) {
         match auth {
             AuthConfig::JwtSvid { config } => {
                 if let JwtSvidSource::File { path } = &config.source
-                    && !out.iter().any(|p| p == path)
+                    && seen.insert(path)
                 {
                     out.push(path.clone());
                 }
             }
-            AuthConfig::Multi { profiles } => profiles.iter().for_each(|p| walk(p, out)),
+            AuthConfig::Multi { profiles } => profiles.iter().for_each(|p| walk(p, seen, out)),
             _ => {}
         }
     }
-    let mut out = Vec::new();
-    auths.into_iter().for_each(|auth| walk(auth, &mut out));
+    let (mut seen, mut out) = (HashSet::new(), Vec::new());
+    auths.into_iter().for_each(|auth| walk(auth, &mut seen, &mut out));
     out
+}
+
+/// Whether `auth` (nested multi-auth sets included) reads a JWT-SVID token file.
+fn names_token_file(auth: &AuthConfig) -> bool {
+    match auth {
+        AuthConfig::JwtSvid { config } => matches!(config.source, JwtSvidSource::File { .. }),
+        AuthConfig::Multi { profiles } => profiles.iter().any(names_token_file),
+        _ => false,
+    }
 }
 
 fn linked_paths(v: &serde_json::Value, out: &mut Vec<String>) {

@@ -495,10 +495,15 @@ forwarding, 0-RTT early data or the legacy HMAC opt-in, and never open an
 imported collection's root folder to its workspace. The preview lists what
 was normalised.
 
-Device-bound items (keychain entries, provider sessions, linked local files,
-JWT-SVID token files) are reported as needing rebinding, and the preview lists
-each linked local file with the request or dataset that names it, and each
-token file with the workspace, folder or request that names it. A bundle import drops this
+Device-bound items (keychain entries, provider sessions, linked local files)
+are reported as needing rebinding, and the preview lists each linked local
+file with the request or dataset that names it. JWT-SVID token-file paths are
+listed with the workspace, folder or request that names them, as paths to
+check on this device: the desktop reads one only once it is chosen here (a
+path already chosen in this profile counts), and the CLI reads the path as
+written; either way the imported workspace must first be allowed to use this
+device's identity. Paths only saved request revisions name are listed too;
+nothing needs choosing for them. A bundle import drops this
 device's linked-file bindings for every request and dataset it overwrites,
 and deleting a request, folder, dataset or workspace drops the bindings of
 the requests and datasets it deletes.
