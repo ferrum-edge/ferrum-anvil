@@ -655,7 +655,7 @@ fn export_previews_list_jwt_svid_token_files() {
         assert_eq!(opened.graph.revision_files(), historical);
         assert!(opened.graph.linked_files().is_empty(), "a revision-only path is not one to choose");
         assert!(
-            opened.warnings.iter().any(|w| w.contains("saved request revisions") && w.contains("/home/alice/old.jwt")),
+            opened.warnings.iter().any(|w| w.contains("request revisions") && w.contains("/home/alice/old.jwt")),
             "{:?}",
             opened.warnings
         );
@@ -683,6 +683,22 @@ fn export_previews_list_jwt_svid_token_files() {
             format!("{label} token file: /home/alice/old.jwt")
         ]
     );
+    // Opening it leaves the revision out but still names what it carried.
+    let (bytes, _) = bundle::write_redacting(&g2, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
+    let opened = bundle::open(&bytes, None).unwrap();
+    assert!(opened.graph.revisions.is_empty());
+    assert!(opened.warnings.iter().any(|w| w.contains(&format!("{label}: /home/alice/old.bin"))), "{:?}", opened.warnings);
+}
+
+/// A crafted graph naming many paths lists only the first few hundred.
+#[test]
+fn path_listings_are_capped() {
+    let mut g = sample();
+    let profiles = (0..anvil_portability::graph::MAX_LISTED_PATHS + 5).map(|i| svid_file(&format!("/t/{i}.jwt"))).collect();
+    g.workspaces[0].auth = AuthConfig::Multi { profiles };
+    let listed = g.token_files();
+    assert_eq!(listed.len(), anvil_portability::graph::MAX_LISTED_PATHS + 1);
+    assert_eq!(listed.last().unwrap(), "… and 5 more");
 }
 
 #[test]

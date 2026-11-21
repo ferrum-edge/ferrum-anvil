@@ -197,7 +197,7 @@ fn device_bindings(graph: &PortableGraph) -> Vec<String> {
     if graph.has_token_files() {
         out.push("JWT-SVID auth names token files by their path on this machine; check each path on the target machine, where the desktop reads a token file only once it is chosen there.".into());
     }
-    if !graph.revision_files().is_empty() {
+    if graph.has_revision_files() {
         out.push(
             "Saved request revisions name local file paths of this machine; revisions are never sent, so nothing needs choosing for them."
                 .into(),

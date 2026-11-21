@@ -36,6 +36,9 @@ use std::collections::{HashMap, HashSet};
 
 pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, BundleError> {
     let mut warnings = Vec::new();
+    // Read before revisions of requests outside the file are left out: the
+    // file carried their paths all the same.
+    let revision_files = g.revision_files();
     validate_ruleset_limits(g, "bundle")?;
     let ws: HashSet<Id> = g.workspaces.iter().map(|w| w.meta.id).collect();
     // Import writes each object under the workspace it names, and a Duplicate
@@ -360,16 +363,13 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
     let token_files = g.token_files();
     if !token_files.is_empty() {
         warnings.push(format!(
-            "{} JWT-SVID token file path(s) name files by their path on the machine that made the file; check each path here (the desktop reads a token file only once it is chosen on this device): {}",
-            token_files.len(),
+            "JWT-SVID auth names token files by their path on the machine that made the file; check each path here (the desktop reads a token file only once it is chosen on this device): {}",
             token_files.join("; ")
         ));
     }
-    let revision_files = g.revision_files();
     if !revision_files.is_empty() {
         warnings.push(format!(
-            "{} path(s) in saved request revisions name files on the machine that made the file; revisions are never sent: {}",
-            revision_files.len(),
+            "Saved request revisions in the file name local paths of the machine that made it; revisions are never sent: {}",
             revision_files.join("; ")
         ));
     }

@@ -110,5 +110,8 @@ describe("export linked files", () => {
     expect(displayLinkedFile("request 'Up': /tmp/a.bin")).toBe("request 'Up': /tmp/a.bin");
     expect(displayLinkedFile("request 'Up' token file: \\\\?\\C:\\run\\jwt")).toBe("request 'Up' token file: C:\\run\\jwt");
     expect(displayLinkedFile("saved revision of request 'Up': \\\\?\\C:\\x")).toBe("saved revision of request 'Up': C:\\x");
+    expect(displayLinkedFile("saved revision 0b1d-ef: \\\\?\\C:\\x")).toBe("saved revision 0b1d-ef: C:\\x");
+    // A POSIX path that merely contains the prefix text is shown as it is.
+    expect(displayLinkedFile("request 'Up' token file: /home/a/build: \\\\?\\jwt")).toBe("request 'Up' token file: /home/a/build: \\\\?\\jwt");
   });
 });

@@ -994,7 +994,7 @@ const MODES = [
   { id: "full_backup", label: "Full backup", desc: "Everything including history and settings, encrypted. Restores into a clean install without this computer's keychain." },
 ];
 
-const VERBATIM_LINKED_FILE = /^(.*: )(\\\\\?\\.*)$/s;
+const VERBATIM_LINKED_FILE = /^((?:saved revision of )?\w+ '.*'(?: token file)?: |saved revision [0-9a-f-]+(?: token file)?: )(\\\\\?\\.*)$/s;
 
 /**
  * An export preview's local file entry (`request 'Upload': /path/to/file`, `request 'Orders' token file: …`,

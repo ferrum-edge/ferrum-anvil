@@ -500,8 +500,9 @@ are reported as needing rebinding, and the preview lists each linked local
 file with the request or dataset that names it. JWT-SVID token-file paths are
 listed with the workspace, folder or request that names them, as paths to
 check on this device: the desktop reads one only once it is chosen here (a
-path already chosen in this profile counts), and the CLI reads the path as
-written; either way the imported workspace must first be allowed to use this
+path already chosen in this profile counts), and the CLI resolves the
+configured path (its variables too) at send time without a native-dialog
+choice; either way the imported workspace must first be allowed to use this
 device's identity. Paths only saved request revisions name are listed too;
 nothing needs choosing for them. A bundle import drops this
 device's linked-file bindings for every request and dataset it overwrites,
