@@ -66,6 +66,9 @@ pub(crate) struct Builder<'o> {
     pub sentinel_nonce: String,
     /// The name of each sentinel, by index ([`crate::common::finalize`]).
     pub placeholder_names: Vec<String>,
+    /// The variables the OpenAPI importer's document-level servers define,
+    /// which an operation-level server's placeholders never take.
+    pub server_variable_names: std::collections::HashSet<String>,
 }
 
 impl<'o> Builder<'o> {
@@ -119,6 +122,7 @@ impl<'o> Builder<'o> {
                 hex::encode(bytes)
             },
             placeholder_names: vec![],
+            server_variable_names: Default::default(),
         }
     }
 
@@ -139,6 +143,11 @@ impl<'o> Builder<'o> {
     /// Charge `n` bytes of text copied from the source into the imported
     /// objects; `false` (reported once) when they do not fit. Once the budget
     /// is spent no further operation is admitted.
+    /// Text budget still available ([`Self::charge_text`]).
+    pub fn text_left(&self) -> usize {
+        self.text_left
+    }
+
     pub fn charge_text(&mut self, pointer: &str, n: usize) -> bool {
         if n < self.text_left {
             self.text_left -= n;
