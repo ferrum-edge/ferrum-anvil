@@ -1134,7 +1134,7 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
           {preview.manifest.device_bindings.length > 0 && <div className="warn-box">Needs rebinding on the other machine: {preview.manifest.device_bindings.join(", ")}</div>}
           {preview.linked_files && preview.linked_files.length > 0 && (
             <div className="warn-box" data-testid="export-linked-files">
-              The bundle names these linked files by their path on this computer:
+              The bundle names these local files (linked files and JWT-SVID token files) by their path on this computer:
               <ul>
                 {preview.linked_files.map((f, i) => (
                   <li key={i} className="mono">
