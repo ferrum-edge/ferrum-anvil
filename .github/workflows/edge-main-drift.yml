@@ -103,7 +103,7 @@ jobs:
             echo "::error::The ferrum-contracts tree listing at $contracts is truncated"
             exit 1
           fi
-          pinned=$(awk '$1 == "sha256" { print $3 }' contracts/ferrum-contracts/PIN | LC_ALL=C sort)
+          pinned=$(grep -E '^[0-9a-f]{64}  ' contracts/ferrum-contracts/PIN | cut -c67- | LC_ALL=C sort)
           upstream=$(jq -r '.tree[] | select(.type == "blob") | .path
             | select(startswith("fixtures/diagnostic-ref/") or startswith("fixtures/diagnostic-finding/"))' <<< "$tree" \
             | LC_ALL=C sort)

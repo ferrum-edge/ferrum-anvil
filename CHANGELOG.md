@@ -251,6 +251,11 @@
 
 ### Changed
 
+- `contracts/ferrum-contracts/PIN` uses the canonical ferrum-contracts consumer format
+  (`docs/consumer-pins.md`): `tag`, `commit`, then `<sha256>  <path>` rows sorted by path, so
+  `grep -E '^[0-9a-f]{64}  ' PIN | sha256sum -c` checks it. `contracts_adoption.rs` now parses it
+  strictly and refuses duplicate, unsorted or legacy `sha256 ` rows, a `PIN` self-row, and a
+  symbolic link or other non-regular entry under the vendored tree (#591).
 - BREAKING: import report text and imported names with a credential indicator are redacted to the
   end of the text, not just to the end of the value (#595, GHSA-84pr-239v-mv8x). Over-redaction is
   the price: an imported name such as `Basic auth` becomes `Basic <redacted>`, and `auth: none`
