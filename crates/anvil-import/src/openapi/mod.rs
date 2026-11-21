@@ -41,6 +41,9 @@ pub(crate) struct Ctx<'a> {
     /// Swagger 2.0 document-level `produces` and `consumes`, read once rather
     /// than by every operation that inherits them.
     pub swagger_defaults: SwaggerDefaults,
+    /// The `{{name}}` of every path template parameter (`/items/{id}` gives
+    /// `id`): a server variable never takes one as a suffixed name.
+    pub path_parameter_names: HashSet<String>,
 }
 
 /// What an operation without its own `produces`/`consumes` inherits.
@@ -83,6 +86,21 @@ fn is_32(d: Dialect) -> bool {
     d == Dialect::OpenApi32
 }
 
+/// The sanitized names of the `{…}` segments of every path template.
+fn path_parameter_names(root: &Value) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for path in root.get("paths").and_then(Value::as_object).into_iter().flat_map(|p| p.keys()) {
+        let mut rest = path.as_str();
+        while let Some(open) = rest.find('{') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('}') else { break };
+            out.insert(sanitize_var(&after[..close]));
+            rest = &after[close + 1..];
+        }
+    }
+    out
+}
+
 fn only_32(ctx: &Ctx, b: &mut Builder, at: &str, what: &'static str) {
     b.report.warn(
         "openapi32_construct",
@@ -105,6 +123,7 @@ pub(crate) fn import(root: &Value, dialect: Dialect, b: &mut Builder) -> Result<
         } else {
             SwaggerDefaults::default()
         },
+        path_parameter_names: path_parameter_names(root),
     };
 
     // Info.
@@ -239,7 +258,7 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
             .unwrap_or_else(|| vec![json!({"url": "/"})]);
         for (i, s) in servers.iter().enumerate() {
             let sptr = format!("/servers/{i}");
-            let (url, vars) = server_url(b, s, &sptr, false);
+            let (url, vars) = server_url(b, s, &sptr, false, &ctx.path_parameter_names);
             let name = str_of(s, "name")
                 .filter(|_| is_32(ctx.dialect))
                 .or_else(|| str_of(s, "description"))
@@ -285,7 +304,7 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
 /// own `{{variable}}` name ([`server_aliases`]), and the text read and
 /// written is charged to the import's text budget: an operation-level server
 /// is converted for every operation that uses it.
-fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, Vec<Variable>) {
+fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool, avoid: &HashSet<String>) -> (String, Vec<Variable>) {
     let raw = str_of(s, "url").unwrap_or("/").trim();
     let empty = Map::new();
     let decl = s.get("variables").and_then(Value::as_object).unwrap_or(&empty);
@@ -293,7 +312,7 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
     let mut out = String::new();
     let mut rendered: HashMap<&str, String> = HashMap::new();
     let mut rest = if b.charge_text(sptr, raw.len()) { raw } else { "" };
-    let aliases = server_aliases(rest, decl, inline);
+    let aliases = server_aliases(rest, decl, inline, b.text_left(), avoid);
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
@@ -356,29 +375,61 @@ fn server_url_names<'a>(url: &'a str, decl: &Map<String, Value>, inline: bool) -
 }
 
 /// Whether [`server_url`] renders `url` as a relative URL (prefixed with
-/// `{{origin}}`): the same check on the same text, with each inlined default
-/// in place and every other variable as a `{{…}}` placeholder.
-fn renders_relative(url: &str, decl: &Map<String, Value>, inline: bool) -> bool {
-    let mut out = String::new();
-    let mut rest = url;
+/// `{{origin}}`): the same check (no `://` once trailing `/` are trimmed, and
+/// not starting with `{{`) on the text it renders, with each inlined default
+/// in place and every other variable as a `{{…}}` placeholder, inserted only
+/// while they fit `budget` bytes, as the renderer charges them. Nothing is
+/// built: the text is read once, character by character.
+fn renders_relative(url: &str, decl: &Map<String, Value>, inline: bool, budget: usize) -> bool {
+    struct Scan {
+        head: String,
+        last: [char; 2],
+        /// A `://` was read; `confirmed` once a character other than `/`
+        /// follows it, which trimming the trailing `/` keeps.
+        scheme: bool,
+        confirmed: bool,
+    }
+    impl Scan {
+        fn feed(&mut self, text: &str) {
+            for c in text.chars() {
+                if self.head.len() < 2 {
+                    self.head.push(c);
+                }
+                if self.scheme && c != '/' {
+                    self.confirmed = true;
+                }
+                if self.last == [':', '/'] && c == '/' {
+                    self.scheme = true;
+                }
+                self.last = [self.last[1], c];
+            }
+        }
+    }
+    let mut scan = Scan { head: String::new(), last: ['\0', '\0'], scheme: false, confirmed: false };
+    let mut defaults: HashMap<&str, Option<String>> = HashMap::new();
+    let (mut rest, mut left) = (url, budget);
     while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
+        scan.feed(&rest[..open]);
         let after = &rest[open + 1..];
         let Some(close) = after.find('}') else {
-            out.push_str(&rest[open..]);
+            scan.feed(&rest[open..]);
             rest = "";
             break;
         };
         let name = &after[..close];
         rest = &after[close + 1..];
-        match decl.get(name).and_then(|d| d.get("default")).filter(|_| inline) {
-            Some(d) => out.push_str(&scalar_text(d)),
-            None => out.push_str("{{v}}"),
+        let text =
+            defaults.entry(name).or_insert_with(|| decl.get(name).and_then(|d| d.get("default")).filter(|_| inline).map(scalar_text));
+        let text = text.as_deref().unwrap_or("{{v}}");
+        if text.len() >= left {
+            rest = "";
+            break;
         }
+        left -= text.len();
+        scan.feed(text);
     }
-    out.push_str(rest);
-    let url = out.trim_end_matches('/');
-    !url.contains("://") && !url.starts_with("{{")
+    scan.feed(rest);
+    !scan.confirmed && !scan.head.starts_with("{{")
 }
 
 /// A distinct `{{variable}}` name for each variable a server URL writes as
@@ -389,14 +440,20 @@ fn renders_relative(url: &str, decl: &Map<String, Value>, inline: bool) -> bool 
 /// sanitized winning, then the first used) before any suffix is given, so
 /// `{release-name}` beside them becomes `release_name_2` only when no
 /// `{release-name-2}` claims that name. The environment's own names are
-/// never given: `baseUrl`, and `origin` when the URL renders relative. A
-/// variable whose default is inlined needs no name. The same URL always gets
-/// the same names.
-fn server_aliases<'a>(url: &'a str, decl: &Map<String, Value>, inline: bool) -> HashMap<&'a str, String> {
+/// never given: `baseUrl`, and `origin` when the URL renders relative, nor
+/// is a path parameter's name in `avoid` as a suffixed one. A variable whose
+/// default is inlined needs no name. The same URL always gets the same names.
+fn server_aliases<'a>(
+    url: &'a str,
+    decl: &Map<String, Value>,
+    inline: bool,
+    budget: usize,
+    avoid: &HashSet<String>,
+) -> HashMap<&'a str, String> {
     let names: Vec<&str> = server_url_names(url, decl, inline).into_iter().filter(|(_, named)| *named).map(|(n, _)| n).collect();
     let mut used = crate::common::PlaceholderNames::default();
     used.reserve("baseUrl");
-    if renders_relative(url, decl, inline) {
+    if renders_relative(url, decl, inline, budget) {
         used.reserve("origin");
     }
     let mut aliases: HashMap<&str, String> = HashMap::with_capacity(names.len());
@@ -410,6 +467,8 @@ fn server_aliases<'a>(url: &'a str, decl: &Map<String, Value>, inline: bool) -> 
             }
         }
     }
+    // A suffixed name is never one a path parameter of the document uses.
+    avoid.iter().for_each(|n| used.reserve(n));
     for &name in &names {
         if !aliases.contains_key(name) {
             aliases.insert(name, used.name_verbatim(&sanitize_var(name)));
@@ -976,7 +1035,7 @@ fn import_operation(
                 &p,
                 "operation/path-level server overrides the environment baseUrl (variables use their defaults)",
             );
-            server_url(b, s0, &format!("{p}/0"), true).0
+            server_url(b, s0, &format!("{p}/0"), true, &ctx.path_parameter_names).0
         }
         None => "{{baseUrl}}".to_string(),
     };

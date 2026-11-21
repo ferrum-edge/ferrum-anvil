@@ -139,6 +139,11 @@ impl<'o> Builder<'o> {
     /// Charge `n` bytes of text copied from the source into the imported
     /// objects; `false` (reported once) when they do not fit. Once the budget
     /// is spent no further operation is admitted.
+    /// Text budget still available ([`Self::charge_text`]).
+    pub fn text_left(&self) -> usize {
+        self.text_left
+    }
+
     pub fn charge_text(&mut self, pointer: &str, n: usize) -> bool {
         if n < self.text_left {
             self.text_left -= n;
