@@ -556,6 +556,126 @@ fn export_previews_list_the_linked_file_paths_they_carry() {
     }
 }
 
+/// The stored data of a dataset with sensitive columns is never a plaintext
+/// entry: a share-safe bundle leaves it out (the dataset names a linked file
+/// to choose instead), and an encrypted transfer seals it in the vault and
+/// restores it on open.
+#[test]
+fn sensitive_dataset_data_is_sealed_or_left_out() {
+    let cell = "tok-SENSITIVE-dataset-cell";
+    let data = format!("user,password\nalice,{cell}\n").into_bytes();
+    let sha = hex_sha(&data);
+    let mut g = sample();
+    let ws = g.workspaces[0].meta.id;
+    let attachment =
+        AttachmentRef::Stored { sha256: sha.clone(), size: data.len() as u64, file_name: "users.csv".into(), media_type: None };
+    g.datasets.push(Dataset {
+        meta: Meta::new(),
+        workspace_id: ws,
+        name: "users".into(),
+        format: DatasetFormat::Csv,
+        attachment: attachment.clone(),
+        sensitive_columns: vec!["password".into()],
+    });
+    g.attachments.insert(sha.clone(), data.clone());
+
+    let (bytes, written) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
+    assert!(!text_of(&bytes).contains(cell));
+    assert!(written.manifest.excluded.iter().any(|e| e.starts_with("the data of dataset 'users'")), "{:?}", written.manifest.excluded);
+    let opened = bundle::open(&bytes, None).unwrap();
+    let d = opened.graph.datasets.iter().find(|d| d.name == "users").unwrap();
+    assert_eq!(d.attachment, AttachmentRef::LinkedFile { path: "users.csv".into() });
+    assert!(!opened.graph.attachments.contains_key(&sha));
+    assert!(opened.graph.attachments.contains_key(&hex_sha(b"attachment bytes")), "other attachments still travel");
+
+    let pass = Some("correct horse battery");
+    let (bytes, written) = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, pass), &[]).unwrap();
+    assert!(!text_of(&bytes).contains(cell), "only the encrypted vault may hold the data");
+    assert!(!written.manifest.excluded.iter().any(|e| e.contains("dataset")), "{:?}", written.manifest.excluded);
+    let opened = bundle::open(&bytes, pass).unwrap();
+    let d = opened.graph.datasets.iter().find(|d| d.name == "users").unwrap();
+    assert_eq!(d.attachment, attachment);
+    assert_eq!(opened.graph.attachments.get(&sha), Some(&data));
+}
+
+/// Two dropped files with the same name in one request become two distinct
+/// linked files, and a rewritten revision no longer claims its spec's hash.
+#[test]
+fn dropped_files_with_one_name_stay_distinct() {
+    let mut g = sample();
+    let ws = g.workspaces[0].meta.id;
+    let mut parts = vec![];
+    for (i, cell) in ["tok-SENSITIVE-a", "tok-SENSITIVE-b"].iter().enumerate() {
+        let data = format!("user,password\nu{i},{cell}\n").into_bytes();
+        let sha = hex_sha(&data);
+        let attachment =
+            AttachmentRef::Stored { sha256: sha.clone(), size: data.len() as u64, file_name: "users.csv".into(), media_type: None };
+        g.datasets.push(Dataset {
+            meta: Meta::new(),
+            workspace_id: ws,
+            name: format!("users {i}"),
+            format: DatasetFormat::Csv,
+            attachment: attachment.clone(),
+            sensitive_columns: vec!["password".into()],
+        });
+        g.attachments.insert(sha, data);
+        parts.push(MultipartPart {
+            name: format!("f{i}"),
+            enabled: true,
+            content: MultipartContent::File { attachment, file_name: None },
+            content_type: None,
+        });
+    }
+    g.requests[0].spec.body = Body::Multipart { parts };
+    g.revisions.push(RequestRevision {
+        id: Id::new(),
+        request_id: g.requests[0].meta.id,
+        created_at: anvil_domain::Timestamp::now(),
+        spec_sha256: "1".repeat(64),
+        spec: g.requests[0].spec.clone(),
+    });
+    let (bytes, written) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
+    let name = g.requests[0].name.clone();
+    for path in ["users.csv", "users.csv (2)"] {
+        assert!(written.linked_files.contains(&format!("request '{name}': {path}")), "{:?}", written.linked_files);
+    }
+    let opened = bundle::open(&bytes, None).unwrap();
+    let Body::Multipart { parts } = &opened.graph.requests[0].spec.body else { panic!("not multipart") };
+    let paths: Vec<_> = parts
+        .iter()
+        .map(|p| match &p.content {
+            MultipartContent::File { attachment: AttachmentRef::LinkedFile { path }, .. } => path.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(paths, ["users.csv", "users.csv (2)"]);
+    assert_eq!(opened.graph.revisions[0].spec_sha256, "0".repeat(64));
+
+    // The same bytes under two names stay two files to choose.
+    let mut g2 = g.clone();
+    g2.revisions.clear();
+    let Body::Multipart { parts } = &mut g2.requests[0].spec.body else { panic!("not multipart") };
+    let first = match &parts[0].content {
+        MultipartContent::File { attachment: AttachmentRef::Stored { sha256, size, .. }, .. } => (sha256.clone(), *size),
+        other => panic!("{other:?}"),
+    };
+    for (part, name) in parts.iter_mut().zip(["baseline.csv", "candidate.csv"]) {
+        let attachment = AttachmentRef::Stored { sha256: first.0.clone(), size: first.1, file_name: name.into(), media_type: None };
+        part.content = MultipartContent::File { attachment, file_name: None };
+    }
+    let (bytes, _) = bundle::write_redacting(&g2, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
+    let opened = bundle::open(&bytes, None).unwrap();
+    let Body::Multipart { parts } = &opened.graph.requests[0].spec.body else { panic!("not multipart") };
+    let paths: Vec<_> = parts
+        .iter()
+        .map(|p| match &p.content {
+            MultipartContent::File { attachment: AttachmentRef::LinkedFile { path }, .. } => path.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(paths, ["baseline.csv", "candidate.csv"]);
+}
+
 #[test]
 fn data_006_conflict_policies_and_duplicate_remap() {
     let g = sample();
@@ -1384,7 +1504,7 @@ fn with_format_1_vault(bytes: &[u8], g: &PortableGraph, pass: &str) -> Vec<u8> {
     let key = anvil_storage::crypto::derive(pass.as_bytes(), &salt, &kdf).unwrap();
     let mut objects = serde_json::to_value(g).unwrap();
     let literals = anvil_portability::sanitize::sanitize(&mut objects, &[]).extracted;
-    let payload = serde_json::to_vec(&bundle::VaultPayload { secrets: g.secrets.clone(), literals }).unwrap();
+    let payload = serde_json::to_vec(&bundle::VaultPayload { secrets: g.secrets.clone(), literals, ..Default::default() }).unwrap();
     let vault = anvil_storage::crypto::seal(&key, b"anvil-portable-vault-v1", &payload);
     repack(bytes, |n, b| match n {
         "manifest.json" => {
