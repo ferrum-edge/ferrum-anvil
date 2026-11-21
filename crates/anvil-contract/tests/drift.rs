@@ -406,6 +406,53 @@ fn har_captures_are_checked_too() {
     assert!(r.from.is_some());
 }
 
+/// Declared paths that differ only in empty segments (`/items` and
+/// `/items/`, `/a/b` and `/a//b`) are distinct operations: traffic to one is
+/// counted, checked and suggested against that one only (#581).
+#[test]
+fn har_traffic_reaches_the_operation_whose_empty_segments_match() {
+    for (plain, other) in [("/items", "/items/"), ("/a/b", "/a//b")] {
+        let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"}, "paths": {
+            plain: {"get": {"responses": {"200": {"description": "ok"}}}},
+            other: {"get": {"responses": {"202": {"description": "accepted"}}}}
+        }});
+        let spec = Spec::parse(doc.to_string().as_bytes()).unwrap();
+        let har = |path: &str, status: u16| {
+            let entry = json!({"startedDateTime": "2026-09-30T10:00:00Z", "time": 5,
+                "request": {"method": "GET", "url": format!("https://example.test{path}"), "headers": []},
+                "response": {"status": status, "headers": [], "content": {"size": 0, "mimeType": ""}}});
+            let har = json!({"log": {"version": "1.2", "entries": [entry]}});
+            anvil_contract::observe::from_har(har.to_string().as_bytes()).unwrap().observations
+        };
+        let coverage = |r: &DriftReport, path: &str| {
+            let op = r.operations.iter().find(|o| o.path == path).unwrap_or_else(|| panic!("{path}: {:#?}", r.operations));
+            (op.calls, op.statuses.clone())
+        };
+        let statuses = |code: &str| -> std::collections::BTreeMap<String, usize> { [(code.to_string(), 1)].into_iter().collect() };
+
+        // Each spelling reaches its own operation, with no status finding.
+        for (sent, code, idle) in [(other, "202", plain), (plain, "200", other)] {
+            let r = analyze(&spec, &har(sent, code.parse().unwrap()), &DriftOptions::default());
+            assert_eq!(r.matched, 1, "{sent}");
+            assert_eq!(coverage(&r, sent), (1, statuses(code)), "{sent}");
+            assert_eq!(coverage(&r, idle), (0, Default::default()), "{sent}");
+            assert!(r.findings.is_empty(), "{sent}: {:#?}", r.findings);
+            assert!(!r.suggestions.iter().any(|s| s.title.starts_with("Document the")), "{sent}: {:#?}", r.suggestions);
+        }
+
+        // A status the matching operation does not declare is charged to it alone.
+        let r = analyze(&spec, &har(other, 200), &DriftOptions::default());
+        assert_eq!(coverage(&r, other), (1, statuses("200")));
+        assert_eq!(coverage(&r, plain).0, 0);
+        let undeclared: Vec<_> = r.findings.iter().filter(|f| f.kind == DriftKind::UndeclaredStatus).collect();
+        assert_eq!(undeclared.len(), 1, "{:#?}", r.findings);
+        assert!(undeclared[0].message.contains(&format!("GET {other} ")), "{:#?}", undeclared[0]);
+        let titles: Vec<&str> = r.suggestions.iter().map(|s| s.title.as_str()).collect();
+        assert!(titles.contains(&format!("Document the 200 response of GET {other}").as_str()), "{titles:?}");
+        assert!(!titles.iter().any(|t| t.ends_with(&format!("of GET {plain}"))), "{titles:?}");
+    }
+}
+
 #[test]
 fn many_operations_and_observations_stay_fast() {
     let mut paths = serde_json::Map::new();

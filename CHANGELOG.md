@@ -251,6 +251,11 @@
 
 ### Changed
 
+- `contracts/ferrum-contracts/PIN` uses the canonical ferrum-contracts consumer format
+  (`docs/consumer-pins.md`): `tag`, `commit`, then `<sha256>  <path>` rows sorted by path, so
+  `grep -E '^[0-9a-f]{64}  ' PIN | sha256sum -c` checks it. `contracts_adoption.rs` now parses it
+  strictly and refuses duplicate, unsorted or legacy `sha256 ` rows, a `PIN` self-row, and a
+  symbolic link or other non-regular entry under the vendored tree (#591).
 - BREAKING: import report text and imported names with a credential indicator are redacted to the
   end of the text, not just to the end of the value (#595, GHSA-84pr-239v-mv8x). Over-redaction is
   the price: an imported name such as `Basic auth` becomes `Basic <redacted>`, and `auth: none`
@@ -419,6 +424,10 @@
   distinct name (`release_name_2`, `release_name`), never reusing `baseUrl` or, for a relative URL,
   `origin`. Both used to be written as `release_name`, so a request ran against the wrong path
   (#580).
+- Spec drift attributes traffic to the declared path whose empty segments match the request's
+  (`GET /items/` to `/items/`, `GET /a//b` to `/a//b`) when the description declares both that
+  path and one without them. Matching dropped empty segments, so the other operation took the
+  calls, coverage and status findings (#581).
 - An MCP request's protocol tag in the sidebar and tab bar uses the protocol colour of the
   other non-HTTP requests instead of the `GET` colour.
 - HTTP/3 requests, WebSocket over HTTP/3, SSE over HTTP/3, gRPC over HTTP/3 and MASQUE CONNECT-UDP
