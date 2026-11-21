@@ -260,6 +260,12 @@ profiles, spec-import records or load reports, and its bundle kind is
   missing (a blob lost to retention, or a request created without its file)
   travels without it, and the export lists that request or dataset among its
   excluded items.
+- The data of a dataset with `sensitive_columns`, which hold secrets, is
+  never a plaintext entry. An encrypted transfer carries it inside the
+  encrypted vault and restores it on import. A share-safe bundle leaves it
+  out: the dataset arrives naming a linked file (its file name) to choose on
+  the target machine, and the export lists the dataset, and any request that
+  uses the same file, among its excluded items.
 - The path of every linked local file its requests and datasets name, in
   every mode: a path on the exporting device, which can show its user name
   and folder layout. Only the binding stays on the device. The export

@@ -556,6 +556,48 @@ fn export_previews_list_the_linked_file_paths_they_carry() {
     }
 }
 
+/// The stored data of a dataset with sensitive columns is never a plaintext
+/// entry: a share-safe bundle leaves it out (the dataset names a linked file
+/// to choose instead), and an encrypted transfer seals it in the vault and
+/// restores it on open.
+#[test]
+fn sensitive_dataset_data_is_sealed_or_left_out() {
+    let secret = "sensitive-cell-4r8w";
+    let data = format!("user,password\nalice,{secret}\n").into_bytes();
+    let sha = hex_sha(&data);
+    let mut g = sample();
+    let ws = g.workspaces[0].meta.id;
+    let attachment =
+        AttachmentRef::Stored { sha256: sha.clone(), size: data.len() as u64, file_name: "users.csv".into(), media_type: None };
+    g.datasets.push(Dataset {
+        meta: Meta::new(),
+        workspace_id: ws,
+        name: "users".into(),
+        format: DatasetFormat::Csv,
+        attachment: attachment.clone(),
+        sensitive_columns: vec!["password".into()],
+    });
+    g.attachments.insert(sha.clone(), data.clone());
+
+    let (bytes, written) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
+    assert!(!text_of(&bytes).contains(secret));
+    assert!(written.manifest.excluded.iter().any(|e| e.starts_with("the data of dataset 'users'")), "{:?}", written.manifest.excluded);
+    let opened = bundle::open(&bytes, None).unwrap();
+    let d = opened.graph.datasets.iter().find(|d| d.name == "users").unwrap();
+    assert_eq!(d.attachment, AttachmentRef::LinkedFile { path: "users.csv".into() });
+    assert!(!opened.graph.attachments.contains_key(&sha));
+    assert!(opened.graph.attachments.contains_key(&hex_sha(b"attachment bytes")), "other attachments still travel");
+
+    let pass = Some("correct horse battery");
+    let (bytes, written) = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, pass), &[]).unwrap();
+    assert!(!text_of(&bytes).contains(secret), "only the encrypted vault may hold the data");
+    assert!(!written.manifest.excluded.iter().any(|e| e.contains("dataset")), "{:?}", written.manifest.excluded);
+    let opened = bundle::open(&bytes, pass).unwrap();
+    let d = opened.graph.datasets.iter().find(|d| d.name == "users").unwrap();
+    assert_eq!(d.attachment, attachment);
+    assert_eq!(opened.graph.attachments.get(&sha), Some(&data));
+}
+
 #[test]
 fn data_006_conflict_policies_and_duplicate_remap() {
     let g = sample();
@@ -1384,7 +1426,7 @@ fn with_format_1_vault(bytes: &[u8], g: &PortableGraph, pass: &str) -> Vec<u8> {
     let key = anvil_storage::crypto::derive(pass.as_bytes(), &salt, &kdf).unwrap();
     let mut objects = serde_json::to_value(g).unwrap();
     let literals = anvil_portability::sanitize::sanitize(&mut objects, &[]).extracted;
-    let payload = serde_json::to_vec(&bundle::VaultPayload { secrets: g.secrets.clone(), literals }).unwrap();
+    let payload = serde_json::to_vec(&bundle::VaultPayload { secrets: g.secrets.clone(), literals, ..Default::default() }).unwrap();
     let vault = anvil_storage::crypto::seal(&key, b"anvil-portable-vault-v1", &payload);
     repack(bytes, |n, b| match n {
         "manifest.json" => {

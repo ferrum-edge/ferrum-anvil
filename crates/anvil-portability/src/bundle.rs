@@ -2,6 +2,7 @@
 
 use crate::graph::{PortableGraph, SecretValue};
 use crate::sanitize::{self, ContentWarning, Extracted};
+use anvil_domain::request::AttachmentRef;
 use anvil_storage::crypto::{self, KdfParams};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -156,6 +157,50 @@ pub struct Manifest {
 pub struct VaultPayload {
     pub secrets: BTreeMap<String, SecretValue>,
     pub literals: Vec<Extracted>,
+    /// The stored data of each dataset with sensitive columns, by content
+    /// sha256 (base64): an encrypted transfer carries it here, never as a
+    /// plaintext `attachments/` entry ([`sensitive_dataset_hashes`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attachments: BTreeMap<String, String>,
+}
+
+/// The content hash of the stored data of every dataset with sensitive
+/// columns. Those columns hold secrets (`docs/runner.md`), so neither bundle
+/// mode writes these bytes as a plaintext `attachments/` entry, even when a
+/// request uses the same file: an encrypted transfer carries them inside its
+/// vault, and a share-safe bundle leaves them out.
+fn sensitive_dataset_hashes(graph: &PortableGraph) -> BTreeSet<&str> {
+    graph
+        .datasets
+        .iter()
+        .filter(|d| !d.sensitive_columns.is_empty())
+        .filter_map(|d| match &d.attachment {
+            AttachmentRef::Stored { sha256, .. } => Some(sha256.as_str()),
+            AttachmentRef::LinkedFile { .. } => None,
+        })
+        .collect()
+}
+
+/// The attachments a bundle writes as plaintext `attachments/` entries.
+fn plaintext_attachments(graph: &PortableGraph) -> impl Iterator<Item = (&String, &Vec<u8>)> {
+    let withheld = sensitive_dataset_hashes(graph);
+    graph.attachments.iter().filter(move |(hash, _)| !withheld.contains(hash.as_str()))
+}
+
+/// In a share-safe bundle's objects, each dataset with sensitive columns
+/// whose data stays out names a linked file instead (its file name), so it
+/// is chosen again on the target machine rather than resolving to whatever
+/// content with that hash the importing device holds.
+fn unlink_sensitive_datasets(objects: &mut serde_json::Value) {
+    let Some(datasets) = objects.get_mut("datasets").and_then(|d| d.as_array_mut()) else { return };
+    for d in datasets {
+        let sensitive = d.get("sensitive_columns").and_then(|c| c.as_array()).is_some_and(|c| !c.is_empty());
+        let Some(attachment) = d.get_mut("attachment") else { continue };
+        if sensitive && attachment.get("kind").and_then(|k| k.as_str()) == Some("stored") {
+            let file_name = attachment.get("file_name").and_then(|f| f.as_str()).unwrap_or_default().to_string();
+            *attachment = serde_json::json!({ "kind": "linked_file", "path": file_name });
+        }
+    }
 }
 
 pub struct ExportOptions<'a> {
@@ -247,7 +292,12 @@ pub fn prepare_redacting(
         safe_name(&name)?;
         charge_entry_bytes(&name, data.len() as u64, &mut remaining, READ_LIMITS)?;
     }
+    let encrypted = !matches!(opts.mode, ExportMode::ShareSafely);
+    let withheld = sensitive_dataset_hashes(graph);
     let mut objects = serde_json::to_value(graph)?;
+    if !encrypted {
+        unlink_sensitive_datasets(&mut objects);
+    }
     let san = sanitize::sanitize(&mut objects, redaction_names);
     let mut excluded = graph.omitted.clone();
     // Stored files whose content could not be read here travel without it.
@@ -257,7 +307,32 @@ pub fn prepare_redacting(
             excluded.push(entry);
         }
     }
-    let encrypted = !matches!(opts.mode, ExportMode::ShareSafely);
+    if !encrypted {
+        for (what, name, value) in graph
+            .requests
+            .iter()
+            .map(|r| ("request", &r.name, serde_json::to_value(&r.spec)))
+            .chain(graph.datasets.iter().map(|d| ("dataset", &d.name, serde_json::to_value(&d.attachment))))
+        {
+            let mut hashes = Vec::new();
+            crate::validate::stored_hashes(&value?, &mut hashes);
+            if !hashes.iter().any(|h| withheld.contains(h.as_str()) && graph.attachments.contains_key(h)) {
+                continue;
+            }
+            let entry = if what == "dataset" {
+                format!(
+                    "the data of dataset '{name}' (it has sensitive columns, so a share-safe bundle never carries it; choose its file on the target machine, or use an encrypted transfer)"
+                )
+            } else {
+                format!(
+                    "a stored file of request '{name}' (it is the data of a dataset with sensitive columns, which a share-safe bundle never carries; it fails until the file is attached again)"
+                )
+            };
+            if !excluded.contains(&entry) {
+                excluded.push(entry);
+            }
+        }
+    }
     if encrypted && opts.passphrase.is_none_or(|p| p.chars().count() < 8) {
         return Err(BundleError::Invalid("encrypted exports need an export passphrase of at least 8 characters".into()));
     }
@@ -265,6 +340,11 @@ pub fn prepare_redacting(
     if encrypted {
         vault.secrets = graph.secrets.clone();
         vault.literals = san.extracted.clone();
+        for hash in &withheld {
+            if let Some(data) = graph.attachments.get(*hash) {
+                vault.attachments.insert((*hash).to_string(), base64::engine::general_purpose::STANDARD.encode(data));
+            }
+        }
     } else {
         for (id, s) in &graph.secrets {
             excluded.push(format!("secret '{}' ({id})", s.label));
@@ -289,7 +369,8 @@ pub fn prepare_redacting(
     counts.insert("datasets".into(), graph.datasets.len());
     counts.insert("load_plans".into(), graph.load_plans.len());
     counts.insert("api_standards".into(), graph.rulesets.len());
-    counts.insert("attachments".into(), graph.attachments.len());
+    let dropped = if encrypted { 0 } else { graph.attachments.len() - plaintext_attachments(graph).count() };
+    counts.insert("attachments".into(), graph.attachments.len() - dropped);
     counts.insert("secrets".into(), if encrypted { graph.secrets.len() } else { 0 });
     counts.insert("history".into(), if opts.include_history { graph.history.len() } else { 0 });
     let manifest = Manifest {
@@ -446,7 +527,7 @@ fn export_preflight(
     let mut exported_manifest = manifest.clone();
     let mut names = vec![MANIFEST_ENTRY.to_string(), "workspace/objects.json".to_string()];
     charge_json("workspace/objects.json", objects, true, 0, &mut remaining, &mut nodes, limits)?;
-    for (hash, data) in &graph.attachments {
+    for (hash, data) in plaintext_attachments(graph) {
         let name = format!("attachments/{hash}");
         safe_name(&name)?;
         charge_entry_bytes(&name, data.len() as u64, &mut remaining, limits)?;
@@ -556,7 +637,7 @@ fn write_prepared(
     export_preflight(graph, opts, &manifest, &objects, &vault, limits)?;
     let mut files: Vec<(String, Cow<'_, [u8]>)> = Vec::new();
     files.push(("workspace/objects.json".into(), Cow::Owned(serde_json::to_vec_pretty(&objects)?)));
-    for (hash, data) in &graph.attachments {
+    for (hash, data) in plaintext_attachments(graph) {
         if sha256(data) != *hash {
             return Err(BundleError::Invalid(format!("attachment {hash} does not match its content hash")));
         }
@@ -1093,6 +1174,7 @@ fn open_archive<R: Read + Seek>(
     migrate_objects(manifest.schema_version, &mut objects)?;
     let mut secrets_restored = false;
     let mut secrets = BTreeMap::new();
+    let mut sealed_attachments = BTreeMap::new();
     if let Some(v) = &manifest.vault {
         let salt = vault_salt.as_ref().ok_or_else(|| BundleError::Invalid("vault salt".into()))?;
         let pass = passphrase.ok_or(BundleError::PassphraseRequired)?;
@@ -1114,6 +1196,7 @@ fn open_archive<R: Read + Seek>(
         }
         sanitize::restore(&mut objects, &payload.literals).map_err(BundleError::Invalid)?;
         secrets = payload.secrets;
+        sealed_attachments = payload.attachments;
         secrets_restored = true;
     }
     let mut graph: PortableGraph = serde_json::from_value(objects)
@@ -1128,6 +1211,24 @@ fn open_archive<R: Read + Seek>(
             }
             // Opened owns the attachment bytes; no second retained copy.
             graph.attachments.insert(h.to_string(), data);
+        }
+    }
+    // The data of datasets with sensitive columns, carried in the vault: each
+    // must be the content its hash names, used by such a dataset, and not
+    // also carried as a plaintext entry.
+    let sensitive: BTreeSet<String> = sensitive_dataset_hashes(&graph).into_iter().map(str::to_string).collect();
+    for (hash, encoded) in sealed_attachments {
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .map_err(|_| BundleError::Invalid("an attachment in the encrypted vault is not base64".into()))?;
+        if sha256(&data) != hash {
+            return Err(BundleError::Checksum(format!("{VAULT_ENTRY} attachment {hash}")));
+        }
+        if !sensitive.contains(&hash) {
+            return Err(BundleError::Invalid("the encrypted vault carries a file no dataset with sensitive columns uses".into()));
+        }
+        if graph.attachments.insert(hash, data).is_some() {
+            return Err(BundleError::Invalid("a dataset's data is carried both in the encrypted vault and as a plaintext entry".into()));
         }
     }
     let history_name = "history/records.jsonl";
