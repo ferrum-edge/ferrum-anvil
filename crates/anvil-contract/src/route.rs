@@ -8,7 +8,11 @@
 //! in front of a declared base path. Among matching templates the one with
 //! the most literal segments wins (a segment mixing text and a parameter
 //! counts half), then the longest base path, then the operation the request
-//! was imported from.
+//! was imported from. Empty segments are ignored while matching, so `/items/`
+//! reaches `/items` when only that is declared; when the description also
+//! declares a template that differs from the winner only in empty segments
+//! (`/items` and `/items/`, `/a/b` and `/a//b`), the one whose empty segments
+//! are where the request's are is chosen.
 //!
 //! A Path Item that many paths `$ref` is read once and its operations are
 //! shared by those paths; each (path, operation) the router lists is charged
@@ -133,13 +137,25 @@ struct Template {
     /// Sum of [`Seg::score`].
     score: usize,
     ops: Vec<usize>,
+    /// The templates whose path is the same as this one's once empty
+    /// segments are dropped (`/items` and `/items/`), by [`empty_shape`]:
+    /// an index into [`Router::siblings`] when it has any.
+    siblings: Option<usize>,
 }
 
 impl Template {
     fn new(path: &str, ops: Vec<usize>) -> Template {
         let segs = parse_segments(path);
-        Template { path: path.to_string(), score: segs.iter().map(Seg::score).sum(), segs, ops }
+        Template { path: path.to_string(), score: segs.iter().map(Seg::score).sum(), segs, ops, siblings: None }
     }
+}
+
+/// Which `/`-separated segments of `path` after its leading `/` are empty:
+/// `/items/` is `[false, true]`, `/a//b` is `[false, true, false]` and `/`
+/// is `[true]`. Matching drops empty segments; this tells apart declared
+/// paths that differ only in them.
+fn empty_shape(path: &str) -> Vec<bool> {
+    path.strip_prefix('/').unwrap_or(path).split('/').map(str::is_empty).collect()
 }
 
 /// A declared server: its URL and whether an origin matches it.
@@ -168,6 +184,9 @@ pub struct Router<'a> {
     by_path: HashMap<&'a str, usize>,
     /// Template indexes by segment count.
     by_len: HashMap<usize, Vec<usize>>,
+    /// For each set of templates that differ only in empty segments, the
+    /// template of each [`empty_shape`].
+    siblings: Vec<HashMap<Vec<bool>, usize>>,
     bases: Vec<Base>,
     pub servers: Vec<Server>,
     /// Server URLs whose base path was not kept ([`MAX_BASES`]).
@@ -235,6 +254,28 @@ impl<'a> Router<'a> {
         let mut by_len: HashMap<usize, Vec<usize>> = HashMap::new();
         for (i, t) in templates.iter().enumerate() {
             by_len.entry(t.segs.len()).or_default().push(i);
+        }
+        // Templates whose path is the same once empty segments are dropped
+        // (`/items`, `/items/`; `/a/b`, `/a//b`), compared as written, by where
+        // their empty segments are. Each path is declared once, so each shape
+        // names one template.
+        // A key without its leading `/` (which the importer warns about) is
+        // kept apart from the one with it.
+        let mut alike: HashMap<(bool, Vec<&str>), Vec<usize>> = HashMap::new();
+        for (i, t) in templates.iter().enumerate() {
+            let key = (t.path.starts_with('/'), t.path.split('/').filter(|s| !s.is_empty()).collect());
+            alike.entry(key).or_default().push(i);
+        }
+        let mut alike: Vec<Vec<usize>> = alike.into_values().filter(|group| group.len() > 1).collect();
+        alike.sort_unstable();
+        let mut siblings: Vec<HashMap<Vec<bool>, usize>> = vec![];
+        for group in alike {
+            let mut by_shape: HashMap<Vec<bool>, usize> = HashMap::new();
+            for &i in &group {
+                templates[i].siblings = Some(siblings.len());
+                by_shape.entry(empty_shape(&templates[i].path)).or_insert(i);
+            }
+            siblings.push(by_shape);
         }
         // Server URLs with their variables.
         let mut urls: Vec<(String, Option<&Value>)> = vec![];
@@ -337,7 +378,7 @@ impl<'a> Router<'a> {
             })
             .collect();
         let dropped_servers = dropped.len();
-        Router { items, entries, templates, by_path, by_len, bases, servers, dropped_servers, skipped_operations }
+        Router { items, entries, templates, by_path, by_len, siblings, bases, servers, dropped_servers, skipped_operations }
     }
 
     /// How many operations are listed (the indexes of [`Route::Operation`]).
@@ -406,9 +447,12 @@ impl<'a> Router<'a> {
         let (_, path) = split_url(url);
         let segs: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(percent_decode_path).collect();
         let method = method.to_ascii_lowercase();
-        // (template score, base length, template index, base).
-        let mut best: Option<(usize, usize, usize, String)> = None;
-        let consider = |base_len: usize, base: String, rest: &[String], best: &mut Option<(usize, usize, usize, String)>| {
+        let hinted = |i: usize| hint.is_some_and(|h| self.templates[i].ops.iter().any(|o| self.key(*o) == strip_dup(h)));
+        // (template score, base length, template index, base, segments the base takes).
+        type Best = Option<(usize, usize, usize, String, usize)>;
+        let mut best: Best = None;
+        let consider = |base_len: usize, base: String, taken: usize, best: &mut Best| {
+            let rest = &segs[taken..];
             for &ti in self.by_len.get(&rest.len()).into_iter().flatten() {
                 let t = &self.templates[ti];
                 if !t.segs.iter().zip(rest).all(|(s, r)| s.matches(r)) {
@@ -417,13 +461,12 @@ impl<'a> Router<'a> {
                 let lits = t.score;
                 let better = match best {
                     None => true,
-                    Some((bl, bb, bt, _)) => {
-                        let hinted = |i: usize| hint.is_some_and(|h| self.templates[i].ops.iter().any(|o| self.key(*o) == strip_dup(h)));
+                    Some((bl, bb, bt, _, _)) => {
                         (lits, base_len) > (*bl, *bb) || ((lits, base_len) == (*bl, *bb) && hinted(ti) && !hinted(*bt))
                     }
                 };
                 if better {
-                    *best = Some((lits, base_len, ti, base.clone()));
+                    *best = Some((lits, base_len, ti, base.clone(), taken));
                 }
             }
         };
@@ -437,14 +480,14 @@ impl<'a> Router<'a> {
                 if bsegs.len() <= rest.len() && bsegs.iter().zip(rest).all(|(s, r)| s.matches(r)) {
                     let n = k + bsegs.len();
                     let base = if n == 0 { String::new() } else { format!("/{}", segs[..n].join("/")) };
-                    consider(bsegs.len(), base, &segs[n..], &mut best);
+                    consider(bsegs.len(), base, n, &mut best);
                 }
             }
             if best.is_some() {
                 break;
             }
         }
-        let Some((_, _, ti, base)) = best else {
+        let Some((_, _, ti, base, taken)) = best else {
             // Only a base whose variables have their declared values names
             // the base of an undeclared path.
             // (An unknown prefix may come first, as above.)
@@ -459,6 +502,21 @@ impl<'a> Router<'a> {
                 })
                 .unwrap_or_default();
             return Route::Path { base };
+        };
+        // A declared template that differs from the one chosen only in empty
+        // segments, and has them where the request does after its base, is
+        // the operation meant (`/items/` rather than `/items`).
+        let ti = match self.templates[ti].siblings {
+            Some(g) => {
+                let shape = empty_shape(&path);
+                // Just past the last segment the base takes.
+                let from = match taken {
+                    0 => 0,
+                    n => shape.iter().enumerate().filter(|(_, empty)| !**empty).nth(n - 1).map_or(shape.len(), |(i, _)| i + 1),
+                };
+                self.siblings[g].get(&shape[from..]).copied().unwrap_or(ti)
+            }
+            None => ti,
         };
         let t = &self.templates[ti];
         let find = |m: &str| t.ops.iter().copied().find(|o| self.method(*o) == m);
@@ -586,6 +644,87 @@ mod tests {
         assert_eq!(op_of(&r, r.route("GET", "https://eu.example/v2/owners/1", None)), "path @/v2");
         assert_eq!(op_of(&r, r.route("GET", "https://eu.example/owners/1", None)), "path @");
         assert!(r.base_declared("/v2") && r.base_declared("/v1") && !r.base_declared("/owners"));
+    }
+
+    #[test]
+    fn declared_paths_differing_in_empty_segments_stay_distinct() {
+        let s = spec(
+            r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},"servers":[{"url":"https://api.example/v1/"}],
+              "paths":{
+                "/items":{"get":{"operationId":"items"}},
+                "/items/":{"get":{"operationId":"itemsSlash"}},
+                "/a/b":{"get":{"operationId":"ab"}},
+                "/a//b":{"get":{"operationId":"aEmptyB"}},
+                "/":{"get":{"operationId":"root"}},
+                "/only":{"get":{"operationId":"only"}},
+                "/users/{id}":{"get":{"operationId":"user"}}
+              }}"#,
+        );
+        let r = Router::new(&s);
+        for (url, want) in [
+            ("https://api.example/v1/items", "items @/v1"),
+            ("https://api.example/v1/items/", "itemsSlash @/v1"),
+            ("https://api.example/v1/a/b", "ab @/v1"),
+            ("https://api.example/v1/a//b", "aEmptyB @/v1"),
+            ("https://api.example/v1/", "root @/v1"),
+            // Without a declared base, and behind an unknown prefix.
+            ("http://localhost/items/", "itemsSlash @"),
+            ("http://localhost/items", "items @"),
+            ("https://gw.example/api/v1/a//b", "aEmptyB @/api/v1"),
+            // A path declared only one way still takes either spelling.
+            ("https://api.example/v1/only/", "only @/v1"),
+            ("https://api.example/v1//only", "only @/v1"),
+            // An ordinary templated route, and HEAD answered by GET.
+            ("https://api.example/v1/users/7", "user @/v1"),
+        ] {
+            assert_eq!(op_of(&r, r.route("GET", url, None)), want, "{url}");
+        }
+        assert_eq!(op_of(&r, r.route("HEAD", "https://api.example/v1/items/", None)), "itemsSlash @/v1");
+        assert_eq!(op_of(&r, r.route("HEAD", "https://api.example/v1/a/b", None)), "ab @/v1");
+        assert_eq!(op_of(&r, r.route("POST", "https://api.example/v1/items/", None)), "method /items/ @/v1");
+    }
+
+    /// A template's empty segments decide only between templates that differ
+    /// in nothing else: overlapping templates keep the import hint and
+    /// document order.
+    #[test]
+    fn empty_segments_never_outrank_a_different_template() {
+        let s = spec(
+            r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},
+              "paths":{
+                "/users/{id}":{"get":{"operationId":"getUser"}},
+                "/{group}/summary/":{"post":{"operationId":"postSummary"}}
+              }}"#,
+        );
+        let r = Router::new(&s);
+        assert_eq!(op_of(&r, r.route("GET", "http://localhost/users/summary/", Some("getUser"))), "getUser @");
+        assert_eq!(op_of(&r, r.route("GET", "http://localhost/users/summary/", None)), "getUser @");
+        assert_eq!(op_of(&r, r.route("POST", "http://localhost/users/summary/", Some("postSummary"))), "postSummary @");
+    }
+
+    /// Only paths written alike apart from empty segments are siblings: an
+    /// escaped `/` or `:` inside a segment keeps two paths apart.
+    #[test]
+    fn escaped_segments_are_not_empty_segment_siblings() {
+        let s = spec(
+            r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},
+              "paths":{
+                "/a%2Fl%3Ab/c":{"get":{"operationId":"escaped"}},
+                "/a/b%2Fl%3Ac/":{"get":{"operationId":"other"}},
+                "/files/a:b":{"get":{"operationId":"colon"}},
+                "/files/a%3Ab/":{"get":{"operationId":"escapedColon"}}
+              }}"#,
+        );
+        let r = Router::new(&s);
+        assert_eq!(op_of(&r, r.route("GET", "http://localhost/a%2Fl%3Ab/c/", None)), "escaped @");
+        assert_eq!(op_of(&r, r.route("GET", "http://localhost/files/a:b/", None)), "colon @");
+        // A key missing its leading `/` is not a sibling of the one with it.
+        let s = spec(
+            r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},
+              "paths":{"items":{"get":{"operationId":"relativeItems"}},"/items":{"get":{"operationId":"absoluteItems"}}}}"#,
+        );
+        let r = Router::new(&s);
+        assert_eq!(op_of(&r, r.route("GET", "https://api.example/items", Some("absoluteItems"))), "absoluteItems @");
     }
 
     #[test]
