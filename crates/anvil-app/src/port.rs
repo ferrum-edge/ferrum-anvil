@@ -217,13 +217,7 @@ impl App {
     fn sensitive_dataset_hashes(&self) -> Result<std::collections::BTreeSet<String>> {
         let mut out = std::collections::BTreeSet::new();
         for w in self.workspaces()? {
-            for d in self.datasets(&w.meta.id)? {
-                if let anvil_domain::request::AttachmentRef::Stored { sha256, .. } = d.attachment
-                    && !d.sensitive_columns.is_empty()
-                {
-                    out.insert(sha256);
-                }
-            }
+            out.extend(sensitive_dataset_hashes_in(&self.datasets(&w.meta.id)?));
         }
         Ok(out)
     }
@@ -338,6 +332,16 @@ impl App {
         }
         if let Err(e) = crate::standards::layered_for_port(&combined, include_recommended) {
             warnings.push(format!("Imported API standards would not load: {e}"));
+        }
+        // Data the vault carries is stored only beside a dataset with
+        // sensitive columns that will be here once this policy applies.
+        if !opened.sealed_attachments.is_empty() {
+            let mut kept = self.sensitive_dataset_hashes()?;
+            let skip = |id: &Id| policy == ConflictPolicy::Merge && existing.objects.contains(id);
+            kept.extend(sensitive_dataset_hashes_in(&graph.datasets.iter().filter(|d| !skip(&d.meta.id)).cloned().collect::<Vec<_>>()));
+            for sha in opened.sealed_attachments.iter().filter(|h| !kept.contains(*h)) {
+                warnings.push(discarded_sealed_note(&graph, sha));
+            }
         }
         let plan = plan::plan(&graph, &existing, policy);
         Ok(ImportReport {
@@ -620,24 +624,26 @@ impl App {
             crate::device_identity::seal_in(s, g.workspaces.iter().map(|w| &w.meta.id))?;
             Ok(Ok((plan, notes)))
         })?;
-        // Data the vault carried belongs to a dataset with sensitive columns:
-        // stored only while such a dataset here names it (Merge may have kept
-        // an existing dataset instead), so a later export still withholds it.
-        let sensitive = if opened.sealed_attachments.is_empty() { Default::default() } else { self.sensitive_dataset_hashes()? };
         for (sha, bytes) in &g.attachments {
-            if opened.sealed_attachments.contains(sha) && !sensitive.contains(sha) {
-                notes.push(format!(
-                    "The data of a dataset with sensitive columns ({sha}) was not stored: no dataset with sensitive columns here uses it; attach the file again where it is needed."
-                ));
-                continue;
-            }
-            // The items written above reference it, so it is not marked as
-            // added by a user (see `App::put_attachment`).
-            let r = self.store.atomically(|s| put_attachment_in(s, sha, bytes, None))?;
-            if let anvil_domain::request::AttachmentRef::Stored { sha256, .. } = r
-                && sha256 != *sha
-            {
-                return Err(AppError::Invalid(format!("attachment {sha} failed its integrity check")));
+            // Data the vault carried belongs to a dataset with sensitive
+            // columns: stored only while such a dataset here names it (Merge
+            // may have kept an existing dataset instead), checked in the same
+            // transaction that stores it, so a later export still withholds it.
+            let sealed = opened.sealed_attachments.contains(sha);
+            let stored = self.store.atomically(|s| {
+                if sealed && !sensitive_dataset_hashes_in(&s.list::<anvil_domain::workspace::Dataset>(kind::DATASET, None)?).contains(sha) {
+                    return Ok(None);
+                }
+                // The items written above reference it, so it is not marked as
+                // added by a user (see `App::put_attachment`).
+                put_attachment_in(s, sha, bytes, None).map(Some)
+            })?;
+            match stored {
+                None => notes.push(discarded_sealed_note(&g, sha)),
+                Some(anvil_domain::request::AttachmentRef::Stored { sha256, .. }) if sha256 != *sha => {
+                    return Err(AppError::Invalid(format!("attachment {sha} failed its integrity check")));
+                }
+                Some(_) => {}
             }
         }
         let mut warnings = opened.warnings;
@@ -715,6 +721,38 @@ pub(crate) fn stored_among(r: &StoreRead<'_>, uncarried: &[UncarriedAttachment])
         }
     }
     Ok(out)
+}
+
+/// The content hash of the stored data of each dataset in `datasets` that
+/// has sensitive columns.
+fn sensitive_dataset_hashes_in(datasets: &[anvil_domain::workspace::Dataset]) -> std::collections::BTreeSet<String> {
+    datasets
+        .iter()
+        .filter(|d| !d.sensitive_columns.is_empty())
+        .filter_map(|d| match &d.attachment {
+            anvil_domain::request::AttachmentRef::Stored { sha256, .. } => Some(sha256.clone()),
+            anvil_domain::request::AttachmentRef::LinkedFile { .. } => None,
+        })
+        .collect()
+}
+
+/// The note for vault-carried data an import does not store, naming what
+/// uses it.
+fn discarded_sealed_note(g: &PortableGraph, sha: &str) -> String {
+    let users: Vec<String> = validate::uncarried_attachments(&PortableGraph {
+        requests: g.requests.clone(),
+        datasets: g.datasets.clone(),
+        ..Default::default()
+    })
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|u| u.sha256 == sha)
+    .map(|u| u.item)
+    .collect();
+    format!(
+        "The data of a dataset with sensitive columns is not stored, since no dataset with sensitive columns here uses it (Merge keeps the existing dataset): {} will fail until the file is attached again.",
+        if users.is_empty() { format!("file {sha}") } else { users.join(", ") }
+    )
 }
 
 /// Check the stored attachments a bundle or backup (`file`) names without

@@ -235,12 +235,13 @@ fn unlinked_files(graph: &PortableGraph, mode: ExportMode) -> Vec<String> {
 }
 
 /// The linked path each dropped stored attachment in `v` (one request spec,
-/// revision spec or dataset attachment) becomes, in traversal order: its
-/// file name, made distinct within `v` (`users.csv`, `users.csv (2)`) from
-/// the other dropped files and the linked paths `v` already names, so
-/// choosing one file never binds another.
-fn linked_placeholders(v: &serde_json::Value, dropped: &BTreeSet<&str>) -> Vec<(String, String)> {
-    fn walk(v: &serde_json::Value, dropped: &BTreeSet<&str>, linked: &mut BTreeSet<String>, files: &mut Vec<(String, String)>) {
+/// revision spec or dataset attachment) becomes, by content hash and file
+/// name, in traversal order: its file name, made distinct within `v`
+/// (`users.csv`, `users.csv (2)`) from the other dropped files and the
+/// linked paths `v` already names, so choosing one file never binds
+/// another, even when two files hold the same bytes.
+fn linked_placeholders(v: &serde_json::Value, dropped: &BTreeSet<&str>) -> Vec<((String, String), String)> {
+    fn walk(v: &serde_json::Value, dropped: &BTreeSet<&str>, linked: &mut BTreeSet<String>, files: &mut Vec<((String, String), String)>) {
         match v {
             serde_json::Value::Object(o) => {
                 let kind = o.get("kind").and_then(|k| k.as_str());
@@ -248,9 +249,12 @@ fn linked_placeholders(v: &serde_json::Value, dropped: &BTreeSet<&str>) -> Vec<(
                     linked.insert(o.get("path").and_then(|p| p.as_str()).unwrap_or_default().to_string());
                 } else if kind == Some("stored")
                     && let Some(hash) = o.get("sha256").and_then(|h| h.as_str()).filter(|h| dropped.contains(h))
-                    && !files.iter().any(|(h, _)| h == hash)
                 {
-                    files.push((hash.to_string(), o.get("file_name").and_then(|f| f.as_str()).unwrap_or_default().to_string()));
+                    let key = (hash.to_string(), o.get("file_name").and_then(|f| f.as_str()).unwrap_or_default().to_string());
+                    if !files.iter().any(|(k, _)| *k == key) {
+                        let path = key.1.clone();
+                        files.push((key, path));
+                    }
                 }
                 o.values().for_each(|x| walk(x, dropped, linked, files));
             }
@@ -275,11 +279,15 @@ fn linked_placeholders(v: &serde_json::Value, dropped: &BTreeSet<&str>) -> Vec<(
 /// `v` with each dropped stored attachment replaced by its linked file
 /// ([`linked_placeholders`]); whether anything was replaced.
 fn unlink_dropped(v: &mut serde_json::Value, dropped: &BTreeSet<&str>) -> bool {
-    fn walk(v: &mut serde_json::Value, paths: &BTreeMap<String, String>) {
+    fn walk(v: &mut serde_json::Value, paths: &BTreeMap<(String, String), String>) {
         match v {
             serde_json::Value::Object(o) => {
                 let stored = o.get("kind").and_then(|k| k.as_str()) == Some("stored");
-                if let Some(path) = o.get("sha256").and_then(|h| h.as_str()).and_then(|h| paths.get(h)).filter(|_| stored) {
+                let key = |o: &serde_json::Map<String, serde_json::Value>| {
+                    let hash = o.get("sha256").and_then(|h| h.as_str())?.to_string();
+                    Some((hash, o.get("file_name").and_then(|f| f.as_str()).unwrap_or_default().to_string()))
+                };
+                if let Some(path) = key(o).and_then(|k| paths.get(&k)).filter(|_| stored) {
                     *v = serde_json::json!({ "kind": "linked_file", "path": path });
                     return;
                 }
@@ -289,9 +297,15 @@ fn unlink_dropped(v: &mut serde_json::Value, dropped: &BTreeSet<&str>) -> bool {
             _ => {}
         }
     }
-    let paths: BTreeMap<String, String> = linked_placeholders(v, dropped).into_iter().collect();
+    let paths: BTreeMap<(String, String), String> = linked_placeholders(v, dropped).into_iter().collect();
     walk(v, &paths);
     !paths.is_empty()
+}
+
+/// The bytes the base64 of each sealed file adds to a prepared vault, whose
+/// attachment strings are still empty.
+fn sealed_overhead(graph: &PortableGraph, vault: &VaultPayload) -> u64 {
+    vault.attachments.keys().map(|h| graph.attachments.get(h).map_or(0, |d| base64_len(d.len()))).sum()
 }
 
 /// Base64 length of `n` bytes.
@@ -465,23 +479,14 @@ pub fn prepare_redacting(
     if encrypted {
         vault.secrets = graph.secrets.clone();
         vault.literals = san.extracted.clone();
-        // The vault's exact size, with each sealed file as its base64 length,
-        // before any of it is encoded.
-        vault.attachments = sealed.iter().map(|h| ((*h).to_string(), String::new())).collect();
-        let skeleton = serde_json::to_vec(&vault)?.len() as u64;
-        if skeleton.saturating_add(sealed_len).saturating_add(VAULT_ENVELOPE_OVERHEAD) > MAX_ENTRY_BYTES {
-            return Err(BundleError::Limits(format!(
-                "the encrypted vault with the data of the datasets with sensitive columns ({} MiB) exceeds {} MiB; export a full backup instead",
-                (skeleton + sealed_len) / (1024 * 1024),
-                MAX_ENTRY_BYTES / (1024 * 1024)
-            )));
-        }
+        // Each sealed file stays an empty string here: the preflight charges
+        // its base64 length ([`sealed_overhead`]), and only the writer encodes
+        // it, after the preflight passed.
         for hash in &sealed {
-            let data = &graph.attachments[*hash];
-            if sha256(data) != *hash {
+            if sha256(&graph.attachments[*hash]) != *hash {
                 return Err(BundleError::Invalid(format!("attachment {hash} does not match its content hash")));
             }
-            vault.attachments.insert((*hash).to_string(), base64::engine::general_purpose::STANDARD.encode(data));
+            vault.attachments.insert((*hash).to_string(), String::new());
         }
     } else {
         for (id, s) in &graph.secrets {
@@ -693,7 +698,8 @@ fn export_preflight(
     }
     if opts.mode == ExportMode::EncryptedTransfer {
         check_kdf(&opts.kdf)?;
-        charge_json(VAULT_ENTRY, vault, false, VAULT_ENVELOPE_OVERHEAD, &mut remaining, &mut nodes, limits)?;
+        let overhead = VAULT_ENVELOPE_OVERHEAD.saturating_add(sealed_overhead(graph, vault));
+        charge_json(VAULT_ENTRY, vault, false, overhead, &mut remaining, &mut nodes, limits)?;
         exported_manifest.vault = Some(VaultInfo {
             kdf: opts.kdf,
             salt_b64: base64::engine::general_purpose::STANDARD.encode([0u8; 16]),
@@ -782,7 +788,7 @@ fn write_prepared(
     prepared: PreparedExport,
     limits: ReadLimits,
 ) -> Result<(Vec<u8>, ExportPreview), BundleError> {
-    let (mut manifest, objects, vault) = prepared;
+    let (mut manifest, objects, mut vault) = prepared;
     // Check exact serialized lengths before payload buffers, ZIP output or KDF work.
     export_preflight(graph, opts, &manifest, &objects, &vault, limits)?;
     let mut files: Vec<(String, Cow<'_, [u8]>)> = Vec::new();
@@ -822,6 +828,10 @@ fn write_prepared(
     }
     // The vault is sealed last, bound to every other entry as written.
     if let Some(key) = key {
+        // The sealed files, encoded now that the preflight passed.
+        for (hash, encoded) in &mut vault.attachments {
+            *encoded = base64::engine::general_purpose::STANDARD.encode(&graph.attachments[hash.as_str()]);
+        }
         let payload = zeroize::Zeroizing::new(serde_json::to_vec(&vault)?);
         let sealed = crypto::seal(&key, &vault_aad(manifest.format_version, &checksums), &payload);
         checksums.insert(VAULT_ENTRY.into(), sha256(&sealed));

@@ -1191,6 +1191,8 @@ export function ImportDialog(props: {
   const [pass, setPass] = useState("");
   const [policy, setPolicy] = useState("duplicate");
   const [preview, setPreview] = useState<ImportReport | null>(null);
+  // Warnings the import itself raised beyond the preview's (the profile can change in between).
+  const [appliedNotes, setAppliedNotes] = useState<string[] | null>(null);
   // Set only after the preview named the existing workspaces the bundle or backup writes into.
   const [intoExisting, setIntoExisting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -1267,6 +1269,11 @@ export function ImportDialog(props: {
       const approved = intoExisting ? existing.map((w) => w.id) : [];
       const r = await api.importApply(file.token, pass || null, preview.plan.policy, approved, preview.bundle_sha256, a);
       props.onImported(r.workspace_ids);
+      const added = r.warnings.filter((w) => !preview.warnings.includes(w));
+      if (added.length > 0) {
+        setAppliedNotes(added);
+        return;
+      }
       props.onClose();
     } catch (e) {
       failed(e, "import");
@@ -1425,6 +1432,16 @@ export function ImportDialog(props: {
               the dataset in a load plan. Until then Anvil never reads it.
             </p>
           )}
+        </div>
+      )}
+      {appliedNotes && (
+        <div className="warn-box" role="status" data-testid="import-applied-notes">
+          Imported, with these notes:
+          <ul>
+            {appliedNotes.map((n, i) => (
+              <li key={i}>{n}</li>
+            ))}
+          </ul>
         </div>
       )}
       {notice && (

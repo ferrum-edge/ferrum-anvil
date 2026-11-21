@@ -1240,3 +1240,32 @@ fn a_sensitive_dataset_file_stays_out_of_another_workspaces_bundle() {
         );
     }
 }
+
+/// Merge keeps an existing (linked) dataset over the incoming one: the vault
+/// data it would have backed is then not stored, which the preview already
+/// says, so a later share-safe export cannot carry it as plaintext.
+#[test]
+fn merge_never_stores_vault_data_without_its_sensitive_dataset() {
+    const CELL: &str = "tok-SENSITIVE-merge-cell";
+    let csv = format!("user,password\nalice,{CELL}\n");
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "sender");
+    let ws = a.create_workspace("Shared").unwrap().meta.id;
+    let users = a.create_dataset(&ws, "users", DatasetFormat::Csv, csv.as_bytes(), vec!["password".into()]).unwrap();
+    let (share, _) = a.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, false, false).unwrap();
+    let root_b = tempfile::tempdir().unwrap();
+    let b = new_app(root_b.path(), "recipient");
+    b.import_approved(&share, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
+    // The sender adds a request uploading the dataset's file.
+    let same = a.put_attachment("users.csv", csv.as_bytes(), Some("text/csv".into())).unwrap();
+    a.create_request(&ws, None, "Upload users", upload(Body::Binary { attachment: same, content_type: None })).unwrap();
+    let (sealed, _) = a.export_with_standards(Some(&ws), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
+    let preview = b.import_preview(&sealed, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    assert!(preview.warnings.iter().any(|w| w.contains("is not stored") && w.contains("Upload users")), "{:?}", preview.warnings);
+    b.import_approved(&sealed, Some(EXPORT_PASS), ConflictPolicy::Merge, &into(&ws, &sealed)).unwrap();
+    assert_eq!(b.get_attachment(&sha(&users.attachment)).unwrap(), None);
+    let (bytes, _) = b.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, false, false).unwrap();
+    for (name, data) in bundle_entries(&bytes) {
+        assert!(!holds(&data, CELL), "{name} carries the sensitive value");
+    }
+}

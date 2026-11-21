@@ -650,6 +650,30 @@ fn dropped_files_with_one_name_stay_distinct() {
         .collect();
     assert_eq!(paths, ["users.csv", "users.csv (2)"]);
     assert_eq!(opened.graph.revisions[0].spec_sha256, "0".repeat(64));
+
+    // The same bytes under two names stay two files to choose.
+    let mut g2 = g.clone();
+    g2.revisions.clear();
+    let Body::Multipart { parts } = &mut g2.requests[0].spec.body else { panic!("not multipart") };
+    let first = match &parts[0].content {
+        MultipartContent::File { attachment: AttachmentRef::Stored { sha256, size, .. }, .. } => (sha256.clone(), *size),
+        other => panic!("{other:?}"),
+    };
+    for (part, name) in parts.iter_mut().zip(["baseline.csv", "candidate.csv"]) {
+        let attachment = AttachmentRef::Stored { sha256: first.0.clone(), size: first.1, file_name: name.into(), media_type: None };
+        part.content = MultipartContent::File { attachment, file_name: None };
+    }
+    let (bytes, _) = bundle::write_redacting(&g2, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
+    let opened = bundle::open(&bytes, None).unwrap();
+    let Body::Multipart { parts } = &opened.graph.requests[0].spec.body else { panic!("not multipart") };
+    let paths: Vec<_> = parts
+        .iter()
+        .map(|p| match &p.content {
+            MultipartContent::File { attachment: AttachmentRef::LinkedFile { path }, .. } => path.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(paths, ["baseline.csv", "candidate.csv"]);
 }
 
 #[test]
