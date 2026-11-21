@@ -1212,3 +1212,31 @@ fn sensitive_dataset_data_stays_out_of_plaintext_bundle_entries() {
         assert_eq!(b.get_attachment(&sha(&d.attachment)).unwrap().as_deref(), Some(data.as_bytes()), "{}", d.name);
     }
 }
+
+/// A request in another workspace that uploads a sensitive dataset's file
+/// does not carry it either: exporting only that workspace leaves the bytes
+/// out in both modes and says so.
+#[test]
+fn a_sensitive_dataset_file_stays_out_of_another_workspaces_bundle() {
+    const CELL: &str = "tok-SENSITIVE-other-workspace-cell";
+    let csv = format!("user,password\nalice,{CELL}\n");
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "two");
+    let owner = a.create_workspace("Owner").unwrap().meta.id;
+    a.create_dataset(&owner, "users", DatasetFormat::Csv, csv.as_bytes(), vec!["password".into()]).unwrap();
+    let other = a.create_workspace("Other").unwrap().meta.id;
+    let same = a.put_attachment("users.csv", csv.as_bytes(), Some("text/csv".into())).unwrap();
+    a.create_request(&other, None, "Upload users", upload(Body::Binary { attachment: same, content_type: None })).unwrap();
+    for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some(EXPORT_PASS))] {
+        let (bytes, written) = a.export_with_standards(Some(&other), mode, pass, false, false).unwrap();
+        for (name, data) in bundle_entries(&bytes) {
+            assert!(!name.starts_with("attachments/"), "{mode:?}: {name}");
+            assert!(!holds(&data, CELL), "{mode:?}: {name} carries the sensitive value");
+        }
+        assert!(
+            written.manifest.excluded.iter().any(|e| e.starts_with("a stored file of request 'Upload users'")),
+            "{:?}",
+            written.manifest.excluded
+        );
+    }
+}

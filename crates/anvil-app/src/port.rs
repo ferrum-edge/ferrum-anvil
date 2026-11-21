@@ -185,6 +185,18 @@ impl App {
             }
         }
         g.workspaces = wss;
+        // The data of every dataset with sensitive columns in the profile:
+        // a bundle never carries it as a plaintext entry, also when only a
+        // request of an exported workspace uses the same file.
+        for w in self.workspaces()? {
+            for d in self.datasets(&w.meta.id)? {
+                if let anvil_domain::request::AttachmentRef::Stored { sha256, .. } = d.attachment
+                    && !d.sensitive_columns.is_empty()
+                {
+                    g.withheld.insert(sha256);
+                }
+            }
+        }
         // Attachments referenced anywhere in the graph. One whose content
         // cannot be read here travels without it, and the export lists it
         // among its excluded items.

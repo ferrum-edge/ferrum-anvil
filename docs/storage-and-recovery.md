@@ -265,7 +265,12 @@ profiles, spec-import records or load reports, and its bundle kind is
   encrypted vault and restores it on import. A share-safe bundle leaves it
   out: the dataset arrives naming a linked file (its file name) to choose on
   the target machine, and the export lists the dataset, and any request that
-  uses the same file, among its excluded items.
+  uses the same file, among its excluded items. The same holds for a request
+  or dataset that uses the file of such a dataset elsewhere in the profile: a
+  bundle never carries that file as a plaintext entry. The vault is one
+  entry, so the sealed data of an encrypted transfer must fit in it (under
+  96 MiB of dataset files); a larger export is refused, and a full backup
+  carries it.
 - The path of every linked local file its requests and datasets name, in
   every mode: a path on the exporting device, which can show its user name
   and folder layout. Only the binding stays on the device. The export
