@@ -28,15 +28,18 @@ pub enum Grouping {
     Paths,
 }
 
+// Exactly one target: a workspace, or `--new-workspace` (a flag, which names
+// the workspace after the source and takes no value). Passing both is a usage
+// error, not a workspace argument silently ignored.
 #[derive(Args)]
+#[command(group = clap::ArgGroup::new("target").required(true).args(["workspace", "new_workspace"]))]
 pub struct ImportSpecArgs {
-    /// Target workspace (id or name). Omit with `--new-workspace`.
-    #[arg(required_unless_present = "new_workspace")]
+    /// Target workspace (id or name). Not with `--new-workspace`.
     workspace: Option<String>,
     /// OpenAPI/Swagger, WSDL, Postman, Insomnia, HAR or a file with a cURL command; `-` reads stdin.
     #[arg(long)]
     file: PathBuf,
-    /// Create a new workspace named after the source instead.
+    /// Create a new workspace named after the source instead of naming a target workspace (takes no value).
     #[arg(long)]
     new_workspace: bool,
     #[arg(long, value_enum, default_value = "sample")]
@@ -506,6 +509,31 @@ fn us_or_none(count: u64, us: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_spec_takes_a_workspace_or_new_workspace_never_both() {
+        use clap::error::ErrorKind;
+        use clap::{CommandFactory, Parser};
+        let parse = |rest: &[&str]| {
+            let mut args = vec!["anvil", "import-spec", "--file", "openapi.yaml"];
+            args.extend_from_slice(rest);
+            crate::Cli::try_parse_from(args)
+        };
+        // A workspace name next to --new-workspace is refused, not dropped (#603).
+        for rest in [&["--new-workspace", "SpecWs"][..], &["SpecWs", "--new-workspace"][..]] {
+            let err = parse(rest).err().unwrap_or_else(|| panic!("{rest:?} parsed"));
+            assert_eq!(err.kind(), ErrorKind::ArgumentConflict, "{err}");
+            assert!(err.use_stderr(), "a usage error (exit 3): {err}");
+        }
+        let err = parse(&[]).err().expect("no target parsed");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument, "{err}");
+        assert!(parse(&["SpecWs"]).is_ok());
+        assert!(parse(&["--new-workspace"]).is_ok());
+
+        let mut cli = crate::Cli::command();
+        let usage = cli.find_subcommand_mut("import-spec").unwrap().render_usage().to_string();
+        assert!(usage.contains("<WORKSPACE|--new-workspace>"), "{usage}");
+    }
 
     #[test]
     fn a_spec_source_over_the_limit_is_refused_unread() {

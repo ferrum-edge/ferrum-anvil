@@ -419,6 +419,10 @@
 
 ### Fixed
 
+- `anvil import-spec` refuses a workspace argument passed with `--new-workspace` as a usage error
+  (exit 3), and its usage line shows the two as alternatives (`<WORKSPACE|--new-workspace>`). The
+  argument was ignored and the new workspace named after the source, so later commands naming it
+  failed (#603).
 - Workspace bundle export previews list every JWT-SVID token-file path (`file` source) the exported
   workspaces, folders and requests name, nested multi-auth sets included, and every linked-file or
   token-file path only a saved request revision names. The manifest's device bindings note that
