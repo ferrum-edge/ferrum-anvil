@@ -1,13 +1,48 @@
 //! The portable object graph carried by bundles.
 
+use anvil_domain::Id;
+use anvil_domain::auth::AuthConfig;
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::load::LoadPlan;
 use anvil_domain::request::AttachmentRef;
 use anvil_domain::settings::{AppSettings, StoredRuleset};
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
+use anvil_domain::workload::JwtSvidSource;
 use anvil_domain::workspace::{Dataset, Environment, Folder, RequestDefinition, RequestRevision, Scenario, Workspace};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+/// Entries [`PortableGraph::token_files`] and [`PortableGraph::revision_files`]
+/// list at most (the import warnings); past it the last entry counts the
+/// rest, since a crafted file could otherwise name millions of paths. An
+/// export preview ([`PortableGraph::local_files`]) lists every path.
+pub const MAX_LISTED_PATHS: usize = 200;
+
+/// One local file path a graph carries, with what names it: `owner` is
+/// `request 'Upload'`, `workspace 'Team' token file`, `saved revision of
+/// request 'Upload'` and the like. An export preview lists these, so the
+/// path is never parsed back out of a combined line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LocalFile {
+    pub owner: String,
+    pub path: String,
+}
+
+impl LocalFile {
+    fn line(&self) -> String {
+        format!("{}: {}", self.owner, self.path)
+    }
+}
+
+/// `entries` as lines, with a last line counting the `total - entries.len()`
+/// left out.
+fn capped(entries: Vec<LocalFile>, total: usize) -> Vec<String> {
+    let mut lines: Vec<String> = entries.iter().map(LocalFile::line).collect();
+    if total > entries.len() {
+        lines.push(format!("… and {} more", total - entries.len()));
+    }
+    lines
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PortableGraph {
@@ -90,18 +125,187 @@ impl PortableGraph {
     /// that made the bundle, and stays unused on this one until the user
     /// chooses it here for that request or dataset.
     pub fn linked_files(&self) -> Vec<String> {
+        self.linked_entries().iter().map(LocalFile::line).collect()
+    }
+
+    fn linked_entries(&self) -> Vec<LocalFile> {
         let mut out = Vec::new();
         for r in &self.requests {
             let mut paths = Vec::new();
             linked_paths(&serde_json::to_value(&r.spec).unwrap_or_default(), &mut paths);
-            out.extend(paths.into_iter().map(|p| format!("request '{}': {p}", r.name)));
+            out.extend(paths.into_iter().map(|path| LocalFile { owner: format!("request '{}'", r.name), path }));
         }
         for d in &self.datasets {
             if let AttachmentRef::LinkedFile { path } = &d.attachment {
-                out.push(format!("dataset '{}': {path}", d.name));
+                out.push(LocalFile { owner: format!("dataset '{}'", d.name), path: path.clone() });
             }
         }
         out
+    }
+
+    /// Every JWT-SVID token file the graph's workspaces, folders and requests
+    /// name (a `file` source, inside multi-auth sets too), as
+    /// `request 'Orders' token file: /run/spire/jwt.token`. Each names a file
+    /// by its path on the machine that made the bundle. The desktop reads a
+    /// token file only once it is chosen on the device, and that choice is
+    /// never exported.
+    /// At most [`MAX_LISTED_PATHS`] are listed (see [`capped`]).
+    pub fn token_files(&self) -> Vec<String> {
+        let (entries, total) = self.token_entries(MAX_LISTED_PATHS);
+        capped(entries, total)
+    }
+
+    /// At most `limit` token-file entries, and how many there are.
+    fn token_entries(&self, limit: usize) -> (Vec<LocalFile>, usize) {
+        let (mut out, mut total) = (Vec::new(), 0);
+        let owners = self
+            .workspaces
+            .iter()
+            .map(|w| ("workspace", &w.name, &w.auth))
+            .chain(self.folders.iter().map(|f| ("folder", &f.name, &f.auth)))
+            .chain(self.requests.iter().map(|r| ("request", &r.name, &r.spec.auth)));
+        for (kind, name, auth) in owners {
+            for p in token_file_paths([auth]) {
+                total += 1;
+                if out.len() < limit {
+                    out.push(LocalFile { owner: format!("{kind} '{name}' token file"), path: p });
+                }
+            }
+        }
+        (out, total)
+    }
+
+    /// Whether a workspace, folder or request names a JWT-SVID token file
+    /// ([`Self::token_files`] is not empty), without listing them.
+    pub fn has_token_files(&self) -> bool {
+        self.workspaces
+            .iter()
+            .map(|w| &w.auth)
+            .chain(self.folders.iter().map(|f| &f.auth))
+            .chain(self.requests.iter().map(|r| &r.spec.auth))
+            .any(names_token_file)
+    }
+
+    /// The linked-file and token-file paths only saved revisions name: the
+    /// paths of each revision that neither its request's current spec nor an
+    /// earlier revision of it names, as
+    /// `saved revision of request 'Upload': /path/to/file` or
+    /// `saved revision of request 'Orders' token file: /run/spire/jwt.token`
+    /// (`saved revision <id>` when the graph lacks its request). Revisions
+    /// are never sent, so nothing needs choosing for them, but they travel in
+    /// the bundle like any object.
+    /// At most [`MAX_LISTED_PATHS`] are listed (see [`capped`]).
+    pub fn revision_files(&self) -> Vec<String> {
+        let (entries, total) = self.revision_entries(MAX_LISTED_PATHS);
+        capped(entries, total)
+    }
+
+    /// At most `limit` revision-only entries, and how many there are.
+    fn revision_entries(&self, limit: usize) -> (Vec<LocalFile>, usize) {
+        let current: HashMap<_, _> = self.requests.iter().map(|r| (r.meta.id, r)).collect();
+        // Per request: the linked and token paths seen so far, starting with
+        // those of its current spec (read once).
+        // Keyed by request id, or by revision id (`false`) for a revision whose
+        // request the graph lacks, so the two never share an entry.
+        let mut seen: HashMap<(bool, Id), (HashSet<String>, HashSet<String>)> = HashMap::new();
+        let (mut out, mut total) = (Vec::new(), 0);
+        for v in &self.revisions {
+            let owner = current.get(&v.request_id);
+            let (linked_seen, tokens_seen) =
+                seen.entry(owner.map_or((false, v.id), |r| (true, r.meta.id))).or_insert_with(|| match owner {
+                    Some(r) => {
+                        let mut linked = HashSet::new();
+                        linked_paths_into(&serde_json::to_value(&r.spec).unwrap_or_default(), &mut linked, &mut Vec::new());
+                        (linked, token_file_paths([&r.spec.auth]).into_iter().collect())
+                    }
+                    None => (HashSet::new(), HashSet::new()),
+                });
+            let mut fresh = Vec::new();
+            linked_paths_into(&serde_json::to_value(&v.spec).unwrap_or_default(), linked_seen, &mut fresh);
+            let tokens: Vec<String> = token_file_paths([&v.spec.auth]).into_iter().filter(|p| tokens_seen.insert(p.clone())).collect();
+            let label = |suffix: &str| match owner {
+                Some(r) => format!("saved revision of request '{}'{suffix}", r.name),
+                None => format!("saved revision {}{suffix}", v.id),
+            };
+            for (suffix, paths) in [("", fresh), (" token file", tokens)] {
+                for path in paths {
+                    total += 1;
+                    if out.len() < limit {
+                        out.push(LocalFile { owner: label(suffix), path });
+                    }
+                }
+            }
+        }
+        (out, total)
+    }
+
+    /// Whether a saved revision names a path its request's current spec does
+    /// not ([`Self::revision_files`] is not empty).
+    pub fn has_revision_files(&self) -> bool {
+        !self.revisions.is_empty() && self.revision_entries(0).1 > 0
+    }
+
+    /// Every local file path the graph carries: [`Self::linked_files`], then
+    /// [`Self::token_files`], then [`Self::revision_files`], each in full.
+    /// This is what an export preview lists.
+    pub fn local_files(&self) -> Vec<String> {
+        self.local_file_entries().iter().map(LocalFile::line).collect()
+    }
+
+    /// [`Self::local_files`] with each path apart from what names it.
+    pub fn local_file_entries(&self) -> Vec<LocalFile> {
+        let mut out = self.linked_entries();
+        out.extend(self.token_entries(usize::MAX).0);
+        out.extend(self.revision_entries(usize::MAX).0);
+        out
+    }
+}
+
+/// The token-file paths of the JWT-SVID `file` sources in `auths`, nested
+/// multi-auth sets included, each listed once, in first-seen order.
+fn token_file_paths<'a>(auths: impl IntoIterator<Item = &'a AuthConfig>) -> Vec<String> {
+    fn walk<'a>(auth: &'a AuthConfig, seen: &mut HashSet<&'a str>, out: &mut Vec<String>) {
+        match auth {
+            AuthConfig::JwtSvid { config } => {
+                if let JwtSvidSource::File { path } = &config.source
+                    && seen.insert(path)
+                {
+                    out.push(path.clone());
+                }
+            }
+            AuthConfig::Multi { profiles } => profiles.iter().for_each(|p| walk(p, seen, out)),
+            _ => {}
+        }
+    }
+    let (mut seen, mut out) = (HashSet::new(), Vec::new());
+    auths.into_iter().for_each(|auth| walk(auth, &mut seen, &mut out));
+    out
+}
+
+/// Whether `auth` (nested multi-auth sets included) reads a JWT-SVID token file.
+fn names_token_file(auth: &AuthConfig) -> bool {
+    match auth {
+        AuthConfig::JwtSvid { config } => matches!(config.source, JwtSvidSource::File { .. }),
+        AuthConfig::Multi { profiles } => profiles.iter().any(names_token_file),
+        _ => false,
+    }
+}
+
+/// [`linked_paths`] for paths not yet in `seen`: each is added to `seen` and,
+/// in traversal order, to `fresh`.
+fn linked_paths_into(v: &serde_json::Value, seen: &mut HashSet<String>, fresh: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(o) => {
+            if o.get("kind").and_then(|k| k.as_str()) == Some("linked_file") {
+                let path = o.get("path").and_then(|p| p.as_str()).unwrap_or_default();
+                if seen.insert(path.to_string()) {
+                    fresh.push(path.to_string());
+                }
+            }
+            o.values().for_each(|x| linked_paths_into(x, seen, fresh));
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| linked_paths_into(x, seen, fresh)),
+        _ => {}
     }
 }
 
