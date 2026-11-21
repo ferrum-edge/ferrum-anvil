@@ -313,7 +313,7 @@ impl App {
             let before = graph.rulesets.len();
             graph.rulesets.retain(|r| hashes.insert(r.sha256.clone()));
             if before > graph.rulesets.len() {
-                warnings.push(format!("{} duplicate API ruleset(s) with matching SHA-256 will be skipped.", before - graph.rulesets.len()));
+                warnings.push(format!("{} duplicate API ruleset(s) with matching SHA-256 are skipped.", before - graph.rulesets.len()));
             }
         }
         let replacing: HashSet<Id> =
@@ -474,7 +474,7 @@ impl App {
                 let before = g.rulesets.len();
                 g.rulesets.retain(|r| hashes.insert(r.sha256.clone()));
                 if g.rulesets.len() < before {
-                    notes.push(format!("{} duplicate API ruleset(s) with matching SHA-256 were skipped.", before - g.rulesets.len()));
+                    notes.push(format!("{} duplicate API ruleset(s) with matching SHA-256 are skipped.", before - g.rulesets.len()));
                 }
                 // Fresh ids for every object, revision and secret: the copy
                 // can never overwrite or share anything with its source.
