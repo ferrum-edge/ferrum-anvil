@@ -38,7 +38,8 @@ gateway to v0.9.20.
   URL userinfo, and `{{url_<16 hex digits>}}` for quarantined URLs. They replace
   field-named placeholders (`{{Authorization}}`, `{{api_key}}`), owner-named
   ones (`{{<collection>_password}}`), `{{username}}` / `{{password}}` and
-  `{{url-needs-review}}`. The report's required variables list them.
+  `{{url-needs-review}}`. The report's required variables list them; a
+  quarantined URL's placeholder is listed in `redactions[].placeholder`.
 - The first reimport after upgrading moves requests imported by an earlier build
   to the new names, so their credentials are asked for again once. After that, a
   credential you fill stays with the secret it replaced across reimports, and a
@@ -112,7 +113,8 @@ version is `2026.11.17-1`.
     becomes required `{{auth_<16 hex digits>_<field>}}` variables (see above).
   - A URL with a template before the end of its host part and an `@` anywhere
     (`https://{{tenant}}.example.com/x?to=a@b`) imports as
-    `{{url_<16 hex digits>}}` with a `url_quarantined` warning: re-enter it. With
+    `{{url_<16 hex digits>}}` (listed in `redactions[].placeholder`) with a
+    `url_quarantined` warning: re-enter it. With
     credentials included it is kept as written. `{{baseUrl}}/x?email=a@b` is
     kept as written.
   - An OAuth 2 token or authorization URL with credentials in it (Postman,
@@ -126,7 +128,7 @@ version is `2026.11.17-1`.
     stored decoded.
   - cURL `-d @file` imports as POST.
 - Import reports and imported names no longer carry credential material:
-  tooling that reads report messages or pointers sees
+  tooling that reads report pointers, external references or imported names sees
   `<redacted>`, `<url redacted>` or `{{…}}` there, and a pointer token that
   was redacted ends in `#` and a digest. cURL diagnostics no longer quote the
   ignored URL, option value or command tail; use the pointer.

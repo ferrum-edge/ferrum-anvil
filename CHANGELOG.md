@@ -4,20 +4,22 @@
 
 ## [0.1.8] - 2026-11-21
 
-Security release: the default Postman, Insomnia, cURL and HAR import no longer keeps URL
-userinfo or credential-named values as plaintext, import reports and imported names no longer show
-them, and share-safely and encrypted-transfer exports no longer leave such credentials readable in
-`workspace/objects.json` (GHSA-c236-7r9g-c9p2, GHSA-8fmc-h49v-mh7f, GHSA-84pr-239v-mv8x); a server under test can no longer crash Anvil with a
-long QUIC close reason or a large DTLS certificate (GHSA-c825-hqr8-8gj8, GHSA-62g8-g8px-5xm3), and
-CLI text and JSON output no longer pass on GitHub Actions workflow commands or terminal escapes
-from the traffic. The supported Ferrum Edge release moves to v0.9.20, now the lab and new-profile
-default, with a source-audited catalog of 620 outcomes and wording for the `loop_detected` gateway
-error token; v0.9.5 to v0.9.15 are no longer supported (their diagnostics catalogs stay
-embedded). A changed spec or collection can be reimported into the import it came from, and
-workspaces and load datasets can be deleted. Import placeholders and reports, `anvil load run`
-exit codes and CSVs, and gateway console links change incompatibly: read the Breaking section
-below and the [upgrade guide](docs/upgrade-guide.md#018) before upgrading. The profile database
-format is unchanged from 0.1.7.
+Security release: it fixes five advisories. The default Postman, Insomnia, cURL and HAR import
+redacts URL userinfo and credential-named fields, import reports and imported names no longer show
+credential material, and share-safely and encrypted-transfer exports extract more credential-named
+fields and URL credentials from the readable `workspace/objects.json` (GHSA-c236-7r9g-c9p2,
+GHSA-8fmc-h49v-mh7f, GHSA-84pr-239v-mv8x). A credential in free text, such as an XML or SOAP
+body or a variable not marked secret, can still be kept as written. A server under test can no longer crash Anvil with a long QUIC
+close reason or a large DTLS certificate (GHSA-c825-hqr8-8gj8, GHSA-62g8-g8px-5xm3), and CLI text
+and JSON output no longer pass on GitHub Actions workflow commands or terminal escapes from the
+traffic. The supported Ferrum Edge release moves to v0.9.20, now the lab and new-profile default,
+with a source-audited catalog of 620 outcomes and wording for the `loop_detected` gateway error
+token. Earlier releases are no longer supported; the previously supported ones keep their embedded
+diagnostics catalogs. A changed spec or collection can be reimported into the import it came from,
+and workspaces and load datasets can be deleted. Import placeholders and reports, `anvil load run`
+exit codes and CSVs, and gateway console links change incompatibly: read the Breaking section below
+and the [upgrade guide](docs/upgrade-guide.md#018) before upgrading. The profile database format is
+unchanged from 0.1.7.
 
 ### Added
 
@@ -247,7 +249,8 @@ format is unchanged from 0.1.7.
     redacted>`, a `{{…}}` that is not a plain name `{{…}}`, and the value of a credential-named
     `name=value` or `name: value` pair, the token after `Bearer`, `Basic`, `Token` or `Digest`, and
     a JWT become `<redacted>`. cURL diagnostics no longer echo an ignored URL, a connection option's
-    value (a proxy password) or the rest of the command line.
+    value (a proxy password) or the rest of the command line. (#584 then stopped quoting source
+    values in report messages and dropped retained script bodies; see Breaking.)
   - Each redaction is listed in `report.redactions` unless `include_credentials` is set.
   - Before, such a password, key or token was stored in the request or shown in the report, and left
     the machine in share-safely and encrypted-transfer exports. Re-import affected collections, and
@@ -363,7 +366,8 @@ format is unchanged from 0.1.7.
   `:url-needs-review` path segment included); and report messages, pointers, retained scripts and
   imported names show `<redacted>`, `<url redacted>` or `{{…}}` where the source had credential
   material. A changed pointer token carries a `#` and a digest of the original. See the Security
-  entries. The placeholder names were then replaced by #584's literal-bound names (see Breaking).
+  entries. #584 then replaced the placeholder names with literal-bound ones and made the report
+  messages and retained-script entries structured (see Breaking).
 
 ### Removed
 
