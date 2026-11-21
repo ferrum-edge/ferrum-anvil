@@ -7,10 +7,12 @@
 //! unknown prefix (a gateway mounting the API under `/api`, say), alone or
 //! in front of a declared base path. Among matching templates the one with
 //! the most literal segments wins (a segment mixing text and a parameter
-//! counts half), then the longest base path, then a template whose empty
-//! segments (`/items/`, `/a//b`) are where the request's are, then the
-//! operation the request was imported from. Empty segments are otherwise
-//! ignored, so `/items/` still reaches `/items` when only that is declared.
+//! counts half), then the longest base path, then the operation the request
+//! was imported from. Empty segments are ignored while matching, so `/items/`
+//! reaches `/items` when only that is declared; when the description also
+//! declares a template that differs from the winner only in empty segments
+//! (`/items` and `/items/`, `/a/b` and `/a//b`), the one whose empty segments
+//! are where the request's are is chosen.
 //!
 //! A Path Item that many paths `$ref` is read once and its operations are
 //! shared by those paths; each (path, operation) the router lists is charged
@@ -134,15 +136,17 @@ struct Template {
     segs: Vec<Seg>,
     /// Sum of [`Seg::score`].
     score: usize,
-    /// [`empty_shape`] of the path: where its empty segments are.
-    shape: Vec<bool>,
     ops: Vec<usize>,
+    /// The templates whose segments are the same as this one's once empty
+    /// segments are dropped (`/items` and `/items/`), by [`empty_shape`]:
+    /// an index into [`Router::siblings`] when it has any.
+    siblings: Option<usize>,
 }
 
 impl Template {
     fn new(path: &str, ops: Vec<usize>) -> Template {
         let segs = parse_segments(path);
-        Template { path: path.to_string(), score: segs.iter().map(Seg::score).sum(), shape: empty_shape(path), segs, ops }
+        Template { path: path.to_string(), score: segs.iter().map(Seg::score).sum(), segs, ops, siblings: None }
     }
 }
 
@@ -180,6 +184,9 @@ pub struct Router<'a> {
     by_path: HashMap<&'a str, usize>,
     /// Template indexes by segment count.
     by_len: HashMap<usize, Vec<usize>>,
+    /// For each set of templates that differ only in empty segments, the
+    /// templates of each [`empty_shape`], in document order.
+    siblings: Vec<HashMap<Vec<bool>, Vec<usize>>>,
     bases: Vec<Base>,
     pub servers: Vec<Server>,
     /// Server URLs whose base path was not kept ([`MAX_BASES`]).
@@ -247,6 +254,24 @@ impl<'a> Router<'a> {
         let mut by_len: HashMap<usize, Vec<usize>> = HashMap::new();
         for (i, t) in templates.iter().enumerate() {
             by_len.entry(t.segs.len()).or_default().push(i);
+        }
+        // Templates that are the same once empty segments are dropped
+        // (`/items`, `/items/`; `/a/b`, `/a//b`), grouped by where their
+        // empty segments are.
+        let mut alike: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, t) in templates.iter().enumerate() {
+            alike.entry(t.segs.iter().map(Seg::canonical).collect::<Vec<_>>().join("/")).or_default().push(i);
+        }
+        let mut alike: Vec<Vec<usize>> = alike.into_values().filter(|group| group.len() > 1).collect();
+        alike.sort_unstable();
+        let mut siblings: Vec<HashMap<Vec<bool>, Vec<usize>>> = vec![];
+        for group in alike {
+            let mut by_shape: HashMap<Vec<bool>, Vec<usize>> = HashMap::new();
+            for &i in &group {
+                templates[i].siblings = Some(siblings.len());
+                by_shape.entry(empty_shape(&templates[i].path)).or_default().push(i);
+            }
+            siblings.push(by_shape);
         }
         // Server URLs with their variables.
         let mut urls: Vec<(String, Option<&Value>)> = vec![];
@@ -349,7 +374,7 @@ impl<'a> Router<'a> {
             })
             .collect();
         let dropped_servers = dropped.len();
-        Router { items, entries, templates, by_path, by_len, bases, servers, dropped_servers, skipped_operations }
+        Router { items, entries, templates, by_path, by_len, siblings, bases, servers, dropped_servers, skipped_operations }
     }
 
     /// How many operations are listed (the indexes of [`Route::Operation`]).
@@ -417,32 +442,27 @@ impl<'a> Router<'a> {
     pub fn route(&self, method: &str, url: &str, hint: Option<&str>) -> Route {
         let (_, path) = split_url(url);
         let segs: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(percent_decode_path).collect();
-        // Where the observed path's empty segments are, and the position in
-        // that shape just past each non-empty segment: the template after a
-        // base of `n` segments starts at `after[n - 1]`.
-        let shape = empty_shape(&path);
-        let after: Vec<usize> = shape.iter().enumerate().filter(|(_, empty)| !**empty).map(|(i, _)| i + 1).collect();
         let method = method.to_ascii_lowercase();
-        // (template score, base length, same empty segments, template index, base).
-        type Best = Option<(usize, usize, bool, usize, String)>;
+        let hinted = |i: usize| hint.is_some_and(|h| self.templates[i].ops.iter().any(|o| self.key(*o) == strip_dup(h)));
+        // (template score, base length, template index, base, segments the base takes).
+        type Best = Option<(usize, usize, usize, String, usize)>;
         let mut best: Best = None;
-        let consider = |base_len: usize, base: String, rest: &[String], best: &mut Best| {
-            let rest_shape = &shape[(segs.len() - rest.len()).checked_sub(1).map_or(0, |n| after[n])..];
+        let consider = |base_len: usize, base: String, taken: usize, best: &mut Best| {
+            let rest = &segs[taken..];
             for &ti in self.by_len.get(&rest.len()).into_iter().flatten() {
                 let t = &self.templates[ti];
                 if !t.segs.iter().zip(rest).all(|(s, r)| s.matches(r)) {
                     continue;
                 }
-                let rank = (t.score, base_len, t.shape == rest_shape);
+                let lits = t.score;
                 let better = match best {
                     None => true,
-                    Some((bl, bb, bs, bt, _)) => {
-                        let hinted = |i: usize| hint.is_some_and(|h| self.templates[i].ops.iter().any(|o| self.key(*o) == strip_dup(h)));
-                        rank > (*bl, *bb, *bs) || (rank == (*bl, *bb, *bs) && hinted(ti) && !hinted(*bt))
+                    Some((bl, bb, bt, _, _)) => {
+                        (lits, base_len) > (*bl, *bb) || ((lits, base_len) == (*bl, *bb) && hinted(ti) && !hinted(*bt))
                     }
                 };
                 if better {
-                    *best = Some((rank.0, rank.1, rank.2, ti, base.clone()));
+                    *best = Some((lits, base_len, ti, base.clone(), taken));
                 }
             }
         };
@@ -456,14 +476,14 @@ impl<'a> Router<'a> {
                 if bsegs.len() <= rest.len() && bsegs.iter().zip(rest).all(|(s, r)| s.matches(r)) {
                     let n = k + bsegs.len();
                     let base = if n == 0 { String::new() } else { format!("/{}", segs[..n].join("/")) };
-                    consider(bsegs.len(), base, &segs[n..], &mut best);
+                    consider(bsegs.len(), base, n, &mut best);
                 }
             }
             if best.is_some() {
                 break;
             }
         }
-        let Some((_, _, _, ti, base)) = best else {
+        let Some((_, _, ti, base, taken)) = best else {
             // Only a base whose variables have their declared values names
             // the base of an undeclared path.
             // (An unknown prefix may come first, as above.)
@@ -478,6 +498,24 @@ impl<'a> Router<'a> {
                 })
                 .unwrap_or_default();
             return Route::Path { base };
+        };
+        // A declared template that differs from the one chosen only in empty
+        // segments, and has them where the request does after its base, is
+        // the operation meant (`/items/` rather than `/items`).
+        let ti = match self.templates[ti].siblings {
+            Some(g) => {
+                let shape = empty_shape(&path);
+                // Just past the last segment the base takes.
+                let from = match taken {
+                    0 => 0,
+                    n => shape.iter().enumerate().filter(|(_, empty)| !**empty).nth(n - 1).map_or(shape.len(), |(i, _)| i + 1),
+                };
+                match self.siblings[g].get(&shape[from..]) {
+                    Some(exact) if !exact.contains(&ti) => exact.iter().copied().find(|&i| hinted(i)).unwrap_or(exact[0]),
+                    _ => ti,
+                }
+            }
+            None => ti,
         };
         let t = &self.templates[ti];
         let find = |m: &str| t.ops.iter().copied().find(|o| self.method(*o) == m);
@@ -643,6 +681,24 @@ mod tests {
         assert_eq!(op_of(&r, r.route("HEAD", "https://api.example/v1/items/", None)), "itemsSlash @/v1");
         assert_eq!(op_of(&r, r.route("HEAD", "https://api.example/v1/a/b", None)), "ab @/v1");
         assert_eq!(op_of(&r, r.route("POST", "https://api.example/v1/items/", None)), "method /items/ @/v1");
+    }
+
+    /// A template's empty segments decide only between templates that differ
+    /// in nothing else: overlapping templates keep the import hint and
+    /// document order.
+    #[test]
+    fn empty_segments_never_outrank_a_different_template() {
+        let s = spec(
+            r#"{"openapi":"3.1.0","info":{"title":"t","version":"1"},
+              "paths":{
+                "/users/{id}":{"get":{"operationId":"getUser"}},
+                "/{group}/summary/":{"post":{"operationId":"postSummary"}}
+              }}"#,
+        );
+        let r = Router::new(&s);
+        assert_eq!(op_of(&r, r.route("GET", "http://localhost/users/summary/", Some("getUser"))), "getUser @");
+        assert_eq!(op_of(&r, r.route("GET", "http://localhost/users/summary/", None)), "getUser @");
+        assert_eq!(op_of(&r, r.route("POST", "http://localhost/users/summary/", Some("postSummary"))), "postSummary @");
     }
 
     #[test]
