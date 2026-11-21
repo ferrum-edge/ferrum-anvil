@@ -20,27 +20,54 @@ fn files_under(root: &Path, base: &Path) -> BTreeSet<String> {
     try_files_under(root, base).unwrap_or_else(|error| panic!("{error}"))
 }
 
-/// [`files_under`], returning the refusal instead of panicking. Entries are
-/// classified with `symlink_metadata`, so a link is never followed.
+/// [`files_under`], returning the refusal instead of panicking. `base`, and
+/// every directory from it down to `root`, must be a real directory, not a
+/// link to one. Entries are classified with `symlink_metadata`, so a link is
+/// never followed.
 fn try_files_under(root: &Path, base: &Path) -> Result<BTreeSet<String>, String> {
+    let below = root.strip_prefix(base).map_err(|_| format!("{} is outside {}", root.display(), base.display()))?;
+    let mut dir = base.to_path_buf();
+    real_dir(&dir)?;
+    for component in below.components() {
+        dir.push(component);
+        real_dir(&dir)?;
+    }
     let mut files = BTreeSet::new();
-    let entries = std::fs::read_dir(root).map_err(|error| format!("reading {}: {error}", root.display()))?;
+    walk_files(root, base, &mut files)?;
+    Ok(files)
+}
+
+fn real_dir(path: &Path) -> Result<(), String> {
+    let kind = std::fs::symlink_metadata(path).map_err(|error| format!("reading {}: {error}", path.display()))?.file_type();
+    if kind.is_symlink() {
+        Err(format!("{} is a symbolic link", path.display()))
+    } else if kind.is_dir() {
+        Ok(())
+    } else {
+        Err(format!("{} is not a directory", path.display()))
+    }
+}
+
+fn walk_files(dir: &Path, base: &Path, files: &mut BTreeSet<String>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|error| format!("reading {}: {error}", dir.display()))?;
     for entry in entries {
-        let path = entry.map_err(|error| format!("reading {}: {error}", root.display()))?.path();
+        let path = entry.map_err(|error| format!("reading {}: {error}", dir.display()))?.path();
         let kind = std::fs::symlink_metadata(&path).map_err(|error| format!("reading {}: {error}", path.display()))?.file_type();
         if kind.is_symlink() {
             return Err(format!("{} is a symbolic link", path.display()));
         } else if kind.is_dir() {
-            files.extend(try_files_under(&path, base)?);
+            walk_files(&path, base, files)?;
         } else if kind.is_file() {
+            // Join the real components with `/`: a `\` inside a Unix file
+            // name stays as it is (and matches no row), never a separator.
             let relative = path.strip_prefix(base).map_err(|_| format!("{} is outside {}", path.display(), base.display()))?;
-            let relative = relative.to_str().ok_or_else(|| format!("{} is not UTF-8", path.display()))?;
-            files.insert(relative.replace('\\', "/"));
+            let segments: Option<Vec<&str>> = relative.components().map(|c| c.as_os_str().to_str()).collect();
+            files.insert(segments.ok_or_else(|| format!("{} is not UTF-8", path.display()))?.join("/"));
         } else {
             return Err(format!("{} is neither a regular file nor a directory", path.display()));
         }
     }
-    Ok(files)
+    Ok(())
 }
 
 /// A parsed `contracts/ferrum-contracts/PIN`, in the canonical consumer format
@@ -237,6 +264,11 @@ fn assert_catalog_matches_pin(root: &Path, compatibility_id: &str, errors: &Valu
 fn pinned_contract_hashes_and_anvil_copies_match() {
     let root = repo_root();
     let vendor = root.join("contracts/ferrum-contracts");
+    // Walk the tree first: PIN is read only once it is known to be a regular
+    // file in a tree with no links.
+    let vendored_files = files_under(&vendor, &vendor);
+    assert!(vendored_files.contains("PIN"), "contracts/ferrum-contracts/PIN is missing");
+    let vendored_files: BTreeSet<String> = vendored_files.into_iter().filter(|path| path != "PIN").collect();
     let pin = std::fs::read(vendor.join("PIN")).expect("contracts/ferrum-contracts/PIN");
     let pin = String::from_utf8(pin).expect("PIN is not UTF-8");
     let pin = parse_pin(&pin).unwrap_or_else(|error| panic!("contracts/ferrum-contracts/PIN: {error}"));
@@ -298,7 +330,6 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     let actual_files: BTreeSet<String> = hashes.keys().cloned().collect();
     let (missing, extra) = differences(&expected_files, &actual_files);
     assert!(missing.is_empty() && extra.is_empty(), "PIN file list differs; missing: {missing:?}; extra: {extra:?}");
-    let vendored_files: BTreeSet<String> = files_under(&vendor, &vendor).into_iter().filter(|path| path != "PIN").collect();
     let (unpinned, stale_pins) = differences(&vendored_files, &actual_files);
     assert!(
         unpinned.is_empty() && stale_pins.is_empty(),
@@ -743,7 +774,8 @@ fn a_malformed_header_or_layout_is_refused() {
     }
 }
 
-/// A fresh, empty directory under the system temporary directory.
+/// A fresh directory under the system temporary directory, holding one
+/// regular file, `schemas/a.json`.
 fn scratch_dir(name: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let dir = std::env::temp_dir().join(format!("anvil-contracts-{name}-{}-{nanos}", std::process::id()));
@@ -758,6 +790,34 @@ fn a_regular_tree_is_listed() {
     let listed = try_files_under(&dir, &dir);
     std::fs::remove_dir_all(&dir).unwrap();
     assert_eq!(listed.unwrap(), BTreeSet::from(["schemas/a.json".to_owned()]));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_scan_root_is_refused() {
+    let dir = scratch_dir("root");
+    let link = dir.with_extension("link");
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+    let as_base = try_files_under(&link, &link);
+    let as_parent = try_files_under(&link.join("schemas"), &link);
+    std::fs::remove_file(&link).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    for listed in [as_base, as_parent] {
+        let error = listed.expect_err("a linked root was followed");
+        assert!(error.contains("symbolic link"), "{error}");
+    }
+}
+
+/// A `\` in a Unix file name is part of the name, not a separator, so such
+/// a file never stands in for the pinned one it resembles.
+#[cfg(unix)]
+#[test]
+fn a_backslash_in_a_file_name_is_not_a_separator() {
+    let dir = scratch_dir("backslash");
+    std::fs::write(dir.join("schemas\\a.json"), b"{}").unwrap();
+    let listed = try_files_under(&dir, &dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(listed.unwrap(), BTreeSet::from(["schemas/a.json".to_owned(), "schemas\\a.json".to_owned()]));
 }
 
 #[cfg(unix)]
