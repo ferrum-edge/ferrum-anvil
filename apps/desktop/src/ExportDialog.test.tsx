@@ -96,6 +96,18 @@ describe("export linked files", () => {
     expect(list.textContent).not.toContain("\\\\?\\");
   });
 
+  it("formats only the path of a structured entry", async () => {
+    const entries = [
+      { owner: "request 'Up' token file", path: "/home/a/build' token file: \\\\?\\jwt" },
+      { owner: "request 'Up'", path: "\\\\?\\C:\\Users\\me\\a.bin" },
+    ];
+    backend({ ...preview(entries.map((e) => `${e.owner}: ${e.path}`)), local_files: entries });
+    render(<ExportDialog workspace={WORKSPACE} onClose={vi.fn()} notify={vi.fn()} />);
+    const list = await screen.findByTestId("export-linked-files");
+    const items = Array.from(list.querySelectorAll("li")).map((li) => li.textContent);
+    expect(items).toEqual(["request 'Up' token file: /home/a/build' token file: \\\\?\\jwt", "request 'Up': C:\\Users\\me\\a.bin"]);
+  });
+
   it("shows no list when the preview has none", async () => {
     backend(preview());
     render(<ExportDialog workspace={null} onClose={vi.fn()} notify={vi.fn()} />);

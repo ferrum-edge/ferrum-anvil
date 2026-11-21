@@ -202,6 +202,8 @@ export interface ExportPreview {
    * revision names (`saved revision of request 'Upload': /path/to/file`). A full-backup preview leaves it out.
    */
   linked_files?: string[];
+  /** The same paths, each apart from what names it (`owner` is `request 'Upload'` and the like). */
+  local_files?: { owner: string; path: string }[];
 }
 export interface ImportReport {
   plan: {

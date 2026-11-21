@@ -602,6 +602,8 @@ fn export_previews_list_jwt_svid_token_files() {
     for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some("correct horse battery"))] {
         let preview = bundle::preview_redacting(&g, &opts(mode, pass), &[]).unwrap();
         assert_eq!(preview.linked_files, expected, "{mode:?}");
+        let structured: Vec<String> = preview.local_files.iter().map(|f| format!("{}: {}", f.owner, f.path)).collect();
+        assert_eq!(structured, expected, "{mode:?}");
         let warned = &preview.manifest.device_bindings;
         assert!(warned.iter().any(|d| d.contains("token file")), "{warned:?}");
         assert!(warned.iter().any(|d| d.contains("linked local files")), "{warned:?}");

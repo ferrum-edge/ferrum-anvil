@@ -1137,11 +1137,17 @@ export function ExportDialog(props: { workspace: Workspace | null; onClose: () =
             <div className="warn-box" data-testid="export-linked-files">
               The bundle names these local files (linked files and JWT-SVID token files) by their path on this computer:
               <ul>
-                {preview.linked_files.map((f, i) => (
-                  <li key={i} className="mono">
-                    {displayLinkedFile(f)}
-                  </li>
-                ))}
+                {preview.local_files
+                  ? preview.local_files.map((f, i) => (
+                      <li key={i} className="mono">
+                        {f.owner}: {displayPath(f.path)}
+                      </li>
+                    ))
+                  : preview.linked_files.map((f, i) => (
+                      <li key={i} className="mono">
+                        {displayLinkedFile(f)}
+                      </li>
+                    ))}
               </ul>
             </div>
           )}

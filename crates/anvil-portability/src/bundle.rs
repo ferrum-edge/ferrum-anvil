@@ -183,6 +183,9 @@ pub struct ExportPreview {
     /// preview lists them rather than only warning that there are some. Not
     /// written into the bundle's manifest.
     pub linked_files: Vec<String>,
+    /// The same paths as [`Self::linked_files`], each apart from what names
+    /// it, so a display can format the path alone.
+    pub local_files: Vec<crate::graph::LocalFile>,
 }
 
 fn sha256(b: &[u8]) -> String {
@@ -535,6 +538,7 @@ fn preview_prepared(
         secrets_included: vault.secrets.len(),
         literals_moved: vault.literals.len(),
         linked_files: graph.local_files(),
+        local_files: graph.local_file_entries(),
     })
 }
 
@@ -644,6 +648,7 @@ fn write_prepared(
         secrets_included: vault.secrets.len(),
         literals_moved: vault.literals.len(),
         linked_files: graph.local_files(),
+        local_files: graph.local_file_entries(),
     };
     Ok((bytes, preview))
 }
