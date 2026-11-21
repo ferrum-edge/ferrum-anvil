@@ -1271,6 +1271,8 @@ export function ImportDialog(props: {
       props.onImported(r.workspace_ids);
       const added = r.warnings.filter((w) => !preview.warnings.includes(w));
       if (added.length > 0) {
+        // The import is done: the preview it used cannot be applied again.
+        setPreview(null);
         setAppliedNotes(added);
         return;
       }
@@ -1429,7 +1431,8 @@ export function ImportDialog(props: {
           {preview.linked_files.length > 0 && (
             <p className="hint" data-testid="import-linked-files">
               After the {backup ? "restore" : "import"}, choose each linked file on this device with Choose file… beside the request&apos;s body or gRPC schema, or beside
-              the dataset in a load plan. Until then Anvil never reads it.
+              the dataset in a load plan. Until then Anvil never reads it. A file named without its folder (one a share-safe bundle left
+              out) is chosen with Choose new location….
             </p>
           )}
         </div>

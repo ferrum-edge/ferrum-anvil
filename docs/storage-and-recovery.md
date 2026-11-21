@@ -262,9 +262,11 @@ profiles, spec-import records or load reports, and its bundle kind is
   excluded items.
 - The data of a dataset with `sensitive_columns`, which hold secrets, is
   never a plaintext entry. An encrypted transfer carries it inside the
-  encrypted vault and restores it on import. A share-safe bundle leaves it
-  out: the dataset arrives naming a linked file (its file name) to choose on
-  the target machine, and the export lists the dataset, and any request that
+  encrypted vault and restores it on import, while a dataset with sensitive
+  columns here uses it (a Merge that keeps an existing, linked dataset in
+  place does not store it, and its preview says so). A share-safe bundle leaves it
+  out: the dataset arrives naming a linked file (its file name), chosen on
+  the target machine with **Choose new location…**, and the export lists the dataset, and any request that
   uses the same file, among its excluded items. The same holds for a request
   or dataset that uses the file of such a dataset elsewhere in the profile: a
   bundle never carries that file as a plaintext entry. The vault is one
