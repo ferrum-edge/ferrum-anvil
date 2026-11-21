@@ -13,18 +13,184 @@ fn read_json(path: &Path) -> Value {
         .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
 }
 
+/// Every regular file under `root`, as a `/`-separated path relative to
+/// `base`. A symbolic link, or any entry that is neither a regular file nor a
+/// directory, panics (ferrum-contracts `docs/consumer-pins.md`, check 4).
 fn files_under(root: &Path, base: &Path) -> BTreeSet<String> {
+    try_files_under(root, base).unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// [`files_under`], returning the refusal instead of panicking. `base`, and
+/// every directory from it down to `root`, must be a real directory, not a
+/// link to one. Entries are classified with `symlink_metadata`, so a link is
+/// never followed.
+fn try_files_under(root: &Path, base: &Path) -> Result<BTreeSet<String>, String> {
+    let below = root.strip_prefix(base).map_err(|_| format!("{} is outside {}", root.display(), base.display()))?;
+    // Rebuilt from its components, so a trailing `/` or `/.` cannot make
+    // `symlink_metadata` resolve a linked last component.
+    let base: PathBuf = base.components().collect();
+    let mut dir = base.clone();
+    real_dir(&dir)?;
+    for component in below.components() {
+        dir.push(component);
+        real_dir(&dir)?;
+    }
     let mut files = BTreeSet::new();
-    for entry in std::fs::read_dir(root).unwrap_or_else(|error| panic!("reading {}: {error}", root.display())) {
-        let entry = entry.expect("directory entry");
-        let path = entry.path();
-        if path.is_dir() {
-            files.extend(files_under(&path, base));
+    walk_files(&dir, &base, &mut files)?;
+    Ok(files)
+}
+
+/// `contracts/ferrum-contracts` under the checkout `root`, once its
+/// `contracts` parent is known to be a real directory: a link there would
+/// move the whole vendored tree out of the checkout without any link inside
+/// it. [`try_files_under`] checks the vendored directory itself and below.
+fn try_vendored_dir(root: &Path) -> Result<PathBuf, String> {
+    real_dir(&root.join("contracts"))?;
+    Ok(root.join("contracts/ferrum-contracts"))
+}
+
+fn real_dir(path: &Path) -> Result<(), String> {
+    let kind = std::fs::symlink_metadata(path).map_err(|error| format!("reading {}: {error}", path.display()))?.file_type();
+    if kind.is_symlink() {
+        Err(format!("{} is a symbolic link", path.display()))
+    } else if kind.is_dir() {
+        Ok(())
+    } else {
+        Err(format!("{} is not a directory", path.display()))
+    }
+}
+
+fn walk_files(dir: &Path, base: &Path, files: &mut BTreeSet<String>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|error| format!("reading {}: {error}", dir.display()))?;
+    for entry in entries {
+        let path = entry.map_err(|error| format!("reading {}: {error}", dir.display()))?.path();
+        let kind = std::fs::symlink_metadata(&path).map_err(|error| format!("reading {}: {error}", path.display()))?.file_type();
+        if kind.is_symlink() {
+            return Err(format!("{} is a symbolic link", path.display()));
+        } else if kind.is_dir() {
+            walk_files(&path, base, files)?;
+        } else if kind.is_file() {
+            // Join the real components with `/`: a `\` inside a Unix file
+            // name stays as it is (and matches no row), never a separator.
+            let relative = path.strip_prefix(base).map_err(|_| format!("{} is outside {}", path.display(), base.display()))?;
+            let segments: Option<Vec<&str>> = relative.components().map(|c| c.as_os_str().to_str()).collect();
+            files.insert(segments.ok_or_else(|| format!("{} is not UTF-8", path.display()))?.join("/"));
         } else {
-            files.insert(path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/"));
+            return Err(format!("{} is neither a regular file nor a directory", path.display()));
         }
     }
-    files
+    Ok(())
+}
+
+/// A parsed `contracts/ferrum-contracts/PIN`, in the canonical consumer format
+/// of ferrum-contracts `docs/consumer-pins.md`.
+#[derive(Debug, PartialEq)]
+struct Pin {
+    tag: String,
+    commit: String,
+    edge_version: Option<String>,
+    /// `(path, sha256)` in file order, which is strictly ascending by path.
+    rows: Vec<(String, String)>,
+}
+
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `<major>.<minor>.<patch>`, each one or more ASCII digits.
+fn is_dotted_version(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `^contracts-edge-[0-9]+\.[0-9]+\.[0-9]+(-r([2-9]|[1-9][0-9]+))?$`.
+fn is_contracts_tag(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("contracts-edge-") else { return false };
+    let (version, revision) = match rest.split_once("-r") {
+        Some((version, revision)) => (version, Some(revision)),
+        None => (rest, None),
+    };
+    let revision_ok = match revision {
+        None => true,
+        Some(r) => {
+            !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()) && !r.starts_with('0') && (r.len() > 1 || r.as_bytes()[0] >= b'2')
+        }
+    };
+    is_dotted_version(version) && revision_ok
+}
+
+/// A row path: `/`-separated segments matching `^[A-Za-z0-9._-]+$`, none `.`
+/// or `..`, and not `PIN` itself.
+fn check_row_path(path: &str) -> Result<(), String> {
+    if path == "PIN" {
+        return Err("a row names PIN itself".into());
+    }
+    for segment in path.split('/') {
+        let charset = segment.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if segment.is_empty() || segment == "." || segment == ".." || !charset {
+            return Err(format!("row path {path:?} breaks the path rules"));
+        }
+    }
+    Ok(())
+}
+
+/// Parse `PIN` strictly and positionally: `tag`, `commit`, an optional
+/// `edge_version`, then at least one `<sha256>  <path>` row, with paths
+/// strictly ascending in byte order (which also refuses duplicates). Any other
+/// line, a CR, a BOM, a blank line or a missing final newline is refused.
+fn parse_pin(text: &str) -> Result<Pin, String> {
+    if !text.is_ascii() {
+        return Err("PIN is not ASCII (or starts with a byte order mark)".into());
+    }
+    if text.contains('\r') {
+        return Err("PIN contains a carriage return".into());
+    }
+    let Some(body) = text.strip_suffix('\n') else { return Err("PIN does not end with a newline".into()) };
+    let mut lines = body.split('\n').enumerate().map(|(i, line)| (i + 1, line)).peekable();
+    let mut header = |key: &str| -> Result<String, String> {
+        let (n, line) = lines.next().ok_or_else(|| format!("PIN ends before its `{key}` line"))?;
+        line.strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .map(str::to_owned)
+            .ok_or_else(|| format!("PIN line {n} is not `{key} <value>`: {line:?}"))
+    };
+    let tag = header("tag")?;
+    if !is_contracts_tag(&tag) {
+        return Err(format!("PIN tag {tag:?} is not a contracts-edge release tag"));
+    }
+    let commit = header("commit")?;
+    if !is_lower_hex(&commit, 40) {
+        return Err(format!("PIN commit {commit:?} is not 40 lowercase hex digits"));
+    }
+    let mut edge_version = None;
+    if let Some((n, line)) = lines.next_if(|(_, line)| line.starts_with("edge_version")) {
+        let version =
+            line.strip_prefix("edge_version ").ok_or_else(|| format!("PIN line {n} is not `edge_version <version>`: {line:?}"))?;
+        if !version.strip_prefix('v').is_some_and(is_dotted_version) {
+            return Err(format!("PIN edge_version {version:?} is not v<major>.<minor>.<patch>"));
+        }
+        edge_version = Some(version.to_owned());
+    }
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for (n, line) in lines {
+        let (hash, path) = line.split_at_checked(64).ok_or_else(|| format!("PIN line {n} is not `<sha256>  <path>`: {line:?}"))?;
+        let path = path.strip_prefix("  ").ok_or_else(|| format!("PIN line {n} is not `<sha256>  <path>`: {line:?}"))?;
+        if !is_lower_hex(hash, 64) {
+            return Err(format!("PIN line {n} is not `<sha256>  <path>`: {line:?}"));
+        }
+        check_row_path(path).map_err(|error| format!("PIN line {n}: {error}"))?;
+        if let Some((previous, _)) = rows.last()
+            && path.as_bytes() <= previous.as_bytes()
+        {
+            let problem = if path == previous { "repeats" } else { "is out of order after" };
+            return Err(format!("PIN line {n}: {path:?} {problem} {previous:?}"));
+        }
+        rows.push((path.to_owned(), hash.to_owned()));
+    }
+    if rows.is_empty() {
+        return Err("PIN lists no files".into());
+    }
+    Ok(Pin { tag, commit, edge_version, rows })
 }
 
 fn strings(value: &Value) -> BTreeSet<String> {
@@ -109,24 +275,20 @@ fn assert_catalog_matches_pin(root: &Path, compatibility_id: &str, errors: &Valu
 #[test]
 fn pinned_contract_hashes_and_anvil_copies_match() {
     let root = repo_root();
-    let vendor = root.join("contracts/ferrum-contracts");
-    let pin = std::fs::read_to_string(vendor.join("PIN")).expect("contracts/ferrum-contracts/PIN");
-    let mut hashes = BTreeMap::new();
-    let mut tag = None;
-    let mut commit = None;
-    for line in pin.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        match fields.as_slice() {
-            ["tag", value] => tag = Some(*value),
-            ["commit", value] => commit = Some(*value),
-            ["sha256", hash, path] => {
-                hashes.insert((*path).to_owned(), (*hash).to_owned());
-            }
-            _ => panic!("malformed PIN line: {line}"),
-        }
-    }
-    assert_eq!(tag, Some("contracts-edge-0.9.20"));
-    assert_eq!(commit, Some("39da322083044c2e92617209e62983c92387f0ad"));
+    let vendor = try_vendored_dir(&root).unwrap_or_else(|error| panic!("{error}"));
+    // Walk the tree first: PIN is read only once it is known to be a regular
+    // file in a tree with no links.
+    let vendored_files = files_under(&vendor, &vendor);
+    assert!(vendored_files.contains("PIN"), "contracts/ferrum-contracts/PIN is missing");
+    let vendored_files: BTreeSet<String> = vendored_files.into_iter().filter(|path| path != "PIN").collect();
+    let pin = std::fs::read(vendor.join("PIN")).expect("contracts/ferrum-contracts/PIN");
+    let pin = String::from_utf8(pin).expect("PIN is not UTF-8");
+    let pin = parse_pin(&pin).unwrap_or_else(|error| panic!("contracts/ferrum-contracts/PIN: {error}"));
+    let tag = pin.tag.as_str();
+    assert_eq!(tag, "contracts-edge-0.9.20");
+    assert_eq!(pin.commit, "39da322083044c2e92617209e62983c92387f0ad");
+    assert!(pin.edge_version.as_deref().is_none_or(|version| version == "v0.9.20"), "edge_version {:?}", pin.edge_version);
+    let hashes: BTreeMap<String, String> = pin.rows.into_iter().collect();
     let expected_files: BTreeSet<String> = [
         "vocabularies/gateway-errors.json",
         "vocabularies/gateway-headers.json",
@@ -180,7 +342,6 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     let actual_files: BTreeSet<String> = hashes.keys().cloned().collect();
     let (missing, extra) = differences(&expected_files, &actual_files);
     assert!(missing.is_empty() && extra.is_empty(), "PIN file list differs; missing: {missing:?}; extra: {extra:?}");
-    let vendored_files: BTreeSet<String> = files_under(&vendor, &vendor).into_iter().filter(|path| path != "PIN").collect();
     let (unpinned, stale_pins) = differences(&vendored_files, &actual_files);
     assert!(
         unpinned.is_empty() && stale_pins.is_empty(),
@@ -321,7 +482,10 @@ fn local(values: &[&str]) -> BTreeSet<String> {
 /// fixtures are accepted or refused by both.
 #[test]
 fn pinned_diagnostic_ref_contract_matches_anvils_reader() {
-    assert_diagnostic_ref_contract_matches_anvils_reader(&repo_root().join("contracts/ferrum-contracts"), Some(22));
+    let vendor = try_vendored_dir(&repo_root()).unwrap_or_else(|error| panic!("{error}"));
+    // Refuse a link or special file anywhere in the tree before reading any.
+    files_under(&vendor, &vendor);
+    assert_diagnostic_ref_contract_matches_anvils_reader(&vendor, Some(22));
 }
 
 /// The `ferrum.diagnostic_ref.v1` schema, error classes and fixtures in
@@ -531,4 +695,176 @@ fn edge_main_vocabulary_matches_anvils_reader() {
         missing.is_empty() && extra.is_empty(),
         "Edge main ErrorClass labels vs Anvil's reader; missing: {missing:?}; extra: {extra:?}"
     );
+}
+
+const HASH_A: &str = "ae768167c796e60919bf4a135018089db94c73885df3465384506b9ab775d2fe";
+const HASH_B: &str = "1e6bfba4742fcc33387c0d5108692c30b984e343d0278684cc4e52447b0ea8eb";
+
+fn pin_text(rows: &[&str]) -> String {
+    let mut text = String::from("tag contracts-edge-0.9.20\ncommit 39da322083044c2e92617209e62983c92387f0ad\n");
+    for row in rows {
+        text.push_str(row);
+        text.push('\n');
+    }
+    text
+}
+
+fn refusal(text: &str) -> String {
+    parse_pin(text).expect_err("PIN accepted")
+}
+
+#[test]
+fn a_canonical_pin_parses() {
+    let pin = parse_pin(&pin_text(&[&format!("{HASH_A}  a-b/x.json"), &format!("{HASH_B}  a/x.json")])).unwrap();
+    assert_eq!(pin.tag, "contracts-edge-0.9.20");
+    assert_eq!(pin.commit, "39da322083044c2e92617209e62983c92387f0ad");
+    assert_eq!(pin.edge_version, None);
+    assert_eq!(pin.rows, [("a-b/x.json".to_owned(), HASH_A.to_owned()), ("a/x.json".to_owned(), HASH_B.to_owned())]);
+    let with_edge = format!(
+        "tag contracts-edge-0.9.9-r2\ncommit 39da322083044c2e92617209e62983c92387f0ad\nedge_version v0.9.10\n{HASH_A}  vocabularies/gateway-errors.json\n"
+    );
+    let pin = parse_pin(&with_edge).unwrap();
+    assert_eq!((pin.tag.as_str(), pin.edge_version.as_deref()), ("contracts-edge-0.9.9-r2", Some("v0.9.10")));
+}
+
+#[test]
+fn a_duplicate_or_unsorted_row_is_refused() {
+    let duplicate = refusal(&pin_text(&[&format!("{HASH_A}  a/x.json"), &format!("{HASH_B}  a/x.json")]));
+    assert!(duplicate.contains("repeats"), "{duplicate}");
+    let unsorted = refusal(&pin_text(&[&format!("{HASH_A}  b.json"), &format!("{HASH_B}  a.json")]));
+    assert!(unsorted.contains("out of order"), "{unsorted}");
+    // Whole strings compare byte by byte: `a-b/x` sorts before `a/x`.
+    let by_component = refusal(&pin_text(&[&format!("{HASH_A}  a/x.json"), &format!("{HASH_B}  a-b/x.json")]));
+    assert!(by_component.contains("out of order"), "{by_component}");
+}
+
+#[test]
+fn a_legacy_or_malformed_row_is_refused() {
+    for row in [
+        format!("sha256 {HASH_A} a.json"),
+        format!("{HASH_A} a.json"),
+        format!("{HASH_A}   a.json"),
+        format!("{}  a.json", HASH_A.to_ascii_uppercase()),
+        format!("{}  a.json", &HASH_A[1..]),
+        format!("{HASH_A}  /a.json"),
+        format!("{HASH_A}  a//b.json"),
+        format!("{HASH_A}  a/../b.json"),
+        format!("{HASH_A}  a/./b.json"),
+        format!("{HASH_A}  a/"),
+        format!("{HASH_A}  a b.json"),
+        format!("{HASH_A}  a.json "),
+        format!("{HASH_A}  PIN"),
+        String::new(),
+        "# comment".to_owned(),
+    ] {
+        let error = refusal(&pin_text(&[&row]));
+        assert!(error.contains("PIN line 3"), "{row:?}: {error}");
+    }
+    assert!(refusal(&pin_text(&[&format!("{HASH_A}  PIN")])).contains("names PIN itself"));
+}
+
+#[test]
+fn a_malformed_header_or_layout_is_refused() {
+    let row = format!("{HASH_A}  a.json\n");
+    let commit = "commit 39da322083044c2e92617209e62983c92387f0ad\n";
+    for text in [
+        format!("{commit}tag contracts-edge-0.9.20\n{row}"),
+        format!("tag contracts-edge-0.9.20\ntag contracts-edge-0.9.20\n{commit}{row}"),
+        format!("tag  contracts-edge-0.9.20\n{commit}{row}"),
+        format!("tag contracts-edge-0.9.20-r1\n{commit}{row}"),
+        format!("tag contracts-edge-0.9.20-r01\n{commit}{row}"),
+        format!("tag v0.9.20\n{commit}{row}"),
+        format!("tag contracts-edge-0.9.20\ncommit 39DA322083044C2E92617209E62983C92387F0AD\n{row}"),
+        format!("tag contracts-edge-0.9.20\n{commit}edge_version 0.9.20\n{row}"),
+        format!("tag contracts-edge-0.9.20\n{commit}edge_version v0.9.20\nedge_version v0.9.20\n{row}"),
+        format!("tag contracts-edge-0.9.20\n{commit}{row}edge_version v0.9.20\n"),
+        format!("tag contracts-edge-0.9.20\n{commit}"),
+        format!("tag contracts-edge-0.9.20\n{commit}{}", row.trim_end()),
+        format!("tag contracts-edge-0.9.20\r\n{commit}{row}"),
+        format!("\u{feff}tag contracts-edge-0.9.20\n{commit}{row}"),
+        format!("tag contracts-edge-0.9.20\n{commit}\n{row}"),
+        format!("unknown value\ntag contracts-edge-0.9.20\n{commit}{row}"),
+    ] {
+        assert!(parse_pin(&text).is_err(), "accepted {text:?}");
+    }
+}
+
+/// A fresh directory under the system temporary directory, holding one
+/// regular file, `schemas/a.json`.
+fn scratch_dir(name: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("anvil-contracts-{name}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(dir.join("schemas")).unwrap();
+    std::fs::write(dir.join("schemas/a.json"), b"{}").unwrap();
+    dir
+}
+
+#[test]
+fn a_regular_tree_is_listed() {
+    let dir = scratch_dir("regular");
+    let listed = try_files_under(&dir, &dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(listed.unwrap(), BTreeSet::from(["schemas/a.json".to_owned()]));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_scan_root_is_refused() {
+    let dir = scratch_dir("root");
+    let link = dir.with_extension("link");
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+    let as_base = try_files_under(&link, &link);
+    let as_parent = try_files_under(&link.join("schemas"), &link);
+    let mut slashed = link.clone().into_os_string();
+    slashed.push("/");
+    let slashed = PathBuf::from(slashed);
+    let with_slash = try_files_under(&slashed, &slashed);
+    let with_dot = try_files_under(&link.join("."), &link.join("."));
+    std::fs::remove_file(&link).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    for listed in [as_base, as_parent, with_slash, with_dot] {
+        let error = listed.expect_err("a linked root was followed");
+        assert!(error.contains("symbolic link"), "{error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_contracts_parent_is_refused() {
+    let dir = scratch_dir("parent");
+    std::fs::create_dir_all(dir.join("moved/ferrum-contracts")).unwrap();
+    std::os::unix::fs::symlink(dir.join("moved"), dir.join("contracts")).unwrap();
+    let linked = try_vendored_dir(&dir);
+    std::fs::remove_file(dir.join("contracts")).unwrap();
+    std::fs::rename(dir.join("moved"), dir.join("contracts")).unwrap();
+    let real = try_vendored_dir(&dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let error = linked.expect_err("a linked contracts directory was followed");
+    assert!(error.contains("symbolic link"), "{error}");
+    assert_eq!(real.unwrap(), dir.join("contracts/ferrum-contracts"));
+}
+
+/// A `\` in a Unix file name is part of the name, not a separator, so such
+/// a file never stands in for the pinned one it resembles.
+#[cfg(unix)]
+#[test]
+fn a_backslash_in_a_file_name_is_not_a_separator() {
+    let dir = scratch_dir("backslash");
+    std::fs::write(dir.join("schemas\\a.json"), b"{}").unwrap();
+    let listed = try_files_under(&dir, &dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(listed.unwrap(), BTreeSet::from(["schemas/a.json".to_owned(), "schemas\\a.json".to_owned()]));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_under_the_vendored_tree_is_refused() {
+    for (name, target) in [("file", "schemas/a.json"), ("dir", "schemas")] {
+        let dir = scratch_dir(&format!("link-{name}"));
+        std::os::unix::fs::symlink(dir.join(target), dir.join("linked")).unwrap();
+        let listed = try_files_under(&dir, &dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let error = listed.expect_err("a symbolic link was followed");
+        assert!(error.contains("symbolic link"), "{error}");
+    }
 }

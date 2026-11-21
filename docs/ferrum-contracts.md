@@ -43,8 +43,10 @@ the v0.9.20 delta in [the Edge delta audit](audit/gateway-0.9.20-delta.md#contra
 
 ## What CI checks
 
-Hosted `anvil-diagnostics` gates check every vendored byte against `PIN` and
-exact adopted file presence; token/class/header parity with the 0.9.20
+Hosted `anvil-diagnostics` gates parse `PIN` strictly (positional headers;
+sorted, unique, canonical rows; no `PIN` self-row), refuse a symbolic link or
+any other non-regular entry under the vendored tree, and check every vendored
+byte against `PIN` and exact adopted file presence; token/class/header parity with the 0.9.20
 catalog; the current owner source
 identity; local DiagnosticFinding schema parity; and strict diagnostic-ref
 reader vocabularies. All original fixtures and precise negative expectations
@@ -103,7 +105,13 @@ a lab run diagnoses with the audited catalog of its gateway's release, and
    SHA (dereference annotated tags).
 2. Download the scoped vocabulary, schema, and fixture files from that tag
    into `contracts/ferrum-contracts`, preserving their paths and bytes.
-3. Update `PIN` with the tag, commit SHA, and SHA-256 of every vendored file.
+3. Update `PIN` in the canonical consumer format of ferrum-contracts
+   [`docs/consumer-pins.md`](https://github.com/ferrum-edge/ferrum-contracts/blob/main/docs/consumer-pins.md):
+   `tag <tag>`, `commit <sha>`, then one `<sha256>  <path>` row (two spaces)
+   per vendored file, sorted by path byte by byte, with LF endings and a final
+   newline. From `contracts/ferrum-contracts`,
+   `grep -E '^[0-9a-f]{64}  ' PIN | sha256sum -c` (`shasum -a 256 -c` on macOS)
+   checks the hashes.
 4. Reconcile local catalogs, token mappings, and schemas with the new contract.
    Keep older Edge compatibility catalogs tied to their own releases.
 5. Run the normal CI suite. Its pinned-contract checks must pass before
