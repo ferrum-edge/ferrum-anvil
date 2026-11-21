@@ -516,7 +516,7 @@ fn stored_file_name(value: &serde_json::Value, sha: &str) -> Option<String> {
 
 /// The content hash of every stored attachment `v` names, wherever it sits
 /// (binary bodies, multipart parts, gRPC schema files).
-fn stored_hashes(v: &serde_json::Value, out: &mut Vec<String>) {
+pub(crate) fn stored_hashes(v: &serde_json::Value, out: &mut Vec<String>) {
     match v {
         serde_json::Value::Object(o) => {
             if o.get("kind").and_then(|k| k.as_str()) == Some("stored")

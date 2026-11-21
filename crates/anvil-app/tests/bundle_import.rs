@@ -1132,3 +1132,140 @@ fn an_import_declined_once_its_bundle_is_open_writes_nothing() {
     assert_eq!(rep.workspace_ids, vec![ws.meta.id.to_string()]);
     assert_eq!(b.store.list_secret_ids(Some(&ws.meta.id)).unwrap().len(), 1);
 }
+
+/// Every entry of a bundle, decompressed.
+fn bundle_entries(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    (0..z.len())
+        .map(|i| {
+            let mut f = z.by_index(i).unwrap();
+            let mut b = Vec::new();
+            std::io::Read::read_to_end(&mut f, &mut b).unwrap();
+            (f.name().unwrap().into_owned(), b)
+        })
+        .collect()
+}
+
+fn holds(haystack: &[u8], needle: &str) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
+/// The stored data of a CSV or JSON dataset with sensitive columns never
+/// travels as a plaintext bundle entry: a share-safe bundle leaves it out
+/// (also when a request uploads the same file) and says so, and an encrypted
+/// transfer carries it only inside its vault and restores it on import.
+#[test]
+fn sensitive_dataset_data_stays_out_of_plaintext_bundle_entries() {
+    const CSV_SECRET: &str = "dataset-secret-csv-7f3k";
+    const JSON_SECRET: &str = "dataset-secret-json-9q2m";
+    let csv = format!("user,password\nalice,{CSV_SECRET}\n");
+    let json = format!(r#"[{{"user":"bob","api_key":"{JSON_SECRET}"}}]"#);
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "datasets");
+    let ws = a.create_workspace("Datasets").unwrap().meta.id;
+    let users = a.create_dataset(&ws, "users", DatasetFormat::Csv, csv.as_bytes(), vec!["password".into()]).unwrap();
+    let keys = a.create_dataset(&ws, "keys", DatasetFormat::Json, json.as_bytes(), vec!["api_key".into()]).unwrap();
+    // A request uploading the very same file.
+    let same = a.put_attachment("users.csv", csv.as_bytes(), Some("text/csv".into())).unwrap();
+    assert_eq!(sha(&same), sha(&users.attachment));
+    a.create_request(&ws, None, "Upload users", upload(Body::Binary { attachment: same, content_type: None })).unwrap();
+
+    // Share safely: neither file is in any entry, and both are listed.
+    let dry = a.export_preview_with_standards(Some(&ws), ExportMode::ShareSafely, false, false).unwrap();
+    let (bytes, written) = a.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, false, false).unwrap();
+    for (name, data) in bundle_entries(&bytes) {
+        assert!(!holds(&data, CSV_SECRET) && !holds(&data, JSON_SECRET), "{name} carries a sensitive dataset value");
+    }
+    for excluded in [&dry.manifest.excluded, &written.manifest.excluded] {
+        for item in ["the data of dataset 'users'", "the data of dataset 'keys'", "a stored file of request 'Upload users'"] {
+            assert!(excluded.iter().any(|e| e.starts_with(item)), "{item}: {excluded:?}");
+        }
+    }
+    assert_eq!(written.manifest.counts["attachments"], 0, "{:?}", written.manifest.counts);
+    // On import each dataset names a file to choose here, never stored content.
+    let shared = tempfile::tempdir().unwrap();
+    let c = new_app(shared.path(), "colleague");
+    let rep = c.import_approved(&bytes, None, ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
+    let copy: Id = rep.workspace_ids[0].parse().unwrap();
+    for d in c.datasets(&copy).unwrap() {
+        assert!(matches!(&d.attachment, AttachmentRef::LinkedFile { .. }), "{:?}", d.attachment);
+        assert!(!d.sensitive_columns.is_empty());
+    }
+    assert!(rep.linked_files.iter().any(|l| l.starts_with("dataset 'users'")), "{:?}", rep.linked_files);
+
+    // Encrypted transfer: only the vault holds the data, and it comes back.
+    let (bytes, written) = a.export_with_standards(Some(&ws), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
+    for (name, data) in bundle_entries(&bytes) {
+        assert!(!name.starts_with("attachments/"), "{name} is a plaintext attachment entry");
+        assert!(!holds(&data, CSV_SECRET) && !holds(&data, JSON_SECRET), "{name} carries a sensitive dataset value");
+    }
+    assert!(!written.manifest.excluded.iter().any(|e| e.contains("dataset")), "{:?}", written.manifest.excluded);
+    let root2 = tempfile::tempdir().unwrap();
+    let b = new_app(root2.path(), "receiver");
+    let rep = b.import_approved(&bytes, Some(EXPORT_PASS), ConflictPolicy::Duplicate, &ImportApproval::default()).unwrap();
+    let copy: Id = rep.workspace_ids[0].parse().unwrap();
+    let mut restored = b.datasets(&copy).unwrap();
+    restored.sort_by(|x, y| x.name.cmp(&y.name));
+    assert_eq!(restored.len(), 2);
+    for (d, original, data) in [(&restored[0], &keys, &json), (&restored[1], &users, &csv)] {
+        assert_eq!(sha(&d.attachment), sha(&original.attachment), "{}", d.name);
+        assert_eq!(b.get_attachment(&sha(&d.attachment)).unwrap().as_deref(), Some(data.as_bytes()), "{}", d.name);
+    }
+}
+
+/// A request in another workspace that uploads a sensitive dataset's file
+/// does not carry it either: exporting only that workspace leaves the bytes
+/// out in both modes and says so.
+#[test]
+fn a_sensitive_dataset_file_stays_out_of_another_workspaces_bundle() {
+    const CELL: &str = "tok-SENSITIVE-other-workspace-cell";
+    let csv = format!("user,password\nalice,{CELL}\n");
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "two");
+    let owner = a.create_workspace("Owner").unwrap().meta.id;
+    a.create_dataset(&owner, "users", DatasetFormat::Csv, csv.as_bytes(), vec!["password".into()]).unwrap();
+    let other = a.create_workspace("Other").unwrap().meta.id;
+    let same = a.put_attachment("users.csv", csv.as_bytes(), Some("text/csv".into())).unwrap();
+    a.create_request(&other, None, "Upload users", upload(Body::Binary { attachment: same, content_type: None })).unwrap();
+    for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some(EXPORT_PASS))] {
+        let (bytes, written) = a.export_with_standards(Some(&other), mode, pass, false, false).unwrap();
+        for (name, data) in bundle_entries(&bytes) {
+            assert!(!name.starts_with("attachments/"), "{mode:?}: {name}");
+            assert!(!holds(&data, CELL), "{mode:?}: {name} carries the sensitive value");
+        }
+        assert!(
+            written.manifest.excluded.iter().any(|e| e.starts_with("a stored file of request 'Upload users'")),
+            "{:?}",
+            written.manifest.excluded
+        );
+    }
+}
+
+/// Merge keeps an existing (linked) dataset over the incoming one: the vault
+/// data it would have backed is then not stored, which the preview already
+/// says, so a later share-safe export cannot carry it as plaintext.
+#[test]
+fn merge_never_stores_vault_data_without_its_sensitive_dataset() {
+    const CELL: &str = "tok-SENSITIVE-merge-cell";
+    let csv = format!("user,password\nalice,{CELL}\n");
+    let root = tempfile::tempdir().unwrap();
+    let a = new_app(root.path(), "sender");
+    let ws = a.create_workspace("Shared").unwrap().meta.id;
+    let users = a.create_dataset(&ws, "users", DatasetFormat::Csv, csv.as_bytes(), vec!["password".into()]).unwrap();
+    let (share, _) = a.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, false, false).unwrap();
+    let root_b = tempfile::tempdir().unwrap();
+    let b = new_app(root_b.path(), "recipient");
+    b.import_approved(&share, None, ConflictPolicy::Merge, &ImportApproval::default()).unwrap();
+    // The sender adds a request uploading the dataset's file.
+    let same = a.put_attachment("users.csv", csv.as_bytes(), Some("text/csv".into())).unwrap();
+    a.create_request(&ws, None, "Upload users", upload(Body::Binary { attachment: same, content_type: None })).unwrap();
+    let (sealed, _) = a.export_with_standards(Some(&ws), ExportMode::EncryptedTransfer, Some(EXPORT_PASS), false, false).unwrap();
+    let preview = b.import_preview(&sealed, Some(EXPORT_PASS), ConflictPolicy::Merge).unwrap();
+    assert!(preview.warnings.iter().any(|w| w.contains("is not stored") && w.contains("Upload users")), "{:?}", preview.warnings);
+    b.import_approved(&sealed, Some(EXPORT_PASS), ConflictPolicy::Merge, &into(&ws, &sealed)).unwrap();
+    assert_eq!(b.get_attachment(&sha(&users.attachment)).unwrap(), None);
+    let (bytes, _) = b.export_with_standards(Some(&ws), ExportMode::ShareSafely, None, false, false).unwrap();
+    for (name, data) in bundle_entries(&bytes) {
+        assert!(!holds(&data, CELL), "{name} carries the sensitive value");
+    }
+}
