@@ -417,7 +417,7 @@ impl App {
         // The checkpoint is never restored automatically: that would also
         // erase whatever other callers saved since it was taken. A refusal
         // returns before anything is written, and removes the checkpoint.
-        let (checkpoint, (plan, notes)) = self.checkpointed("before-import", |s| {
+        let (checkpoint, (plan, mut notes)) = self.checkpointed("before-import", |s| {
             // Read inside the transaction, so merge and naming decisions see
             // exactly what the writes below land on.
             let existing = existing(&s.as_read())?;
@@ -620,7 +620,17 @@ impl App {
             crate::device_identity::seal_in(s, g.workspaces.iter().map(|w| &w.meta.id))?;
             Ok(Ok((plan, notes)))
         })?;
+        // Data the vault carried belongs to a dataset with sensitive columns:
+        // stored only while such a dataset here names it (Merge may have kept
+        // an existing dataset instead), so a later export still withholds it.
+        let sensitive = if opened.sealed_attachments.is_empty() { Default::default() } else { self.sensitive_dataset_hashes()? };
         for (sha, bytes) in &g.attachments {
+            if opened.sealed_attachments.contains(sha) && !sensitive.contains(sha) {
+                notes.push(format!(
+                    "The data of a dataset with sensitive columns ({sha}) was not stored: no dataset with sensitive columns here uses it; attach the file again where it is needed."
+                ));
+                continue;
+            }
             // The items written above reference it, so it is not marked as
             // added by a user (see `App::put_attachment`).
             let r = self.store.atomically(|s| put_attachment_in(s, sha, bytes, None))?;

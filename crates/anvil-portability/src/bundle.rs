@@ -212,10 +212,10 @@ fn plaintext_attachments(graph: &PortableGraph) -> impl Iterator<Item = (&String
 
 /// The stored attachments of the graph's requests and datasets whose data an
 /// export of `mode` leaves out: in the bundle each names a linked file
-/// instead (its file name), so the file is chosen on the target machine
-/// rather than resolving to whatever content with that hash the importing
-/// device holds or later stores. As `dataset 'Users': users.csv` or
-/// `request 'Upload': users.csv`.
+/// instead ([`linked_placeholders`]), so the file is chosen on the target
+/// machine rather than resolving to whatever content with that hash the
+/// importing device holds or later stores. As `dataset 'Users': users.csv`
+/// or `request 'Upload': users.csv`.
 fn unlinked_files(graph: &PortableGraph, mode: ExportMode) -> Vec<String> {
     let dropped = dropped_hashes(graph, mode);
     if dropped.is_empty() {
@@ -228,52 +228,70 @@ fn unlinked_files(graph: &PortableGraph, mode: ExportMode) -> Vec<String> {
         .map(|r| ("request", &r.name, serde_json::to_value(&r.spec)))
         .chain(graph.datasets.iter().map(|d| ("dataset", &d.name, serde_json::to_value(&d.attachment))));
     for (what, name, value) in items {
-        let mut names = Vec::new();
-        dropped_file_names(&value.unwrap_or_default(), &dropped, &mut names);
-        out.extend(names.into_iter().map(|f| format!("{what} '{name}': {f}")));
+        let placeholders = linked_placeholders(&value.unwrap_or_default(), &dropped);
+        out.extend(placeholders.into_iter().map(|(_, path)| format!("{what} '{name}': {path}")));
     }
     out
 }
 
-/// The file name of every stored attachment in `v` whose hash is in
-/// `dropped`, each once.
-fn dropped_file_names(v: &serde_json::Value, dropped: &BTreeSet<&str>, out: &mut Vec<String>) {
-    match v {
-        serde_json::Value::Object(o) => {
-            if let Some(f) = dropped_attachment(o, dropped)
-                && !out.contains(&f)
-            {
-                out.push(f);
+/// The linked path each dropped stored attachment in `v` (one request spec,
+/// revision spec or dataset attachment) becomes, in traversal order: its
+/// file name, made distinct within `v` (`users.csv`, `users.csv (2)`) from
+/// the other dropped files and the linked paths `v` already names, so
+/// choosing one file never binds another.
+fn linked_placeholders(v: &serde_json::Value, dropped: &BTreeSet<&str>) -> Vec<(String, String)> {
+    fn walk(v: &serde_json::Value, dropped: &BTreeSet<&str>, linked: &mut BTreeSet<String>, files: &mut Vec<(String, String)>) {
+        match v {
+            serde_json::Value::Object(o) => {
+                let kind = o.get("kind").and_then(|k| k.as_str());
+                if kind == Some("linked_file") {
+                    linked.insert(o.get("path").and_then(|p| p.as_str()).unwrap_or_default().to_string());
+                } else if kind == Some("stored")
+                    && let Some(hash) = o.get("sha256").and_then(|h| h.as_str()).filter(|h| dropped.contains(h))
+                    && !files.iter().any(|(h, _)| h == hash)
+                {
+                    files.push((hash.to_string(), o.get("file_name").and_then(|f| f.as_str()).unwrap_or_default().to_string()));
+                }
+                o.values().for_each(|x| walk(x, dropped, linked, files));
             }
-            o.values().for_each(|x| dropped_file_names(x, dropped, out));
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, dropped, linked, files)),
+            _ => {}
         }
-        serde_json::Value::Array(a) => a.iter().for_each(|x| dropped_file_names(x, dropped, out)),
-        _ => {}
     }
+    let (mut linked, mut files) = (BTreeSet::new(), Vec::new());
+    walk(v, dropped, &mut linked, &mut files);
+    for (_, path) in &mut files {
+        let mut candidate = path.clone();
+        let mut n = 2;
+        while !linked.insert(candidate.clone()) {
+            candidate = format!("{path} ({n})");
+            n += 1;
+        }
+        *path = candidate;
+    }
+    files
 }
 
-/// The file name of `o` when it is a stored attachment whose hash is in `dropped`.
-fn dropped_attachment(o: &serde_json::Map<String, serde_json::Value>, dropped: &BTreeSet<&str>) -> Option<String> {
-    let stored = o.get("kind").and_then(|k| k.as_str()) == Some("stored");
-    let hash = o.get("sha256").and_then(|h| h.as_str())?;
-    (stored && dropped.contains(hash)).then(|| o.get("file_name").and_then(|f| f.as_str()).unwrap_or_default().to_string())
-}
-
-/// In a bundle's objects (requests, their revisions and datasets), each
-/// stored attachment whose data is in `dropped` names a linked file instead
-/// ([`unlinked_files`]).
-fn unlink_dropped(v: &mut serde_json::Value, dropped: &BTreeSet<&str>) {
-    match v {
-        serde_json::Value::Object(o) => {
-            if let Some(file_name) = dropped_attachment(o, dropped) {
-                *v = serde_json::json!({ "kind": "linked_file", "path": file_name });
-                return;
+/// `v` with each dropped stored attachment replaced by its linked file
+/// ([`linked_placeholders`]); whether anything was replaced.
+fn unlink_dropped(v: &mut serde_json::Value, dropped: &BTreeSet<&str>) -> bool {
+    fn walk(v: &mut serde_json::Value, paths: &BTreeMap<String, String>) {
+        match v {
+            serde_json::Value::Object(o) => {
+                let stored = o.get("kind").and_then(|k| k.as_str()) == Some("stored");
+                if let Some(path) = o.get("sha256").and_then(|h| h.as_str()).and_then(|h| paths.get(h)).filter(|_| stored) {
+                    *v = serde_json::json!({ "kind": "linked_file", "path": path });
+                    return;
+                }
+                o.values_mut().for_each(|x| walk(x, paths));
             }
-            o.values_mut().for_each(|x| unlink_dropped(x, dropped));
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|x| walk(x, paths)),
+            _ => {}
         }
-        serde_json::Value::Array(a) => a.iter_mut().for_each(|x| unlink_dropped(x, dropped)),
-        _ => {}
     }
+    let paths: BTreeMap<String, String> = linked_placeholders(v, dropped).into_iter().collect();
+    walk(v, &paths);
+    !paths.is_empty()
 }
 
 /// Base64 length of `n` bytes.
@@ -385,9 +403,19 @@ pub fn prepare_redacting(
     charge_total_bytes(sealed_len, &mut remaining)?;
     let mut objects = serde_json::to_value(graph)?;
     if !dropped.is_empty() {
-        for list in ["requests", "revisions", "datasets"] {
-            if let Some(items) = objects.get_mut(list) {
-                unlink_dropped(items, &dropped);
+        // Each request's spec, and each dataset's attachment, on its own.
+        for (list, field) in [("requests", "spec"), ("datasets", "attachment")] {
+            for item in objects.get_mut(list).and_then(|l| l.as_array_mut()).into_iter().flatten() {
+                if let Some(v) = item.get_mut(field) {
+                    unlink_dropped(v, &dropped);
+                }
+            }
+        }
+        // A rewritten revision no longer has its spec's hash: it must not
+        // match a later save of that spec, which then records a revision.
+        for item in objects.get_mut("revisions").and_then(|l| l.as_array_mut()).into_iter().flatten() {
+            if item.get_mut("spec").is_some_and(|v| unlink_dropped(v, &dropped)) {
+                item["spec_sha256"] = serde_json::Value::String("0".repeat(64));
             }
         }
     }
@@ -851,6 +879,10 @@ pub struct Opened {
     pub warnings: Vec<String>,
     /// True when sensitive values were restored from the encrypted vault.
     pub secrets_restored: bool,
+    /// The attachments the encrypted vault carried (the data of datasets
+    /// with sensitive columns): an import stores one only while a stored
+    /// dataset with sensitive columns names it.
+    pub sealed_attachments: BTreeSet<String>,
 }
 
 fn safe_name(name: &str) -> Result<(), BundleError> {
@@ -1343,6 +1375,7 @@ fn open_archive<R: Read + Seek>(
     // must be the content its hash names, used by such a dataset, and not
     // also carried as a plaintext entry.
     let sensitive: BTreeSet<String> = sensitive_dataset_hashes(&graph).into_iter().map(str::to_string).collect();
+    let mut sealed = BTreeSet::new();
     for (hash, encoded) in sealed_attachments {
         let data = base64::engine::general_purpose::STANDARD
             .decode(&encoded)
@@ -1353,6 +1386,7 @@ fn open_archive<R: Read + Seek>(
         if !sensitive.contains(&hash) {
             return Err(BundleError::Invalid("the encrypted vault carries a file no dataset with sensitive columns uses".into()));
         }
+        sealed.insert(hash.clone());
         if graph.attachments.insert(hash, data).is_some() {
             return Err(BundleError::Invalid("a dataset's data is carried both in the encrypted vault and as a plaintext entry".into()));
         }
@@ -1374,7 +1408,7 @@ fn open_archive<R: Read + Seek>(
     crate::validate::clear_token_cache_ids(&mut graph);
     // A gateway profile's diagnostic reference lookup never arrives in a bundle.
     warnings.extend(crate::validate::clear_gateway_lookups(&mut graph));
-    Ok(Opened { manifest, graph, warnings, secrets_restored })
+    Ok(Opened { manifest, graph, warnings, secrets_restored, sealed_attachments: sealed })
 }
 
 #[cfg(test)]

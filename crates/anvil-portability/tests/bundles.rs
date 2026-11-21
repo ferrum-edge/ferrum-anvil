@@ -598,6 +598,60 @@ fn sensitive_dataset_data_is_sealed_or_left_out() {
     assert_eq!(opened.graph.attachments.get(&sha), Some(&data));
 }
 
+/// Two dropped files with the same name in one request become two distinct
+/// linked files, and a rewritten revision no longer claims its spec's hash.
+#[test]
+fn dropped_files_with_one_name_stay_distinct() {
+    let mut g = sample();
+    let ws = g.workspaces[0].meta.id;
+    let mut parts = vec![];
+    for (i, cell) in ["tok-SENSITIVE-a", "tok-SENSITIVE-b"].iter().enumerate() {
+        let data = format!("user,password\nu{i},{cell}\n").into_bytes();
+        let sha = hex_sha(&data);
+        let attachment =
+            AttachmentRef::Stored { sha256: sha.clone(), size: data.len() as u64, file_name: "users.csv".into(), media_type: None };
+        g.datasets.push(Dataset {
+            meta: Meta::new(),
+            workspace_id: ws,
+            name: format!("users {i}"),
+            format: DatasetFormat::Csv,
+            attachment: attachment.clone(),
+            sensitive_columns: vec!["password".into()],
+        });
+        g.attachments.insert(sha, data);
+        parts.push(MultipartPart {
+            name: format!("f{i}"),
+            enabled: true,
+            content: MultipartContent::File { attachment, file_name: None },
+            content_type: None,
+        });
+    }
+    g.requests[0].spec.body = Body::Multipart { parts };
+    g.revisions.push(RequestRevision {
+        id: Id::new(),
+        request_id: g.requests[0].meta.id,
+        created_at: anvil_domain::Timestamp::now(),
+        spec_sha256: "1".repeat(64),
+        spec: g.requests[0].spec.clone(),
+    });
+    let (bytes, written) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
+    let name = g.requests[0].name.clone();
+    for path in ["users.csv", "users.csv (2)"] {
+        assert!(written.linked_files.contains(&format!("request '{name}': {path}")), "{:?}", written.linked_files);
+    }
+    let opened = bundle::open(&bytes, None).unwrap();
+    let Body::Multipart { parts } = &opened.graph.requests[0].spec.body else { panic!("not multipart") };
+    let paths: Vec<_> = parts
+        .iter()
+        .map(|p| match &p.content {
+            MultipartContent::File { attachment: AttachmentRef::LinkedFile { path }, .. } => path.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(paths, ["users.csv", "users.csv (2)"]);
+    assert_eq!(opened.graph.revisions[0].spec_sha256, "0".repeat(64));
+}
+
 #[test]
 fn data_006_conflict_policies_and_duplicate_remap() {
     let g = sample();
