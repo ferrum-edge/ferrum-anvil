@@ -984,6 +984,19 @@ fn server_variables_that_sanitize_alike_keep_distinct_names() {
     let names: Vec<&str> = r.environments[0].variables.iter().map(|v| v.name.as_str()).collect();
     assert_eq!(names, ["baseUrl", "release_name_4", "release_name"]);
 
+    // Nor a sibling server beside a `$ref` (reached through a percent-encoded
+    // pointer), nor a `{{name}}` the source writes.
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+        "servers": [{"url": "https://example.test/{release-name}/{release_name}",
+            "variables": {"release-name": {"default": "v1"}, "release_name": {"default": "v2"}}}],
+        "components": {"pathItems": {"Preview": {"get": {"parameters": [
+            {"name": "X-Tenant", "in": "header", "example": "{{release_name_3}}", "schema": {"type": "string"}}], "responses": {}}}}},
+        "paths": {"/preview": {"$ref": "#/components/pathItems/%50review",
+            "servers": [{"url": "https://preview.example.test/{release_name_2}"}]}}});
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    let names: Vec<&str> = r.environments[0].variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["baseUrl", "release_name_4", "release_name"]);
+
     // Operation-level servers inline their defaults: only the variables left
     // as placeholders take names, and `origin` is kept for the rendered URL.
     let op_server = |url: &str, vars: serde_json::Value| {

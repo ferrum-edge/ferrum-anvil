@@ -818,8 +818,11 @@ digit gets a leading `_` (`{123}` is `_123`), and a name with no letter or
 digit is `value`. When two variables of a
 server sanitize alike, the one already spelled that way (else the first used)
 keeps the name and the other gets the next free `_2`, `_3`, … suffix that no
-variable of the server has as its own name and no path parameter of the
-document uses (`{release-name}/{release_name}` becomes
+variable of the server has as its own name and no other variable of the
+document can use (a path template or declared parameter, a security scheme's
+credential, a path- or operation-level server's variable, a document-level
+server's variable for an operation-level server, or a `{{name}}` the source
+writes) (`{release-name}/{release_name}` becomes
 `{{release_name_2}}/{{release_name}}`); `baseUrl`, and `origin` when
 the URL is relative, are never given. A path- or operation-level server
 inlines defaults, so only its variables without one take names. The same

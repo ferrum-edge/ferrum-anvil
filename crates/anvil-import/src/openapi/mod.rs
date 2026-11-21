@@ -41,11 +41,9 @@ pub(crate) struct Ctx<'a> {
     /// Swagger 2.0 document-level `produces` and `consumes`, read once rather
     /// than by every operation that inherits them.
     pub swagger_defaults: SwaggerDefaults,
-    /// The `{{name}}`s a request of the document can use besides its server
-    /// variables: path template and declared parameters, and the security
-    /// schemes' credentials. A server variable never takes one as a suffixed
-    /// name ([`server_aliases`]).
-    pub request_variable_names: HashSet<String>,
+    /// [`request_variable_names`], read only once a server variable needs a
+    /// suffix ([`Ctx::taken_by_requests`]).
+    request_variable_names: std::cell::OnceCell<HashSet<String>>,
 }
 
 /// What an operation without its own `produces`/`consumes` inherits.
@@ -88,94 +86,130 @@ fn is_32(d: Dialect) -> bool {
     d == Dialect::OpenApi32
 }
 
+impl Ctx<'_> {
+    /// Whether a request of the document can use `name` besides its server
+    /// variables ([`request_variable_names`]); read on first use.
+    fn taken_by_requests(&self, name: &str) -> bool {
+        self.request_variable_names.get_or_init(|| request_variable_names(self.root, self.refs.max_depth)).contains(name)
+    }
+}
+
 /// The `{{name}}`s a request of the document can use besides its server
-/// variables ([`Ctx::request_variable_names`]): the `{…}` segments of every
-/// path template, every declared parameter's name (path, path item,
-/// operation and component level), and each security scheme's credential
-/// names, all sanitized as the importer names them.
-fn request_variable_names(root: &Value) -> HashSet<String> {
-    // A local `$ref` (a shared Path Item or parameter), followed a few times.
-    fn local<'a>(root: &'a Value, mut v: &'a Value) -> Option<&'a Value> {
-        for _ in 0..8 {
-            match v.get("$ref").and_then(Value::as_str) {
-                Some(r) => v = root.pointer(r.strip_prefix('#')?)?,
-                None => return Some(v),
-            }
+/// variables: the `{…}` segments of every path template, every declared
+/// parameter's name (path item, its local fields beside a `$ref`, operation
+/// and component level, 3.2 `additionalOperations` included), each security
+/// scheme's credential names (by scheme and requirement key), and the
+/// default-less variables of path- and operation-level servers, all
+/// sanitized as the importer names them. Local `$ref`s are followed as the
+/// importer follows them (percent-decoded, at most `max_depth` hops, at most
+/// [`refs::MAX_REF_LEN`] bytes), with no report and no budget charged, and
+/// each referenced object is read once however many paths share it.
+fn request_variable_names(root: &Value, max_depth: usize) -> HashSet<String> {
+    fn local<'a>(root: &'a Value, mut v: &'a Value, max_depth: usize) -> Option<&'a Value> {
+        for _ in 0..=max_depth {
+            let Some(r) = v.get("$ref").and_then(Value::as_str) else { return Some(v) };
+            let frag = r.strip_prefix('#').filter(|f| r.len() <= refs::MAX_REF_LEN && (f.is_empty() || f.starts_with('/')))?;
+            let decoded = percent_encoding::percent_decode_str(frag).decode_utf8_lossy();
+            v = root.pointer(&decoded)?;
         }
         None
     }
-    let resolve = |v| local(root, v);
-    let mut out = HashSet::new();
-    let template_names = |path: &str, out: &mut HashSet<String>| {
-        let mut rest = path;
+    fn template_names(text: &str, out: &mut HashSet<String>, keep: impl Fn(&str) -> bool) {
+        let mut rest = text;
         while let Some(open) = rest.find('{') {
             let after = &rest[open + 1..];
             let Some(close) = after.find('}') else { break };
-            out.insert(sanitize_var(&after[..close]));
-            rest = &after[close + 1..];
-        }
-    };
-    let mut parameter_lists: Vec<&Value> = vec![];
-    let mut operations: Vec<&Value> = vec![];
-    let paths = root.get("paths").and_then(Value::as_object);
-    for (path, item) in paths.into_iter().flatten() {
-        template_names(path, &mut out);
-        let Some(item) = resolve(item) else { continue };
-        parameter_lists.extend(item.get("parameters"));
-        if let Some(o) = item.as_object() {
-            operations.extend(o.values().filter(|v| v.is_object()));
-            // OpenAPI 3.2 `additionalOperations`.
-            operations.extend(o.get("additionalOperations").and_then(Value::as_object).into_iter().flat_map(|a| a.values()));
-        }
-    }
-    for op in &operations {
-        parameter_lists.extend(op.get("parameters"));
-    }
-    let components = root.pointer("/components/parameters").or_else(|| root.get("parameters")).and_then(Value::as_object);
-    let declared = parameter_lists.into_iter().filter_map(Value::as_array).flatten().chain(components.into_iter().flat_map(|c| c.values()));
-    for p in declared {
-        if let Some(name) = resolve(p).and_then(|p| p.get("name")).and_then(Value::as_str) {
-            out.insert(sanitize_var(name));
-        }
-    }
-    // Every security scheme's credential names, by the scheme keys and by
-    // the requirement keys that name them (OpenAPI 3.2 allows a URI).
-    let mut schemes: Vec<&str> = vec![];
-    let defined = root.pointer("/components/securitySchemes").or_else(|| root.get("securityDefinitions")).and_then(Value::as_object);
-    schemes.extend(defined.into_iter().flat_map(|s| s.keys()).map(String::as_str));
-    for list in std::iter::once(root.get("security")).chain(operations.iter().map(|op| op.get("security"))) {
-        for requirement in list.and_then(Value::as_array).into_iter().flatten() {
-            schemes.extend(requirement.as_object().into_iter().flat_map(|r| r.keys()).map(String::as_str));
-        }
-    }
-    for key in schemes {
-        let v = sanitize_var(key);
-        for suffix in ["", "_username", "_password", "_client_id", "_client_secret"] {
-            out.insert(format!("{v}{suffix}"));
-        }
-    }
-    // The placeholders of path- and operation-level servers (their variables
-    // without a default): a document-level server never takes one as a suffix.
-    let mut override_servers: Vec<&Value> = vec![];
-    for (_, item) in paths.into_iter().flatten() {
-        let Some(item) = resolve(item) else { continue };
-        override_servers.extend(item.get("servers"));
-    }
-    override_servers.extend(operations.iter().filter_map(|op| op.get("servers")));
-    for server in override_servers.into_iter().filter_map(Value::as_array).flatten() {
-        let (Some(url), decl) = (server.get("url").and_then(Value::as_str), server.get("variables")) else { continue };
-        let mut rest = url;
-        while let Some(open) = rest.find('{') {
-            let after = &rest[open + 1..];
-            let Some(close) = after.find('}') else { break };
-            let name = &after[..close];
-            if decl.and_then(|d| d.get(name)).and_then(|d| d.get("default")).is_none() {
-                out.insert(sanitize_var(name));
+            if keep(&after[..close]) {
+                out.insert(sanitize_var(&after[..close]));
             }
             rest = &after[close + 1..];
         }
     }
-    out
+    struct Scan<'a> {
+        root: &'a Value,
+        max_depth: usize,
+        out: HashSet<String>,
+        /// Objects already read (by address): a shared one is read once.
+        seen: HashSet<*const Value>,
+        schemes: Vec<&'a str>,
+    }
+    impl<'a> Scan<'a> {
+        fn first(&mut self, v: &'a Value) -> bool {
+            self.seen.insert(v as *const Value)
+        }
+        fn parameters(&mut self, list: Option<&'a Value>) {
+            for p in list.and_then(Value::as_array).into_iter().flatten() {
+                let Some(p) = local(self.root, p, self.max_depth) else { continue };
+                if self.first(p)
+                    && let Some(name) = p.get("name").and_then(Value::as_str)
+                {
+                    self.out.insert(sanitize_var(name));
+                }
+            }
+        }
+        fn servers(&mut self, list: Option<&'a Value>) {
+            for server in list.and_then(Value::as_array).into_iter().flatten() {
+                let (Some(url), decl) = (server.get("url").and_then(Value::as_str), server.get("variables")) else { continue };
+                template_names(url, &mut self.out, |name| decl.and_then(|d| d.get(name)).and_then(|d| d.get("default")).is_none());
+            }
+        }
+        fn security(&mut self, list: Option<&'a Value>) {
+            for requirement in list.and_then(Value::as_array).into_iter().flatten() {
+                self.schemes.extend(requirement.as_object().into_iter().flat_map(|r| r.keys()).map(String::as_str));
+            }
+        }
+        fn operation(&mut self, op: &'a Value) {
+            if self.first(op) {
+                self.parameters(op.get("parameters"));
+                self.servers(op.get("servers"));
+                self.security(op.get("security"));
+            }
+        }
+        /// A Path Item's own fields: parameters, servers and operations.
+        fn item_fields(&mut self, item: &'a Value) {
+            self.parameters(item.get("parameters"));
+            self.servers(item.get("servers"));
+            let Some(o) = item.as_object() else { return };
+            for (key, op) in o {
+                if key == "additionalOperations" {
+                    for op in op.as_object().into_iter().flat_map(|a| a.values()) {
+                        self.operation(op);
+                    }
+                } else if !matches!(key.as_str(), "parameters" | "servers" | "$ref") && op.is_object() {
+                    self.operation(op);
+                }
+            }
+        }
+    }
+    let mut scan = Scan { root, max_depth, out: HashSet::new(), seen: HashSet::new(), schemes: vec![] };
+    for (path, item) in root.get("paths").and_then(Value::as_object).into_iter().flatten() {
+        template_names(path, &mut scan.out, |_| true);
+        // Local fields beside a `$ref`, then the shared target, once.
+        scan.item_fields(item);
+        if item.get("$ref").is_some()
+            && let Some(target) = local(root, item, max_depth)
+            && scan.first(target)
+        {
+            scan.item_fields(target);
+        }
+    }
+    let components = root.pointer("/components/parameters").or_else(|| root.get("parameters")).and_then(Value::as_object);
+    for p in components.into_iter().flat_map(|c| c.values()) {
+        if let Some(name) = local(root, p, max_depth).and_then(|p| p.get("name")).and_then(Value::as_str) {
+            scan.out.insert(sanitize_var(name));
+        }
+    }
+    scan.security(root.get("security"));
+    let defined = root.pointer("/components/securitySchemes").or_else(|| root.get("securityDefinitions")).and_then(Value::as_object);
+    let mut schemes: HashSet<&str> = scan.schemes.drain(..).collect();
+    schemes.extend(defined.into_iter().flat_map(|s| s.keys()).map(String::as_str));
+    for key in schemes {
+        let v = sanitize_var(key);
+        for suffix in ["", "_username", "_password", "_client_id", "_client_secret"] {
+            scan.out.insert(format!("{v}{suffix}"));
+        }
+    }
+    scan.out
 }
 
 fn only_32(ctx: &Ctx, b: &mut Builder, at: &str, what: &'static str) {
@@ -200,7 +234,7 @@ pub(crate) fn import(root: &Value, dialect: Dialect, b: &mut Builder) -> Result<
         } else {
             SwaggerDefaults::default()
         },
-        request_variable_names: request_variable_names(root),
+        request_variable_names: std::cell::OnceCell::new(),
     };
 
     // Info.
@@ -335,7 +369,7 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
             .unwrap_or_else(|| vec![json!({"url": "/"})]);
         for (i, s) in servers.iter().enumerate() {
             let sptr = format!("/servers/{i}");
-            let (url, vars) = server_url(b, s, &sptr, false, &ctx.request_variable_names);
+            let (url, vars) = server_url(b, s, &sptr, false, &|n: &str| ctx.taken_by_requests(n));
             let name = str_of(s, "name")
                 .filter(|_| is_32(ctx.dialect))
                 .or_else(|| str_of(s, "description"))
@@ -381,7 +415,7 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
 /// own `{{variable}}` name ([`server_aliases`]), and the text read and
 /// written is charged to the import's text budget: an operation-level server
 /// is converted for every operation that uses it.
-fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool, avoid: &HashSet<String>) -> (String, Vec<Variable>) {
+fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool, avoid: &dyn Fn(&str) -> bool) -> (String, Vec<Variable>) {
     let raw = str_of(s, "url").unwrap_or("/").trim();
     let empty = Map::new();
     let decl = s.get("variables").and_then(Value::as_object).unwrap_or(&empty);
@@ -391,9 +425,9 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool, avoid: &Hash
     let mut rest = if b.charge_text(sptr, raw.len()) { raw } else { "" };
     // An operation-level server's placeholders sit beside the document's
     // server environment, so its names are avoided too.
-    let none = HashSet::new();
-    let env_names = if inline { &b.server_variable_names } else { &none };
-    let aliases = server_aliases(rest, decl, inline, b.text_left(), &[avoid, env_names]);
+    // ... and a name the source itself writes as `{{name}}`.
+    let taken = |n: &str| avoid(n) || (inline && b.server_variable_names.contains(n)) || b.env_names.is_used(n);
+    let aliases = server_aliases(rest, decl, inline, b.text_left(), &taken);
     if !inline {
         // Every name a document-level server gives, required ones included.
         b.server_variable_names.extend(aliases.values().cloned());
@@ -533,7 +567,7 @@ fn server_aliases<'a>(
     decl: &Map<String, Value>,
     inline: bool,
     budget: usize,
-    avoid: &[&HashSet<String>],
+    avoid: &dyn Fn(&str) -> bool,
 ) -> HashMap<&'a str, String> {
     let names: Vec<&str> = server_url_names(url, decl, inline).into_iter().filter(|(_, named)| *named).map(|(n, _)| n).collect();
     let mut used = crate::common::PlaceholderNames::default();
@@ -562,7 +596,7 @@ fn server_aliases<'a>(
             let alias = loop {
                 let candidate = format!("{base}_{n}");
                 *n += 1;
-                if !avoid.iter().any(|set| set.contains(&candidate)) && used.claim(&candidate) {
+                if !avoid(&candidate) && used.claim(&candidate) {
                     break candidate;
                 }
             };
@@ -1130,7 +1164,7 @@ fn import_operation(
                 &p,
                 "operation/path-level server overrides the environment baseUrl (variables use their defaults)",
             );
-            server_url(b, s0, &format!("{p}/0"), true, &ctx.request_variable_names).0
+            server_url(b, s0, &format!("{p}/0"), true, &|n: &str| ctx.taken_by_requests(n)).0
         }
         None => "{{baseUrl}}".to_string(),
     };

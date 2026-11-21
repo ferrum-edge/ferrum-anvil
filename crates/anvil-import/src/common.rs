@@ -562,6 +562,11 @@ impl PlaceholderNames {
         }
     }
 
+    /// Whether `name` is reserved or taken.
+    pub fn is_used(&self, name: &str) -> bool {
+        self.used.contains(name)
+    }
+
     /// Reserve `name` exactly as written if it is free; whether it was.
     pub fn claim(&mut self, name: &str) -> bool {
         self.used.insert(name.to_string())
