@@ -4,3 +4,8 @@
 # pull request, the PR's own commits; on main, main's. Pull requests are squash-merged, so
 # a fingerprint for a commit of a PR is dead once it merges: remove it then. Prefer the
 # allowlisted tok-SENSITIVE- canary prefix (.gitleaks.toml) or a value built at run time.
+
+# PR #602: a fixture dataset cell named like a secret in the first commit's
+# sensitive_dataset_data_is_sealed_or_left_out; the next commit uses the tok-SENSITIVE-
+# canary prefix. Dead once the PR is squash-merged.
+550b77192ba8c6d0a21226159fbd5fc1c88f31b0:crates/anvil-portability/tests/bundles.rs:generic-api-key:565

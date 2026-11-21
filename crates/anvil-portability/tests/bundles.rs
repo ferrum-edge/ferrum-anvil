@@ -562,8 +562,8 @@ fn export_previews_list_the_linked_file_paths_they_carry() {
 /// restores it on open.
 #[test]
 fn sensitive_dataset_data_is_sealed_or_left_out() {
-    let secret = "sensitive-cell-4r8w";
-    let data = format!("user,password\nalice,{secret}\n").into_bytes();
+    let cell = "tok-SENSITIVE-dataset-cell";
+    let data = format!("user,password\nalice,{cell}\n").into_bytes();
     let sha = hex_sha(&data);
     let mut g = sample();
     let ws = g.workspaces[0].meta.id;
@@ -580,7 +580,7 @@ fn sensitive_dataset_data_is_sealed_or_left_out() {
     g.attachments.insert(sha.clone(), data.clone());
 
     let (bytes, written) = bundle::write_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
-    assert!(!text_of(&bytes).contains(secret));
+    assert!(!text_of(&bytes).contains(cell));
     assert!(written.manifest.excluded.iter().any(|e| e.starts_with("the data of dataset 'users'")), "{:?}", written.manifest.excluded);
     let opened = bundle::open(&bytes, None).unwrap();
     let d = opened.graph.datasets.iter().find(|d| d.name == "users").unwrap();
@@ -590,7 +590,7 @@ fn sensitive_dataset_data_is_sealed_or_left_out() {
 
     let pass = Some("correct horse battery");
     let (bytes, written) = bundle::write_redacting(&g, &opts(ExportMode::EncryptedTransfer, pass), &[]).unwrap();
-    assert!(!text_of(&bytes).contains(secret), "only the encrypted vault may hold the data");
+    assert!(!text_of(&bytes).contains(cell), "only the encrypted vault may hold the data");
     assert!(!written.manifest.excluded.iter().any(|e| e.contains("dataset")), "{:?}", written.manifest.excluded);
     let opened = bundle::open(&bytes, pass).unwrap();
     let d = opened.graph.datasets.iter().find(|d| d.name == "users").unwrap();
