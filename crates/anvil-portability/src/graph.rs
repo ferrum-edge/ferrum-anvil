@@ -3,13 +3,13 @@
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::load::LoadPlan;
-use anvil_domain::request::{AttachmentRef, RequestSpec};
+use anvil_domain::request::AttachmentRef;
 use anvil_domain::settings::{AppSettings, StoredRuleset};
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
 use anvil_domain::workload::JwtSvidSource;
 use anvil_domain::workspace::{Dataset, Environment, Folder, RequestDefinition, RequestRevision, Scenario, Workspace};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PortableGraph {
@@ -84,15 +84,12 @@ impl PortableGraph {
     /// Every linked local file the graph's requests and datasets name, as
     /// `request 'Upload': /path/to/file`. Each names a file on the machine
     /// that made the bundle, and stays unused on this one until the user
-    /// chooses it here for that request or dataset. A request's paths include
-    /// those of its revisions in the graph, listed once.
+    /// chooses it here for that request or dataset.
     pub fn linked_files(&self) -> Vec<String> {
         let mut out = Vec::new();
         for r in &self.requests {
             let mut paths = Vec::new();
-            for spec in std::iter::once(&r.spec).chain(self.revision_specs(r)) {
-                linked_paths(&serde_json::to_value(spec).unwrap_or_default(), &mut paths);
-            }
+            linked_paths(&serde_json::to_value(&r.spec).unwrap_or_default(), &mut paths);
             out.extend(paths.into_iter().map(|p| format!("request '{}': {p}", r.name)));
         }
         for d in &self.datasets {
@@ -106,9 +103,9 @@ impl PortableGraph {
     /// Every JWT-SVID token file the graph's workspaces, folders and requests
     /// name (a `file` source, inside multi-auth sets too), as
     /// `request 'Orders' token file: /run/spire/jwt.token`. Each names a file
-    /// on the machine that made the bundle; the binding that lets the desktop
-    /// read it stays on that device, so it is bound again on the target
-    /// machine.
+    /// by its path on the machine that made the bundle. The desktop reads a
+    /// token file only once it is chosen on the device, and that choice is
+    /// never exported.
     pub fn token_files(&self) -> Vec<String> {
         let mut out = Vec::new();
         let mut push = |owner: String, paths: Vec<String>| out.extend(paths.into_iter().map(|p| format!("{owner} token file: {p}")));
@@ -119,22 +116,51 @@ impl PortableGraph {
             push(format!("folder '{}'", f.name), token_file_paths([&f.auth]));
         }
         for r in &self.requests {
-            let auths = std::iter::once(&r.spec).chain(self.revision_specs(r)).map(|spec| &spec.auth);
-            push(format!("request '{}'", r.name), token_file_paths(auths));
+            push(format!("request '{}'", r.name), token_file_paths([&r.spec.auth]));
         }
         out
     }
 
-    /// Every local file path the graph carries ([`Self::linked_files`], then
-    /// [`Self::token_files`]): what an export preview lists.
-    pub fn local_files(&self) -> Vec<String> {
-        let mut out = self.linked_files();
-        out.extend(self.token_files());
+    /// The linked-file and token-file paths only saved revisions name: each
+    /// revision's paths that its request's current spec does not, as
+    /// `saved revision of request 'Upload': /path/to/file` or
+    /// `saved revision of request 'Orders' token file: /run/spire/jwt.token`
+    /// (`saved revision <id>` when the graph lacks its request). Revisions
+    /// are never sent, so nothing needs choosing for them, but they travel in
+    /// the bundle like any object.
+    pub fn revision_files(&self) -> Vec<String> {
+        let current: HashMap<_, _> = self.requests.iter().map(|r| (r.meta.id, r)).collect();
+        let mut out = Vec::new();
+        for v in &self.revisions {
+            let (owner, mut linked, mut tokens) = match current.get(&v.request_id) {
+                Some(r) => {
+                    let mut linked = Vec::new();
+                    linked_paths(&serde_json::to_value(&r.spec).unwrap_or_default(), &mut linked);
+                    (format!("saved revision of request '{}'", r.name), linked, token_file_paths([&r.spec.auth]))
+                }
+                None => (format!("saved revision {}", v.id), Vec::new(), Vec::new()),
+            };
+            let (known_linked, known_tokens) = (linked.len(), tokens.len());
+            linked_paths(&serde_json::to_value(&v.spec).unwrap_or_default(), &mut linked);
+            for p in token_file_paths([&v.spec.auth]) {
+                if !tokens.contains(&p) {
+                    tokens.push(p);
+                }
+            }
+            out.extend(linked.drain(known_linked..).map(|p| format!("{owner}: {p}")));
+            out.extend(tokens.drain(known_tokens..).map(|p| format!("{owner} token file: {p}")));
+        }
         out
     }
 
-    fn revision_specs<'a>(&'a self, r: &'a RequestDefinition) -> impl Iterator<Item = &'a RequestSpec> + 'a {
-        self.revisions.iter().filter(move |v| v.request_id == r.meta.id).map(|v| &v.spec)
+    /// Every local file path the graph carries: [`Self::linked_files`], then
+    /// [`Self::token_files`], then [`Self::revision_files`]. This is what an
+    /// export preview lists.
+    pub fn local_files(&self) -> Vec<String> {
+        let mut out = self.linked_files();
+        out.extend(self.token_files());
+        out.extend(self.revision_files());
+        out
     }
 }
 

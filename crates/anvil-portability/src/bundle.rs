@@ -177,7 +177,8 @@ pub struct ExportPreview {
     /// each linked local file the exported requests and datasets name, as
     /// `request 'Upload': /path/to/file`, then each JWT-SVID token file the
     /// exported workspaces, folders and requests name, as
-    /// `request 'Orders' token file: /run/spire/jwt.token`. The bundle carries
+    /// `request 'Orders' token file: /run/spire/jwt.token`, then each path only
+    /// a saved request revision names. The bundle carries
     /// these paths of this machine (user names, folder layout), so the
     /// preview lists them rather than only warning that there are some. Not
     /// written into the bundle's manifest.
@@ -194,7 +195,7 @@ fn device_bindings(graph: &PortableGraph) -> Vec<String> {
         out.push("Requests or datasets name linked local files; attach them, or choose them again on the target machine.".into());
     }
     if !graph.token_files().is_empty() {
-        out.push("JWT-SVID auth names token files on this machine; bind each token file again on the target machine.".into());
+        out.push("JWT-SVID auth names token files by their path on this machine; check each path on the target machine, where the desktop reads a token file only once it is chosen there.".into());
     }
     out.push("OS keychain entries, local master keys and signed-in provider sessions are device-bound and are never exported.".into());
     out

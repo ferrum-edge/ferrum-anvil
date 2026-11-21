@@ -615,18 +615,54 @@ fn export_previews_list_jwt_svid_token_files() {
         assert!(opened.warnings.iter().any(|w| w.contains("token file") && w.contains("/home/alice/ws.jwt")), "{:?}", opened.warnings);
     }
 
-    // A token file only an older revision of the request names is listed too.
+    // Paths only a saved revision names are disclosed too, once, apart from
+    // what the current request names; nothing asks for them to be chosen.
     let mut g = sample();
-    let mut old = g.requests[0].spec.clone();
-    old.auth = svid_file("/home/alice/old.jwt");
-    g.revisions.push(RequestRevision {
+    let mut current = g.requests[0].spec.clone();
+    current.auth = svid_file("/home/alice/now.jwt");
+    g.requests[0].spec = current.clone();
+    let mut old = current;
+    old.auth = AuthConfig::Multi { profiles: vec![svid_file("/home/alice/now.jwt"), svid_file("/home/alice/old.jwt")] };
+    old.body = Body::Binary { attachment: AttachmentRef::LinkedFile { path: "/home/alice/old.bin".into() }, content_type: None };
+    let revision = |request_id: Id, spec: RequestSpec| RequestRevision {
         id: Id::new(),
-        request_id: g.requests[0].meta.id,
+        request_id,
         created_at: anvil_domain::Timestamp::now(),
         spec_sha256: String::new(),
-        spec: old,
-    });
-    assert_eq!(g.token_files(), vec![format!("request '{}' token file: /home/alice/old.jwt", g.requests[0].name)]);
+        spec,
+    };
+    g.revisions.push(revision(g.requests[0].meta.id, old.clone()));
+    let name = g.requests[0].name.clone();
+    let historical = vec![
+        format!("saved revision of request '{name}': /home/alice/old.bin"),
+        format!("saved revision of request '{name}' token file: /home/alice/old.jwt"),
+    ];
+    assert_eq!(g.revision_files(), historical);
+    assert_eq!(g.token_files(), vec![format!("request '{name}' token file: /home/alice/now.jwt")]);
+    assert!(g.linked_files().is_empty());
+    for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some("correct horse battery"))] {
+        let preview = bundle::preview_redacting(&g, &opts(mode, pass), &[]).unwrap();
+        let mut expected = vec![format!("request '{name}' token file: /home/alice/now.jwt")];
+        expected.extend(historical.iter().cloned());
+        assert_eq!(preview.linked_files, expected, "{mode:?}");
+        let (bytes, _) = bundle::write_redacting(&g, &opts(mode, pass), &[]).unwrap();
+        let opened = bundle::open(&bytes, pass).unwrap();
+        assert_eq!(opened.graph.revision_files(), historical);
+        assert!(opened.graph.linked_files().is_empty(), "a revision-only path is not one to choose");
+    }
+    // A revision whose request is not in the graph is still disclosed.
+    let orphan = revision(Id::new(), old);
+    let label = format!("saved revision {}", orphan.id);
+    let mut g2 = sample();
+    g2.revisions.push(orphan);
+    assert_eq!(
+        g2.revision_files(),
+        vec![
+            format!("{label}: /home/alice/old.bin"),
+            format!("{label} token file: /home/alice/now.jwt"),
+            format!("{label} token file: /home/alice/old.jwt")
+        ]
+    );
 }
 
 #[test]

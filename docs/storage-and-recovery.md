@@ -269,10 +269,15 @@ profiles, spec-import records or load reports, and its bundle kind is
   Attach a copy instead to keep a local path out of a bundle.
 - The path of every JWT-SVID token file its workspaces, folders and requests
   name (a `file` source, inside multi-auth sets too), in every mode. The
-  device's token-file binding is never exported. The preview lists each one
-  after the linked files (as `request 'Orders' token file:
-  /run/spire/jwt.token`), and the manifest says to bind each token file again
-  on the target machine.
+  device's choice of a token file is never exported. The preview lists each
+  one after the linked files (as `request 'Orders' token file:
+  /run/spire/jwt.token`), and the manifest notes that the paths are this
+  machine's, to check on the target machine, where the desktop reads a token
+  file only once it is chosen there.
+- The paths that only a saved request revision names (linked files and token
+  files its request no longer uses). The preview lists them last, as
+  `saved revision of request 'Upload': /path/to/file`; a revision is never
+  sent, so nothing needs choosing for them.
 
 For example, `anvil export --workspace Team --mode share --include-standards
 --out team.anvil` includes profile standards in a share-safe bundle. Omit

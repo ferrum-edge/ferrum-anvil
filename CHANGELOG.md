@@ -415,9 +415,10 @@
 ### Fixed
 
 - Workspace bundle export previews list every JWT-SVID token-file path (`file` source) the exported
-  workspaces, folders and requests name, nested multi-auth sets and request revisions included,
-  and the manifest's device bindings say to bind those token files again on the target machine.
-  Opening such a bundle warns about them too. They were exported with no listing or note (#590).
+  workspaces, folders and requests name, nested multi-auth sets included, and every linked-file or
+  token-file path only a saved request revision names. The manifest's device bindings note that
+  token-file paths are this machine's, and opening such a bundle lists them in a warning. They
+  were exported with no listing or note (#590).
 - An MCP request's protocol tag in the sidebar and tab bar uses the protocol colour of the
   other non-HTTP requests instead of the `GET` colour.
 - HTTP/3 requests, WebSocket over HTTP/3, SSE over HTTP/3, gRPC over HTTP/3 and MASQUE CONNECT-UDP
