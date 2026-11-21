@@ -414,6 +414,10 @@
 
 ### Fixed
 
+- Spec drift attributes traffic to the declared path whose empty segments match the request's
+  (`GET /items/` to `/items/`, `GET /a//b` to `/a//b`) when the description declares both that
+  path and one without them. Matching dropped empty segments, so the other operation took the
+  calls, coverage and status findings (#581).
 - An MCP request's protocol tag in the sidebar and tab bar uses the protocol colour of the
   other non-HTTP requests instead of the `GET` colour.
 - HTTP/3 requests, WebSocket over HTTP/3, SSE over HTTP/3, gRPC over HTTP/3 and MASQUE CONNECT-UDP

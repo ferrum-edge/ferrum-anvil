@@ -430,7 +430,10 @@ path (`servers[*].url` at every level, Swagger `basePath`; server variables
 match any segment), against the path templates. Among matching templates,
 the one with the most literal segments wins (`/pets/mine` over
 `/pets/{id}`, and `/files/{name}.json` over `/files/{name}`), then the
-longest base path, then the operation the request was imported from. When
+longest base path, then the template whose empty segments are where the
+request's are (`/items/` over `/items`, `/a//b` over `/a/b`, when both are
+declared), then the operation the request was imported from. Empty segments
+are otherwise ignored, so `/items/` still reaches a lone `/items`. When
 nothing matches, up to three leading segments are tried as an unknown prefix
 (an API mounted behind a gateway under `/api`), alone or in front of a
 declared base path. For a path nothing declares, a base path with server
