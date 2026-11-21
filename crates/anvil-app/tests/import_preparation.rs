@@ -202,3 +202,51 @@ fn an_escaped_credential_name_never_reads_a_variable() {
         assert_eq!(query, expected);
     }
 }
+
+/// The URL an OpenAPI import's first request prepares to, with the active
+/// server's environment as the only variable layer.
+fn prepared_openapi_url(doc: &serde_json::Value) -> String {
+    let result = import(doc.to_string().as_bytes(), &ImportOptions::default()).unwrap();
+    let env = &result.environments[0];
+    let vars = env
+        .variables
+        .iter()
+        .map(|v| match &v.value {
+            anvil_domain::secret::SensitiveValue::Template { value } => {
+                VarEntry { name: v.name.clone(), value: value.clone(), secret: false, literal: false }
+            }
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let resolver = Resolver::new(vec![VarLayer { label: "environment".into(), vars }], None);
+    let spec = &result.requests[0].spec;
+    let attachments = MemoryAttachments::default();
+    prepare_http(spec, &resolver, &attachments, &EffectiveSettings::default(), false, &["https"]).unwrap().target.url()
+}
+
+/// Server variables whose names sanitize alike resolve to their own values
+/// once imported and prepared, and a variable used twice resolves the same
+/// both times (#580).
+#[test]
+fn openapi_server_variables_that_sanitize_alike_resolve_to_their_own_values() {
+    let doc = |url: &str, vars: serde_json::Value| {
+        serde_json::json!({
+            "openapi": "3.0.3", "info": { "title": "t", "version": "1" },
+            "servers": [{ "url": url, "variables": vars }],
+            "paths": { "/items": { "get": { "responses": { "200": { "description": "ok" } } } } }
+        })
+    };
+    let declared = doc(
+        "https://example.test/{release-name}/{release_name}",
+        serde_json::json!({ "release-name": { "default": "v1" }, "release_name": { "default": "v2" } }),
+    );
+    assert_eq!(prepared_openapi_url(&declared), "https://example.test/v1/v2/items");
+    let reused = doc(
+        "https://example.test/{release-name}/{release_name}/{release-name}",
+        serde_json::json!({ "release-name": { "default": "v1" }, "release_name": { "default": "v2" } }),
+    );
+    assert_eq!(prepared_openapi_url(&reused), "https://example.test/v1/v2/v1/items");
+    let unique =
+        doc("https://{region}.example.test/{base}", serde_json::json!({ "region": { "default": "eu" }, "base": { "default": "v3" } }));
+    assert_eq!(prepared_openapi_url(&unique), "https://eu.example.test/v3/items");
+}
