@@ -556,6 +556,79 @@ fn export_previews_list_the_linked_file_paths_they_carry() {
     }
 }
 
+/// A JWT-SVID auth reading a token file.
+fn svid_file(path: &str) -> AuthConfig {
+    serde_json::from_value(serde_json::json!({
+        "type": "jwt_svid",
+        "config": { "source": { "kind": "file", "path": path }, "audiences": ["spiffe://example.test/api"] }
+    }))
+    .unwrap()
+}
+
+/// JWT-SVID token-file paths on a workspace, a folder and a request (also
+/// inside a nested multi-auth set) travel in `objects.json`, so every
+/// preview lists them and the manifest says to bind them again (#590).
+#[test]
+fn export_previews_list_jwt_svid_token_files() {
+    let mut g = sample();
+    let preview = bundle::preview_redacting(&g, &opts(ExportMode::ShareSafely, None), &[]).unwrap();
+    assert!(g.token_files().is_empty() && preview.linked_files.is_empty());
+    assert!(!preview.manifest.device_bindings.iter().any(|d| d.contains("token file")), "{:?}", preview.manifest.device_bindings);
+
+    g.workspaces[0].auth = svid_file("/home/alice/ws.jwt");
+    g.folders[0].auth = AuthConfig::Multi {
+        profiles: vec![
+            AuthConfig::ApiKey { name: "k".into(), value: SensitiveValue::template("{{k}}"), location: KeyLocation::Header },
+            svid_file("/home/alice/folder.jwt"),
+        ],
+    };
+    g.requests[0].spec.auth = svid_file("/home/alice/request.jwt");
+    // Nested sets, and the same path twice in one request, are listed once for it.
+    g.requests[1].spec.auth = AuthConfig::Multi {
+        profiles: vec![svid_file("/home/alice/nested.jwt"), AuthConfig::Multi { profiles: vec![svid_file("/home/alice/nested.jwt")] }],
+    };
+    // A linked file is listed first, then the token files.
+    g.requests[1].spec.body =
+        Body::Binary { attachment: AttachmentRef::LinkedFile { path: "/home/alice/up.bin".into() }, content_type: None };
+    let tokens = vec![
+        format!("workspace '{}' token file: /home/alice/ws.jwt", g.workspaces[0].name),
+        format!("folder '{}' token file: /home/alice/folder.jwt", g.folders[0].name),
+        format!("request '{}' token file: /home/alice/request.jwt", g.requests[0].name),
+        format!("request '{}' token file: /home/alice/nested.jwt", g.requests[1].name),
+    ];
+    assert_eq!(g.token_files(), tokens);
+    let mut expected = vec![format!("request '{}': /home/alice/up.bin", g.requests[1].name)];
+    expected.extend(tokens.iter().cloned());
+    for (mode, pass) in [(ExportMode::ShareSafely, None), (ExportMode::EncryptedTransfer, Some("correct horse battery"))] {
+        let preview = bundle::preview_redacting(&g, &opts(mode, pass), &[]).unwrap();
+        assert_eq!(preview.linked_files, expected, "{mode:?}");
+        let warned = &preview.manifest.device_bindings;
+        assert!(warned.iter().any(|d| d.contains("token file")), "{warned:?}");
+        assert!(warned.iter().any(|d| d.contains("linked local files")), "{warned:?}");
+        let (bytes, written) = bundle::write_redacting(&g, &opts(mode, pass), &[]).unwrap();
+        assert_eq!(written.linked_files, expected, "{mode:?}");
+        let opened = bundle::open(&bytes, pass).unwrap();
+        assert!(opened.manifest.device_bindings.iter().any(|d| d.contains("token file")), "{:?}", opened.manifest.device_bindings);
+        let manifest = serde_json::to_string(&opened.manifest).unwrap();
+        assert!(!manifest.contains("/home/alice"), "{manifest}");
+        assert_eq!(opened.graph.token_files(), tokens);
+        assert!(opened.warnings.iter().any(|w| w.contains("token file") && w.contains("/home/alice/ws.jwt")), "{:?}", opened.warnings);
+    }
+
+    // A token file only an older revision of the request names is listed too.
+    let mut g = sample();
+    let mut old = g.requests[0].spec.clone();
+    old.auth = svid_file("/home/alice/old.jwt");
+    g.revisions.push(RequestRevision {
+        id: Id::new(),
+        request_id: g.requests[0].meta.id,
+        created_at: anvil_domain::Timestamp::now(),
+        spec_sha256: String::new(),
+        spec: old,
+    });
+    assert_eq!(g.token_files(), vec![format!("request '{}' token file: /home/alice/old.jwt", g.requests[0].name)]);
+}
+
 #[test]
 fn data_006_conflict_policies_and_duplicate_remap() {
     let g = sample();

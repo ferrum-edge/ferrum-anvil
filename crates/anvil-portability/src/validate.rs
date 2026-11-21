@@ -357,6 +357,14 @@ pub fn validate_and_normalize(g: &mut PortableGraph) -> Result<Vec<String>, Bund
             linked.join("; ")
         ));
     }
+    let token_files = g.token_files();
+    if !token_files.is_empty() {
+        warnings.push(format!(
+            "{} JWT-SVID token file path(s) name files on the machine that made the bundle; bind each token file again on this device: {}",
+            token_files.len(),
+            token_files.join("; ")
+        ));
+    }
     Ok(warnings)
 }
 

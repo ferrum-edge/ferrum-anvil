@@ -173,11 +173,14 @@ pub struct ExportPreview {
     pub manifest: Manifest,
     pub secrets_included: usize,
     pub literals_moved: usize,
-    /// Every linked local file the exported requests and datasets name, as
-    /// `request 'Upload': /path/to/file` ([`PortableGraph::linked_files`]).
-    /// The bundle carries these paths of this machine (user names, folder
-    /// layout), so the preview lists them rather than only warning that
-    /// there are some. Not written into the bundle's manifest.
+    /// Every local file path the export carries ([`PortableGraph::local_files`]):
+    /// each linked local file the exported requests and datasets name, as
+    /// `request 'Upload': /path/to/file`, then each JWT-SVID token file the
+    /// exported workspaces, folders and requests name, as
+    /// `request 'Orders' token file: /run/spire/jwt.token`. The bundle carries
+    /// these paths of this machine (user names, folder layout), so the
+    /// preview lists them rather than only warning that there are some. Not
+    /// written into the bundle's manifest.
     pub linked_files: Vec<String>,
 }
 
@@ -189,6 +192,9 @@ fn device_bindings(graph: &PortableGraph) -> Vec<String> {
     let mut out = Vec::new();
     if !graph.linked_files().is_empty() {
         out.push("Requests or datasets name linked local files; attach them, or choose them again on the target machine.".into());
+    }
+    if !graph.token_files().is_empty() {
+        out.push("JWT-SVID auth names token files on this machine; bind each token file again on the target machine.".into());
     }
     out.push("OS keychain entries, local master keys and signed-in provider sessions are device-bound and are never exported.".into());
     out
@@ -521,7 +527,7 @@ fn preview_prepared(
         manifest,
         secrets_included: vault.secrets.len(),
         literals_moved: vault.literals.len(),
-        linked_files: graph.linked_files(),
+        linked_files: graph.local_files(),
     })
 }
 
@@ -630,7 +636,7 @@ fn write_prepared(
         manifest,
         secrets_included: vault.secrets.len(),
         literals_moved: vault.literals.len(),
-        linked_files: graph.linked_files(),
+        linked_files: graph.local_files(),
     };
     Ok((bytes, preview))
 }

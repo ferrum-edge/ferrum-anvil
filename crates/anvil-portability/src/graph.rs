@@ -1,10 +1,12 @@
 //! The portable object graph carried by bundles.
 
+use anvil_domain::auth::AuthConfig;
 use anvil_domain::integration::IntegrationProfile;
 use anvil_domain::load::LoadPlan;
-use anvil_domain::request::AttachmentRef;
+use anvil_domain::request::{AttachmentRef, RequestSpec};
 use anvil_domain::settings::{AppSettings, StoredRuleset};
 use anvil_domain::tls::{ProxyProfile, TlsProfile};
+use anvil_domain::workload::JwtSvidSource;
 use anvil_domain::workspace::{Dataset, Environment, Folder, RequestDefinition, RequestRevision, Scenario, Workspace};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -82,12 +84,15 @@ impl PortableGraph {
     /// Every linked local file the graph's requests and datasets name, as
     /// `request 'Upload': /path/to/file`. Each names a file on the machine
     /// that made the bundle, and stays unused on this one until the user
-    /// chooses it here for that request or dataset.
+    /// chooses it here for that request or dataset. A request's paths include
+    /// those of its revisions in the graph, listed once.
     pub fn linked_files(&self) -> Vec<String> {
         let mut out = Vec::new();
         for r in &self.requests {
             let mut paths = Vec::new();
-            linked_paths(&serde_json::to_value(&r.spec).unwrap_or_default(), &mut paths);
+            for spec in std::iter::once(&r.spec).chain(self.revision_specs(r)) {
+                linked_paths(&serde_json::to_value(spec).unwrap_or_default(), &mut paths);
+            }
             out.extend(paths.into_iter().map(|p| format!("request '{}': {p}", r.name)));
         }
         for d in &self.datasets {
@@ -97,6 +102,61 @@ impl PortableGraph {
         }
         out
     }
+
+    /// Every JWT-SVID token file the graph's workspaces, folders and requests
+    /// name (a `file` source, inside multi-auth sets too), as
+    /// `request 'Orders' token file: /run/spire/jwt.token`. Each names a file
+    /// on the machine that made the bundle; the binding that lets the desktop
+    /// read it stays on that device, so it is bound again on the target
+    /// machine.
+    pub fn token_files(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut push = |owner: String, paths: Vec<String>| out.extend(paths.into_iter().map(|p| format!("{owner} token file: {p}")));
+        for w in &self.workspaces {
+            push(format!("workspace '{}'", w.name), token_file_paths([&w.auth]));
+        }
+        for f in &self.folders {
+            push(format!("folder '{}'", f.name), token_file_paths([&f.auth]));
+        }
+        for r in &self.requests {
+            let auths = std::iter::once(&r.spec).chain(self.revision_specs(r)).map(|spec| &spec.auth);
+            push(format!("request '{}'", r.name), token_file_paths(auths));
+        }
+        out
+    }
+
+    /// Every local file path the graph carries ([`Self::linked_files`], then
+    /// [`Self::token_files`]): what an export preview lists.
+    pub fn local_files(&self) -> Vec<String> {
+        let mut out = self.linked_files();
+        out.extend(self.token_files());
+        out
+    }
+
+    fn revision_specs<'a>(&'a self, r: &'a RequestDefinition) -> impl Iterator<Item = &'a RequestSpec> + 'a {
+        self.revisions.iter().filter(move |v| v.request_id == r.meta.id).map(|v| &v.spec)
+    }
+}
+
+/// The token-file paths of the JWT-SVID `file` sources in `auths`, nested
+/// multi-auth sets included, each listed once.
+fn token_file_paths<'a>(auths: impl IntoIterator<Item = &'a AuthConfig>) -> Vec<String> {
+    fn walk(auth: &AuthConfig, out: &mut Vec<String>) {
+        match auth {
+            AuthConfig::JwtSvid { config } => {
+                if let JwtSvidSource::File { path } = &config.source
+                    && !out.iter().any(|p| p == path)
+                {
+                    out.push(path.clone());
+                }
+            }
+            AuthConfig::Multi { profiles } => profiles.iter().for_each(|p| walk(p, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    auths.into_iter().for_each(|auth| walk(auth, &mut out));
+    out
 }
 
 fn linked_paths(v: &serde_json::Value, out: &mut Vec<String>) {

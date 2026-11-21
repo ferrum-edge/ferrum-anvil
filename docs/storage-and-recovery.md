@@ -267,6 +267,12 @@ profiles, spec-import records or load reports, and its bundle kind is
   the request or dataset that names it (`linked_files` in the preview, as
   `request 'Upload': /path/to/file`); the manifest does not repeat them.
   Attach a copy instead to keep a local path out of a bundle.
+- The path of every JWT-SVID token file its workspaces, folders and requests
+  name (a `file` source, inside multi-auth sets too), in every mode. The
+  device's token-file binding is never exported. The preview lists each one
+  after the linked files (as `request 'Orders' token file:
+  /run/spire/jwt.token`), and the manifest says to bind each token file again
+  on the target machine.
 
 For example, `anvil export --workspace Team --mode share --include-standards
 --out team.anvil` includes profile standards in a share-safe bundle. Omit
@@ -484,9 +490,10 @@ forwarding, 0-RTT early data or the legacy HMAC opt-in, and never open an
 imported collection's root folder to its workspace. The preview lists what
 was normalised.
 
-Device-bound items (keychain entries, provider sessions, linked local files)
-are reported as needing rebinding, and the preview lists each linked local
-file with the request or dataset that names it. A bundle import drops this
+Device-bound items (keychain entries, provider sessions, linked local files,
+JWT-SVID token files) are reported as needing rebinding, and the preview lists
+each linked local file with the request or dataset that names it, and each
+token file with the workspace, folder or request that names it. A bundle import drops this
 device's linked-file bindings for every request and dataset it overwrites,
 and deleting a request, folder, dataset or workspace drops the bindings of
 the requests and datasets it deletes.
