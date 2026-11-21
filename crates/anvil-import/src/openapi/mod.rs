@@ -212,25 +212,30 @@ fn request_variable_names(root: &Value, max_depth: usize) -> HashSet<String> {
     // Every `{{name}}` a decoded string of the document writes (JSON or YAML
     // escapes can hide one from the raw-text reservation), as written and
     // as a placeholder would spell it.
+    let references = |text: &str, out: &mut HashSet<String>| {
+        let mut rest = text;
+        while let Some(open) = rest.find("{{") {
+            let after = &rest[open + 2..];
+            let Some(close) = after.find("}}") else { break };
+            let expr = after[..close].trim();
+            let name = expr.strip_prefix("_.").unwrap_or(expr);
+            if !name.is_empty() && name.len() <= 256 {
+                out.insert(name.to_string());
+                out.insert(sanitize_var(name));
+            }
+            rest = &after[close + 2..];
+        }
+    };
     let mut stack = vec![root];
     while let Some(v) = stack.pop() {
         match v {
-            Value::String(text) if text.contains("{{") => {
-                let mut rest = text.as_str();
-                while let Some(open) = rest.find("{{") {
-                    let after = &rest[open + 2..];
-                    let Some(close) = after.find("}}") else { break };
-                    let expr = after[..close].trim();
-                    let name = expr.strip_prefix("_.").unwrap_or(expr);
-                    if !name.is_empty() && name.len() <= 256 {
-                        scan.out.insert(name.to_string());
-                        scan.out.insert(sanitize_var(name));
-                    }
-                    rest = &after[close + 2..];
-                }
-            }
+            Value::String(text) => references(text, &mut scan.out),
             Value::Array(a) => stack.extend(a.iter()),
-            Value::Object(o) => stack.extend(o.values()),
+            // Member names too: an example's keys are sent as written.
+            Value::Object(o) => {
+                o.keys().for_each(|k| references(k, &mut scan.out));
+                stack.extend(o.values());
+            }
             _ => {}
         }
     }
