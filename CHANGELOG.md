@@ -4,9 +4,10 @@
 
 ## [0.1.8] - 2026-11-21
 
-Security release: it fixes five advisories. The default Postman, Insomnia, cURL and HAR import
-redacts URL userinfo and credential-named fields, import reports and imported names no longer show
-credential material, and share-safely and encrypted-transfer exports extract more credential-named
+Security release: it fixes five Anvil advisories. The default Postman, Insomnia, cURL and HAR
+import redacts URL userinfo and credential-named fields, import report messages no longer quote
+source values, report pointers and imported names redact recognised credential patterns, and
+share-safely and encrypted-transfer exports extract more credential-named
 fields and URL credentials from the readable `workspace/objects.json` (GHSA-c236-7r9g-c9p2,
 GHSA-8fmc-h49v-mh7f, GHSA-84pr-239v-mv8x). A credential in free text, such as an XML or SOAP
 body or a variable not marked secret, can still be kept as written. A server under test can no longer crash Anvil with a long QUIC
@@ -684,7 +685,8 @@ unchanged from 0.1.7.
   inactive-setting values are the importer's own words plus the counts and limits it computed. They
   never quote a source value: no option, header or setting name, media type, body mode, auth type,
   grant, resource type, template, version, scheme, `$ref`, pattern, constraint, default, location or
-  URL. The entry's pointer locates what it is about, and codes and pointers are unchanged. A
+  URL. The entry's pointer locates what it is about, and codes and pointers are unchanged (apart from
+  the pointer-token redaction described under Security). A
   callback's inactive-setting value is now a count of its URL expressions. `report.scripts[]` no
   longer carries the script body (`source`) or the owner's name. It has `owner` (`collection`,
   `folder`, `request`, `test_suite`), `event` and `language` from a fixed vocabulary (`other`
@@ -699,7 +701,9 @@ unchanged from 0.1.7.
   kind, the field and the literal, keyed by a key derived from the profile's data key. That key is
   never stored in workspace files or exports. The same secret in the same field shares one variable
   across the import and every reimport; a changed secret gets a new variable to fill in. Empty
-  secrets are left empty. `ImportResult::credential_names` lists the names the import made.
+  secrets are left empty. `ImportResult::credential_names` lists the names the import made. A
+  secret variable definition keeps its own name: its literal is dropped and the variable is listed
+  as required.
 - Importing a source that itself uses a variable or reference named `auth_`, `secret_` or
   `url_` followed by 16 hex digits now fails with an invalid-document error asking to rename it
   (#584).

@@ -38,8 +38,9 @@ gateway to v0.9.20.
   URL userinfo, and `{{url_<16 hex digits>}}` for quarantined URLs. They replace
   field-named placeholders (`{{Authorization}}`, `{{api_key}}`), owner-named
   ones (`{{<collection>_password}}`), `{{username}}` / `{{password}}` and
-  `{{url-needs-review}}`. The report's required variables list them; a
-  quarantined URL's placeholder is listed in `redactions[].placeholder`.
+  `{{url-needs-review}}`. The report lists the `secret_` and `auth_` names
+  under required variables and a quarantined URL's `url_` name in
+  `redactions[].placeholder`.
 - The first reimport after upgrading moves requests imported by an earlier build
   to the new names, so their credentials are asked for again once. After that, a
   credential you fill stays with the secret it replaced across reimports, and a
@@ -127,7 +128,8 @@ version is `2026.11.17-1`.
   - Postman and Insomnia query values with exactly re-encodable escapes are
     stored decoded.
   - cURL `-d @file` imports as POST.
-- Import reports and imported names no longer carry credential material:
+- Import report messages no longer quote source values, and report pointers
+  and imported names redact recognised credential patterns:
   tooling that reads report pointers, external references or imported names sees
   `<redacted>`, `<url redacted>` or `{{…}}` there, and a pointer token that
   was redacted ends in `#` and a digest. cURL diagnostics no longer quote the
