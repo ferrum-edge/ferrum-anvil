@@ -562,6 +562,11 @@ impl PlaceholderNames {
         }
     }
 
+    /// Reserve `name` exactly as written if it is free; whether it was.
+    pub fn claim(&mut self, name: &str) -> bool {
+        self.used.insert(name.to_string())
+    }
+
     /// A free name for `base` as written (not sanitized), now reserved: for
     /// a name that must not be one an import derives from the source, since
     /// every derived name is sanitized ([`sanitize_var`]: letters, digits

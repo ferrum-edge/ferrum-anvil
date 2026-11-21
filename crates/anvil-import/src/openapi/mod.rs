@@ -293,10 +293,7 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
     let mut out = String::new();
     let mut rendered: HashMap<&str, String> = HashMap::new();
     let mut rest = if b.charge_text(sptr, raw.len()) { raw } else { "" };
-    // The environment also holds `baseUrl`, and a relative URL is prefixed
-    // with `{{origin}}` (a URL starting with a variable is not relative).
-    let relative = !rest.contains("://") && !(rest.starts_with('{') && rest.contains('}'));
-    let aliases = server_aliases(rest, if relative { &["baseUrl", "origin"] } else { &["baseUrl"] });
+    let aliases = server_aliases(rest, decl, inline);
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
@@ -309,7 +306,12 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
         rest = &after[close + 1..];
         let text = match rendered.entry(name) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(server_variable(b, decl, name, &aliases[name], sptr, inline, &mut vars)),
+            Entry::Vacant(e) => {
+                // An inlined default needs no name of its own; a variable
+                // without one keeps its plain sanitized name if free.
+                let alias = aliases.get(name).cloned().unwrap_or_else(|| sanitize_var(name));
+                e.insert(server_variable(b, decl, name, &alias, sptr, inline, &mut vars))
+            }
         };
         if !b.charge_text(sptr, text.len()) {
             rest = "";
@@ -333,15 +335,11 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
     (url, vars)
 }
 
-/// A distinct `{{variable}}` name for each variable a server URL uses, so
-/// each keeps its own value: its sanitized name ([`sanitize_var`]), or, when
-/// that is taken, the next free `_2`, `_3`, … suffix. `{release-name}` and
-/// `{release_name}` both sanitize to `release_name`; the variable already
-/// spelled that way keeps it and the other gets `release_name_2`. Names in
-/// `taken` (the environment's own) are never given. The same URL always
-/// gets the same names.
-fn server_aliases<'a>(url: &'a str, taken: &[&str]) -> HashMap<&'a str, String> {
-    let mut names: Vec<&str> = vec![];
+/// The variables `url` uses, in first-use order, each with whether it is
+/// written as a `{{variable}}` (rather than its default inlined), as
+/// [`server_url`] reads them.
+fn server_url_names<'a>(url: &'a str, decl: &Map<String, Value>, inline: bool) -> Vec<(&'a str, bool)> {
+    let mut names = vec![];
     let mut seen: HashSet<&str> = HashSet::new();
     let mut rest = url;
     while let Some(open) = rest.find('{') {
@@ -349,20 +347,72 @@ fn server_aliases<'a>(url: &'a str, taken: &[&str]) -> HashMap<&'a str, String> 
         let Some(close) = after.find('}') else { break };
         let name = &after[..close];
         if seen.insert(name) {
-            names.push(name);
+            let has_default = decl.get(name).and_then(|d| d.get("default")).is_some();
+            names.push((name, !(inline && has_default)));
         }
         rest = &after[close + 1..];
     }
+    names
+}
+
+/// Whether [`server_url`] renders `url` as a relative URL (prefixed with
+/// `{{origin}}`): the same check on the same text, with each inlined default
+/// in place and every other variable as a `{{…}}` placeholder.
+fn renders_relative(url: &str, decl: &Map<String, Value>, inline: bool) -> bool {
+    let mut out = String::new();
+    let mut rest = url;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            out.push_str(&rest[open..]);
+            rest = "";
+            break;
+        };
+        let name = &after[..close];
+        rest = &after[close + 1..];
+        match decl.get(name).and_then(|d| d.get("default")).filter(|_| inline) {
+            Some(d) => out.push_str(&scalar_text(d)),
+            None => out.push_str("{{v}}"),
+        }
+    }
+    out.push_str(rest);
+    let url = out.trim_end_matches('/');
+    !url.contains("://") && !url.starts_with("{{")
+}
+
+/// A distinct `{{variable}}` name for each variable a server URL writes as
+/// one, so each keeps its own value: its sanitized name ([`sanitize_var`]),
+/// or, when another variable holds that name, the next free `_2`, `_3`, …
+/// suffix. Every variable that can have its own sanitized name gets it
+/// (`{release_name}` keeps `release_name`, the spelling that is already
+/// sanitized winning, then the first used) before any suffix is given, so
+/// `{release-name}` beside them becomes `release_name_2` only when no
+/// `{release-name-2}` claims that name. The environment's own names are
+/// never given: `baseUrl`, and `origin` when the URL renders relative. A
+/// variable whose default is inlined needs no name. The same URL always gets
+/// the same names.
+fn server_aliases<'a>(url: &'a str, decl: &Map<String, Value>, inline: bool) -> HashMap<&'a str, String> {
+    let names: Vec<&str> = server_url_names(url, decl, inline).into_iter().filter(|(_, named)| *named).map(|(n, _)| n).collect();
     let mut used = crate::common::PlaceholderNames::default();
-    taken.iter().for_each(|t| used.reserve(t));
-    let mut aliases = HashMap::with_capacity(names.len());
-    // Names already in sanitized form first, so they keep their spelling.
+    used.reserve("baseUrl");
+    if renders_relative(url, decl, inline) {
+        used.reserve("origin");
+    }
+    let mut aliases: HashMap<&str, String> = HashMap::with_capacity(names.len());
+    // Natural names: the already-sanitized spellings first, then the rest
+    // in first-use order; then suffixes for the variables left without one.
     for exact in [true, false] {
         for &name in &names {
             let base = sanitize_var(name);
-            if (base == name) == exact {
-                aliases.insert(name, used.name_verbatim(&base));
+            if (base == name) == exact && !aliases.contains_key(name) && used.claim(&base) {
+                aliases.insert(name, base);
             }
+        }
+    }
+    for &name in &names {
+        if !aliases.contains_key(name) {
+            aliases.insert(name, used.name_verbatim(&sanitize_var(name)));
         }
     }
     aliases

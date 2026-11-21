@@ -937,6 +937,40 @@ fn server_variables_that_sanitize_alike_keep_distinct_names() {
     let (vars, _) = server("https://{origin}/api", json!({"origin": {"default": "example.test"}}));
     assert_eq!(vars, pairs(&[("baseUrl", "https://{{origin}}/api"), ("origin", "example.test")]));
 
+    // A later variable whose own name is the suffixed one keeps it.
+    let (vars, _) = server(
+        "https://example.test/{release-name}/{release_name}/{release-name-2}",
+        json!({"release-name": {"default": "a"}, "release_name": {"default": "b"}, "release-name-2": {"default": "c"}}),
+    );
+    assert_eq!(
+        vars,
+        pairs(&[
+            ("baseUrl", "https://example.test/{{release_name_3}}/{{release_name}}/{{release_name_2}}"),
+            ("release_name_3", "a"),
+            ("release_name", "b"),
+            ("release_name_2", "c")
+        ])
+    );
+
+    // Operation-level servers inline their defaults: only the variables left
+    // as placeholders take names, and `origin` is kept for the rendered URL.
+    let op_server = |url: &str, vars: serde_json::Value| {
+        let doc = json!({"openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+            "paths": {"/items": {"get": {"servers": [{"url": url, "variables": vars}], "responses": {}}}}});
+        let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+        let required: Vec<String> = r.report.required_variables.iter().map(|v| v.name.clone()).collect();
+        (r.requests[0].spec.url.clone(), required)
+    };
+    let (url, required) = op_server(
+        "https://{release_name}.example.test/{release-name}",
+        json!({"release_name": {"default": "staging"}, "release-name": {}}),
+    );
+    assert_eq!(url, "https://staging.example.test/{{release_name}}/items");
+    assert!(required.contains(&"release_name".to_string()), "{required:?}");
+    let (url, required) = op_server("{prefix}/{origin}", json!({"prefix": {"default": "/api"}, "origin": {}}));
+    assert_eq!(url, "{{origin}}/api/{{origin_2}}/items");
+    assert!(required.contains(&"origin".to_string()) && required.contains(&"origin_2".to_string()), "{required:?}");
+
     // Unique names are unchanged, and a second import names them the same.
     let url = "https://{region}.example.test/{base-path}";
     let decl = json!({"region": {"default": "eu"}, "base-path": {"default": "v1"}});
