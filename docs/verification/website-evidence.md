@@ -33,9 +33,9 @@ the site to the published `anvil-v0.1.8` and re-records the capability evidence 
 The 2 skipped tests are the live highlight.js CDN checks in `tests/components.test.js`
 (`skip: RUN_LIVE_ASSET_CHECKS !== '1'`), which do not concern Anvil.
 
-Between `f3551a0` and this pin, the website's tests grew from 461 to 532. Most of the new tests cover site work
-unrelated to Anvil (the contact Worker, CSS, the shared components and the release refreshes of Ferrum Edge,
-Foundry, Nexus, Alloy and Contracts); five are new Anvil tests in `tests/anvil.test.js`, one from #112 (the Anvil
+Between `f3551a0` and this pin, the website's tests grew from 461 to 532. 66 of the new tests cover site work
+unrelated to Anvil: the contact Worker (54), the shared components and page CSP (5), CSS (2) and accuracy guards in
+`tests/releases.test.js` (5). The other five are new Anvil tests in `tests/anvil.test.js`: one from #112 (the Anvil
 block inventory) and four from #115 (page walks and entity handling). For Anvil:
 - `tests/fixtures/release-audit.json` re-records the Anvil entry from the published `anvil-v0.1.8`: 35 assets with
   GitHub's digests (checked 2026-11-22), the 33 `SHA256SUMS` lines and the `release-evidence.json` targets, and
@@ -46,11 +46,11 @@ block inventory) and four from #115 (page walks and entity handling). For Anvil:
   capability backs the copy saying both workspace bundle modes carry free text and stored dataset files as
   written; `tests/fixtures/anvil-vocabulary.json` is regenerated;
 - `tests/anvil.test.js`, `tests/anvil-capabilities.test.js` and `tests/anvil-claims.js` changed in three other
-  website PRs: constant regexes compiled once (#111), the page CSP and the Anvil page inventory derived from the
-  Worker and the claim check (#112), and entities read in `anvil.test.js` as the claim check reads them, with dot
-  directories skipped in page walks (#115). In #143 the pinned values follow the release (version, date, supported
-  versions, catalog count and the upgrade-guide anchor). The tests REL-006, REL-007 and REL-008 cite keep their names, and all ten Anvil and shared pages still carry `nav-container` and `footer-container` and load
-  `components.js` at their depth.
+  website PRs: constant regexes compiled once (#111), the Anvil page and block inventory derived from the claim
+  check (#112), and entities read in `anvil.test.js` as the claim check reads them, with dot directories skipped in
+  page walks (#115). In #143 the pinned values follow the release (version, date, supported versions, catalog count
+  and the upgrade-guide anchor). The tests REL-006, REL-007 and REL-008 cite keep their names, and all ten Anvil and
+  shared pages still carry `nav-container` and `footer-container` and load `components.js` at their depth.
 
 At this pin, the claim check reads 832 claim elements in 17 regions (`node tests/anvil-claims.js --counts`, run on a
 checkout of `f8b206a`).
