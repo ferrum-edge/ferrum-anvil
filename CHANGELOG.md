@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Security
+
+- `url` is updated to 2.5.9 for RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on nested
+  `blob:` URLs).
+
 ### Fixed
 
 - Workbench keyboard shortcuts (`Cmd/Ctrl+Enter`, `Cmd/Ctrl+S`, `Cmd/Ctrl+N`, `Escape`,
