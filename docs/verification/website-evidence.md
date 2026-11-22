@@ -33,9 +33,10 @@ the site to the published `anvil-v0.1.8` and re-records the capability evidence 
 The 2 skipped tests are the live highlight.js CDN checks in `tests/components.test.js`
 (`skip: RUN_LIVE_ASSET_CHECKS !== '1'`), which do not concern Anvil.
 
-Between `f3551a0` and this pin, the website's tests grew from 461 to 532 with site work unrelated to Anvil (tests for
-the contact Worker, CSS, the shared components and the release refreshes of Ferrum Edge, Foundry, Nexus, Alloy and
-Contracts). For Anvil:
+Between `f3551a0` and this pin, the website's tests grew from 461 to 532. Most of the new tests cover site work
+unrelated to Anvil (the contact Worker, CSS, the shared components and the release refreshes of Ferrum Edge,
+Foundry, Nexus, Alloy and Contracts); five are new Anvil tests in `tests/anvil.test.js`, one from #112 (the Anvil
+block inventory) and four from #115 (page walks and entity handling). For Anvil:
 - `tests/fixtures/release-audit.json` re-records the Anvil entry from the published `anvil-v0.1.8`: 35 assets with
   GitHub's digests (checked 2026-11-22), the 33 `SHA256SUMS` lines and the `release-evidence.json` targets, and
   records the published advisory GHSA-7p29-5g2w-wwq4, which affects 0.1.8;
