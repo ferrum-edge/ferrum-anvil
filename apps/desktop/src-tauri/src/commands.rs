@@ -2,13 +2,15 @@
 //! refuses while locked; secrets never cross into the webview except where
 //! the user explicitly typed them (they are stored and only references return).
 //! A change that weakens how the profile is protected goes ahead only once
-//! the user confirmed it in a native dialog (`crate::presence`), and a draft
-//! uses the vault only where its saved request would (`crate::draft_authority`).
+//! the user confirmed it in a native dialog (`crate::presence`), a draft uses
+//! the vault only where its saved request would (`crate::draft_authority`), and
+//! a persistence mutation that establishes or alters a vault-authority binding
+//! asks natively before writing (`crate::persistence_authority`).
 
 use crate::presence::NativePresence;
 use crate::state::{DesktopState, ImportGate, LockReason, PayloadFence, PayloadState, PendingEntry, cancel_pending};
 use anvil_app::cleanup::{RemovedRevisions, StorageCleanup, StorageCleanupRecord, UndecodableRevision};
-use anvil_app::exec::{SendOptions, refuse_linked_files};
+use anvil_app::exec::SendOptions;
 use anvil_app::file_grants::{FileGrants, FilePurpose};
 use anvil_app::profiles::{ProfileManager, Unlock};
 use anvil_app::{App, AppError};
@@ -360,9 +362,12 @@ pub fn workspace_create(st: State<'_, DesktopState>, name: String) -> R<Workspac
     st.app()?.create_workspace(&name).map_err(e)
 }
 
+/// Saving workspace settings, auth, variables or active environment that
+/// establishes or alters a request's vault-authority binding requires native
+/// confirmation (see `crate::persistence_authority`).
 #[tauri::command]
-pub fn workspace_save(st: State<'_, DesktopState>, workspace: Workspace) -> R<Workspace> {
-    st.app()?.save_workspace(workspace).map_err(e)
+pub async fn workspace_save(st: State<'_, DesktopState>, window: Window, workspace: Workspace) -> R<Workspace> {
+    crate::persistence_authority::save_workspace(&st, &NativePresence(window), workspace).await
 }
 
 /// One transaction over the whole workspace, on a blocking thread (see
@@ -406,10 +411,11 @@ pub fn folder_get(st: State<'_, DesktopState>, folder_id: String) -> R<Folder> {
 
 /// A stored folder stays under its stored parent: it moves only through
 /// `folder_move`, which asks before it takes anything out of an imported
-/// collection.
+/// collection. A save that establishes or alters a child request's
+/// vault-authority binding asks natively (see `crate::persistence_authority`).
 #[tauri::command]
-pub fn folder_save(st: State<'_, DesktopState>, folder: Folder) -> R<Folder> {
-    st.app()?.save_folder_in_place(folder).map_err(e)
+pub async fn folder_save(st: State<'_, DesktopState>, window: Window, folder: Folder) -> R<Folder> {
+    crate::persistence_authority::save_folder(&st, &NativePresence(window), folder).await
 }
 
 /// The user's explicit choice to let an imported collection's requests also
@@ -444,20 +450,23 @@ pub async fn folder_delete(handle: AppHandle, folder_id: String) -> R<()> {
 }
 
 /// A spec from the webview references only stored attachments, never a
-/// linked local file (a path).
+/// linked local file (a path). Creating a request that carries vault-backed
+/// authority (including outside an isolated import root where it inherits
+/// workspace scope) requires native confirmation (see
+/// `crate::persistence_authority`).
 #[tauri::command]
-pub fn request_create(
+pub async fn request_create(
     st: State<'_, DesktopState>,
+    window: Window,
     workspace_id: String,
     folder_id: Option<String>,
     name: String,
     spec: Option<RequestSpec>,
 ) -> R<RequestDefinition> {
-    let app = st.app()?;
+    let ws = id(&workspace_id)?;
     let folder = folder_id.map(|p| id(&p)).transpose()?;
     let spec = spec.unwrap_or_else(|| RequestSpec::http("GET", "https://"));
-    refuse_linked_files(&spec).map_err(e)?;
-    app.create_request(&id(&workspace_id)?, folder, &name, spec).map_err(e)
+    crate::persistence_authority::create_request(&st, &NativePresence(window), ws, folder, name, spec).await
 }
 
 #[tauri::command]
@@ -465,11 +474,11 @@ pub fn request_get(st: State<'_, DesktopState>, request_id: String) -> R<Request
     st.app()?.request(&id(&request_id)?).map_err(e)
 }
 
+/// Saving a request that establishes or alters its vault-authority binding
+/// requires native confirmation (see `crate::persistence_authority`).
 #[tauri::command]
-pub fn request_save(st: State<'_, DesktopState>, request: RequestDefinition) -> R<RequestDefinition> {
-    let app = st.app()?;
-    refuse_linked_files(&request.spec).map_err(e)?;
-    app.save_request(request).map_err(e)
+pub async fn request_save(st: State<'_, DesktopState>, window: Window, request: RequestDefinition) -> R<RequestDefinition> {
+    crate::persistence_authority::save_request(&st, &NativePresence(window), request).await
 }
 
 /// Asked natively, as `folder_move` is, when the move takes the request out
@@ -503,9 +512,12 @@ pub fn environments_list(st: State<'_, DesktopState>, workspace_id: String) -> R
     st.app()?.environments(&id(&workspace_id)?).map_err(e)
 }
 
+/// Saving an environment that establishes or alters a request's
+/// vault-authority binding requires native confirmation (see
+/// `crate::persistence_authority`).
 #[tauri::command]
-pub fn environment_save(st: State<'_, DesktopState>, environment: Environment) -> R<Environment> {
-    st.app()?.save_environment(environment).map_err(e)
+pub async fn environment_save(st: State<'_, DesktopState>, window: Window, environment: Environment) -> R<Environment> {
+    crate::persistence_authority::save_environment(&st, &NativePresence(window), environment).await
 }
 
 #[tauri::command]
@@ -542,9 +554,12 @@ pub fn tls_profiles_list(st: State<'_, DesktopState>, workspace_id: String) -> R
     st.app()?.tls_profiles(&id(&workspace_id)?).map_err(e)
 }
 
+/// Saving a TLS profile that establishes or alters a request's
+/// vault-authority binding requires native confirmation (see
+/// `crate::persistence_authority`).
 #[tauri::command]
-pub fn tls_profile_save(st: State<'_, DesktopState>, profile: TlsProfile) -> R<TlsProfile> {
-    st.app()?.save_tls_profile(profile).map_err(e)
+pub async fn tls_profile_save(st: State<'_, DesktopState>, window: Window, profile: TlsProfile) -> R<TlsProfile> {
+    crate::persistence_authority::save_tls_profile(&st, &NativePresence(window), profile).await
 }
 
 #[tauri::command]
@@ -552,9 +567,12 @@ pub fn proxy_profiles_list(st: State<'_, DesktopState>, workspace_id: String) ->
     st.app()?.proxy_profiles(&id(&workspace_id)?).map_err(e)
 }
 
+/// Saving a proxy profile that establishes or alters a request's
+/// vault-authority binding requires native confirmation (see
+/// `crate::persistence_authority`).
 #[tauri::command]
-pub fn proxy_profile_save(st: State<'_, DesktopState>, profile: ProxyProfile) -> R<ProxyProfile> {
-    st.app()?.save_proxy_profile(profile).map_err(e)
+pub async fn proxy_profile_save(st: State<'_, DesktopState>, window: Window, profile: ProxyProfile) -> R<ProxyProfile> {
+    crate::persistence_authority::save_proxy_profile(&st, &NativePresence(window), profile).await
 }
 
 #[tauri::command]

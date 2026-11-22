@@ -424,12 +424,14 @@ pub(crate) async fn move_folder(st: &DesktopState, presence: &impl Presence, fol
 const MOVED_MEANWHILE: &str = "the tree changed while you were asked; move it again";
 
 /// Save the settings dialog's settings. A change that weakens the lock
-/// policy is saved only once the user confirmed it natively, and only over
-/// the policy it was asked against.
+/// policy, or alters default connection settings for any saved request
+/// carrying vault-backed authority, is saved only once the user confirmed it
+/// natively, and only over the state it was asked against.
 pub(crate) async fn save_settings(st: &DesktopState, presence: &impl Presence, settings: AppSettings) -> R<()> {
+    let seen = st.epoch();
     let app = st.app()?;
-    let stored = app.settings().map_err(e)?.lock;
-    let weaker = stored.weakening(&settings.lock);
+    let stored = app.settings().map_err(e)?;
+    let weaker = stored.lock.weakening(&settings.lock);
     let app = if weaker.is_empty() {
         app
     } else {
@@ -439,13 +441,19 @@ pub(crate) async fn save_settings(st: &DesktopState, presence: &impl Presence, s
             weaker.join(", and ")
         );
         let prompt = Prompt { title: "Weaken the lock settings", message, ok: "Save" };
-        let seen = confirm(st, presence, prompt).await?;
+        let confirmed = confirm(st, presence, prompt).await?;
+        if confirmed != seen {
+            return Err("LOCKED".into());
+        }
         fenced(st, seen)?
     };
-    if !app.save_settings_if_lock_is(&settings, &stored).map_err(e)? {
-        return Err("the lock settings changed meanwhile; review them and save again".into());
+    if stored.defaults == settings.defaults {
+        if !app.save_settings_if_lock_is(&settings, &stored.lock).map_err(e)? {
+            return Err("the lock settings changed meanwhile; review them and save again".into());
+        }
+        return Ok(());
     }
-    Ok(())
+    crate::persistence_authority::save_app_settings_defaults(st, presence, seen, settings, stored.lock).await
 }
 
 /// Offer the lock policy a backup restore withheld from `report` (see

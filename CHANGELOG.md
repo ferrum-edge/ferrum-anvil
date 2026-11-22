@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Security
+
+- Desktop persistence mutations (`request_create`, `request_save`, `workspace_save`, `folder_save`,
+  `environment_save`, `tls_profile_save`, `proxy_profile_save`, and app default connection settings)
+  now require native OS confirmation (`crate::presence`) whenever they establish or alter a
+  vault-backed authority binding, including when `request_create` places a request outside an
+  isolated import root where it would gain workspace-scope vault authority. Ordinary edits that do
+  not establish or change a vault-backed authority binding continue without prompting.
+
 ### Fixed
 
 - `anvil import-spec` refuses a workspace argument passed with `--new-workspace` as a usage error

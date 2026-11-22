@@ -14,6 +14,7 @@ mod commands;
 mod draft_authority;
 #[cfg(test)]
 mod payload_tests;
+mod persistence_authority;
 mod presence;
 mod state;
 
