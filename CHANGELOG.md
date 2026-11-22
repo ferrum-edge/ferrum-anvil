@@ -10,6 +10,8 @@
   vault-backed authority binding, including when `request_create` places a request outside an
   isolated import root where it would gain workspace-scope vault authority. Ordinary edits that do
   not establish or change a vault-backed authority binding continue without prompting.
+- `url` is updated to 2.5.9 for RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on nested
+  `blob:` URLs).
 
 ### Fixed
 
