@@ -6,26 +6,29 @@
 
 Security release: it fixes two high-severity Anvil advisories. Workspace bundles no longer write
 the stored data of a dataset with `sensitive_columns` as a plaintext entry: an encrypted transfer
-seals it inside the encrypted vault and restores it on import, and a share-safe bundle leaves it
-out and lists the dataset among its excluded items
+seals it inside the encrypted vault, and a share-safe bundle leaves it out and lists the dataset
+among its excluded items
 ([GHSA-7p29-5g2w-wwq4](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-7p29-5g2w-wwq4)).
 Desktop saves that establish or change a vault-backed authority binding (creating or saving a
 request, saving a workspace, folder, environment, TLS or proxy profile, or the default connection
-settings) now need native OS confirmation, so a compromised renderer can no longer bind vault-backed
-credentials to a request without the user
+settings) now need native OS confirmation, so a compromised renderer can no longer bind or redirect
+vault-backed credentials without the user
 ([GHSA-qxwm-425v-8xgf](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-qxwm-425v-8xgf)).
 `url` 2.5.9 fixes RUSTSEC-2026-0592. OpenAPI server variables whose names sanitize alike,
 `anvil import-spec` given both a workspace and `--new-workspace`, and Workbench shortcuts pressed
 right after switching tabs are fixed too. 0.1.9 keeps 0.1.8's profile database and settings
-format. An encrypted transfer exported by 0.1.9 opens in 0.1.8 or earlier without the sealed
-dataset data; see the [upgrade guide](docs/upgrade-guide.md#019).
+format. Anvil 0.1.8 and earlier cannot read the sealed dataset data of an encrypted transfer made by
+0.1.9, so upgrade the receiving Anvil first, and `anvil import-spec` now refuses a workspace
+argument passed with `--new-workspace`: read the Breaking section below and the
+[upgrade guide](docs/upgrade-guide.md#019).
 
 ### Security
 
 - Workspace bundles no longer write the stored data of a dataset with `sensitive_columns` as a
   plaintext `attachments/` entry, in either mode and even when a request uses the same file
   (#602, GHSA-7p29-5g2w-wwq4). An encrypted transfer carries it inside the encrypted vault and
-  restores it on import. A share-safe bundle leaves it out and lists the dataset (and any such request)
+  restores it on import (a Merge that keeps an existing, linked dataset in place does not store
+  it, and its preview says so). A share-safe bundle leaves it out and lists the dataset (and any such request)
   among its excluded items; the imported dataset names a linked file to choose on the target
   machine. An Anvil without this change opens such an encrypted transfer without that data.
 - Desktop persistence mutations (`request_create`, `request_save`, `workspace_save`, `folder_save`,
@@ -43,16 +46,22 @@ dataset data; see the [upgrade guide](docs/upgrade-guide.md#019).
 - Workbench keyboard shortcuts (`Cmd/Ctrl+Enter`, `Cmd/Ctrl+S`, `Cmd/Ctrl+N`, `Escape`,
   `Cmd/Ctrl+B`, `Cmd/Ctrl+L`) now stay bound to the committed render via a layout effect instead of
   re-registering the `window` listener in a passive `useEffect`, preventing a keypress right after
-  opening or switching a tab from running against the previous tab's stale closure.
+  opening or switching a tab from running against the previous tab's stale closure (#608).
 - `anvil import-spec` refuses a workspace argument passed with `--new-workspace` as a usage error
   (exit 3), and its usage line shows the two as alternatives (`<WORKSPACE|--new-workspace>`). The
   argument was ignored and the new workspace named after the source, so later commands naming it
   failed (#603).
 - OpenAPI server variables whose names sanitize to the same environment name
   (`{release-name}` and `{release_name}`) each keep their own value: the import gives each a
-  distinct name (`release_name_2`, `release_name`), never reusing `baseUrl` or, for a relative URL,
-  `origin`. Both used to be written as `release_name`, so a request ran against the wrong path
+  distinct name (`release_name_2`, `release_name`), never naming one `baseUrl` or, for a relative
+  URL, `origin`. Both used to be written as `release_name`, so a request ran against the wrong path
   (#580).
+
+### Breaking
+
+- `anvil import-spec` given both a workspace argument and `--new-workspace` now exits 3 (usage
+  error) instead of ignoring the workspace argument (#603). Scripts must pass exactly one of the
+  two.
 
 ## [0.1.8] - 2026-11-21
 
