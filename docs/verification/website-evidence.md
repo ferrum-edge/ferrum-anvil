@@ -22,32 +22,45 @@ change it, which is how a new pin is tried.
 
 ## Current pin
 
-`f3551a0664aaec1ec23666d37cf9f962d6dca0a7`: ferrumedge `main` after ferrum-edge/ferrumedge#109. That commit moves
-the site to the published `anvil-v0.1.7` and re-records the capability evidence from ferrum-anvil at that tag.
+`f8b206ace58ea0587ef19a817bb64cafda784ede`: ferrumedge `main` after ferrum-edge/ferrumedge#143. That commit moves
+the site to the published `anvil-v0.1.8` and re-records the capability evidence from ferrum-anvil at that tag.
 
 | Run | Event | Anvil commit | Result |
 |---|---|---|---|
-| [41589535671](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41589535671) | workflow_dispatch, 2026-11-03 | `3a7f371e` (the pin change) | `pass`: 461 tests, 459 pass, 0 fail, 0 cancelled, 2 skipped |
-| [41589538071](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41589538071) | pull_request, 2026-11-03 | `9c8aade5` (the pull request's test merge of the pin change into `main`) | `pass`: 461 tests, 459 pass, 0 fail, 0 cancelled, 2 skipped |
+| [45012006101](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/45012006101) | workflow_dispatch, 2026-11-22 | `bfdb1196` (the pin change) | `pass`: 532 tests, 530 pass, 0 fail, 0 cancelled, 2 skipped |
+| [45012375360](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/45012375360) | pull_request, 2026-11-22 | `dcd3d0ae` (the pull request's test merge of the pin change into `main`) | `pass`: 532 tests, 530 pass, 0 fail, 0 cancelled, 2 skipped |
 
 The 2 skipped tests are the live highlight.js CDN checks in `tests/components.test.js`
 (`skip: RUN_LIVE_ASSET_CHECKS !== '1'`), which do not concern Anvil.
 
-Between `1f89dfd` and this pin, the tests change only to follow the release:
-- `tests/components.test.js` and `tests/releases.test.js` did not change;
-- `tests/fixtures/release-audit.json` re-records the Anvil entry from the published `anvil-v0.1.7`: 35 assets with
-  GitHub's digests (checked 2026-11-03) and the 33 `SHA256SUMS` lines;
-- `tests/fixtures/anvil-capabilities.json` is re-recorded from ferrum-anvil at `anvil-v0.1.7` (`e1a3dc0e`), and
-  `tests/fixtures/anvil-vocabulary.json` is regenerated;
-- in `tests/anvil.test.js`, `tests/anvil-capabilities.test.js` and `tests/anvil-claims.js`, pinned values follow the
-  release (version, date, the upgrade-guide link and the hardening-release wording), the JWT and lock-qualifier
-  mutations use the new copy, and RS256 becomes a variant marker. The tests REL-006, REL-007 and REL-008 cite keep
-  their names.
+Between `f3551a0` and this pin, the website's tests grew from 461 to 532 with site work unrelated to Anvil (tests for
+the contact Worker, CSS, the shared components and the release refreshes of Ferrum Edge, Foundry, Nexus, Alloy and
+Contracts). For Anvil:
+- `tests/fixtures/release-audit.json` re-records the Anvil entry from the published `anvil-v0.1.8`: 35 assets with
+  GitHub's digests (checked 2026-11-22), the 33 `SHA256SUMS` lines and the `release-evidence.json` targets, and
+  records the published advisory GHSA-7p29-5g2w-wwq4, which affects 0.1.8;
+- `tests/fixtures/anvil-capabilities.json` is re-recorded from ferrum-anvil at `anvil-v0.1.8` (`164edccc`): the
+  0.9.20 catalog is added (620 outcomes, 17 headers, nine public tokens including `loop_detected`), the lab is
+  recorded as running Edge v0.9.20 only, the upgrade note is 0.1.8's, and a new `export.dataset-attachments`
+  capability backs the copy saying both workspace bundle modes carry free text and stored dataset files as
+  written; `tests/fixtures/anvil-vocabulary.json` is regenerated;
+- `tests/anvil.test.js`, `tests/anvil-capabilities.test.js` and `tests/anvil-claims.js` changed in three other
+  website PRs: constant regexes compiled once (#111), the page CSP and the Anvil page inventory derived from the
+  Worker and the claim check (#112), and entities read in `anvil.test.js` as the claim check reads them, with dot
+  directories skipped in page walks (#115). In #143 the pinned values follow the release (version, date, supported
+  versions, catalog count and the upgrade-guide anchor). The tests REL-006, REL-007 and REL-008 cite keep their names, and all ten Anvil and shared pages still carry `nav-container` and `footer-container` and load
+  `components.js` at their depth.
 
-At this pin, the claim check still reads 824 claim elements in 17 regions (`node tests/anvil-claims.js --counts`,
-run on a checkout of `f3551a0`).
+At this pin, the claim check reads 832 claim elements in 17 regions (`node tests/anvil-claims.js --counts`, run on a
+checkout of `f8b206a`).
 
 ## Previous pins
+
+`f3551a0664aaec1ec23666d37cf9f962d6dca0a7` (ferrumedge `main` after #109), which described `anvil-v0.1.7`. 459 of
+461 tests passed, with 0 failed and the same 2 skipped, in workflow_dispatch run
+[41589535671](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41589535671) on `3a7f371e` (the pin change)
+and pull_request run [41589538071](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/41589538071), 2026-11-03.
+At that pin the claim check read 824 claim elements in 17 regions.
 
 `1f89dfd94915aa419b80decf9666dc1bcc769df8` (ferrumedge `main` after #108), which described `anvil-v0.1.5`. 459 of
 461 tests passed, with 0 failed and the same 2 skipped, in workflow_dispatch run
@@ -77,14 +90,14 @@ page with a checked Anvil region.
 ## Scope
 
 These limits apply to all three cases:
-- **The pinned commit only.** The check covers the website at the pinned commit, which describes `anvil-v0.1.7`. It
+- **The pinned commit only.** The check covers the website at the pinned commit, which describes `anvil-v0.1.8`. It
   re-runs the website's tests against that commit and its recorded audit, not against the live site or the
   release being built, so it gives the same result whenever it runs. A later release's pages are covered once the
   pin moves to a website commit that describes that release.
 - **Recorded, not re-fetched.** Release assets and digests are compared as recorded in the website's
   `tests/fixtures/release-audit.json`, and Anvil capabilities as recorded in
   `tests/fixtures/anvil-capabilities.json`. Neither is re-fetched on each run. The website repository's own CI
-  re-verifies the capability fixture against a checkout of `anvil-v0.1.7`
+  re-verifies the capability fixture against a checkout of `anvil-v0.1.8`
   (`scripts/verify_anvil_capabilities.py --anvil`); this workflow does not run that step.
 - **Stated limits elsewhere.** Each case's own limits are in its `matrix-status.json` entry. The residual limits
   of the REL-008 claim check are listed in ferrumedge's `README.md` ("Residual limits of a word-level check").
