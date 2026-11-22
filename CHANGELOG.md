@@ -13,6 +13,10 @@
 
 ### Fixed
 
+- Workbench keyboard shortcuts (`Cmd/Ctrl+Enter`, `Cmd/Ctrl+S`, `Cmd/Ctrl+N`, `Escape`,
+  `Cmd/Ctrl+B`, `Cmd/Ctrl+L`) now stay bound to the committed render via a layout effect instead of
+  re-registering the `window` listener in a passive `useEffect`, preventing a keypress right after
+  opening or switching a tab from running against the previous tab's stale closure.
 - `anvil import-spec` refuses a workspace argument passed with `--new-workspace` as a usage error
   (exit 3), and its usage line shows the two as alternatives (`<WORKSPACE|--new-workspace>`). The
   argument was ignored and the new workspace named after the source, so later commands naming it

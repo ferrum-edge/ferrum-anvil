@@ -136,7 +136,7 @@ const openTabs = () => within(screen.getByRole("tablist", { name: "Open requests
 
 async function openTab(name: string) {
   fireEvent.click(screen.getByRole("treeitem", { name: new RegExp(name) }));
-  await openTabs().findByRole("tab", { name: new RegExp(name) });
+  await openTabs().findByRole("tab", { name: new RegExp(name), selected: true });
 }
 
 async function selectWorkspace(id: string, expectItem: string) {
@@ -1910,6 +1910,39 @@ describe("the send shortcut", () => {
     await openTab("Alpha");
     fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
     await waitFor(() => expect(calls("send_request")).toHaveLength(1));
+    expect((calls("send_request")[0].input as { request_id: string }).request_id).toBe("r1");
+  });
+
+  it("targets a newly opened tab as soon as it commits, before passive effects flush", async () => {
+    backend();
+    await boot();
+    await openTab("Socket");
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(calls("session_open")).toHaveLength(1));
+
+    // Dispatch Ctrl+Enter from a MutationObserver microtask right after React
+    // commits the new Alpha tab, before passive useEffect callbacks can run.
+    // A passive keydown listener still holds Socket's closure and drops the
+    // send; a layout-synced listener sends Alpha deterministically.
+    const tablist = screen.getByRole("tablist", { name: "Open requests" });
+    let dispatched = false;
+    const observer = new MutationObserver(() => {
+      if (!dispatched && tablist.textContent?.includes("Alpha")) {
+        dispatched = true;
+        observer.disconnect();
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, cancelable: true }));
+      }
+    });
+    observer.observe(tablist, { childList: true, subtree: true });
+    try {
+      await openTab("Alpha");
+    } finally {
+      observer.disconnect();
+    }
+    expect(dispatched).toBe(true);
+    await waitFor(() => expect(calls("send_request")).toHaveLength(1));
+    expect((calls("send_request")[0].input as { request_id: string }).request_id).toBe("r1");
+    await screen.findByText("Sending…");
   });
 
   it("leaves the hidden request tab alone while another view is shown (#513)", async () => {

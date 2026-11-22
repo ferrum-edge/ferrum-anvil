@@ -1,6 +1,6 @@
 // Main workspace window: collection tree + history, open request tabs, and
 // the request/response split.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, onExecutionEvent, onLocked, onSessionEnded, type ExecutionView, type HistoryItem, type StreamMessage, type TreeNode } from "./api";
 import { useConfirm } from "./Confirm";
 import { SessionConsole } from "./SessionConsole";
@@ -718,8 +718,12 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   };
 
   // ------------------------------------------------------------- shortcuts
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+  // Keep the window keydown listener bound to the committed render before paint
+  // (a passive useEffect leaves the previous render's active tab, view or
+  // dialog closure handling keys until effects flush).
+  const onKeyRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  useLayoutEffect(() => {
+    onKeyRef.current = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
       // Locking works from anywhere, a dialog or a confirmation included.
       if (mod && e.key.toLowerCase() === "l") {
@@ -753,9 +757,12 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
         void cancel();
       }
     };
+  });
+  useLayoutEffect(() => {
+    const onKey = (e: KeyboardEvent) => onKeyRef.current(e);
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, []);
 
   // Tell the backend the user is active (idle auto-lock).
   useEffect(() => {
