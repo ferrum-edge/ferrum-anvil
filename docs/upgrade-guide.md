@@ -1,5 +1,49 @@
 # Upgrade guide
 
+## 0.1.9
+
+0.1.9 opens 0.1.8 profiles unchanged: the profile database stays at schema 6
+and the app settings format is the same, so no migration or enrollment runs.
+
+### Workspace bundles and sensitive datasets (#602, GHSA-7p29-5g2w-wwq4)
+
+The stored data of a dataset with `sensitive_columns` is no longer written as a
+plaintext `attachments/` entry, nor is the same file when a request uses it.
+
+- An encrypted transfer carries that data inside its encrypted vault and
+  restores it on import. Anvil 0.1.8 and earlier open such a transfer without
+  that data: the dataset arrives without its stored file. Upgrade the
+  receiving Anvil to 0.1.9 first. The vault must hold the sealed data (under
+  96 MiB of dataset files); a larger encrypted transfer is refused, and a full
+  backup carries it.
+- A share-safe bundle leaves that data out and lists the dataset, and any
+  request using the same file, among its excluded items. The imported dataset
+  names a linked file; choose it on the receiving machine with **Choose new
+  location…**.
+- Bundles made by 0.1.8 or earlier still carry such data as a plaintext entry.
+  Treat them as containing those secrets, and export again with 0.1.9 where
+  that matters.
+
+### Native confirmation for vault-backed saves (#607, GHSA-qxwm-425v-8xgf)
+
+The desktop app now asks for native OS confirmation before a save that
+establishes or changes a vault-backed authority binding: creating or saving a
+request, or saving a workspace, folder, environment, TLS profile, proxy profile
+or the default connection settings, when the change binds vault-backed
+credentials or secrets to a destination. Ordinary edits are saved without a
+prompt. Declining the prompt, or the profile locking while it is open, leaves
+the change unsaved.
+
+### Other changes
+
+- `anvil import-spec` given both a workspace and `--new-workspace` now fails as
+  a usage error (exit 3) instead of ignoring the workspace (#603). Scripts
+  should pass one or the other.
+- An OpenAPI import whose server variables sanitize to the same name (for
+  example `{release-name}` and `{release_name}`) now gives each its own
+  environment variable (`release_name_2`, `release_name`) instead of writing
+  both as `release_name` (#580).
+
 ## 0.1.8
 
 0.1.8 opens 0.1.7 profiles without a new migration or enrollment: the profile

@@ -2,16 +2,41 @@
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-22
+
+Security release: it fixes two high-severity Anvil advisories. Workspace bundles no longer write
+the stored data of a dataset with `sensitive_columns` as a plaintext entry: an encrypted transfer
+seals it inside the encrypted vault and restores it on import, and a share-safe bundle leaves it
+out and lists the dataset among its excluded items
+([GHSA-7p29-5g2w-wwq4](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-7p29-5g2w-wwq4)).
+Desktop saves that establish or change a vault-backed authority binding (creating or saving a
+request, saving a workspace, folder, environment, TLS or proxy profile, or the default connection
+settings) now need native OS confirmation, so a compromised renderer can no longer bind vault-backed
+credentials to a request without the user
+([GHSA-qxwm-425v-8xgf](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-qxwm-425v-8xgf)).
+`url` 2.5.9 fixes RUSTSEC-2026-0592. OpenAPI server variables whose names sanitize alike,
+`anvil import-spec` given both a workspace and `--new-workspace`, and Workbench shortcuts pressed
+right after switching tabs are fixed too. 0.1.9 keeps 0.1.8's profile database and settings
+format. An encrypted transfer exported by 0.1.9 opens in 0.1.8 or earlier without the sealed
+dataset data; see the [upgrade guide](docs/upgrade-guide.md#019).
+
 ### Security
 
+- Workspace bundles no longer write the stored data of a dataset with `sensitive_columns` as a
+  plaintext `attachments/` entry, in either mode and even when a request uses the same file
+  (#602, GHSA-7p29-5g2w-wwq4). An encrypted transfer carries it inside the encrypted vault and
+  restores it on import. A share-safe bundle leaves it out and lists the dataset (and any such request)
+  among its excluded items; the imported dataset names a linked file to choose on the target
+  machine. An Anvil without this change opens such an encrypted transfer without that data.
 - Desktop persistence mutations (`request_create`, `request_save`, `workspace_save`, `folder_save`,
   `environment_save`, `tls_profile_save`, `proxy_profile_save`, and app default connection settings)
   now require native OS confirmation (`crate::presence`) whenever they establish or alter a
   vault-backed authority binding, including when `request_create` places a request outside an
   isolated import root where it would gain workspace-scope vault authority. Ordinary edits that do
-  not establish or change a vault-backed authority binding continue without prompting.
+  not establish or change a vault-backed authority binding continue without prompting (#607,
+  GHSA-qxwm-425v-8xgf).
 - `url` is updated to 2.5.9 for RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on nested
-  `blob:` URLs).
+  `blob:` URLs) (#609).
 
 ### Fixed
 
@@ -23,6 +48,11 @@
   (exit 3), and its usage line shows the two as alternatives (`<WORKSPACE|--new-workspace>`). The
   argument was ignored and the new workspace named after the source, so later commands naming it
   failed (#603).
+- OpenAPI server variables whose names sanitize to the same environment name
+  (`{release-name}` and `{release_name}`) each keep their own value: the import gives each a
+  distinct name (`release_name_2`, `release_name`), never reusing `baseUrl` or, for a relative URL,
+  `origin`. Both used to be written as `release_name`, so a request ran against the wrong path
+  (#580).
 
 ## [0.1.8] - 2026-11-21
 
@@ -114,12 +144,6 @@ cannot read them, so keep a copy of each profile if you may need to downgrade.
 
 ### Security
 
-- Workspace bundles no longer write the stored data of a dataset with `sensitive_columns` as a
-  plaintext `attachments/` entry, in either mode and even when a request uses the same file
-  (GHSA-7p29-5g2w-wwq4). An encrypted transfer carries it inside the encrypted vault and restores
-  it on import. A share-safe bundle leaves it out and lists the dataset (and any such request)
-  among its excluded items; the imported dataset names a linked file to choose on the target
-  machine. An Anvil without this change opens such an encrypted transfer without that data.
 - Import report text and imported names no longer leak a credential through the free-text
   redaction (#584, #593, #595, #596, GHSA-84pr-239v-mv8x). Report entries no longer quote source
   values at all. The redaction that remains for pointer tokens, external references, redaction
@@ -437,11 +461,6 @@ cannot read them, so keep a copy of each profile if you may need to downgrade.
 
 ### Fixed
 
-- OpenAPI server variables whose names sanitize to the same environment name
-  (`{release-name}` and `{release_name}`) each keep their own value: the import gives each a
-  distinct name (`release_name_2`, `release_name`), never reusing `baseUrl` or, for a relative URL,
-  `origin`. Both used to be written as `release_name`, so a request ran against the wrong path
-  (#580).
 - Workspace bundle export previews list every JWT-SVID token-file path (`file` source) the exported
   workspaces, folders and requests name, nested multi-auth sets included, and every linked-file or
   token-file path only a saved request revision names. The manifest's device bindings note that
