@@ -45,7 +45,7 @@ use anvil_domain::tls::{
 };
 use anvil_engine::ExecutionOutput;
 use anvil_engine::context::ExecutionContext;
-use anvil_engine::prepare::{Target, parse_target, preflight_authority};
+use anvil_engine::prepare::{Target, parse_target, preflight_authority, split_origin};
 use anvil_engine::vars::{DEFERRED_SECRET_VALUE, Resolver, VarEntry, is_deferred_secret, mask_dynamic};
 use anvil_transport::recorder::EventCtx;
 use serde_json::Value;
@@ -122,11 +122,64 @@ fn fixed(r: &Resolver, template: &str, field: &str) -> Option<String> {
     (!resolved.contains(PER_SEND)).then_some(resolved)
 }
 
+/// Whether the already-resolved URL prefix `acc` already fixes the scheme and
+/// authority that [`parse_target`] will extract, regardless of any suffix that
+/// follows.
+fn origin_complete(acc: &str) -> bool {
+    let s = acc.trim_start();
+    if s.is_empty() {
+        return false;
+    }
+    let split = split_origin(s);
+    if !split.scheme.is_empty() {
+        split.scheme.len() + 3 + split.authority.len() < s.len()
+    } else {
+        split.authority.len() < s.len() && !s.ends_with(":/")
+    }
+}
+
+/// Resolve enough of `template` (with per-send dynamic helpers masked as
+/// [`PER_SEND`]) to determine its scheme and authority as [`parse_target`] sees
+/// them. Unresolved variables that appear only in the path, query or fragment
+/// after the origin is already fixed do not obscure the origin; any variable in
+/// or before the origin still resolves (or fails closed with `None`).
+fn resolve_url_origin(r: &Resolver, template: &str, field: &str) -> Option<String> {
+    let masked = mask_dynamic(template, PER_SEND);
+    let mut acc = String::with_capacity(masked.len());
+    let mut rest = masked.as_str();
+    while !rest.is_empty() {
+        let Some(open) = rest.find("{{") else {
+            acc.push_str(rest);
+            break;
+        };
+        if open > 0 {
+            acc.push_str(&rest[..open]);
+            if origin_complete(&acc) {
+                return Some(acc);
+            }
+        }
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else {
+            // Unterminated braces are literal text, matching `Resolver::resolve`.
+            acc.push_str(&rest[open..]);
+            break;
+        };
+        let token = &rest[open..open + 2 + close + 2];
+        let resolved = r.resolve(token, field).ok()?;
+        acc.push_str(&resolved);
+        rest = &after[close + 2..];
+        if origin_complete(&acc) {
+            return Some(acc);
+        }
+    }
+    Some(acc)
+}
+
 /// The target the engine parses the URL `template` into for `schemes`;
-/// `None` when a per-send value reaches its scheme, host or port, or it does
-/// not resolve or parse.
+/// `None` when a per-send value reaches its scheme, host or port, or its
+/// origin does not resolve or parse.
 fn fixed_target(r: &Resolver, template: &str, field: &str, schemes: &[&str]) -> Option<Target> {
-    let url = r.resolve(&mask_dynamic(template, PER_SEND), field).ok()?;
+    let url = resolve_url_origin(r, template, field)?;
     let target = parse_target(&url, schemes, &mut Vec::new()).ok()?;
     (!target.scheme.contains(PER_SEND) && !target.authority.contains(PER_SEND)).then_some(target)
 }
@@ -139,7 +192,7 @@ fn url_target(ctx: &ExecutionContext, r: &Resolver) -> Option<Target> {
 /// Like [`url_target`], keeping [`PER_SEND`] stand-ins in place so a scope
 /// mutation that alters a variable beside a per-send helper is still detected.
 fn masked_url_target(ctx: &ExecutionContext, r: &Resolver) -> Option<Target> {
-    let url = r.resolve(&mask_dynamic(&ctx.spec.url, PER_SEND), "url").ok()?;
+    let url = resolve_url_origin(r, &ctx.spec.url, "url")?;
     parse_target(&url, anvil_load::protocol::send_schemes(ctx.spec.protocol), &mut Vec::new()).ok()
 }
 
@@ -163,7 +216,7 @@ fn masque_route(ctx: &ExecutionContext, r: &Resolver) -> Option<Option<(String, 
 fn masked_masque_route(ctx: &ExecutionContext, r: &Resolver) -> Option<Option<(String, String)>> {
     let masque = ctx.spec.udp.as_ref().and_then(|u| u.masque.as_ref()).filter(|_| ctx.spec.protocol == Protocol::Udp);
     let Some(m) = masque else { return Some(None) };
-    let url = r.resolve(&mask_dynamic(&m.proxy_url, PER_SEND), "udp.masque.proxy_url").ok()?;
+    let url = resolve_url_origin(r, &m.proxy_url, "udp.masque.proxy_url")?;
     let proxy = parse_target(&url, &["https", "http"], &mut Vec::new()).ok()?;
     let template = r.resolve(&mask_dynamic(&m.uri_template, PER_SEND), "udp.masque.uri_template").ok()?;
     Some(Some((origin_of(&proxy), template)))
@@ -1142,8 +1195,45 @@ mod tests {
         assert_eq!(origin("https://user@example.com/", Protocol::Http), None, "the engine refuses it");
         assert_eq!(origin("https://{{$uuid}}.example.com/", Protocol::Http), None);
         assert_eq!(origin("https://example.com/{{$uuid}}", Protocol::Http), Some("https://example.com:443".into()));
+        // Unresolved path/query/fragment variables do not obscure a fixed origin,
+        // while unresolved variables that could reach scheme, host or port still fail closed.
+        assert_eq!(origin("https://SHOP.example:443/v1/orders?page={{missing}}", Protocol::Http), Some("https://shop.example:443".into()));
+        assert_eq!(origin("shop.example/v1?page={{missing}}", Protocol::Http), Some("https://shop.example:443".into()));
+        assert_eq!(origin("https://shop.example?page={{missing}}", Protocol::Http), Some("https://shop.example:443".into()));
+        assert_eq!(origin("https://shop.example#{{missing}}", Protocol::Http), Some("https://shop.example:443".into()));
+        assert_eq!(origin("https://{{missing}}/v1", Protocol::Http), None);
+        assert_eq!(origin("https://shop.example{{missing}}/v1", Protocol::Http), None);
+        assert_eq!(origin("{{missing}}://shop.example/v1", Protocol::Http), None);
+        assert_eq!(origin("https://shop.example:{{missing}}/v1", Protocol::Http), None);
         let unknown = Binding::of(&ExecutionContext::standalone(RequestSpec::http("GET", "https://{{$uuid}}/")));
         assert!(!unknown.matches(&Binding::of(&ExecutionContext::standalone(RequestSpec::http("GET", "https://{{$uuid}}/")))));
+
+        // Variables before the path delimiter (including a split `://` separator) still resolve fully.
+        let mut split_ctx =
+            ExecutionContext::standalone(RequestSpec::http("GET", "{{proto}}:/{{slash}}attacker.example/v1?page={{missing}}"));
+        split_ctx.var_layers.push(anvil_engine::vars::VarLayer {
+            label: "workspace".into(),
+            vars: vec![
+                VarEntry { name: "proto".into(), value: "http".into(), secret: false, literal: false },
+                VarEntry { name: "slash".into(), value: "/".into(), secret: false, literal: false },
+            ],
+        });
+        assert_eq!(url_target(&split_ctx, &fixed_resolver(&split_ctx)).as_ref().map(origin_of), Some("http://attacker.example:80".into()));
+
+        // A `{{base}}` variable fixing scheme+host followed by a literal delimiter and unresolved query var resolves cleanly,
+        // while `{{base}}{{missing}}` without a delimiter fails closed.
+        let base_var = || {
+            vec![anvil_engine::vars::VarLayer {
+                label: "workspace".into(),
+                vars: vec![VarEntry { name: "base".into(), value: "https://shop.example".into(), secret: false, literal: false }],
+            }]
+        };
+        let mut with_delim = ExecutionContext::standalone(RequestSpec::http("GET", "{{base}}/v1/orders?page={{missing}}"));
+        with_delim.var_layers = base_var();
+        assert_eq!(url_target(&with_delim, &fixed_resolver(&with_delim)).as_ref().map(origin_of), Some("https://shop.example:443".into()));
+        let mut no_delim = ExecutionContext::standalone(RequestSpec::http("GET", "{{base}}{{missing}}"));
+        no_delim.var_layers = base_var();
+        assert_eq!(url_target(&no_delim, &fixed_resolver(&no_delim)).as_ref().map(origin_of), None);
     }
 
     /// A standalone context that selects a TLS profile `name`.
