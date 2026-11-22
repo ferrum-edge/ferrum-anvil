@@ -11,7 +11,8 @@ The stored data of a dataset with `sensitive_columns` is no longer written as a
 plaintext `attachments/` entry, nor is the same file when a request uses it.
 
 - An encrypted transfer that includes the dataset carries that data inside
-  its encrypted vault. The import stores it only while a dataset with
+  its encrypted vault (a file missing on the exporting device is listed among
+  the excluded items, as before). The import stores it only while a dataset with
   sensitive columns in the receiving profile uses it, so a Merge that keeps an
   existing dataset in place (a linked one, for example) can leave it unstored;
   the preview says so. Anvil 0.1.8 and
@@ -43,7 +44,8 @@ even if the destination URL and the credential stay the same. The check
 compares a vault-backed request's effective settings, so changing one of them
 (a response size limit, for example) can prompt as well. Ordinary edits, such
 as renaming a request or editing a header other than `Host`, are saved without
-a prompt. Declining the prompt, or the profile locking while it is open, leaves
+a prompt when Anvil can verify that the binding is unchanged; when it cannot
+resolve the request's destination, it asks. Declining the prompt, or the profile locking while it is open, leaves
 the change unsaved.
 
 ### Other changes

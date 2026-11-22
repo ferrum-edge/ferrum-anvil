@@ -14,7 +14,7 @@ request, saving a workspace, folder, environment, TLS or proxy profile, or the d
 settings) now need native OS confirmation, so a compromised renderer can no longer bind or redirect
 vault-backed credentials without the user
 ([GHSA-qxwm-425v-8xgf](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-qxwm-425v-8xgf)).
-`url` 2.5.9 fixes RUSTSEC-2026-0592. OpenAPI server variables whose names sanitize alike,
+`url` 2.5.9 fixes RUSTSEC-2026-0592. Document-level OpenAPI server variables whose names sanitize alike,
 `anvil import-spec` given both a workspace and `--new-workspace`, and Workbench shortcuts pressed
 right after switching tabs are fixed too. 0.1.9 keeps 0.1.8's profile database and settings
 format. Anvil 0.1.8 and earlier cannot read the sealed dataset data of an encrypted transfer made by
@@ -27,7 +27,7 @@ argument passed with `--new-workspace`: read the Breaking section below and the
 - Workspace bundles no longer write the stored data of a dataset with `sensitive_columns` as a
   plaintext `attachments/` entry, in either mode and even when a request uses the same file
   (#602, GHSA-7p29-5g2w-wwq4). An encrypted transfer that includes the dataset carries it inside
-  the encrypted vault, and the import stores it while a dataset with sensitive columns in the
+  the encrypted vault (a file missing on the exporting device travels without it, as before), and the import stores it while a dataset with sensitive columns in the
   receiving profile uses it (a Merge that keeps an existing dataset in place can leave it unstored,
   and the preview says so). A share-safe bundle leaves it out and lists the dataset (and any such
   request) among its excluded items; the imported dataset (and any such request) names a linked
