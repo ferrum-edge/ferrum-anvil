@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `anvil import-spec` refuses a workspace argument passed with `--new-workspace` as a usage error
+  (exit 3), and its usage line shows the two as alternatives (`<WORKSPACE|--new-workspace>`). The
+  argument was ignored and the new workspace named after the source, so later commands naming it
+  failed (#603).
+
 ## [0.1.8] - 2026-11-21
 
 Security release: it fixes five Anvil advisories. The default Postman, Insomnia, cURL and HAR

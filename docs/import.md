@@ -488,6 +488,10 @@ opening or closing the import root does not drop a token already acquired.
 
 ### Filling in required variables from the CLI
 
+`anvil import-spec` takes exactly one target: a workspace (its id or name) or
+`--new-workspace`, a flag that creates a workspace named after the source and
+takes no value. Passing both is refused as a usage error (exit 3).
+
 After an import, `anvil import-spec` lists the environments it brought and,
 when there is one, prints a ready-to-run `anvil env set` command under each
 `required_variables` entry (a secret's command reads the value from stdin; a
