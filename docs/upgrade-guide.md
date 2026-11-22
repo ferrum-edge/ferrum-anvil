@@ -10,9 +10,11 @@ and the app settings format is the same, so no migration or enrollment runs.
 The stored data of a dataset with `sensitive_columns` is no longer written as a
 plaintext `attachments/` entry, nor is the same file when a request uses it.
 
-- An encrypted transfer carries that data inside its encrypted vault and
-  restores it on import, except that a Merge which keeps an existing, linked
-  dataset in place does not store it (the preview says so). Anvil 0.1.8 and
+- An encrypted transfer that includes the dataset carries that data inside
+  its encrypted vault. The import stores it only while a dataset with
+  sensitive columns in the receiving profile uses it, so a Merge that keeps an
+  existing dataset in place (a linked one, for example) can leave it unstored;
+  the preview says so. Anvil 0.1.8 and
   earlier cannot read that data: they ignore it, so the dataset arrives
   without its stored file, and the import is refused (nothing is imported)
   when the receiving profile already stores content with the same hash.
@@ -23,6 +25,8 @@ plaintext `attachments/` entry, nor is the same file when a request uses it.
   request using the same file, among its excluded items. The imported dataset
   (and any such request) names a linked file; choose it on the receiving machine with **Choose new
   location…**.
+- A bundle of only another workspace, whose request uses the same file, leaves
+  the file out in both modes and lists the request among its excluded items.
 - Bundles made by 0.1.8 or earlier still carry such data as a plaintext entry.
   Treat them as containing those secrets, and export again with 0.1.9 where
   that matters.
@@ -35,8 +39,11 @@ request, or saving a workspace, folder, environment, TLS profile, proxy profile
 or the default connection settings, when the change affects where or how
 vault-backed credentials or secrets are sent (for example a new destination,
 routing or proxy, or TLS policy such as turning off certificate verification),
-even if the destination URL and the credential stay the same. Ordinary edits are saved without a
-prompt. Declining the prompt, or the profile locking while it is open, leaves
+even if the destination URL and the credential stay the same. The check
+compares a vault-backed request's effective settings, so changing one of them
+(a response size limit, for example) can prompt as well. Ordinary edits, such
+as renaming a request or editing a header other than `Host`, are saved without
+a prompt. Declining the prompt, or the profile locking while it is open, leaves
 the change unsaved.
 
 ### Other changes

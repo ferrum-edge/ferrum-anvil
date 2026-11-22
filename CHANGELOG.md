@@ -6,8 +6,8 @@
 
 Security release: it fixes two high-severity Anvil advisories. Workspace bundles no longer write
 the stored data of a dataset with `sensitive_columns` as a plaintext entry: an encrypted transfer
-seals it inside the encrypted vault, and a share-safe bundle leaves it out and lists the dataset
-among its excluded items
+that includes the dataset seals it inside the encrypted vault, and a share-safe bundle leaves it
+out and lists the dataset among its excluded items
 ([GHSA-7p29-5g2w-wwq4](https://github.com/ferrum-edge/ferrum-anvil/security/advisories/GHSA-7p29-5g2w-wwq4)).
 Desktop saves that establish or change a vault-backed authority binding (creating or saving a
 request, saving a workspace, folder, environment, TLS or proxy profile, or the default connection
@@ -26,11 +26,14 @@ argument passed with `--new-workspace`: read the Breaking section below and the
 
 - Workspace bundles no longer write the stored data of a dataset with `sensitive_columns` as a
   plaintext `attachments/` entry, in either mode and even when a request uses the same file
-  (#602, GHSA-7p29-5g2w-wwq4). An encrypted transfer carries it inside the encrypted vault and
-  restores it on import (a Merge that keeps an existing, linked dataset in place does not store
-  it, and its preview says so). A share-safe bundle leaves it out and lists the dataset (and any such request)
-  among its excluded items; the imported dataset names a linked file to choose on the target
-  machine. An Anvil without this change opens such an encrypted transfer without that data.
+  (#602, GHSA-7p29-5g2w-wwq4). An encrypted transfer that includes the dataset carries it inside
+  the encrypted vault, and the import stores it while a dataset with sensitive columns in the
+  receiving profile uses it (a Merge that keeps an existing dataset in place can leave it unstored,
+  and the preview says so). A share-safe bundle leaves it out and lists the dataset (and any such
+  request) among its excluded items; the imported dataset (and any such request) names a linked
+  file to choose on the target machine. A bundle of only another workspace whose request uses the
+  same file leaves it out in both modes. An Anvil without this change cannot read the sealed data:
+  see the [upgrade guide](docs/upgrade-guide.md#019).
 - Desktop persistence mutations (`request_create`, `request_save`, `workspace_save`, `folder_save`,
   `environment_save`, `tls_profile_save`, `proxy_profile_save`, and app default connection settings)
   now require native OS confirmation (`crate::presence`) whenever they establish or alter a
@@ -51,7 +54,7 @@ argument passed with `--new-workspace`: read the Breaking section below and the
   (exit 3), and its usage line shows the two as alternatives (`<WORKSPACE|--new-workspace>`). The
   argument was ignored and the new workspace named after the source, so later commands naming it
   failed (#603).
-- OpenAPI server variables whose names sanitize to the same environment name
+- Document-level OpenAPI server variables whose names sanitize to the same environment name
   (`{release-name}` and `{release_name}`) each keep their own value: the import gives each a
   distinct name (`release_name_2`, `release_name`), never naming one `baseUrl` or, for a relative
   URL, `origin`. Both used to be written as `release_name`, so a request ran against the wrong path
