@@ -422,6 +422,11 @@ cannot read them, so keep a copy of each profile if you may need to downgrade.
 
 ### Fixed
 
+- OpenAPI server variables whose names sanitize to the same environment name
+  (`{release-name}` and `{release_name}`) each keep their own value: the import gives each a
+  distinct name (`release_name_2`, `release_name`), never reusing `baseUrl` or, for a relative URL,
+  `origin`. Both used to be written as `release_name`, so a request ran against the wrong path
+  (#580).
 - Workspace bundle export previews list every JWT-SVID token-file path (`file` source) the exported
   workspaces, folders and requests name, nested multi-auth sets included, and every linked-file or
   token-file path only a saved request revision names. The manifest's device bindings note that

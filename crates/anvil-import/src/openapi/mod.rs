@@ -29,8 +29,8 @@ use refs::Refs;
 use schema::SampleGen;
 use serde_json::{Map, Value, json};
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) struct Ctx<'a> {
     pub root: &'a Value,
@@ -41,6 +41,9 @@ pub(crate) struct Ctx<'a> {
     /// Swagger 2.0 document-level `produces` and `consumes`, read once rather
     /// than by every operation that inherits them.
     pub swagger_defaults: SwaggerDefaults,
+    /// [`request_variable_names`], read only once a server variable needs a
+    /// suffix ([`Ctx::taken_by_requests`]).
+    request_variable_names: std::cell::OnceCell<HashSet<String>>,
 }
 
 /// What an operation without its own `produces`/`consumes` inherits.
@@ -83,6 +86,162 @@ fn is_32(d: Dialect) -> bool {
     d == Dialect::OpenApi32
 }
 
+impl Ctx<'_> {
+    /// Whether a request of the document can use `name` besides its server
+    /// variables ([`request_variable_names`]); read on first use.
+    fn taken_by_requests(&self, name: &str) -> bool {
+        self.request_variable_names.get_or_init(|| request_variable_names(self.root, self.refs.max_depth)).contains(name)
+    }
+}
+
+/// The `{{name}}`s a request of the document can use besides its server
+/// variables: the `{…}` segments of every path template, every declared
+/// parameter's name (path item, its local fields beside a `$ref`, operation
+/// and component level, 3.2 `additionalOperations` included), each security
+/// scheme's credential names (by scheme and requirement key), and the
+/// default-less variables of path- and operation-level servers, all
+/// sanitized as the importer names them. Local `$ref`s are followed as the
+/// importer follows them (percent-decoded, at most `max_depth` hops, at most
+/// [`refs::MAX_REF_LEN`] bytes), with no report and no budget charged, and
+/// each referenced object is read once however many paths share it.
+fn request_variable_names(root: &Value, max_depth: usize) -> HashSet<String> {
+    fn local<'a>(root: &'a Value, mut v: &'a Value, max_depth: usize) -> Option<&'a Value> {
+        for _ in 0..=max_depth {
+            let Some(r) = v.get("$ref").and_then(Value::as_str) else { return Some(v) };
+            let frag = r.strip_prefix('#').filter(|f| r.len() <= refs::MAX_REF_LEN && (f.is_empty() || f.starts_with('/')))?;
+            let decoded = percent_encoding::percent_decode_str(frag).decode_utf8_lossy();
+            v = root.pointer(&decoded)?;
+        }
+        None
+    }
+    fn template_names(text: &str, out: &mut HashSet<String>, keep: impl Fn(&str) -> bool) {
+        let mut rest = text;
+        while let Some(open) = rest.find('{') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('}') else { break };
+            if keep(&after[..close]) {
+                out.insert(sanitize_var(&after[..close]));
+            }
+            rest = &after[close + 1..];
+        }
+    }
+    struct Scan<'a> {
+        root: &'a Value,
+        max_depth: usize,
+        out: HashSet<String>,
+        /// Objects already read (by address): a shared one is read once.
+        seen: HashSet<*const Value>,
+        schemes: Vec<&'a str>,
+    }
+    impl<'a> Scan<'a> {
+        fn first(&mut self, v: &'a Value) -> bool {
+            self.seen.insert(v as *const Value)
+        }
+        fn parameters(&mut self, list: Option<&'a Value>) {
+            for p in list.and_then(Value::as_array).into_iter().flatten() {
+                let Some(p) = local(self.root, p, self.max_depth) else { continue };
+                if self.first(p)
+                    && let Some(name) = p.get("name").and_then(Value::as_str)
+                {
+                    self.out.insert(sanitize_var(name));
+                }
+            }
+        }
+        fn servers(&mut self, list: Option<&'a Value>) {
+            for server in list.and_then(Value::as_array).into_iter().flatten() {
+                let (Some(url), decl) = (server.get("url").and_then(Value::as_str), server.get("variables")) else { continue };
+                template_names(url, &mut self.out, |name| decl.and_then(|d| d.get(name)).and_then(|d| d.get("default")).is_none());
+            }
+        }
+        fn security(&mut self, list: Option<&'a Value>) {
+            for requirement in list.and_then(Value::as_array).into_iter().flatten() {
+                self.schemes.extend(requirement.as_object().into_iter().flat_map(|r| r.keys()).map(String::as_str));
+            }
+        }
+        fn operation(&mut self, op: &'a Value) {
+            if self.first(op) {
+                self.parameters(op.get("parameters"));
+                self.servers(op.get("servers"));
+                self.security(op.get("security"));
+            }
+        }
+        /// A Path Item's own fields: parameters, servers and operations.
+        fn item_fields(&mut self, item: &'a Value) {
+            self.parameters(item.get("parameters"));
+            self.servers(item.get("servers"));
+            let Some(o) = item.as_object() else { return };
+            for (key, op) in o {
+                if key == "additionalOperations" {
+                    for op in op.as_object().into_iter().flat_map(|a| a.values()) {
+                        self.operation(op);
+                    }
+                } else if !matches!(key.as_str(), "parameters" | "servers" | "$ref") && op.is_object() {
+                    self.operation(op);
+                }
+            }
+        }
+    }
+    let mut scan = Scan { root, max_depth, out: HashSet::new(), seen: HashSet::new(), schemes: vec![] };
+    for (path, item) in root.get("paths").and_then(Value::as_object).into_iter().flatten() {
+        template_names(path, &mut scan.out, |_| true);
+        // Local fields beside a `$ref`, then the shared target, once.
+        scan.item_fields(item);
+        if item.get("$ref").is_some()
+            && let Some(target) = local(root, item, max_depth)
+            && scan.first(target)
+        {
+            scan.item_fields(target);
+        }
+    }
+    let components = root.pointer("/components/parameters").or_else(|| root.get("parameters")).and_then(Value::as_object);
+    for p in components.into_iter().flat_map(|c| c.values()) {
+        if let Some(name) = local(root, p, max_depth).and_then(|p| p.get("name")).and_then(Value::as_str) {
+            scan.out.insert(sanitize_var(name));
+        }
+    }
+    scan.security(root.get("security"));
+    let defined = root.pointer("/components/securitySchemes").or_else(|| root.get("securityDefinitions")).and_then(Value::as_object);
+    let mut schemes: HashSet<&str> = scan.schemes.drain(..).collect();
+    schemes.extend(defined.into_iter().flat_map(|s| s.keys()).map(String::as_str));
+    for key in schemes {
+        let v = sanitize_var(key);
+        for suffix in ["", "_username", "_password", "_client_id", "_client_secret"] {
+            scan.out.insert(format!("{v}{suffix}"));
+        }
+    }
+    // Every `{{name}}` a decoded string of the document writes (JSON or YAML
+    // escapes can hide one from the raw-text reservation), as written and
+    // as a placeholder would spell it.
+    let references = |text: &str, out: &mut HashSet<String>| {
+        let mut rest = text;
+        while let Some(open) = rest.find("{{") {
+            let after = &rest[open + 2..];
+            let Some(close) = after.find("}}") else { break };
+            let expr = after[..close].trim();
+            let name = expr.strip_prefix("_.").unwrap_or(expr);
+            if !name.is_empty() && name.len() <= 256 {
+                out.insert(name.to_string());
+                out.insert(sanitize_var(name));
+            }
+            rest = &after[close + 2..];
+        }
+    };
+    let mut stack = vec![root];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::String(text) => references(text, &mut scan.out),
+            Value::Array(a) => stack.extend(a.iter()),
+            // Member names too: an example's keys are sent as written.
+            Value::Object(o) => {
+                o.keys().for_each(|k| references(k, &mut scan.out));
+                stack.extend(o.values());
+            }
+            _ => {}
+        }
+    }
+    scan.out
+}
+
 fn only_32(ctx: &Ctx, b: &mut Builder, at: &str, what: &'static str) {
     b.report.warn(
         "openapi32_construct",
@@ -105,6 +264,7 @@ pub(crate) fn import(root: &Value, dialect: Dialect, b: &mut Builder) -> Result<
         } else {
             SwaggerDefaults::default()
         },
+        request_variable_names: std::cell::OnceCell::new(),
     };
 
     // Info.
@@ -239,7 +399,7 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
             .unwrap_or_else(|| vec![json!({"url": "/"})]);
         for (i, s) in servers.iter().enumerate() {
             let sptr = format!("/servers/{i}");
-            let (url, vars) = server_url(b, s, &sptr, false);
+            let (url, vars) = server_url(b, s, &sptr, false, &|n: &str| ctx.taken_by_requests(n));
             let name = str_of(s, "name")
                 .filter(|_| is_32(ctx.dialect))
                 .or_else(|| str_of(s, "description"))
@@ -281,10 +441,11 @@ fn import_servers(ctx: &Ctx, b: &mut Builder) {
 /// server variables are replaced by their defaults (operation/path-level
 /// overrides); otherwise they become `{{variables}}` defined in the
 /// environment. Each variable is rendered once however often the URL uses it
-/// (its default, the check against its `enum`, its description), and the
-/// text read and written is charged to the import's text budget: an
-/// operation-level server is converted for every operation that uses it.
-fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, Vec<Variable>) {
+/// (its default, the check against its `enum`, its description), under its
+/// own `{{variable}}` name ([`server_aliases`]), and the text read and
+/// written is charged to the import's text budget: an operation-level server
+/// is converted for every operation that uses it.
+fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool, avoid: &dyn Fn(&str) -> bool) -> (String, Vec<Variable>) {
     let raw = str_of(s, "url").unwrap_or("/").trim();
     let empty = Map::new();
     let decl = s.get("variables").and_then(Value::as_object).unwrap_or(&empty);
@@ -292,6 +453,15 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
     let mut out = String::new();
     let mut rendered: HashMap<&str, String> = HashMap::new();
     let mut rest = if b.charge_text(sptr, raw.len()) { raw } else { "" };
+    // An operation-level server's placeholders sit beside the document's
+    // server environment, so its names are avoided too.
+    // ... and a name the source itself writes as `{{name}}`.
+    let taken = |n: &str| avoid(n) || (inline && b.server_variable_names.contains(n)) || b.env_names.is_used(n);
+    let aliases = server_aliases(rest, decl, inline, b.text_left(), &taken);
+    if !inline {
+        // Every name a document-level server gives, required ones included.
+        b.server_variable_names.extend(aliases.values().cloned());
+    }
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
@@ -304,7 +474,12 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
         rest = &after[close + 1..];
         let text = match rendered.entry(name) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(server_variable(b, decl, name, sptr, inline, &mut vars)),
+            Entry::Vacant(e) => {
+                // An inlined default needs no name of its own; a variable
+                // without one keeps its plain sanitized name if free.
+                let alias = aliases.get(name).cloned().unwrap_or_else(|| sanitize_var(name));
+                e.insert(server_variable(b, decl, name, &alias, sptr, inline, &mut vars))
+            }
         };
         if !b.charge_text(sptr, text.len()) {
             rest = "";
@@ -328,10 +503,155 @@ fn server_url(b: &mut Builder, s: &Value, sptr: &str, inline: bool) -> (String, 
     (url, vars)
 }
 
-/// Render server variable `name` of `decl` once: the text the URL gets for
-/// it, with its `Variable` (or required variable) recorded. Every `enum`
-/// value read is charged.
-fn server_variable(b: &mut Builder, decl: &Map<String, Value>, name: &str, sptr: &str, inline: bool, vars: &mut Vec<Variable>) -> String {
+/// The variables `url` uses, in first-use order, each with whether it is
+/// written as a `{{variable}}` (rather than its default inlined), as
+/// [`server_url`] reads them.
+fn server_url_names<'a>(url: &'a str, decl: &Map<String, Value>, inline: bool) -> Vec<(&'a str, bool)> {
+    let mut names = vec![];
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut rest = url;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else { break };
+        let name = &after[..close];
+        if seen.insert(name) {
+            let has_default = decl.get(name).and_then(|d| d.get("default")).is_some();
+            names.push((name, !(inline && has_default)));
+        }
+        rest = &after[close + 1..];
+    }
+    names
+}
+
+/// Whether [`server_url`] renders `url` as a relative URL (prefixed with
+/// `{{origin}}`): the same check (no `://` once trailing `/` are trimmed, and
+/// not starting with `{{`) on the text it renders, with each inlined default
+/// in place and every other variable as a `{{…}}` placeholder, inserted only
+/// while they fit `budget` bytes, as the renderer charges them. Nothing is
+/// built: the text is read once, character by character.
+fn renders_relative(url: &str, decl: &Map<String, Value>, inline: bool, budget: usize) -> bool {
+    struct Scan {
+        head: String,
+        last: [char; 2],
+        /// A `://` was read; `confirmed` once a character other than `/`
+        /// follows it, which trimming the trailing `/` keeps.
+        scheme: bool,
+        confirmed: bool,
+    }
+    impl Scan {
+        fn feed(&mut self, text: &str) {
+            for c in text.chars() {
+                if self.head.len() < 2 {
+                    self.head.push(c);
+                }
+                if self.scheme && c != '/' {
+                    self.confirmed = true;
+                }
+                if self.last == [':', '/'] && c == '/' {
+                    self.scheme = true;
+                }
+                self.last = [self.last[1], c];
+            }
+        }
+    }
+    let mut scan = Scan { head: String::new(), last: ['\0', '\0'], scheme: false, confirmed: false };
+    let mut defaults: HashMap<&str, Option<String>> = HashMap::new();
+    let (mut rest, mut left) = (url, budget);
+    while let Some(open) = rest.find('{') {
+        scan.feed(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            scan.feed(&rest[open..]);
+            rest = "";
+            break;
+        };
+        let name = &after[..close];
+        rest = &after[close + 1..];
+        let text =
+            defaults.entry(name).or_insert_with(|| decl.get(name).and_then(|d| d.get("default")).filter(|_| inline).map(scalar_text));
+        let text = text.as_deref().unwrap_or("{{v}}");
+        if text.len() >= left {
+            rest = "";
+            break;
+        }
+        left -= text.len();
+        scan.feed(text);
+    }
+    scan.feed(rest);
+    !scan.confirmed && !scan.head.starts_with("{{")
+}
+
+/// A distinct `{{variable}}` name for each variable a server URL writes as
+/// one, so each keeps its own value: its sanitized name ([`sanitize_var`]),
+/// or, when another variable holds that name, the next free `_2`, `_3`, …
+/// suffix. Every variable that can have its own sanitized name gets it
+/// (`{release_name}` keeps `release_name`, the spelling that is already
+/// sanitized winning, then the first used) before any suffix is given, so
+/// `{release-name}` beside them becomes `release_name_2` only when no
+/// `{release-name-2}` claims that name. The environment's own names are
+/// never given: `baseUrl`, and `origin` when the URL renders relative, nor
+/// is a name in `avoid` (other variables a request can use) a suffixed one. A variable whose
+/// default is inlined needs no name. The same URL always gets the same names.
+fn server_aliases<'a>(
+    url: &'a str,
+    decl: &Map<String, Value>,
+    inline: bool,
+    budget: usize,
+    avoid: &dyn Fn(&str) -> bool,
+) -> HashMap<&'a str, String> {
+    let names: Vec<&str> = server_url_names(url, decl, inline).into_iter().filter(|(_, named)| *named).map(|(n, _)| n).collect();
+    let mut used = crate::common::PlaceholderNames::default();
+    // A document-level server's environment holds `baseUrl`; an operation-
+    // level server may refer to it, as `{baseUrl}`, and keeps that name.
+    if !inline {
+        used.reserve("baseUrl");
+    }
+    if renders_relative(url, decl, inline, budget) {
+        used.reserve("origin");
+    }
+    let mut aliases: HashMap<&str, String> = HashMap::with_capacity(names.len());
+    // Natural names: the already-sanitized spellings first, then the rest
+    // in first-use order; then suffixes for the variables left without one.
+    for exact in [true, false] {
+        for &name in &names {
+            let base = sanitize_var(name);
+            if (base == name) == exact && !aliases.contains_key(name) && used.claim(&base) {
+                aliases.insert(name, base);
+            }
+        }
+    }
+    // A suffixed name is never one this server holds or one in `avoid`
+    // (looked up there, never copied).
+    let mut next: HashMap<String, usize> = HashMap::new();
+    for &name in &names {
+        if !aliases.contains_key(name) {
+            let base = sanitize_var(name);
+            let n = next.entry(base.clone()).or_insert(2);
+            let alias = loop {
+                let candidate = format!("{base}_{n}");
+                *n += 1;
+                if !avoid(&candidate) && used.claim(&candidate) {
+                    break candidate;
+                }
+            };
+            aliases.insert(name, alias);
+        }
+    }
+    aliases
+}
+
+/// Render server variable `name` of `decl` once, as `{{alias}}`: the text
+/// the URL gets for it, with its `Variable` (or required variable) recorded.
+/// Every `enum` value read is charged.
+fn server_variable(
+    b: &mut Builder,
+    decl: &Map<String, Value>,
+    name: &str,
+    alias: &str,
+    sptr: &str,
+    inline: bool,
+    vars: &mut Vec<Variable>,
+) -> String {
     let vptr = ptr(&ptr(sptr, "variables"), name);
     let d = decl.get(name);
     if d.is_none() {
@@ -360,10 +680,10 @@ fn server_variable(b: &mut Builder, decl: &Map<String, Value>, name: &str, sptr:
     if inline && let Some(dv) = def {
         return dv;
     }
-    let v = sanitize_var(name);
+    let v = alias;
     match def {
         Some(dv) => {
-            let mut var = Variable::plain(&v, &dv);
+            let mut var = Variable::plain(v, &dv);
             if let Some(e) = values {
                 let mut listed = vec![];
                 for x in e {
@@ -381,7 +701,7 @@ fn server_variable(b: &mut Builder, decl: &Map<String, Value>, name: &str, sptr:
             }
             vars.push(var);
         }
-        None => b.report.require_var(&v, false, "server variable without a default", &vptr),
+        None => b.report.require_var(v, false, "server variable without a default", &vptr),
     }
     format!("{{{{{v}}}}}")
 }
@@ -878,7 +1198,7 @@ fn import_operation(
                 &p,
                 "operation/path-level server overrides the environment baseUrl (variables use their defaults)",
             );
-            server_url(b, s0, &format!("{p}/0"), true).0
+            server_url(b, s0, &format!("{p}/0"), true, &|n: &str| ctx.taken_by_requests(n)).0
         }
         None => "{{baseUrl}}".to_string(),
     };

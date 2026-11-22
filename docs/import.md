@@ -814,8 +814,23 @@ other version (for example 3.3 or 4.0) is refused with
 
 **Structure.** `info.title`/`version`/`summary`/`description` → workspace.
 Each server becomes an environment with `baseUrl` and the server variables
-(defaults as values, enums and descriptions in the variable description);
-3.2 server `name` is the environment name; `server_index` picks the active
+(defaults as values, enums and descriptions in the variable description).
+A variable's environment name is its name sanitized: each run of characters
+other than ASCII letters and digits becomes one `_`, leading and trailing ones
+are dropped (`{_release--name_}` is `release_name`), a name starting with a
+digit gets a leading `_` (`{123}` is `_123`), and a name with no letter or
+digit is `value`. When two variables of a
+server sanitize alike, the one already spelled that way (else the first used)
+keeps the name and the other gets the next free `_2`, `_3`, … suffix that no
+variable of the server has as its own name and no other variable of the
+document can use (a path template or declared parameter, a security scheme's
+credential, a path- or operation-level server's variable, a document-level
+server's variable for an operation-level server, or a `{{name}}` the source
+writes) (`{release-name}/{release_name}` becomes
+`{{release_name_2}}/{{release_name}}`); `baseUrl`, and `origin` when
+the URL is relative, are never given. A path- or operation-level server
+inlines defaults, so only its variables without one take names. The same
+document always gets the same names. 3.2 server `name` is the environment name; `server_index` picks the active
 one. Relative server URLs become `{{origin}}/…` with `origin` required.
 Swagger 2.0 `schemes` × `host` + `basePath` become environments (https is
 assumed and reported when `schemes` is missing). Path- and operation-level

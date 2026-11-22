@@ -885,6 +885,171 @@ fn server_variables_are_rendered_once() {
     assert!(!has(&r, "contradictory_schema"));
 }
 
+/// Server variables whose names sanitize to the same name (`release-name`
+/// and `release_name`) each get their own environment variable, the one
+/// already spelled that way keeping it; a reused variable keeps one name,
+/// and the environment's `baseUrl` (and `origin` for a relative URL) are
+/// never reused (#580).
+#[test]
+fn server_variables_that_sanitize_alike_keep_distinct_names() {
+    let server = |url: &str, vars: serde_json::Value| {
+        let doc = json!({"openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+            "servers": [{"url": url, "variables": vars}], "paths": {"/items": {"get": {"responses": {}}}}});
+        let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+        let vars: Vec<(String, String)> = r.environments[0]
+            .variables
+            .iter()
+            .map(|v| match &v.value {
+                anvil_domain::secret::SensitiveValue::Template { value } => (v.name.clone(), value.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        (vars, r)
+    };
+    let pairs = |p: &[(&str, &str)]| p.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
+
+    let (vars, _) = server(
+        "https://example.test/{release-name}/{release_name}",
+        json!({"release-name": {"default": "v1"}, "release_name": {"default": "v2"}}),
+    );
+    assert_eq!(
+        vars,
+        pairs(&[("baseUrl", "https://example.test/{{release_name_2}}/{{release_name}}"), ("release_name_2", "v1"), ("release_name", "v2")])
+    );
+
+    // A variable used twice keeps one name; three spellings get three names.
+    let (vars, _) = server(
+        "https://{a.b}.example.test/{a-b}/{a.b}/{a_b}",
+        json!({"a.b": {"default": "x"}, "a-b": {"default": "y"}, "a_b": {"default": "z"}}),
+    );
+    assert_eq!(
+        vars,
+        pairs(&[("baseUrl", "https://{{a_b_2}}.example.test/{{a_b_3}}/{{a_b_2}}/{{a_b}}"), ("a_b_2", "x"), ("a_b_3", "y"), ("a_b", "z")])
+    );
+
+    // The environment's own names are never reused.
+    let (vars, _) = server("https://example.test/{baseUrl}", json!({"baseUrl": {"default": "v"}}));
+    assert_eq!(vars, pairs(&[("baseUrl", "https://example.test/{{baseUrl_2}}"), ("baseUrl_2", "v")]));
+    let (vars, r) = server("/api/{origin}", json!({"origin": {"default": "v"}}));
+    assert_eq!(vars, pairs(&[("baseUrl", "{{origin}}/api/{{origin_2}}"), ("origin_2", "v")]));
+    assert!(r.report.required_variables.iter().any(|v| v.name == "origin"));
+    // An absolute URL needs no `origin`, so a variable of that name keeps it.
+    let (vars, _) = server("https://{origin}/api", json!({"origin": {"default": "example.test"}}));
+    assert_eq!(vars, pairs(&[("baseUrl", "https://{{origin}}/api"), ("origin", "example.test")]));
+
+    // A later variable whose own name is the suffixed one keeps it.
+    let (vars, _) = server(
+        "https://example.test/{release-name}/{release_name}/{release-name-2}",
+        json!({"release-name": {"default": "a"}, "release_name": {"default": "b"}, "release-name-2": {"default": "c"}}),
+    );
+    assert_eq!(
+        vars,
+        pairs(&[
+            ("baseUrl", "https://example.test/{{release_name_3}}/{{release_name}}/{{release_name_2}}"),
+            ("release_name_3", "a"),
+            ("release_name", "b"),
+            ("release_name_2", "c")
+        ])
+    );
+
+    // A suffixed name never takes a path parameter's.
+    let doc = json!({"openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+        "servers": [{"url": "https://example.test/{release-name}/{release_name}",
+            "variables": {"release-name": {"default": "v1"}, "release_name": {"default": "v2"}}}],
+        "paths": {"/items/{release_name_2}": {"get": {"responses": {}}}}});
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    let names: Vec<&str> = r.environments[0].variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["baseUrl", "release_name_3", "release_name"]);
+
+    // Nor a security scheme's credential name.
+    let doc = json!({"openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+        "servers": [{"url": "https://example.test/{release-name}/{release_name}",
+            "variables": {"release-name": {"default": "v1"}, "release_name": {"default": "v2"}}}],
+        "components": {"securitySchemes": {"release_name_2": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}}},
+        "paths": {"/items": {"get": {"responses": {}}}}});
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    let names: Vec<&str> = r.environments[0].variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["baseUrl", "release_name_3", "release_name"]);
+
+    // Nor a parameter declared on a shared Path Item, nor an override's
+    // required server variable.
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+        "servers": [{"url": "https://example.test/{release-name}/{release_name}",
+            "variables": {"release-name": {"default": "v1"}, "release_name": {"default": "v2"}}}],
+        "components": {"pathItems": {"shared": {"get": {"parameters": [
+            {"name": "release_name_2", "in": "header", "required": true, "schema": {"type": "string"}}], "responses": {}}}}},
+        "paths": {"/items": {"$ref": "#/components/pathItems/shared"},
+            "/preview": {"get": {"servers": [{"url": "https://preview.example.test/{release_name_3}"}], "responses": {}}}}});
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    let names: Vec<&str> = r.environments[0].variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["baseUrl", "release_name_4", "release_name"]);
+
+    // Nor a sibling server beside a `$ref` (reached through a percent-encoded
+    // pointer), nor a `{{name}}` the source writes.
+    let doc = json!({"openapi": "3.1.0", "info": {"title": "t", "version": "1"},
+        "servers": [{"url": "https://example.test/{release-name}/{release_name}",
+            "variables": {"release-name": {"default": "v1"}, "release_name": {"default": "v2"}}}],
+        "components": {"pathItems": {"Preview": {"get": {"parameters": [
+            {"name": "X-Tenant", "in": "header", "example": "{{release_name_3}}", "schema": {"type": "string"}}], "responses": {}}}}},
+        "paths": {"/preview": {"$ref": "#/components/pathItems/%50review",
+            "servers": [{"url": "https://preview.example.test/{release_name_2}"}]}}});
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    let names: Vec<&str> = r.environments[0].variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["baseUrl", "release_name_4", "release_name"]);
+
+    // A `{{name}}` hidden from the raw text by JSON escapes is avoided too.
+    let raw = r#"{"openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+        "servers": [{"url": "https://example.test/{release-name}/{release_name}",
+            "variables": {"release-name": {"default": "v1"}, "release_name": {"default": "v2"}}}],
+        "paths": {"/items": {"get": {"parameters": [{"name": "X-Tenant", "in": "header", "required": true,
+            "schema": {"type": "string"}, "example": "\u007b\u007brelease_name_2\u007d\u007d"}], "responses": {}}}}}"#;
+    let r = import(raw.as_bytes(), &opts()).unwrap();
+    let names: Vec<&str> = r.environments[0].variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["baseUrl", "release_name_3", "release_name"]);
+
+    // Also as an escaped member name of an example.
+    let raw = r#"{"openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+        "servers": [{"url": "https://example.test/{release-name}/{release_name}",
+            "variables": {"release-name": {"default": "v1"}, "release_name": {"default": "v2"}}}],
+        "paths": {"/items": {"post": {"requestBody": {"content": {"application/json": {
+            "example": {"\u007b\u007brelease_name_2\u007d\u007d": true}}}}, "responses": {}}}}}"#;
+    let r = import(raw.as_bytes(), &opts()).unwrap();
+    let names: Vec<&str> = r.environments[0].variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["baseUrl", "release_name_3", "release_name"]);
+
+    // An operation-level server may refer to the environment's `baseUrl`.
+    let doc = json!({"openapi": "3.0.3", "info": {"title": "t", "version": "1"}, "servers": [{"url": "https://example.test/api"}],
+        "paths": {"/items": {"get": {"servers": [{"url": "{baseUrl}/preview"}], "responses": {}}}}});
+    let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+    assert_eq!(r.requests[0].spec.url, "{{baseUrl}}/preview/items");
+
+    // Operation-level servers inline their defaults: only the variables left
+    // as placeholders take names, and `origin` is kept for the rendered URL.
+    let op_server = |url: &str, vars: serde_json::Value| {
+        let doc = json!({"openapi": "3.0.3", "info": {"title": "t", "version": "1"},
+            "paths": {"/items": {"get": {"servers": [{"url": url, "variables": vars}], "responses": {}}}}});
+        let r = import(doc.to_string().as_bytes(), &opts()).unwrap();
+        let required: Vec<String> = r.report.required_variables.iter().map(|v| v.name.clone()).collect();
+        (r.requests[0].spec.url.clone(), required)
+    };
+    let (url, required) = op_server(
+        "https://{release_name}.example.test/{release-name}",
+        json!({"release_name": {"default": "staging"}, "release-name": {}}),
+    );
+    assert_eq!(url, "https://staging.example.test/{{release_name}}/items");
+    assert!(required.contains(&"release_name".to_string()), "{required:?}");
+    let (url, required) = op_server("{prefix}/{origin}", json!({"prefix": {"default": "/api"}, "origin": {}}));
+    assert_eq!(url, "{{origin}}/api/{{origin_2}}/items");
+    assert!(required.contains(&"origin".to_string()) && required.contains(&"origin_2".to_string()), "{required:?}");
+
+    // Unique names are unchanged, and a second import names them the same.
+    let url = "https://{region}.example.test/{base-path}";
+    let decl = json!({"region": {"default": "eu"}, "base-path": {"default": "v1"}});
+    let (first, _) = server(url, decl.clone());
+    assert_eq!(first, pairs(&[("baseUrl", "https://{{region}}.example.test/{{base_path}}"), ("region", "eu"), ("base_path", "v1")]));
+    assert_eq!(server(url, decl).0, first);
+}
+
 /// Base-26 letters, a valid method token for every `i`.
 fn method_token(mut i: usize) -> String {
     let mut s = String::new();
