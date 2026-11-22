@@ -36,15 +36,21 @@ use anvil_app::App;
 use anvil_app::exec::SendOptions;
 use anvil_domain::Id;
 use anvil_domain::auth::{AuthConfig, KeyLocation};
+use anvil_domain::proxy_protocol::DatagramAuthSpec;
 use anvil_domain::request::{Protocol, RequestSpec};
+use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::EffectiveSettings;
-use anvil_domain::tls::{ProxyKind, ProxyProfile, TlsProfile};
+use anvil_domain::tls::{
+    ClientIdentity, HboneOptions, HostBinding, ProxyKind, ProxyProfile, ServerSpiffeIdentity, TlsMinVersion, TlsProfile,
+};
 use anvil_engine::ExecutionOutput;
 use anvil_engine::context::ExecutionContext;
-use anvil_engine::prepare::{Target, parse_target, preflight_authority};
-use anvil_engine::vars::{Resolver, mask_dynamic};
+use anvil_engine::prepare::{Target, parse_target, preflight_authority, split_origin};
+use anvil_engine::vars::{DEFERRED_SECRET_VALUE, Resolver, VarEntry, is_deferred_secret, mask_dynamic};
 use anvil_transport::recorder::EventCtx;
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -87,7 +93,7 @@ pub(crate) fn carries_vault_authority(ctx: &ExecutionContext) -> bool {
 }
 
 /// Whether `v` holds a vault reference (`SensitiveValue::Secret`).
-fn names_a_secret(v: &Value) -> bool {
+pub(crate) fn names_a_secret(v: &Value) -> bool {
     match v {
         Value::Object(o) => {
             let is_ref = o.get("kind").and_then(Value::as_str) == Some("secret") && o.contains_key("secret");
@@ -116,11 +122,64 @@ fn fixed(r: &Resolver, template: &str, field: &str) -> Option<String> {
     (!resolved.contains(PER_SEND)).then_some(resolved)
 }
 
+/// Whether the already-resolved URL prefix `acc` already fixes the scheme and
+/// authority that [`parse_target`] will extract, regardless of any suffix that
+/// follows.
+fn origin_complete(acc: &str) -> bool {
+    let s = acc.trim_start();
+    if s.is_empty() {
+        return false;
+    }
+    let split = split_origin(s);
+    if !split.scheme.is_empty() {
+        split.scheme.len() + 3 + split.authority.len() < s.len()
+    } else {
+        split.authority.len() < s.len() && !s.ends_with(":/")
+    }
+}
+
+/// Resolve enough of `template` (with per-send dynamic helpers masked as
+/// [`PER_SEND`]) to determine its scheme and authority as [`parse_target`] sees
+/// them. Unresolved variables that appear only in the path, query or fragment
+/// after the origin is already fixed do not obscure the origin; any variable in
+/// or before the origin still resolves (or fails closed with `None`).
+fn resolve_url_origin(r: &Resolver, template: &str, field: &str) -> Option<String> {
+    let masked = mask_dynamic(template, PER_SEND);
+    let mut acc = String::with_capacity(masked.len());
+    let mut rest = masked.as_str();
+    while !rest.is_empty() {
+        let Some(open) = rest.find("{{") else {
+            acc.push_str(rest);
+            break;
+        };
+        if open > 0 {
+            acc.push_str(&rest[..open]);
+            if origin_complete(&acc) {
+                return Some(acc);
+            }
+        }
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else {
+            // Unterminated braces are literal text, matching `Resolver::resolve`.
+            acc.push_str(&rest[open..]);
+            break;
+        };
+        let token = &rest[open..open + 2 + close + 2];
+        let resolved = r.resolve(token, field).ok()?;
+        acc.push_str(&resolved);
+        rest = &after[close + 2..];
+        if origin_complete(&acc) {
+            return Some(acc);
+        }
+    }
+    Some(acc)
+}
+
 /// The target the engine parses the URL `template` into for `schemes`;
-/// `None` when a per-send value reaches its scheme, host or port, or it does
-/// not resolve or parse.
+/// `None` when a per-send value reaches its scheme, host or port, or its
+/// origin does not resolve or parse.
 fn fixed_target(r: &Resolver, template: &str, field: &str, schemes: &[&str]) -> Option<Target> {
-    let url = r.resolve(&mask_dynamic(template, PER_SEND), field).ok()?;
+    let url = resolve_url_origin(r, template, field)?;
     let target = parse_target(&url, schemes, &mut Vec::new()).ok()?;
     (!target.scheme.contains(PER_SEND) && !target.authority.contains(PER_SEND)).then_some(target)
 }
@@ -128,6 +187,13 @@ fn fixed_target(r: &Resolver, template: &str, field: &str, schemes: &[&str]) -> 
 /// The target of the request URL of `ctx` (see [`fixed_target`]).
 fn url_target(ctx: &ExecutionContext, r: &Resolver) -> Option<Target> {
     fixed_target(r, &ctx.spec.url, "url", anvil_load::protocol::send_schemes(ctx.spec.protocol))
+}
+
+/// Like [`url_target`], keeping [`PER_SEND`] stand-ins in place so a scope
+/// mutation that alters a variable beside a per-send helper is still detected.
+fn masked_url_target(ctx: &ExecutionContext, r: &Resolver) -> Option<Target> {
+    let url = resolve_url_origin(r, &ctx.spec.url, "url")?;
+    parse_target(&url, anvil_load::protocol::send_schemes(ctx.spec.protocol), &mut Vec::new()).ok()
 }
 
 /// `scheme://host:port` of `t`, with the port always written.
@@ -146,54 +212,339 @@ fn masque_route(ctx: &ExecutionContext, r: &Resolver) -> Option<Option<(String, 
     Some(Some((origin_of(&proxy), fixed(r, &m.uri_template, "udp.masque.uri_template")?)))
 }
 
+/// Like [`masque_route`], keeping [`PER_SEND`] stand-ins in place.
+fn masked_masque_route(ctx: &ExecutionContext, r: &Resolver) -> Option<Option<(String, String)>> {
+    let masque = ctx.spec.udp.as_ref().and_then(|u| u.masque.as_ref()).filter(|_| ctx.spec.protocol == Protocol::Udp);
+    let Some(m) = masque else { return Some(None) };
+    let url = resolve_url_origin(r, &m.proxy_url, "udp.masque.proxy_url")?;
+    let proxy = parse_target(&url, &["https", "http"], &mut Vec::new()).ok()?;
+    let template = r.resolve(&mask_dynamic(&m.uri_template, PER_SEND), "udp.masque.uri_template").ok()?;
+    Some(Some((origin_of(&proxy), template)))
+}
+
+/// A compared string that never prints its contents in `Debug` output.
+#[derive(Clone, PartialEq, Eq)]
+struct RedactedSecret(String);
+
+type OAuthEndpoints = Vec<(Option<RedactedSecret>, Option<RedactedSecret>)>;
+
+impl fmt::Debug for RedactedSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// Behavioral fields of a [`TlsProfile`] (excluding display name and
+/// timestamps), so renaming a profile does not alter a binding while any
+/// security-relevant edit does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TlsBinding {
+    id: Id,
+    workspace_id: Id,
+    verify: bool,
+    use_system_roots: bool,
+    extra_roots_pem: Vec<String>,
+    client_identity: Option<ClientIdentity>,
+    bindings: Vec<HostBinding>,
+    min_version: TlsMinVersion,
+    server_name_override: Option<String>,
+    server_spiffe: Option<ServerSpiffeIdentity>,
+}
+
+impl TlsBinding {
+    pub(crate) fn of(p: &TlsProfile) -> Self {
+        TlsBinding {
+            id: p.id,
+            workspace_id: p.workspace_id,
+            verify: p.verify,
+            use_system_roots: p.use_system_roots,
+            extra_roots_pem: p.extra_roots_pem.clone(),
+            client_identity: p.client_identity.clone(),
+            bindings: p.bindings.clone(),
+            min_version: p.min_version,
+            server_name_override: p.server_name_override.clone(),
+            server_spiffe: p.server_spiffe.clone(),
+        }
+    }
+}
+
+/// Behavioral fields of a [`ProxyProfile`] (excluding display name and
+/// timestamps), so renaming a profile does not alter a binding while any
+/// routing or credential edit does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProxyBinding {
+    id: Id,
+    workspace_id: Id,
+    kind: ProxyKind,
+    address: String,
+    username: Option<String>,
+    password: Option<SensitiveValue>,
+    no_proxy: String,
+    tls_profile_id: Option<Id>,
+    hbone: Option<HboneOptions>,
+}
+
+impl ProxyBinding {
+    pub(crate) fn of(p: &ProxyProfile) -> Self {
+        ProxyBinding {
+            id: p.id,
+            workspace_id: p.workspace_id,
+            kind: p.kind,
+            address: p.address.clone(),
+            username: p.username.clone(),
+            password: p.password.clone(),
+            no_proxy: p.no_proxy.clone(),
+            tls_profile_id: p.tls_profile_id,
+            hbone: p.hbone.clone(),
+        }
+    }
+}
+
+/// Effective auth and the layer index that supplied it (independent of mutable
+/// folder display names, so renaming a folder does not alter a binding).
+fn effective_auth_binding(ctx: &ExecutionContext) -> (Option<usize>, AuthConfig) {
+    for (index, (_, auth)) in ctx.auth_layers.iter().enumerate().rev() {
+        if !matches!(auth, AuthConfig::Inherit) {
+            return (Some(index), auth.clone());
+        }
+    }
+    (None, AuthConfig::None)
+}
+
+/// Resolved OAuth token and authorization endpoints for `auth`, both fixed
+/// (`None` when dynamic or unresolvable) and masked (keeping `PER_SEND`).
+fn collect_oauth_endpoints(auth: &AuthConfig, r: &Resolver, fixed_out: &mut OAuthEndpoints, masked_out: &mut OAuthEndpoints) {
+    match auth {
+        AuthConfig::OAuth2 { config } => {
+            let resolve_pair = |raw: &str, field: &str| -> (Option<RedactedSecret>, Option<RedactedSecret>) {
+                if raw.trim().is_empty() {
+                    return (Some(RedactedSecret(String::new())), Some(RedactedSecret(String::new())));
+                }
+                let f = fixed(r, raw, field).map(RedactedSecret);
+                let m = r.resolve(&mask_dynamic(raw, PER_SEND), field).ok().map(RedactedSecret);
+                (f, m)
+            };
+            let (ft, mt) = resolve_pair(&config.token_url, "auth.token_url");
+            let (fa, ma) = resolve_pair(&config.authorization_url, "auth.authorization_url");
+            fixed_out.push((ft, fa));
+            masked_out.push((mt, ma));
+        }
+        AuthConfig::Multi { profiles } => {
+            for p in profiles {
+                collect_oauth_endpoints(p, r, fixed_out, masked_out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Winning enabled variable entry for `name` (last layer, last entry wins,
+/// matching `Resolver::lookup`).
+fn winning_var<'a>(ctx: &'a ExecutionContext, name: &str) -> Option<(usize, usize, &'a VarEntry)> {
+    for (li, layer) in ctx.var_layers.iter().enumerate().rev() {
+        if let Some((vi, v)) = layer.vars.iter().enumerate().rev().find(|(_, v)| v.name == name) {
+            return Some((li, vi, v));
+        }
+    }
+    None
+}
+
+/// Every winning variable in `ctx.var_layers` that is itself secret or
+/// transitively expands a secret variable.
+fn secret_vars_of(ctx: &ExecutionContext) -> BTreeMap<String, RedactedSecret> {
+    let mut winning: BTreeMap<&str, (usize, usize, &VarEntry)> = BTreeMap::new();
+    for (li, layer) in ctx.var_layers.iter().enumerate() {
+        for (vi, v) in layer.vars.iter().enumerate() {
+            winning.insert(v.name.as_str(), (li, vi, v));
+        }
+    }
+    let mut out = BTreeMap::new();
+    for (name, (li, vi, entry)) in winning {
+        if entry.secret {
+            let repr = if entry.value == DEFERRED_SECRET_VALUE {
+                ctx.secrets.variable_secret(li, vi).map(|r| format!("ref:{}", r.id)).unwrap_or_else(|| "deferred".into())
+            } else {
+                format!("val:{}", entry.value)
+            };
+            out.insert(name.to_string(), RedactedSecret(repr));
+        } else if entry.value.contains("{{") {
+            let probe = fixed_resolver(ctx);
+            let touches_secret = match probe.resolve(&mask_dynamic(&entry.value, PER_SEND), "var") {
+                Ok(_) => !probe.used_secrets.lock().is_empty(),
+                Err(failure) => is_deferred_secret(&failure) || !probe.used_secrets.lock().is_empty(),
+            };
+            if touches_secret {
+                out.insert(name.to_string(), RedactedSecret(format!("tpl:{}", entry.value)));
+            }
+        }
+    }
+    out
+}
+
+/// Whether every secret variable in `after` was already bound to the exact
+/// same value/reference in `before`. Removing or disabling a secret variable
+/// leaves `after` a subset of `before`; adding, changing, enabling or
+/// unmasking one does not.
+fn secret_vars_subset(after: &BTreeMap<String, RedactedSecret>, before: &BTreeMap<String, RedactedSecret>) -> bool {
+    after.iter().all(|(k, v)| before.get(k) == Some(v))
+}
+
+/// Winning raw templates of variables touched by `r` when a per-send dynamic
+/// helper or unresolved template prevented a fixed binding part.
+fn touched_var_templates(ctx: &ExecutionContext, r: &Resolver) -> Vec<(String, RedactedSecret)> {
+    let used = r.used.lock();
+    let mut out = BTreeMap::new();
+    for (name, _) in used.iter() {
+        if let Some((_, _, entry)) = winning_var(ctx, name) {
+            out.insert(name.clone(), RedactedSecret(entry.value.clone()));
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// Where, and how, a context uses what it carries, as the engine works it
 /// out from that context on every send: the destination origin, the
 /// authority the request names (its first explicit Host, or an auth-written
 /// one, else the URL's), the MASQUE route of a UDP request, the TLS choices
 /// of its protocol (gRPC plaintext, TCP TLS, UDP DTLS), the auth in effect
-/// and the effective connection settings. `None` marks a part a per-send
-/// value reaches, or one that does not resolve: it is not known before
-/// sending.
-#[derive(Debug, PartialEq)]
+/// and its resolved OAuth endpoints, the effective connection settings, the
+/// behavioral contents of its selected TLS and proxy profiles, any UDP PROXY
+/// protocol authentication, and the secret variables in scope. `None` marks a
+/// part a per-send value reaches, or one that does not resolve: it is not
+/// known before sending.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Binding {
     origin: Option<String>,
     authority: Option<String>,
     masque: Option<Option<(String, String)>>,
     transport: [Option<bool>; 3],
-    auth: (String, AuthConfig),
+    auth: (Option<usize>, AuthConfig),
+    oauth_endpoints: OAuthEndpoints,
     settings: EffectiveSettings,
+    proxy: Option<ProxyBinding>,
+    tls: Option<TlsBinding>,
+    proxy_tls: Option<TlsBinding>,
+    datagram_auth: Option<DatagramAuthSpec>,
+    secret_vars: BTreeMap<String, RedactedSecret>,
+    masked_origin: Option<String>,
+    masked_authority: Option<String>,
+    masked_masque: Option<Option<(String, String)>>,
+    masked_oauth: OAuthEndpoints,
+    dynamic_vars: Vec<(String, RedactedSecret)>,
 }
 
 impl Binding {
     pub(crate) fn of(ctx: &ExecutionContext) -> Binding {
         let r = fixed_resolver(ctx);
         let target = url_target(ctx, &r);
+        let origin = target.as_ref().map(origin_of);
         let authority = target.as_ref().and_then(|t| preflight_authority(ctx, t, |template, field| fixed(&r, template, field)));
+        let masque = masque_route(ctx, &r);
+        let auth = effective_auth_binding(ctx);
+        let mut oauth_endpoints = Vec::new();
+        let mut masked_oauth = Vec::new();
+        collect_oauth_endpoints(&auth.1, &r, &mut oauth_endpoints, &mut masked_oauth);
+
+        let masked_target = if origin.is_some() && authority.is_some() { target } else { masked_url_target(ctx, &r) };
+        let masked_origin = origin.clone().or_else(|| masked_target.as_ref().map(origin_of));
+        let masked_authority = authority.clone().or_else(|| {
+            masked_target
+                .as_ref()
+                .and_then(|t| preflight_authority(ctx, t, |template, field| r.resolve(&mask_dynamic(template, PER_SEND), field).ok()))
+        });
+        let masked_masque = masque.clone().or_else(|| masked_masque_route(ctx, &r));
+
+        let oauth_known = oauth_endpoints.iter().all(|(t, a)| t.is_some() && a.is_some());
+        let dynamic_vars = if origin.is_none() || authority.is_none() || masque.is_none() || !oauth_known {
+            touched_var_templates(ctx, &r)
+        } else {
+            Vec::new()
+        };
+
         let mut settings = anvil_engine::settings::resolve(&ctx.settings_layers);
         // Where a setting comes from changes nothing it does.
         settings.sources.clear();
+        let proxy_profile = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
+        let tls_profile = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
+        let proxy_tls_profile = proxy_profile.and_then(|p| p.tls_profile_id).and_then(|id| ctx.tls_profiles.iter().find(|t| t.id == id));
         let spec = &ctx.spec;
+        let datagram_auth = spec
+            .udp
+            .as_ref()
+            .filter(|_| spec.protocol == Protocol::Udp)
+            .and_then(|u| u.proxy_protocol.as_ref())
+            .and_then(|p| p.authentication.clone());
         Binding {
-            origin: target.as_ref().map(origin_of),
+            origin,
             authority,
-            masque: masque_route(ctx, &r),
+            masque,
             transport: [spec.grpc.as_ref().map(|g| g.plaintext), spec.tcp.as_ref().map(|t| t.tls), spec.udp.as_ref().map(|u| u.dtls)],
-            auth: ctx.effective_auth(),
+            auth,
+            oauth_endpoints,
             settings,
+            proxy: proxy_profile.map(ProxyBinding::of),
+            tls: tls_profile.map(TlsBinding::of),
+            proxy_tls: proxy_tls_profile.map(TlsBinding::of),
+            datagram_auth,
+            secret_vars: secret_vars_of(ctx),
+            masked_origin,
+            masked_authority,
+            masked_masque,
+            masked_oauth,
+            dynamic_vars,
         }
+    }
+
+    fn oauth_endpoints_known(&self) -> bool {
+        self.oauth_endpoints.iter().all(|(t, a)| t.is_some() && a.is_some())
+    }
+
+    fn same_resolved_parts(&self, other: &Binding) -> bool {
+        self.origin == other.origin
+            && self.authority == other.authority
+            && self.masque == other.masque
+            && self.transport == other.transport
+            && self.auth == other.auth
+            && self.oauth_endpoints == other.oauth_endpoints
+            && self.settings == other.settings
+            && self.proxy == other.proxy
+            && self.tls == other.tls
+            && self.proxy_tls == other.proxy_tls
+            && self.datagram_auth == other.datagram_auth
     }
 
     /// Whether `self` uses what it carries as `saved` does. A part that
     /// cannot be worked out before sending matches nothing.
-    fn matches(&self, saved: &Binding) -> bool {
-        self.origin.is_some() && self.authority.is_some() && self.masque.is_some() && self == saved
+    pub(crate) fn matches(&self, saved: &Binding) -> bool {
+        self.origin.is_some()
+            && self.authority.is_some()
+            && self.masque.is_some()
+            && self.oauth_endpoints_known()
+            && self.same_resolved_parts(saved)
+            && secret_vars_subset(&self.secret_vars, &saved.secret_vars)
+    }
+
+    /// Whether a scope or profile mutation (workspace, folder, environment,
+    /// TLS profile, proxy profile or app defaults) left an already-saved
+    /// request's binding unchanged. Unlike [`Binding::matches`], an unrelated
+    /// edit does not falsely mismatch a pre-existing blank or dynamic request,
+    /// while any change reaching its masked target, touched dynamic variables,
+    /// auth, settings, profiles or secret variables still fails to match.
+    pub(crate) fn matches_under_scope_mutation(&self, before: &Binding) -> bool {
+        self.same_resolved_parts(before)
+            && self.masked_origin == before.masked_origin
+            && self.masked_authority == before.masked_authority
+            && self.masked_masque == before.masked_masque
+            && self.masked_oauth == before.masked_oauth
+            && self.dynamic_vars == before.dynamic_vars
+            && secret_vars_subset(&self.secret_vars, &before.secret_vars)
     }
 }
 
 /// The parts of a context a dialog names, in words the backend works out.
 /// A name the webview chose goes through [`shown`]; `None` is "none".
-struct Facts {
-    destination: String,
+pub(crate) struct Facts {
+    pub(crate) destination: String,
     masque: String,
     dns: Option<String>,
     proxy: Option<String>,
@@ -202,7 +553,7 @@ struct Facts {
 }
 
 impl Facts {
-    fn of(ctx: &ExecutionContext) -> Facts {
+    pub(crate) fn of(ctx: &ExecutionContext) -> Facts {
         let settings = anvil_engine::settings::resolve(&ctx.settings_layers);
         let proxy = settings.proxy_profile_id.and_then(|id| ctx.proxy_profiles.iter().find(|p| p.id == id));
         let tls = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
@@ -330,7 +681,7 @@ fn others(s: &EffectiveSettings) -> EffectiveSettings {
 
 /// What `draft` does differently from `saved` with what it carries, one
 /// line for each part, the draft's first.
-fn changes(draft: &Binding, facts: &Facts, saved: &Binding, saved_facts: &Facts) -> Vec<String> {
+pub(crate) fn changes(draft: &Binding, facts: &Facts, saved: &Binding, saved_facts: &Facts) -> Vec<String> {
     let mut out = Vec::new();
     if draft.origin.is_none() || draft.origin != saved.origin {
         out.push(format!("Destination: {} (saved: {})", facts.destination, saved_facts.destination));
@@ -357,9 +708,15 @@ fn changes(draft: &Binding, facts: &Facts, saved: &Binding, saved_facts: &Facts)
     }
     if facts.proxy != saved_facts.proxy {
         out.push(format!("Proxy: {} (saved: {})", said(&facts.proxy), said(&saved_facts.proxy)));
+    } else if draft.proxy != saved.proxy {
+        out.push(format!("Proxy: {} has changed settings", said(&facts.proxy)));
     }
     if facts.tls != saved_facts.tls {
         out.push(format!("TLS profile: {} (saved: {})", said(&facts.tls), said(&saved_facts.tls)));
+    } else if draft.tls != saved.tls {
+        out.push(format!("TLS profile: {} has changed settings", said(&facts.tls)));
+    } else if draft.proxy_tls != saved.proxy_tls {
+        out.push(format!("Proxy TLS profile: {} has changed settings", said(&facts.proxy)));
     }
     if draft.transport != saved.transport {
         out.push("TLS: the protocol's own choice of TLS or cleartext differs".into());
@@ -370,6 +727,15 @@ fn changes(draft: &Binding, facts: &Facts, saved: &Binding, saved_facts: &Facts)
         } else {
             format!("Auth: {} (saved: {})", facts.auth, saved_facts.auth)
         });
+    }
+    if !draft.oauth_endpoints_known() || draft.oauth_endpoints != saved.oauth_endpoints || draft.masked_oauth != saved.masked_oauth {
+        out.push("OAuth endpoint: resolves differently than before".into());
+    }
+    if draft.datagram_auth != saved.datagram_auth {
+        out.push("PROXY protocol authentication differs".into());
+    }
+    if !secret_vars_subset(&draft.secret_vars, &saved.secret_vars) {
+        out.push("Secret variables: different secret variables are in scope".into());
     }
     if others(&draft.settings) != others(&saved.settings) {
         out.push("Other connection settings (redirects, timeouts, retries and the like) differ".into());
@@ -382,7 +748,7 @@ fn changes(draft: &Binding, facts: &Facts, saved: &Binding, saved_facts: &Facts)
 
 /// What a draft without a saved request to compare with does with what it
 /// carries, one line for each part it sets.
-fn alone(draft: &Binding, facts: &Facts) -> Vec<String> {
+pub(crate) fn alone(draft: &Binding, facts: &Facts) -> Vec<String> {
     let mut out = vec![format!("Auth: {}", facts.auth)];
     if draft.authority.is_none() {
         out.push(format!("Host header: {UNKNOWN}"));
@@ -829,8 +1195,45 @@ mod tests {
         assert_eq!(origin("https://user@example.com/", Protocol::Http), None, "the engine refuses it");
         assert_eq!(origin("https://{{$uuid}}.example.com/", Protocol::Http), None);
         assert_eq!(origin("https://example.com/{{$uuid}}", Protocol::Http), Some("https://example.com:443".into()));
+        // Unresolved path/query/fragment variables do not obscure a fixed origin,
+        // while unresolved variables that could reach scheme, host or port still fail closed.
+        assert_eq!(origin("https://SHOP.example:443/v1/orders?page={{missing}}", Protocol::Http), Some("https://shop.example:443".into()));
+        assert_eq!(origin("shop.example/v1?page={{missing}}", Protocol::Http), Some("https://shop.example:443".into()));
+        assert_eq!(origin("https://shop.example?page={{missing}}", Protocol::Http), Some("https://shop.example:443".into()));
+        assert_eq!(origin("https://shop.example#{{missing}}", Protocol::Http), Some("https://shop.example:443".into()));
+        assert_eq!(origin("https://{{missing}}/v1", Protocol::Http), None);
+        assert_eq!(origin("https://shop.example{{missing}}/v1", Protocol::Http), None);
+        assert_eq!(origin("{{missing}}://shop.example/v1", Protocol::Http), None);
+        assert_eq!(origin("https://shop.example:{{missing}}/v1", Protocol::Http), None);
         let unknown = Binding::of(&ExecutionContext::standalone(RequestSpec::http("GET", "https://{{$uuid}}/")));
         assert!(!unknown.matches(&Binding::of(&ExecutionContext::standalone(RequestSpec::http("GET", "https://{{$uuid}}/")))));
+
+        // Variables before the path delimiter (including a split `://` separator) still resolve fully.
+        let mut split_ctx =
+            ExecutionContext::standalone(RequestSpec::http("GET", "{{proto}}:/{{slash}}attacker.example/v1?page={{missing}}"));
+        split_ctx.var_layers.push(anvil_engine::vars::VarLayer {
+            label: "workspace".into(),
+            vars: vec![
+                VarEntry { name: "proto".into(), value: "http".into(), secret: false, literal: false },
+                VarEntry { name: "slash".into(), value: "/".into(), secret: false, literal: false },
+            ],
+        });
+        assert_eq!(url_target(&split_ctx, &fixed_resolver(&split_ctx)).as_ref().map(origin_of), Some("http://attacker.example:80".into()));
+
+        // A `{{base}}` variable fixing scheme+host followed by a literal delimiter and unresolved query var resolves cleanly,
+        // while `{{base}}{{missing}}` without a delimiter fails closed.
+        let base_var = || {
+            vec![anvil_engine::vars::VarLayer {
+                label: "workspace".into(),
+                vars: vec![VarEntry { name: "base".into(), value: "https://shop.example".into(), secret: false, literal: false }],
+            }]
+        };
+        let mut with_delim = ExecutionContext::standalone(RequestSpec::http("GET", "{{base}}/v1/orders?page={{missing}}"));
+        with_delim.var_layers = base_var();
+        assert_eq!(url_target(&with_delim, &fixed_resolver(&with_delim)).as_ref().map(origin_of), Some("https://shop.example:443".into()));
+        let mut no_delim = ExecutionContext::standalone(RequestSpec::http("GET", "{{base}}{{missing}}"));
+        no_delim.var_layers = base_var();
+        assert_eq!(url_target(&no_delim, &fixed_resolver(&no_delim)).as_ref().map(origin_of), None);
     }
 
     /// A standalone context that selects a TLS profile `name`.

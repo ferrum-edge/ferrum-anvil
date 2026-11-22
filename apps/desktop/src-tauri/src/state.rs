@@ -169,6 +169,11 @@ pub struct DesktopState {
     pub last_activity: Mutex<Instant>,
     /// Native signs of the user (see `crate::presence`).
     pub presence: crate::presence::PresenceState,
+    /// Serializes the check-and-commit critical sections of desktop persistence
+    /// mutations (see `crate::persistence_authority`) so concurrent saves
+    /// cannot each pass against pre-mutation state and together establish an
+    /// unconfirmed vault-authority binding. Never held across `.await`.
+    pub(crate) persistence: Arc<Mutex<()>>,
     /// Wall-clock/monotonic pair used to detect system suspend.
     pub clock_probe: Mutex<(Instant, SystemTime)>,
     /// Every lock the webview must hear of goes through it (see [`DesktopState::notify_locked`]).
@@ -213,6 +218,7 @@ impl DesktopState {
             file_grants: Arc::default(),
             last_activity: Mutex::new(Instant::now()),
             presence: Default::default(),
+            persistence: Arc::new(Mutex::new(())),
             clock_probe: Mutex::new((Instant::now(), SystemTime::now())),
             lock_notifier: std::sync::OnceLock::new(),
         }

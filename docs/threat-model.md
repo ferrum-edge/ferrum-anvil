@@ -22,7 +22,7 @@ against it).
 |---|---|---|
 | Network responses → app | Response bytes, headers, TLS peers, stream messages | Rendered as inert text/hex only; strict CSP (no remote script/frame/fetch); bounded buffering and decompression; typed parsing, with XML bounded before it is parsed; gRPC reflection enforces cumulative wire-plus-decoded byte and per-request message limits under its own absolute deadline; no response can call IPC or change settings |
 | Imported files → app | Bundles, OpenAPI/WSDL/Postman/Insomnia/cURL/HAR, API-standards rulesets | Size, node, string-byte, reference and sample-generation limits; no external `$ref`/DTD fetching (XXE disabled); zip traversal/symlink/bomb checks; checksums; preview before apply; trust normalisation; nothing executes on import (scripts kept as inert notes). Spec imports into an existing workspace are sealed under an import root; bundle imports and restores seal this device's workload identity; writing into a stored workspace needs approval for the exact previewed file. See the import threats below. |
-| Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in the backend; secrets returned only as references. Changes that weaken the profile's protection, removing damaged stored revisions, and drafts that would use vault-backed authority elsewhere than their saved request, need a confirmation in the backend's own native dialog (see Local data and the app). File access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire and are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced; grant reads and exports and linked-file reads walk the chosen path one folder at a time without following a link at any of them, on macOS with a single open that refuses a link at any folder (macOS 11 and later), and an export is refused if its folder was replaced; on Windows and on Unix other than Linux and macOS every folder on the path must be one Anvil can list). A request spec from the webview may not name a linked local file (a linked path is written into a saved request or dataset only by a relocation, from the backend's own dialog), and a JWT-SVID token file is read only if it was bound in the vault through the dialog. Capability allowlist (`capabilities/default.json`): no dialog permission at all (no open, save, message or ask dialog) and no filesystem plugin, so every native dialog is the backend's own; the webview asks its own confirmations inside the window. |
+| Webview → Rust backend | A compromised renderer | Narrow typed commands; lock enforced in the backend; secrets returned only as references. Changes that weaken the profile's protection, removing damaged stored revisions, drafts that would use vault-backed authority elsewhere than their saved request, and persistence mutations (`request_create`, `request_save`, `workspace_save`, `folder_save`, `environment_save`, `tls_profile_save`, `proxy_profile_save`, and app default connection settings) that establish or alter a vault-authority binding — including creating a request outside an isolated import root where it would gain workspace-scope vault authority — need a confirmation in the backend's own native dialog (see Local data and the app). File access only through the backend's own native dialogs: file commands take an opaque, purpose-bound grant instead of a path (grants expire and are revoked on lock, a choice in progress when the app locks grants nothing, and a read is refused if the file or a folder on its path was replaced; grant reads and exports and linked-file reads walk the chosen path one folder at a time without following a link at any of them, on macOS with a single open that refuses a link at any folder (macOS 11 and later), and an export is refused if its folder was replaced; on Windows and on Unix other than Linux and macOS every folder on the path must be one Anvil can list). A request spec from the webview may not name a linked local file (a linked path is written into a saved request or dataset only by a relocation, from the backend's own dialog), and a JWT-SVID token file is read only if it was bound in the vault through the dialog. Capability allowlist (`capabilities/default.json`): no dialog permission at all (no open, save, message or ask dialog) and no filesystem plugin, so every native dialog is the backend's own; the webview asks its own confirmations inside the window. |
 | Anvil → destinations | User mistakes, redirects | TLS verification on by default; bypass scoped to a profile with persistent warnings; client certs bound to hosts; credentials stripped on cross-origin redirects; load runs need explicit acknowledgement; imported plans untrusted |
 | Disk | Other local users, backups, forensic reads | Everything sealed with AEAD; key wrapping with Argon2id or OS keychain; leak audit covers WAL/journal/blobs |
 | Worker process | — | Job over stdin (not argv/env); only referenced secrets; killed when the controller drops it and cancels itself when its parent goes away (stdin EOF); no inherited UI state |
@@ -651,25 +651,39 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   a `VACUUM INTO` copy that includes the stored files) is taken before the
   whole batch and keeps the removed rows for a manual restore. Checkpoints
   are not pruned automatically; each removal the user confirms adds one.
-- **Renderer drafts and vault authority:** a draft from the webview is built
-  in the backend like a saved request, and its secrets never cross to the
-  webview. When it carries vault-backed authority (auth in effect, vault
-  references, secret variables, a TLS client identity), it is used only
-  where its saved request would use it: the same destination origin and
-  request authority (an explicit Host or `:authority`, or one an API key
-  writes), the same MASQUE route and protocol TLS choices, the same
-  effective auth and the same effective connection settings, worked out
-  from the context that is then executed, as the engine resolves and parses
-  it. Any of these that a per-send dynamic value (`{{$…}}`, directly or
-  through a variable) reaches is unknown before sending, since each
-  resolution draws it again, and never matches. Otherwise the user confirms
-  natively, for that one send, session or sign-in of that context: the
-  dialog names the destination first, then the workspace and what differs
-  from the saved request. The desktop's send, preview and session commands
-  take no per-send settings override (the CLI's `run_override` has no IPC
-  counterpart). A draft's request-level connection settings come from the
-  webview and are compared against the saved request; workspace and profile
-  settings apply to both.
+- **Renderer drafts, persistence mutations and vault authority:** a draft from
+  the webview is built in the backend like a saved request, and its secrets
+  never cross to the webview. When it carries vault-backed authority (auth in
+  effect, vault references, secret variables, a TLS client identity), it is
+  used only where its saved request would use it: the same destination origin
+  and request authority (an explicit Host or `:authority`, or one an API key
+  writes), the same MASQUE route and protocol TLS choices, the same effective
+  auth and resolved OAuth endpoints, the same effective connection settings,
+  the same behavioral TLS and proxy profile settings, and no additional secret
+  variables in scope, worked out from the context that is then executed, as
+  the engine resolves and parses it. Any of these that a per-send dynamic
+  value (`{{$…}}`, directly or through a variable) reaches is unknown before
+  sending, since each resolution draws it again, and never matches. Otherwise
+  the user confirms natively, for that one send, session or sign-in of that
+  context: the dialog names the destination first, then the workspace and what
+  differs from the saved request. The desktop's send, preview and session
+  commands take no per-send settings override (the CLI's `run_override` has no
+  IPC counterpart).
+  The same native confirmation applies before persisting changes that
+  establish or alter a vault-authority binding across `request_create`,
+  `request_save`, `workspace_save`, `folder_save`, `environment_save`,
+  `tls_profile_save`, `proxy_profile_save`, and app default connection
+  settings (`crate::persistence_authority`). Each mutation is checked across
+  every environment reachable by each affected request, including inactive
+  environments that a send could select explicitly, and `request_create`
+  outside an isolated import root requires confirmation before gaining
+  workspace-scope vault authority. The check and commit are serialized against
+  concurrent persistence mutations and re-checked against the confirmed
+  binding delta and lock epoch before writing. Ordinary saves that neither
+  establish nor alter a vault-backed authority binding (such as creating a
+  blank placeholder request, renaming, editing path/query/method/body or
+  non-Host headers, or editing unrelated plain variables or unused profiles)
+  proceed without prompting.
 - **Edited ownership columns in the database file:** the plaintext workspace,
   parent and request columns only index rows. Every object, request
   revision, history record and load report seals its owner, and a read
@@ -766,8 +780,18 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
 - Keychain-protected profiles are as strong as the OS session. An unlocked
   webview can also reopen a keychain profile after a lock without a
   credential.
-- A compromised, unlocked webview is outside the protection boundary for
-  saved request and profile state.
+- Establishing or altering a vault-authority binding on saved requests,
+  workspaces, folders, environments, TLS profiles, proxy profiles, or app
+  default connection settings — and creating a request outside an isolated
+  import root that gains workspace-scope vault authority — requires native OS
+  confirmation, so a compromised, unlocked webview cannot silently redirect
+  vault credentials by editing persisted state. A compromised, unlocked
+  webview can still read non-secret workspace data (names, URLs, non-secret
+  headers and bodies, redacted history), rename or delete items, edit
+  requests that carry no vault-backed authority, and modify parts of a
+  vault-backed request that keep its confirmed vault-authority binding
+  unchanged (such as method, path, query, body, or non-Host headers sent to
+  the already-bound destination).
 - The passphrase and keychain-conversion confirmations cannot show the new
   passphrase the webview supplies: the dialog confirms that the change happens,
   not which passphrase it sets. The conversion's replacement recovery key is
