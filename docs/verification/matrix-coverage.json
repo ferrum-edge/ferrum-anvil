@@ -21,7 +21,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/src/prepare.rs",
-     "line": 628,
+     "line": 725,
      "kind": "unit_test"
     }
    ],
@@ -40,12 +40,12 @@
    "references": [
     {
      "path": "crates/anvil-engine/src/vars.rs",
-     "line": 409,
+     "line": 410,
      "kind": "unit_test"
     },
     {
      "path": "crates/anvil-engine/tests/engine_scenarios.rs",
-     "line": 238,
+     "line": 275,
      "kind": "integration_test"
     }
    ],
@@ -63,7 +63,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/src/vars.rs",
-     "line": 418,
+     "line": 419,
      "kind": "unit_test"
     }
    ],
@@ -81,7 +81,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 90,
+     "line": 101,
      "kind": "integration_test"
     }
    ],
@@ -117,7 +117,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 107,
+     "line": 118,
      "kind": "integration_test"
     }
    ],
@@ -153,7 +153,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 136,
+     "line": 147,
      "kind": "integration_test"
     }
    ],
@@ -189,7 +189,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 158,
+     "line": 169,
      "kind": "integration_test"
     }
    ],
@@ -244,12 +244,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 426,
+     "line": 437,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1245,
+     "line": 1246,
      "kind": "lab"
     },
     {
@@ -293,12 +293,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 442,
+     "line": 453,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1246,
+     "line": 1247,
      "kind": "lab"
     },
     {
@@ -420,22 +420,17 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 482,
+     "line": 493,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 486,
+     "line": 497,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 847,
-     "kind": "lab"
-    },
-    {
-     "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1247,
+     "line": 846,
      "kind": "lab"
     },
     {
@@ -445,7 +440,12 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1261,
+     "line": 1249,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1262,
      "kind": "lab"
     },
     {
@@ -527,22 +527,17 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 513,
+     "line": 524,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 517,
+     "line": 528,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 523,
-     "kind": "lab"
-    },
-    {
-     "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1249,
+     "line": 534,
      "kind": "lab"
     },
     {
@@ -553,6 +548,11 @@
     {
      "path": "crates/anvil-lab/src/tls.rs",
      "line": 1251,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1252,
      "kind": "lab"
     },
     {
@@ -624,12 +624,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 554,
+     "line": 560,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1252,
+     "line": 1253,
      "kind": "lab"
     },
     {
@@ -673,22 +673,17 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 369,
+     "line": 385,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 412,
+     "line": 423,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 828,
-     "kind": "lab"
-    },
-    {
-     "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1243,
+     "line": 827,
      "kind": "lab"
     },
     {
@@ -698,7 +693,12 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1260,
+     "line": 1245,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1261,
      "kind": "lab"
     },
     {
@@ -770,12 +770,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 573,
+     "line": 579,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1253,
+     "line": 1254,
      "kind": "lab"
     },
     {
@@ -921,17 +921,17 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 238,
+     "line": 249,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 615,
+     "line": 621,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1255,
+     "line": 1256,
      "kind": "lab"
     }
    ],
@@ -975,12 +975,12 @@
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 634,
+     "line": 640,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1256,
+     "line": 1257,
      "kind": "lab"
     },
     {
@@ -1024,12 +1024,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 671,
+     "line": 677,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1257,
+     "line": 1258,
      "kind": "lab"
     },
     {
@@ -1073,17 +1073,17 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 256,
+     "line": 285,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 710,
+     "line": 716,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1258,
+     "line": 1259,
      "kind": "lab"
     }
    ],
@@ -1121,7 +1121,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 280,
+     "line": 309,
      "kind": "integration_test"
     }
    ],
@@ -1155,7 +1155,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/engine_scenarios.rs",
-     "line": 302,
+     "line": 354,
      "kind": "integration_test"
     }
    ],
@@ -1242,12 +1242,12 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2530,
+     "line": 2540,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2979,
+     "line": 3000,
      "kind": "lab"
     }
    ],
@@ -1301,7 +1301,7 @@
    "references": [
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 270,
+     "line": 271,
      "kind": "integration_test"
     },
     {
@@ -1349,32 +1349,32 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2559,
+     "line": 2569,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2980,
+     "line": 3001,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1064,
+     "line": 1063,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1068,
-     "kind": "lab"
-    },
-    {
-     "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1267,
+     "line": 1067,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
      "line": 1268,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1269,
      "kind": "lab"
     }
    ],
@@ -1441,12 +1441,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1072,
+     "line": 1071,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1269,
+     "line": 1270,
      "kind": "lab"
     }
    ],
@@ -1484,22 +1484,22 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1108,
+     "line": 1107,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1112,
-     "kind": "lab"
-    },
-    {
-     "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1270,
+     "line": 1111,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
      "line": 1271,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1272,
      "kind": "lab"
     }
    ],
@@ -1552,17 +1552,17 @@
    "references": [
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 270,
+     "line": 271,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1116,
+     "line": 1115,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1272,
+     "line": 1273,
      "kind": "lab"
     }
    ],
@@ -1600,22 +1600,22 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1148,
+     "line": 1142,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1175,
-     "kind": "lab"
-    },
-    {
-     "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1273,
+     "line": 1169,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
      "line": 1274,
+     "kind": "lab"
+    },
+    {
+     "path": "crates/anvil-lab/src/tls.rs",
+     "line": 1275,
      "kind": "lab"
     }
    ],
@@ -1720,12 +1720,12 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1489,
+     "line": 1497,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2923,
+     "line": 2944,
      "kind": "lab"
     }
    ],
@@ -1973,7 +1973,7 @@
     },
     {
      "path": "crates/anvil-lab/src/admission.rs",
-     "line": 559,
+     "line": 486,
      "kind": "lab"
     }
    ],
@@ -2011,12 +2011,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1195,
+     "line": 1192,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1275,
+     "line": 1276,
      "kind": "lab"
     }
    ],
@@ -2059,22 +2059,22 @@
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 170,
+     "line": 171,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 179,
+     "line": 180,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 215,
+     "line": 216,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 218,
+     "line": 219,
      "kind": "integration_test"
     }
    ],
@@ -2093,62 +2093,62 @@
    "references": [
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 10,
+     "line": 11,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 253,
+     "line": 254,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 259,
+     "line": 260,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 270,
+     "line": 271,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 300,
+     "line": 301,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 307,
+     "line": 308,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 309,
+     "line": 310,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 313,
+     "line": 314,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 340,
+     "line": 341,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 342,
+     "line": 343,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 346,
+     "line": 347,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/admission.rs",
-     "line": 339,
+     "line": 331,
      "kind": "lab"
     }
    ],
@@ -2201,12 +2201,12 @@
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 225,
+     "line": 226,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/upstream_setup_contract.rs",
-     "line": 232,
+     "line": 233,
      "kind": "integration_test"
     }
    ],
@@ -2277,12 +2277,12 @@
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 751,
+     "line": 754,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1008,
+     "line": 970,
      "kind": "lab"
     }
    ],
@@ -2340,7 +2340,7 @@
     },
     {
      "path": "crates/anvil-lab/src/admission.rs",
-     "line": 560,
+     "line": 487,
      "kind": "lab"
     }
    ],
@@ -2421,12 +2421,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 531,
+     "line": 525,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1002,
+     "line": 964,
      "kind": "lab"
     }
    ],
@@ -2699,12 +2699,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 473,
+     "line": 467,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1001,
+     "line": 963,
      "kind": "lab"
     }
    ],
@@ -2757,27 +2757,27 @@
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 227,
+     "line": 221,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 987,
+     "line": 953,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 988,
+     "line": 954,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 989,
+     "line": 955,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 991,
+     "line": 956,
      "kind": "lab"
     }
    ],
@@ -2857,12 +2857,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1190,
+     "line": 1168,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1778,
+     "line": 1744,
      "kind": "lab"
     }
    ],
@@ -2900,12 +2900,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 250,
+     "line": 244,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 995,
+     "line": 957,
      "kind": "lab"
     }
    ],
@@ -2943,32 +2943,32 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 315,
+     "line": 309,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 344,
+     "line": 338,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 374,
+     "line": 368,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 996,
+     "line": 958,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 997,
+     "line": 959,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 998,
+     "line": 960,
      "kind": "lab"
     }
    ],
@@ -3034,12 +3034,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 395,
+     "line": 389,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 999,
+     "line": 961,
      "kind": "lab"
     }
    ],
@@ -3093,12 +3093,12 @@
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 428,
+     "line": 422,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1000,
+     "line": 962,
      "kind": "lab"
     }
    ],
@@ -3277,52 +3277,52 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 802,
+     "line": 805,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 841,
+     "line": 833,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 853,
+     "line": 845,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 922,
+     "line": 888,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 954,
+     "line": 920,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1009,
+     "line": 971,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1010,
+     "line": 972,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1011,
+     "line": 973,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1012,
+     "line": 974,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1013,
+     "line": 975,
      "kind": "lab"
     }
    ],
@@ -3416,42 +3416,42 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 606,
+     "line": 609,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 638,
+     "line": 641,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 688,
+     "line": 691,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 714,
+     "line": 717,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1004,
+     "line": 966,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1005,
+     "line": 967,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1006,
+     "line": 968,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/policy.rs",
-     "line": 1007,
+     "line": 969,
      "kind": "lab"
     }
    ],
@@ -3532,7 +3532,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/engine_scenarios.rs",
-     "line": 251,
+     "line": 288,
      "kind": "integration_test"
     },
     {
@@ -3542,7 +3542,7 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1749,
+     "line": 1715,
      "kind": "lab"
     }
    ],
@@ -3582,22 +3582,22 @@
    "references": [
     {
      "path": "crates/anvil-engine/src/redact.rs",
-     "line": 1230,
+     "line": 1402,
      "kind": "unit_test"
     },
     {
      "path": "crates/anvil-engine/tests/engine_scenarios.rs",
-     "line": 274,
+     "line": 311,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 359,
+     "line": 358,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1750,
+     "line": 1716,
      "kind": "lab"
     }
    ],
@@ -3635,12 +3635,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 389,
+     "line": 388,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1751,
+     "line": 1717,
      "kind": "lab"
     }
    ],
@@ -3678,12 +3678,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 416,
+     "line": 415,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1752,
+     "line": 1718,
      "kind": "lab"
     }
    ],
@@ -3721,12 +3721,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 441,
+     "line": 440,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1753,
+     "line": 1719,
      "kind": "lab"
     }
    ],
@@ -3764,12 +3764,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 459,
+     "line": 458,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1754,
+     "line": 1720,
      "kind": "lab"
     }
    ],
@@ -3807,12 +3807,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 475,
+     "line": 474,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1755,
+     "line": 1721,
      "kind": "lab"
     }
    ],
@@ -3850,12 +3850,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 491,
+     "line": 490,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1756,
+     "line": 1722,
      "kind": "lab"
     }
    ],
@@ -3893,22 +3893,22 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 509,
+     "line": 508,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 548,
+     "line": 547,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1757,
+     "line": 1723,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1758,
+     "line": 1724,
      "kind": "lab"
     }
    ],
@@ -3960,12 +3960,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 583,
+     "line": 573,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1759,
+     "line": 1725,
      "kind": "lab"
     }
    ],
@@ -4038,7 +4038,7 @@
    "references": [
     {
      "path": "crates/anvil-auth/src/oauth.rs",
-     "line": 1096,
+     "line": 1092,
      "kind": "unit_test"
     },
     {
@@ -4117,7 +4117,7 @@
    "references": [
     {
      "path": "crates/anvil-auth/src/oauth.rs",
-     "line": 1014,
+     "line": 1010,
      "kind": "unit_test"
     },
     {
@@ -4158,7 +4158,7 @@
    "references": [
     {
      "path": "crates/anvil-auth/src/oauth.rs",
-     "line": 1072,
+     "line": 1068,
      "kind": "unit_test"
     },
     {
@@ -4168,12 +4168,12 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 694,
+     "line": 684,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1761,
+     "line": 1727,
      "kind": "lab"
     }
    ],
@@ -4211,12 +4211,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 714,
+     "line": 704,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1762,
+     "line": 1728,
      "kind": "lab"
     }
    ],
@@ -4260,47 +4260,47 @@
     },
     {
      "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
-     "line": 92,
+     "line": 110,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
-     "line": 119,
+     "line": 137,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
-     "line": 129,
+     "line": 147,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
-     "line": 145,
+     "line": 163,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-diagnostics/tests/lab_browser_session.rs",
-     "line": 169,
+     "line": 187,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1659,
+     "line": 1625,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1728,
+     "line": 1694,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1786,
+     "line": 1752,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1788,
+     "line": 1754,
      "kind": "lab"
     }
    ],
@@ -4358,22 +4358,22 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 847,
+     "line": 832,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 865,
+     "line": 850,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1766,
+     "line": 1732,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1767,
+     "line": 1733,
      "kind": "lab"
     }
    ],
@@ -4431,12 +4431,12 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 879,
+     "line": 864,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1768,
+     "line": 1734,
      "kind": "lab"
     }
    ],
@@ -4480,12 +4480,12 @@
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 897,
+     "line": 882,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1769,
+     "line": 1735,
      "kind": "lab"
     }
    ],
@@ -4523,17 +4523,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 933,
+     "line": 917,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 937,
-     "kind": "lab"
-    },
-    {
-     "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1770,
+     "line": 1736,
      "kind": "lab"
     }
    ],
@@ -4571,12 +4566,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 962,
+     "line": 940,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1771,
+     "line": 1737,
      "kind": "lab"
     }
    ],
@@ -4614,12 +4609,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 993,
+     "line": 971,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1772,
+     "line": 1738,
      "kind": "lab"
     }
    ],
@@ -4657,12 +4652,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1023,
+     "line": 1001,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1773,
+     "line": 1739,
      "kind": "lab"
     }
    ],
@@ -4700,12 +4695,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1070,
+     "line": 1048,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1774,
+     "line": 1740,
      "kind": "lab"
     }
    ],
@@ -4753,12 +4748,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 745,
+     "line": 751,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/tls.rs",
-     "line": 1259,
+     "line": 1260,
      "kind": "lab"
     }
    ],
@@ -4796,12 +4791,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1108,
+     "line": 1086,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1775,
+     "line": 1741,
      "kind": "lab"
     }
    ],
@@ -4839,12 +4834,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1131,
+     "line": 1109,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1776,
+     "line": 1742,
      "kind": "lab"
     }
    ],
@@ -4883,32 +4878,32 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1344,
+     "line": 1322,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1407,
+     "line": 1376,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1434,
+     "line": 1401,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1781,
+     "line": 1747,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1782,
+     "line": 1748,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1783,
+     "line": 1749,
      "kind": "lab"
     },
     {
@@ -4984,12 +4979,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1463,
+     "line": 1429,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1784,
+     "line": 1750,
      "kind": "lab"
     }
    ],
@@ -5027,12 +5022,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1527,
+     "line": 1493,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1785,
+     "line": 1751,
      "kind": "lab"
     }
    ],
@@ -5070,12 +5065,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1153,
+     "line": 1131,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1777,
+     "line": 1743,
      "kind": "lab"
     }
    ],
@@ -5114,12 +5109,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 438,
+     "line": 441,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2908,
+     "line": 2929,
      "kind": "lab"
     },
     {
@@ -5163,12 +5158,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 477,
+     "line": 480,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2909,
+     "line": 2930,
      "kind": "lab"
     },
     {
@@ -5229,12 +5224,12 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 382,
+     "line": 411,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 386,
+     "line": 415,
      "kind": "integration_test"
     }
    ],
@@ -5253,12 +5248,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 548,
+     "line": 552,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2910,
+     "line": 2931,
      "kind": "lab"
     },
     {
@@ -5317,12 +5312,12 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 613,
+     "line": 617,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2911,
+     "line": 2932,
      "kind": "lab"
     }
    ],
@@ -5366,12 +5361,12 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 643,
+     "line": 647,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2912,
+     "line": 2933,
      "kind": "lab"
     }
    ],
@@ -5415,12 +5410,12 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 671,
+     "line": 675,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2913,
+     "line": 2934,
      "kind": "lab"
     }
    ],
@@ -5464,22 +5459,22 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 730,
+     "line": 734,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 763,
+     "line": 767,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2914,
+     "line": 2935,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2915,
+     "line": 2936,
      "kind": "lab"
     }
    ],
@@ -5537,12 +5532,12 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 787,
+     "line": 791,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2916,
+     "line": 2937,
      "kind": "lab"
     }
    ],
@@ -5604,12 +5599,12 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 875,
+     "line": 880,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2917,
+     "line": 2938,
      "kind": "lab"
     }
    ],
@@ -5653,22 +5648,22 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 902,
+     "line": 907,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 953,
+     "line": 958,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2954,
+     "line": 2975,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2955,
+     "line": 2976,
      "kind": "lab"
     }
    ],
@@ -5731,42 +5726,42 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1277,
+     "line": 1282,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1310,
+     "line": 1316,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1628,
+     "line": 1636,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1665,
+     "line": 1673,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2918,
+     "line": 2939,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2919,
+     "line": 2940,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2925,
+     "line": 2946,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2927,
+     "line": 2948,
      "kind": "lab"
     }
    ],
@@ -5857,12 +5852,12 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1347,
+     "line": 1353,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2920,
+     "line": 2941,
      "kind": "lab"
     }
    ],
@@ -5926,37 +5921,37 @@
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1379,
+     "line": 1386,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1428,
+     "line": 1436,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1553,
+     "line": 1561,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1740,
+     "line": 1748,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 1783,
+     "line": 1791,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2921,
+     "line": 2942,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2922,
+     "line": 2943,
      "kind": "lab"
     }
    ],
@@ -6074,57 +6069,57 @@
     },
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 1323,
+     "line": 1329,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 401,
+     "line": 404,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 448,
+     "line": 451,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 468,
+     "line": 471,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 538,
+     "line": 542,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 592,
+     "line": 602,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 1213,
+     "line": 1223,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 1214,
+     "line": 1224,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 1215,
+     "line": 1225,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 1218,
+     "line": 1228,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 1222,
+     "line": 1232,
      "kind": "lab"
     }
    ],
@@ -6248,37 +6243,37 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 1429,
+     "line": 1435,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2456,
+     "line": 2465,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2488,
+     "line": 2497,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2506,
+     "line": 2516,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2976,
+     "line": 2997,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2977,
+     "line": 2998,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2978,
+     "line": 2999,
      "kind": "lab"
     }
    ],
@@ -6345,22 +6340,22 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 1559,
+     "line": 1565,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2597,
+     "line": 2607,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2981,
+     "line": 3002,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-transport/tests/sessions_streams.rs",
-     "line": 276,
+     "line": 319,
      "kind": "integration_test"
     }
    ],
@@ -6399,17 +6394,17 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 1582,
+     "line": 1619,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2631,
+     "line": 2641,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2982,
+     "line": 3003,
      "kind": "lab"
     }
    ],
@@ -6468,42 +6463,42 @@
     },
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 1672,
+     "line": 1713,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 1693,
+     "line": 1738,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-engine/tests/sessions.rs",
-     "line": 1718,
+     "line": 1764,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-engine/tests/sessions.rs",
+     "line": 1789,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2658,
+     "line": 2668,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2687,
+     "line": 2697,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2983,
+     "line": 3004,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2984,
-     "kind": "lab"
-    },
-    {
-     "path": "crates/anvil-lab/src/tls.rs",
-     "line": 874,
+     "line": 3005,
      "kind": "lab"
     }
    ],
@@ -6648,7 +6643,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 312,
+     "line": 341,
      "kind": "integration_test"
     }
    ],
@@ -6684,7 +6679,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 346,
+     "line": 375,
      "kind": "integration_test"
     }
    ],
@@ -6785,22 +6780,22 @@
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 500,
+     "line": 503,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/h3x.rs",
-     "line": 1216,
+     "line": 1226,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2410,
+     "line": 2418,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2953,
+     "line": 2974,
      "kind": "lab"
     }
    ],
@@ -6853,7 +6848,7 @@
    "references": [
     {
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
-     "line": 366,
+     "line": 395,
      "kind": "integration_test"
     }
    ],
@@ -6882,12 +6877,12 @@
     },
     {
      "path": "crates/anvil-lab/src/g01.rs",
-     "line": 215,
+     "line": 212,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/g01.rs",
-     "line": 348,
+     "line": 345,
      "kind": "lab"
     }
    ],
@@ -6936,12 +6931,12 @@
     },
     {
      "path": "crates/anvil-lab/src/g01.rs",
-     "line": 276,
+     "line": 273,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/g01.rs",
-     "line": 349,
+     "line": 346,
      "kind": "lab"
     }
    ],
@@ -7000,12 +6995,12 @@
     },
     {
      "path": "crates/anvil-lab/src/g01.rs",
-     "line": 316,
+     "line": 313,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/g01.rs",
-     "line": 350,
+     "line": 347,
      "kind": "lab"
     }
    ],
@@ -7076,7 +7071,7 @@
     },
     {
      "path": "crates/anvil-app/tests/roundtrip.rs",
-     "line": 105,
+     "line": 107,
      "kind": "integration_test"
     },
     {
@@ -7109,7 +7104,7 @@
    "references": [
     {
      "path": "crates/anvil-app/tests/roundtrip.rs",
-     "line": 27,
+     "line": 28,
      "kind": "integration_test"
     }
    ],
@@ -7145,7 +7140,7 @@
    "references": [
     {
      "path": "crates/anvil-portability/tests/bundles.rs",
-     "line": 218,
+     "line": 280,
      "kind": "integration_test"
     }
    ],
@@ -7163,7 +7158,7 @@
    "references": [
     {
      "path": "crates/anvil-portability/tests/bundles.rs",
-     "line": 226,
+     "line": 298,
      "kind": "integration_test"
     }
    ],
@@ -7181,7 +7176,7 @@
    "references": [
     {
      "path": "crates/anvil-portability/tests/bundles.rs",
-     "line": 488,
+     "line": 831,
      "kind": "integration_test"
     }
    ],
@@ -7199,7 +7194,7 @@
    "references": [
     {
      "path": "crates/anvil-portability/tests/bundles.rs",
-     "line": 260,
+     "line": 332,
      "kind": "integration_test"
     }
    ],
@@ -7222,17 +7217,17 @@
     },
     {
      "path": "crates/anvil-portability/tests/bundles.rs",
-     "line": 279,
+     "line": 351,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-portability/tests/bundles.rs",
-     "line": 334,
+     "line": 406,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-portability/tests/bundles.rs",
-     "line": 356,
+     "line": 428,
      "kind": "integration_test"
     }
    ],
@@ -7268,7 +7263,7 @@
    "references": [
     {
      "path": "crates/anvil-import/tests/openapi.rs",
-     "line": 268,
+     "line": 323,
      "kind": "integration_test"
     }
    ],
@@ -7378,7 +7373,7 @@
    "references": [
     {
      "path": "crates/anvil-app/tests/roundtrip.rs",
-     "line": 129,
+     "line": 131,
      "kind": "integration_test"
     },
     {
@@ -7401,12 +7396,12 @@
    "references": [
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 1009,
+     "line": 1027,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 1013,
+     "line": 1031,
      "kind": "integration_test"
     }
    ],
@@ -7424,7 +7419,7 @@
    "references": [
     {
      "path": "crates/anvil-storage/src/vault.rs",
-     "line": 1207,
+     "line": 1172,
      "kind": "unit_test"
     }
    ],
@@ -7447,7 +7442,7 @@
     },
     {
      "path": "crates/anvil-app/tests/identity.rs",
-     "line": 138,
+     "line": 153,
      "kind": "integration_test"
     }
    ],
@@ -7465,7 +7460,7 @@
    "references": [
     {
      "path": "crates/anvil-app/tests/identity.rs",
-     "line": 165,
+     "line": 180,
      "kind": "integration_test"
     }
    ],
@@ -7484,12 +7479,12 @@
    "references": [
     {
      "path": "crates/anvil-engine/src/redact.rs",
-     "line": 1285,
+     "line": 1457,
      "kind": "unit_test"
     },
     {
      "path": "crates/anvil-engine/tests/engine_scenarios.rs",
-     "line": 274,
+     "line": 311,
      "kind": "integration_test"
     }
    ],
@@ -7543,7 +7538,7 @@
    "references": [
     {
      "path": "crates/anvil-load/src/metrics.rs",
-     "line": 1254,
+     "line": 1285,
      "kind": "unit_test"
     }
    ],
@@ -7562,7 +7557,7 @@
    "references": [
     {
      "path": "crates/anvil-load/src/metrics.rs",
-     "line": 1319,
+     "line": 1350,
      "kind": "unit_test"
     },
     {
@@ -7622,7 +7617,7 @@
    "references": [
     {
      "path": "crates/anvil-load/src/report.rs",
-     "line": 927,
+     "line": 945,
      "kind": "unit_test"
     },
     {
@@ -7663,17 +7658,17 @@
    "references": [
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 407,
+     "line": 425,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 436,
+     "line": 454,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 464,
+     "line": 482,
      "kind": "integration_test"
     }
    ],
@@ -7692,12 +7687,12 @@
    "references": [
     {
      "path": "crates/anvil-load/src/metrics.rs",
-     "line": 1351,
+     "line": 1382,
      "kind": "unit_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 512,
+     "line": 530,
      "kind": "integration_test"
     }
    ],
@@ -7716,17 +7711,17 @@
    "references": [
     {
      "path": "crates/anvil-load/src/html.rs",
-     "line": 823,
+     "line": 837,
      "kind": "unit_test"
     },
     {
      "path": "crates/anvil-load/src/report.rs",
-     "line": 946,
+     "line": 964,
      "kind": "unit_test"
     },
     {
      "path": "crates/anvil-load/tests/load_scenarios.rs",
-     "line": 595,
+     "line": 613,
      "kind": "integration_test"
     }
    ],
@@ -7761,12 +7756,12 @@
     },
     {
      "path": "crates/anvil-app/tests/specs_load.rs",
-     "line": 621,
+     "line": 639,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-app/tests/specs_load.rs",
-     "line": 652,
+     "line": 670,
      "kind": "integration_test"
     },
     {
@@ -7776,37 +7771,37 @@
     },
     {
      "path": "crates/anvil-cli/tests/cli_load.rs",
-     "line": 116,
+     "line": 118,
      "kind": "integration_test"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2763,
+     "line": 2773,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2813,
+     "line": 2834,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2871,
+     "line": 2892,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2985,
+     "line": 3006,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2986,
+     "line": 3007,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/streams.rs",
-     "line": 2987,
+     "line": 3008,
      "kind": "lab"
     },
     {
@@ -8012,12 +8007,12 @@
     },
     {
      "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
-     "line": 100,
+     "line": 106,
      "kind": "native_e2e"
     },
     {
      "path": "apps/desktop/e2e/specs/09-offline-no-account.e2e.ts",
-     "line": 208,
+     "line": 214,
      "kind": "native_e2e"
     }
    ],
@@ -8032,7 +8027,7 @@
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "Executed check: the hosted website check recorded in docs/verification/website-evidence.md (pinned ferrum-edge/ferrumedge commit f3551a0664aaec1ec23666d37cf9f962d6dca0a7, command, Node version, runs and counts; workflow_dispatch run 41589535671 passes 459 of 461 tests with 0 failed and 2 unrelated live CDN checks skipped). release.yml calls it on every release run, beside the build; it does not gate the draft release. It covers the website at the pinned commit, which describes anvil-v0.1.7; a later release's pages are covered once the pin moves. Tests (tests/anvil.test.js, 'Anvil downloads match the release evidence'): each download.html row's OS and architecture, and each link's package label and column, match the linked asset name (architecture aliases mapped; a swapped architecture, OS, package or column is rejected by a negative test); every displayed download is that platform's installer or CLI archive in the recorded release-evidence.json, and the table shows each of them once; the recorded SHA256SUMS lines hash to GitHub's digest of the published SHA256SUMS asset, each of the 33 listed assets has a recorded digest equal to its SHA256SUMS entry (only SHA256SUMS and release-evidence.json are unlisted), and every displayed download is checksummed there. 'published preview links and bounded claims' requires every release-download link in Anvil content to be a published asset of the audited tag, so no asset name is inferred from the tag; tests/releases.test.js requires download.html to link SHA256SUMS and release-evidence.json. The site displays no hashes and points to SHA256SUMS. Scope: asset names and digests are compared as recorded in tests/fixtures/release-audit.json (GitHub release API, checked 2026-11-03), not re-fetched on each run; the release API returned the same 35 asset names and digests on 2026-11-03."
+   "note": "Executed check: the hosted website check recorded in docs/verification/website-evidence.md (pinned ferrum-edge/ferrumedge commit f8b206ace58ea0587ef19a817bb64cafda784ede, command, Node version, runs and counts; workflow_dispatch run 45012006101 passes 530 of 532 tests with 0 failed and 2 unrelated live CDN checks skipped). release.yml calls it on every release run, beside the build; it does not gate the draft release. It covers the website at the pinned commit, which describes anvil-v0.1.8; a later release's pages are covered once the pin moves. Tests (tests/anvil.test.js, 'Anvil downloads match the release evidence'): each download.html row's OS and architecture, and each link's package label and column, match the linked asset name (architecture aliases mapped; a swapped architecture, OS, package or column is rejected by a negative test); every displayed download is that platform's installer or CLI archive in the recorded release-evidence.json, and the table shows each of them once; the recorded SHA256SUMS lines hash to GitHub's digest of the published SHA256SUMS asset, each of the 33 listed assets has a recorded digest equal to its SHA256SUMS entry (only SHA256SUMS and release-evidence.json are unlisted), and every displayed download is checksummed there. 'published preview links and bounded claims' requires every release-download link in Anvil content to be a published asset of the audited tag, so no asset name is inferred from the tag; tests/releases.test.js requires download.html to link SHA256SUMS and release-evidence.json. The site displays no hashes and points to SHA256SUMS. Scope: asset names and digests are compared as recorded in tests/fixtures/release-audit.json (GitHub release API, checked 2026-11-22), not re-fetched on each run; the release API returned the same 35 asset names and digests on 2026-11-22."
   },
   {
    "id": "REL-007",
@@ -8042,7 +8037,7 @@
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "Executed check: the hosted website check recorded in docs/verification/website-evidence.md (pinned ferrum-edge/ferrumedge commit f3551a0664aaec1ec23666d37cf9f962d6dca0a7, command, Node version, runs and counts; workflow_dispatch run 41589535671 passes 459 of 461 tests with 0 failed and 2 unrelated live CDN checks skipped). release.yml calls it on every release run, beside the build; it does not gate the draft release. It covers the website at the pinned commit, which describes anvil-v0.1.7; a later release's pages are covered once the pin moves. Tests: tests/components.test.js 'Anvil navigation entries' runs the site's components.js, with its real DOMContentLoaded handler, for root (/, /index.html), extensionless and .html (/anvil, /anvil.html, /foundry), guide (/guides/, /guides/anvil-getting-started, /guides/anvil-diagnostics.html) and other nested (/install/linux, /plugins/) page paths: the desktop Tools dropdown, the mobile menu and the footer each carry one Anvil link labelled unsigned preview, written with ./ or ../ as the page's depth requires and resolving to /anvil, and the footer's Anvil guides link resolves to /guides/#anvil-guides; on /anvil and /anvil.html Tools is the only active section and the desktop and mobile Anvil links carry aria-current=\"page\"; an Anvil guide activates Docs and marks no Anvil link current; another Tools page does not mark Anvil current; no injected link uses .html. 'normalizePath' and 'resolveActiveNav' cover the same paths with and without .html, index and trailing slashes; 'the injected nav and banner use data hooks the listener handles' requires aria-controls on every dropdown toggle. tests/anvil.test.js checks that every local link in Anvil content (the six Anvil pages and the Anvil blocks on download, guides/index, index and releases) is extensionless and resolves from its own page, with its anchor; that the anchors other pages link to and the anvil.html jump links exist; that Anvil screenshots and brand images carry alt text; and that no link nests inside another on any page with a checked Anvil region. Scope: the shell is rendered in a Node vm with a minimal DOM, not a browser or a mobile viewport (the mobile menu is checked as markup); accessibility is the targeted aria-current, aria-controls and alt-text checks, not a full audit. No test asserts that a page mounts the shared nav; at the pinned commit f3551a0 all ten of those pages carry nav-container and footer-container and load components.js at their depth."
+   "note": "Executed check: the hosted website check recorded in docs/verification/website-evidence.md (pinned ferrum-edge/ferrumedge commit f8b206ace58ea0587ef19a817bb64cafda784ede, command, Node version, runs and counts; workflow_dispatch run 45012006101 passes 530 of 532 tests with 0 failed and 2 unrelated live CDN checks skipped). release.yml calls it on every release run, beside the build; it does not gate the draft release. It covers the website at the pinned commit, which describes anvil-v0.1.8; a later release's pages are covered once the pin moves. Tests: tests/components.test.js 'Anvil navigation entries' runs the site's components.js, with its real DOMContentLoaded handler, for root (/, /index.html), extensionless and .html (/anvil, /anvil.html, /foundry), guide (/guides/, /guides/anvil-getting-started, /guides/anvil-diagnostics.html) and other nested (/install/linux, /plugins/) page paths: the desktop Tools dropdown, the mobile menu and the footer each carry one Anvil link labelled unsigned preview, written with ./ or ../ as the page's depth requires and resolving to /anvil, and the footer's Anvil guides link resolves to /guides/#anvil-guides; on /anvil and /anvil.html Tools is the only active section and the desktop and mobile Anvil links carry aria-current=\"page\"; an Anvil guide activates Docs and marks no Anvil link current; another Tools page does not mark Anvil current; no injected link uses .html. 'normalizePath' and 'resolveActiveNav' cover the same paths with and without .html, index and trailing slashes; 'the injected nav and banner use data hooks the listener handles' requires aria-controls on every dropdown toggle. tests/anvil.test.js checks that every local link in Anvil content (the six Anvil pages and the Anvil blocks on download, guides/index, index and releases) is extensionless and resolves from its own page, with its anchor; that the anchors other pages link to and the anvil.html jump links exist; that Anvil screenshots and brand images carry alt text; and that no link nests inside another on any page with a checked Anvil region. Scope: the shell is rendered in a Node vm with a minimal DOM, not a browser or a mobile viewport (the mobile menu is checked as markup); accessibility is the targeted aria-current, aria-controls and alt-text checks, not a full audit. No test asserts that a page mounts the shared nav; at the pinned commit f8b206a all ten of those pages carry nav-container and footer-container and load components.js at their depth."
   },
   {
    "id": "REL-008",
@@ -8052,7 +8047,7 @@
    "evidence_kinds": [],
    "references": [],
    "lab": null,
-   "note": "Executed check: the hosted website check recorded in docs/verification/website-evidence.md (pinned ferrum-edge/ferrumedge commit f3551a0664aaec1ec23666d37cf9f962d6dca0a7, command, Node version, runs and counts; workflow_dispatch run 41589535671 passes 459 of 461 tests with 0 failed and 2 unrelated live CDN checks skipped). release.yml calls it on every release run, beside the build; it does not gate the draft release. It covers the website at the pinned commit, which describes anvil-v0.1.7; a later release's pages are covered once the pin moves. Tests: tests/anvil-capabilities.test.js reads every claim element in the <main> and <head> of anvil.html and the five Anvil guides and in the Anvil blocks of index, guides/index, releases and download (824 elements, per `node tests/anvil-claims.js --counts` at that commit: paragraphs, list items, table cells, headings, labels, links, image alt text, page titles and descriptions; any other visible text there fails). The download table on download.html is the one table left out of the claim check; tests/releases.test.js and the REL-006 download tests cover it. Each element names the capabilities it claims in data-anvil-claim, and each capability must be backed in tests/fixtures/anvil-capabilities.json, recorded from ferrum-anvil at anvil-v0.1.7 (e1a3dc0e): a verified matrix case, the catalog outcome counts and public tokens, named tests with a line quoted from inside each test, or a doc or code quote. Every version, count, algorithm, format or product name in a clause must be a recorded value of a capability named there; every lowercase word and inline-code word must be in a reviewed list. Built-but-untested variants must carry their qualifier, and each behavior a test-backed claim asserts must be an audited behavior (a quoted test line or a verified case) or an untested behavior that is qualified in the copy, backed by another declared capability or stated as a limit. A negated audited phrase fails with its negation removed. Refused or unbuilt capabilities may appear only in limiting words; support-matrix cells must agree with each capability's support level. Claims resting on tests outside the verification matrix, or on code the claim says is untested, carry the dagger the #evidence-levels note explains. Screenshot alt text is bound to the e2e spec that captures the screen and the renderer files that draw it. tests/anvil.test.js 'published preview links and bounded claims' rejects exact or guaranteed root-cause claims and 'available now' wording in all Anvil content (must_not). Scope: the claims are compared with the recorded fixture; the website repository's own CI re-verifies that fixture against a checkout of anvil-v0.1.7, which this check does not repeat. Screenshot pixels are not compared with the current app. The check is word-level; its residual limits are listed in ferrumedge's README ('Residual limits of a word-level check'): a universal quantifier or paraphrase for a capability without tests is not audited, the relevance of a case, fact or backing-key quote is recorded for review rather than checked, markup that hides text is refused only from a fixed list, and text inserted by script at run time is not read."
+   "note": "Executed check: the hosted website check recorded in docs/verification/website-evidence.md (pinned ferrum-edge/ferrumedge commit f8b206ace58ea0587ef19a817bb64cafda784ede, command, Node version, runs and counts; workflow_dispatch run 45012006101 passes 530 of 532 tests with 0 failed and 2 unrelated live CDN checks skipped). release.yml calls it on every release run, beside the build; it does not gate the draft release. It covers the website at the pinned commit, which describes anvil-v0.1.8; a later release's pages are covered once the pin moves. Tests: tests/anvil-capabilities.test.js reads every claim element in the <main> and <head> of anvil.html and the five Anvil guides and in the Anvil blocks of index, guides/index, releases and download (832 elements, per `node tests/anvil-claims.js --counts` at that commit: paragraphs, list items, table cells, headings, labels, links, image alt text, page titles and descriptions; any other visible text there fails). The download table on download.html is the one table left out of the claim check; tests/releases.test.js and the REL-006 download tests cover it. Each element names the capabilities it claims in data-anvil-claim, and each capability must be backed in tests/fixtures/anvil-capabilities.json, recorded from ferrum-anvil at anvil-v0.1.8 (164edccc): a verified matrix case, the catalog outcome counts and public tokens, named tests with a line quoted from inside each test, or a doc or code quote. Every version, count, algorithm, format or product name in a clause must be a recorded value of a capability named there; every lowercase word and inline-code word must be in a reviewed list. Built-but-untested variants must carry their qualifier, and each behavior a test-backed claim asserts must be an audited behavior (a quoted test line or a verified case) or an untested behavior that is qualified in the copy, backed by another declared capability or stated as a limit. A negated audited phrase fails with its negation removed. Refused or unbuilt capabilities may appear only in limiting words; support-matrix cells must agree with each capability's support level. Claims resting on tests outside the verification matrix, or on code the claim says is untested, carry the dagger the #evidence-levels note explains. Screenshot alt text is bound to the e2e spec that captures the screen and the renderer files that draw it. tests/anvil.test.js 'published preview links and bounded claims' rejects exact or guaranteed root-cause claims and 'available now' wording in all Anvil content (must_not). Scope: the claims are compared with the recorded fixture; the website repository's own CI re-verifies that fixture against a checkout of anvil-v0.1.8, which this check does not repeat. Screenshot pixels are not compared with the current app. The check is word-level; its residual limits are listed in ferrumedge's README ('Residual limits of a word-level check'): a universal quantifier or paraphrase for a capability without tests is not audited, the relevance of a case, fact or backing-key quote is recorded for review rather than checked, markup that hides text is refused only from a fixed list, and text inserted by script at run time is not read."
   }
  ]
 }
