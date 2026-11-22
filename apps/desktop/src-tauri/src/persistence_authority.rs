@@ -661,9 +661,7 @@ fn plan_environment_save(before_snap: &WorkspaceSnapshot, stored: Option<&Enviro
         None if environment.variables.iter().all(|v| !v.enabled) => return None,
         _ => {}
     }
-    let Some(ws) = before_snap.workspace.as_ref() else {
-        return None;
-    };
+    let ws = before_snap.workspace.as_ref()?;
     let after_snap = before_snap.with_environment(environment.clone());
     let env_id = environment.meta.id;
     let before_choice = if stored.is_some() { EnvChoice::Explicit(env_id) } else { EnvChoice::None };
