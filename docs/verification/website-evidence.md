@@ -28,6 +28,7 @@ the site to the published `anvil-v0.1.9` and re-records the capability evidence 
 | Run | Event | Anvil commit | Result |
 |---|---|---|---|
 | [45098664403](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/45098664403) | workflow_dispatch, 2026-11-23 | `50624e69` (the pin change) | `pass`: 532 tests, 530 pass, 0 fail, 0 cancelled, 2 skipped |
+| [45099361622](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/45099361622) | pull_request, 2026-11-23 | `72f2e30e` (the pull request's test merge of the pin change into `main`) | `pass`: 532 tests, 530 pass, 0 fail, 0 cancelled, 2 skipped |
 
 The 2 skipped tests are the live highlight.js CDN checks in `tests/components.test.js`
 (`skip: RUN_LIVE_ASSET_CHECKS !== '1'`), which do not concern Anvil.
