@@ -638,8 +638,9 @@ What it does **not** cover:
   through the GitHub API, not a browser, so the job does not expect a
   `com.apple.quarantine` attribute or a Mark-of-the-Web. It records the
   actual state of each (absent on every hosted run so far) and does not
-  remove either. Without them, Gatekeeper and SmartScreen are never
-  consulted. The installers run silently, and the DMG license prompt is
+  remove either. Without them, Gatekeeper's first-launch check and
+  SmartScreen are never exercised (the macOS result records a diagnostic
+  `spctl --assess` of the installed app). The installers run silently, and the DMG license prompt is
   answered by `yes`. Each result records this as a bypass.
   Gatekeeper, SmartScreen and Keychain acceptance of signed packages stays
   with ferrum-edge/ferrum-anvil#2.

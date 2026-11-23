@@ -115,7 +115,7 @@ v0.9.20 pin, results 2026-11-04), the release's hosted qualification
     - All seven targets pass every step: macOS arm64 and native Intel DMG, Windows NSIS and MSI, Ubuntu 26.04 `.deb` and AppImage, and `.rpm` in a Fedora 44 container on an Ubuntu 26.04 runner.
     - The AppImage, which failed at its first launch on `anvil-v0.1.5` (its WebKit web process aborted with `EGL_BAD_PARAMETER`), passes with the fix from ferrum-edge/ferrum-anvil#463.
     - The GUI was not driven.
-    - Gatekeeper's first-launch check and SmartScreen were never exercised (no quarantine attribute or Mark-of-the-Web; the macOS results record a diagnostic `spctl --assess`, which fails on the ad-hoc signature), and installers ran silently. Each result records these bypasses.
+    - Gatekeeper's first-launch check and SmartScreen were never exercised (no quarantine attribute or Mark-of-the-Web; the macOS results record a diagnostic `spctl --assess`, which rejects both apps since neither is Developer ID signed), and installers ran silently. Each result records these bypasses.
     - Still blocked: signed and notarized first run on macOS and Windows, which needs owner credentials (ferrum-edge/ferrum-anvil#2).
 - **UP-017 (port exhaustion) and UP-019 (trust withdrawn)** are covered by public-signal contract tests only. UP-017 needs a gateway dial hook. UP-019 is mesh-only; the mesh lab now reproduces the unauthenticated-peer refusal, but not a trust withdrawal on a live tunnel.
 
