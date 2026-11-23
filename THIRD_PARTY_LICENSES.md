@@ -16,13 +16,13 @@ reviewed per-crate exception. `cargo deny check licenses` enforces the same list
 
 ## Summary
 
-658 Rust crates, 4 npm packages.
+655 Rust crates, 4 npm packages.
 
 | License expression | Components |
 | --- | --- |
-| MIT OR Apache-2.0 | 301 |
-| MIT | 152 |
-| Apache-2.0 OR MIT | 85 |
+| MIT OR Apache-2.0 | 300 |
+| MIT | 151 |
+| Apache-2.0 OR MIT | 84 |
 | MIT/Apache-2.0 | 26 |
 | Unicode-3.0 | 18 |
 | Apache-2.0 | 10 |
@@ -69,7 +69,7 @@ the modified file under MPL-2.0.
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
 | selectors | 0.38.0 | MPL-2.0 | https://github.com/servo/stylo |
 
-## Rust crates (658)
+## Rust crates (655)
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
@@ -347,7 +347,7 @@ the modified file under MPL-2.0.
 | jsonschema | 0.61.2 | MIT | https://github.com/Stranger6667/jsonschema |
 | jsonschema-regex | 0.61.2 | MIT | https://github.com/Stranger6667/jsonschema |
 | jsonschema-value | 0.61.2 | MIT | https://github.com/Stranger6667/jsonschema |
-| jsonwebtoken | 11.1.0 | MIT | https://github.com/Keats/jsonwebtoken |
+| jsonwebtoken | 12.0.0 | MIT | https://github.com/Keats/jsonwebtoken |
 | keyboard-types | 0.8.3 | MIT OR Apache-2.0 | https://github.com/rust-windowing/keyboard-types |
 | keyring | 4.2.0 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-rs |
 | keyring-core | 1.0.1 | MIT OR Apache-2.0 | https://github.com/open-source-cooperative/keyring-core.git |
@@ -424,7 +424,6 @@ the modified file under MPL-2.0.
 | parking_lot_core | 0.9.12 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | password-hash | 0.6.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/traits |
 | pbkdf2 | 0.13.0 | MIT OR Apache-2.0 | https://github.com/RustCrypto/password-hashes |
-| pem | 3.0.6 | MIT | https://github.com/jcreekmore/pem-rs.git |
 | pem | 4.0.0 | MIT | https://github.com/jcreekmore/pem-rs.git |
 | pem-rfc7468 | 1.0.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
 | percent-encoding | 2.3.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ |
@@ -473,7 +472,6 @@ the modified file under MPL-2.0.
 | quinn-udp | 0.5.16 | MIT OR Apache-2.0 | https://github.com/quinn-rs/quinn |
 | quote | 1.0.47 | MIT OR Apache-2.0 | https://github.com/dtolnay/quote |
 | rand | 0.10.3 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
-| rand_core | 0.6.4 | MIT OR Apache-2.0 | https://github.com/rust-random/rand |
 | rand_core | 0.10.1 | MIT OR Apache-2.0 | https://github.com/rust-random/rand_core |
 | rand_pcg | 0.10.2 | MIT OR Apache-2.0 | https://github.com/rust-random/rngs |
 | raw-window-handle | 0.6.2 | MIT OR Apache-2.0 OR Zlib | https://github.com/rust-windowing/raw-window-handle |
@@ -547,7 +545,6 @@ the modified file under MPL-2.0.
 | sha2 | 0.11.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/hashes |
 | shlex | 2.0.1 | MIT OR Apache-2.0 | https://github.com/comex/rust-shlex |
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 | https://github.com/vorner/signal-hook |
-| signature | 2.2.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/traits/tree/master/signature |
 | signature | 3.0.0 | Apache-2.0 OR MIT | https://github.com/RustCrypto/traits |
 | simd-adler32 | 0.3.10 | MIT | https://github.com/mcountryman/simd-adler32 |
 | simple_asn1 | 0.6.4 | ISC | https://github.com/acw/simple_asn1 |
