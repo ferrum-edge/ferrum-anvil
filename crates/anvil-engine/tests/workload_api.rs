@@ -342,7 +342,7 @@ async fn failed_local_checks_refuse_the_request_unless_send_anyway_is_chosen() {
     let hs = jsonwebtoken::encode(
         &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
         &serde_json::json!({"sub": "alice", "aud": [GW_AUD], "exp": 4_000_000_000i64}),
-        &jsonwebtoken::EncodingKey::from_secret(b"a-shared-secret-value"),
+        &jsonwebtoken::EncodingKey::from_secret(b"a-shared-secret-value").unwrap(),
     )
     .unwrap();
     let o = run(&e, &with_jwt(&api.url("/echo"), jwt_auth(value(hs), "", &[GW_AUD]))).await;

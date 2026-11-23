@@ -67,7 +67,7 @@ fn token(env: &Env, sub: &str, scope: Option<&str>, ns: Option<&str>) -> String 
     if let Some(n) = ns {
         claims["ns"] = n.into();
     }
-    let key = jsonwebtoken::EncodingKey::from_secret(secret.as_bytes());
+    let key = jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()).expect("valid HS256 lab key");
     jsonwebtoken::encode(&jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256), &claims, &key).expect("HS256 lab token")
 }
 
