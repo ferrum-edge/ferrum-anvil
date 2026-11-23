@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-app"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-contract",
  "anvil-diagnostics",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-auth"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-domain",
  "anvil-xml-limits",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-cli"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-app",
  "anvil-auth",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-contract"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-domain",
  "anvil-import",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-desktop"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-app",
  "anvil-auth",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-diagnostics"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-domain",
  "anvil-xml-limits",
@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-domain"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "schemars 1.2.3",
  "serde",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-engine"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "aho-corasick",
  "anvil-auth",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-fixtures"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-identity"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-auth",
  "anvil-domain",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-import"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-domain",
  "anvil-xml-limits",
@@ -454,7 +454,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-lab"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-auth",
  "anvil-diagnostics",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-load"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-auth",
  "anvil-domain",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-portability"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-domain",
  "anvil-storage",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-runner"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "aho-corasick",
  "anvil-domain",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-storage"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-domain",
  "argon2",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-transport"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anvil-auth",
  "anvil-domain",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-xml-limits"
-version = "0.1.8"
+version = "0.1.9"
 
 [[package]]
 name = "anyhow"
