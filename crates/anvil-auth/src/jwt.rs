@@ -64,7 +64,7 @@ pub fn sign(
                 if key.is_empty() {
                     return Err(AuthError::Invalid("JWT HMAC secret is empty".into()));
                 }
-                EncodingKey::from_secret(key.as_bytes())
+                EncodingKey::from_secret(key.as_bytes()).map_err(|e| AuthError::Invalid(format!("JWT HMAC secret is not usable: {e}")))?
             }
             JwtAlgorithm::RS256 => EncodingKey::from_rsa_pem(key.as_bytes())
                 .map_err(|e| AuthError::Invalid(format!("RS256 key is not a valid RSA PEM: {e}")))?,
@@ -155,8 +155,12 @@ mod tests {
         let mut v = jsonwebtoken::Validation::new(Algorithm::HS256);
         v.validate_exp = false;
         v.required_spec_claims.clear();
-        jsonwebtoken::decode::<serde_json::Value>(&t, &jsonwebtoken::DecodingKey::from_secret(b"bob-jwt-secret-key-12345678901234"), &v)
-            .unwrap();
+        jsonwebtoken::decode::<serde_json::Value>(
+            &t,
+            &jsonwebtoken::DecodingKey::from_secret(b"bob-jwt-secret-key-12345678901234").unwrap(),
+            &v,
+        )
+        .unwrap();
     }
 
     #[test]

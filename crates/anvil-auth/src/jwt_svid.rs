@@ -222,8 +222,12 @@ mod tests {
         let none = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.c2ln";
         let k = fresh_key();
         assert!(verify_signature(none, &jwks(serde_json::json!([key(&k, "k")]))).unwrap_err().contains("unsigned"));
-        let hs = jsonwebtoken::encode(&Header::new(Algorithm::HS256), &serde_json::json!({"sub": "x"}), &EncodingKey::from_secret(b"k"))
-            .unwrap();
+        let hs = jsonwebtoken::encode(
+            &Header::new(Algorithm::HS256),
+            &serde_json::json!({"sub": "x"}),
+            &EncodingKey::from_secret(b"k").unwrap(),
+        )
+        .unwrap();
         assert!(verify_signature(&hs, &jwks(serde_json::json!([key(&k, "k")]))).unwrap_err().contains("HMAC"));
         assert!(algorithm_problem(Some("ES256")).is_none());
     }
