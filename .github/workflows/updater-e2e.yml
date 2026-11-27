@@ -172,7 +172,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $installer = $env:REL003_INSTALLER
+          # A Windows path (the bash steps write it with forward slashes, which
+          # msiexec refuses with 1619, "could not be opened").
+          $installer = [IO.Path]::GetFullPath($env:REL003_INSTALLER)
           if ($env:BUNDLES -eq "nsis") {
             $p = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
           } else {
