@@ -45,27 +45,44 @@ The hosted AppImage checker regression suite also runs with distribution-provide
 `gcc`, `python3` and `mksquashfs`, and the checksum-pinned upstream `unsquashfs`
 described below, before any release build.
 
-**Build** (one job per target) and **bundle-windows**:
+**Build** (one job per target), **bundle-windows** and **check-windows**:
 
 | Target | Runner | Bundles |
 | --- | --- | --- |
 | `aarch64-apple-darwin` | macOS 15 | `.app` → `.dmg` |
 | `x86_64-apple-darwin` | macOS 15 (cross-compiled) | `.app` → `.dmg` |
 | `x86_64-unknown-linux-gnu` | Ubuntu 26.04 (modern Linux baseline) | `.deb`, `.rpm`, `.AppImage` |
-| `x86_64-pc-windows-msvc` | Windows 2025: compiled by the build job, bundled and signed by `bundle-windows` | `.msi`, NSIS `-setup.exe` |
+| `x86_64-pc-windows-msvc` | Windows 2025: compiled by the build job, bundled and signed by `bundle-windows`, checked by `check-windows` | `.msi`, NSIS `-setup.exe` |
 
-The Windows build job compiles the app and the CLI and makes the SBOMs, then
-uploads the two binaries and the SBOMs as the `compiled-x86_64-pc-windows-msvc`
-artifact. The separate **bundle-windows** job (Windows 2025, the `release`
-environment for a tag) checks out the same commit, installs the toolchain and
-the Tauri CLI only (`npm ci --ignore-scripts`; no Rust build cache, no
-compiler run, no dependency build script; `tauri bundle` reads `cargo metadata
---no-deps`), places the binaries in `target/`, and runs steps 1 (bundling and
-signing) and 3 to 4 below. It is the only job with `id-token: write`, which
-Azure Artifact Signing's OIDC route needs, so no compile step of any target
-can request the signing identity. It runs for dry runs too, unsigned.
+Windows takes three jobs, so that the job able to sign never runs anything the
+build produced:
 
-Each build job (bundle-windows for Windows):
+- The Windows **build** job compiles the app and the CLI and makes the SBOMs.
+  It records the two binaries' SHA-256 digests and its `rustc -V` / `cargo -V`
+  as job outputs, and uploads the binaries and SBOMs as the
+  `compiled-x86_64-pc-windows-msvc` artifact (kept 30 days, the longest
+  GitHub lets a deployment wait for approval).
+- **bundle-windows** (Windows 2025, the `release` environment for a tag) is
+  the only job with `id-token: write`, which Azure Artifact Signing's OIDC
+  route needs. It checks out the same commit and installs only the toolchain
+  (for `cargo metadata --no-deps`) and the Tauri CLI (`npm ci
+  --ignore-scripts`: no npm lifecycle script; no Rust build cache, no
+  compiler, no dependency build script). It requires the downloaded binaries
+  to match the build job's recorded digests, places them in `target/`, and
+  runs step 1 (bundling and signing: the binaries are only patched, packaged
+  and passed to SignTool, never executed) and step 4 (signature
+  verification; `build-info.json` records the build job's toolchain). It
+  uploads the result as `bundled-x86_64-pc-windows-msvc`. If the compiled
+  artifact is gone (an approval that waited over 30 days, or a deletion), it
+  fails and says to re-run all jobs, not only the failed ones.
+- **check-windows** (no environment, no credential, no OIDC permission) runs
+  step 3, the release check whose runtime probe launches the app, on the
+  bundled installers and the compiled binary, adds the SBOMs and uploads
+  `release-x86_64-pc-windows-msvc`, the only Windows artifact publish reads.
+
+All three run for dry runs too, unsigned.
+
+Each build job (bundle-windows and check-windows for Windows):
 
 1. `tauri build --ci --target <t> --no-bundle` — release profile, **default
    features only**, with no signing credentials in its environment. The `e2e`
@@ -104,7 +121,7 @@ Each build job (bundle-windows for Windows):
    `LICENSE-COMMERCIAL.md` and `THIRD_PARTY_LICENSES.md`. The standalone
    `anvil-load-worker` binary is not packaged: the desktop app and the CLI run
    load workers by re-launching themselves.
-3. `scripts/release-check.sh` over every installer, the macOS updater archive
+3. `scripts/release-check.sh` (check-windows for Windows) over every installer, the macOS updater archive
    (if any), the CLI archive and the raw app binary, with the runtime probe on native targets (Linux under Xvfb). Any
    failure stops the release.
 4. Signature verification (see [Signing](#signing-and-what-unsigned-means)) and
@@ -391,9 +408,14 @@ How each route signs:
   (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`, given to the
   bundle step only). Artifact Signing certificates are valid for three days
   and renewed daily, so the timestamp is what keeps the signature valid.
-  Before logging in, the job prints its OIDC token's `sub`, `aud`, `iss` and
+  The dlib and its `metadata.json` are prepared before the login. Before
+  logging in, the job prints its OIDC token's `sub`, `aud`, `iss` and
   `environment` claims (never the token), so a subject mismatch is visible in
-  the log.
+  the log. Right after the login it fetches the Artifact Signing access token
+  (`az account get-access-token --scope https://codesigning.azure.net/.default`,
+  printing only its expiry), so the Azure CLI has it cached before bundling
+  starts and a slow bundling step cannot outlive the short-lived GitHub token
+  the login exchanged.
 - **Windows, `.pfx`** (bundle-windows): the certificate is imported into the
   runner's user store, Tauri signs with SignTool by thumbprint (SHA-256,
   DigiCert timestamp), and the certificate and its key are removed afterwards.
@@ -587,7 +609,7 @@ route is only for an older certificate you already have.
       `gh workflow run release.yml -R ferrum-edge/ferrum-anvil --ref <branch> -f dry_run=true`.
       It builds and checks every target unsigned and uploads the
       `release-evidence-<version>` and `notes-<version>` artifacts to the run.
-      Confirm every build job and `bundle-windows` passed, `problems` is empty,
+      Confirm every build job, `bundle-windows` and `check-windows` passed, `problems` is empty,
       `release-evidence.json` has `"version": 2` and `platform_signing`
       is `{"macos": "unsigned", "windows": "unsigned", "linux": "not applicable"}`
       and the notes start with the **Unsigned installers** warning. A dry run
@@ -596,7 +618,9 @@ route is only for an older certificate you already have.
 - [ ] **First signed release**: push the `anvil-vX.Y.Z` tag as in
       [Cutting a release](#cutting-a-release). The run asks for approval of
       the `release` environment twice: once for the four build jobs, and
-      again, after the Windows build, for `bundle-windows`. Each **Signing
+      again, after the Windows build, for `bundle-windows` (approve it within
+      30 days, while the compiled Windows artifact is kept; `check-windows`
+      needs no approval). Each **Signing
       route** step logs the route chosen per platform within minutes; a
       missing or half-set value fails it there. `bundle-windows` prints its
       OIDC subject before logging in to Azure; if the login fails, compare it
@@ -926,7 +950,7 @@ What it does **not** cover:
 
 ## Owner checklist before publishing a draft
 
-- [ ] Preflight, every build job, `bundle-windows` and publish succeeded; `release-evidence.json`
+- [ ] Preflight, every build job, `bundle-windows`, `check-windows` and publish succeeded; `release-evidence.json`
       has an empty `problems` list and every target's `release_check.result` is `pass`.
 - [ ] The CI, Desktop E2E and Lab runs listed under `tests.runs` for the commit
       concluded `success` on all platforms.

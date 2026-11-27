@@ -36,7 +36,7 @@ nightly lab run does not replace either.
 it runs on a PR, it must pass before merging. A pull request's Ubuntu lab job
 runs every profile against the default pin (about 11 to 12 minutes, inside the
 time the Rust jobs already take), and its macOS job runs the core profile. The
-nightly run repeats it on both systems (v0.9.20 is the only supported release). Before this,
+nightly run repeats it on both systems (the Lab supports one release at a time: the default pin in `lab/gateway/RELEASE.lock`). Before this,
 pull requests ran only the core profile, so a dependency bump that broke the
 `tls` profile's DTLS mTLS scenario (PROTO-022) merged green and failed every
 nightly job afterwards. A failing scenario is read from the job's uploaded
@@ -177,10 +177,10 @@ release asset for the runner's OS and architecture with `gh release download`
 (authenticated by the workflow's `github.token`) into `lab/bin/<release>/`.
 It refuses to keep a binary whose SHA-256 differs from its lock:
 
-- `lab/gateway/RELEASE.lock`: the default pin (v0.9.20, hosted Anvil qualification recorded in
-  [its audit](audit/gateway-0.9.20-delta.md#qualification-status));
-- `lab/gateway/releases/<release>.lock`: every supported release (v0.9.20;
-  v0.9.5 to v0.9.15 were retired, see [lab/README.md](lab/README.md)).
+- `lab/gateway/RELEASE.lock`: the default pin (its release and hosted Anvil
+  qualification are recorded in the matching `docs/audit/gateway-<release>-delta.md`);
+- `lab/gateway/releases/<release>.lock`: every supported release (only the
+  default pin; earlier releases were retired, see [lab/README.md](lab/README.md)).
 
 Each lock pins macOS (arm64, x86_64), Linux (x86_64, arm64) and Windows
 (x86_64) assets. The workflow passes the release in `ANVIL_LAB_RELEASE`: pull
