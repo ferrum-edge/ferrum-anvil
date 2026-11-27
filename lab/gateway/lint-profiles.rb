@@ -55,6 +55,11 @@
 # at v0.9.21). v0.9.21 also requires `scope` on every native PeerAuthentication (#7243); the mesh
 # JSON documents (not linted here) carry it. See docs/audit/gateway-0.9.21-delta.md.
 #
+# The Edge candidate commit f1b4d3739d (prepared as 1.0.0) removes the passive health-check keys
+# gateway_error_codes and split_external_local_origin_errors, which v0.9.21 still accepts as no-ops,
+# and refuses unknown keys in every nested proxy and upstream object. They are left out of PASSIVE so
+# profiles keep loading on that release; no profile sets them.
+#
 # Usage: ruby lab/gateway/lint-profiles.rb [profile.yaml ...]   (default: all *.yaml here)
 # Exit status 1 on any finding. `{{TOKEN}}` placeholders are tolerated.
 
@@ -98,8 +103,7 @@ HEALTH = %w[active passive].freeze
 ACTIVE = %w[http_path interval_seconds timeout_ms healthy_threshold unhealthy_threshold healthy_status_codes
             use_tls probe_type udp_probe_payload grpc_service_name].freeze
 PASSIVE = %w[unhealthy_status_codes unhealthy_threshold unhealthy_window_seconds healthy_after_seconds
-             max_ejection_percent gateway_error_codes split_external_local_origin_errors
-             consecutive_error_mode consecutive_5xx_ejection_disabled].freeze
+             max_ejection_percent consecutive_error_mode consecutive_5xx_ejection_disabled].freeze
 BREAKER = %w[failure_threshold success_threshold timeout_seconds cooldown_seconds failure_status_codes
              half_open_max_requests trip_on_connection_errors].freeze
 RETRY = %w[max_retries retryable_status_codes retryable_methods backoff retry_on_connect_failure].freeze
@@ -388,7 +392,8 @@ rescue Psych::Exception => e
   err(file, "YAML error: #{e.message}")
 end
 
-# Self-check, every run: keys v0.9.21 refuses (and v0.9.20 still accepted) are reported.
+# Self-check, every run: keys v0.9.21 refuses (and v0.9.20 still accepted) are reported, and so
+# are the passive health-check keys the Edge candidate commit f1b4d3739d (prepared as 1.0.0) removes.
 RETIRED = <<~YAML
   version: "1"
   proxies:
@@ -400,10 +405,14 @@ RETIRED = <<~YAML
     - { id: i, plugin_name: ip_restriction, scope: proxy, proxy_id: p, config: { mode: allow_first } }
     - { id: j, plugin_name: jwks_auth, scope: proxy, proxy_id: p, config: { providers: [{ audience: a }] } }
     - { id: m, plugin_name: mcp_gateway, scope: proxy, proxy_id: p, config: { discovery: { hide_denied_items: false } } }
+  upstreams:
+    - { id: u, targets: [{ host: 127.0.0.1, port: 1 }],
+        health_checks: { passive: { gateway_error_codes: [502], split_external_local_origin_errors: true } } }
 YAML
 lint('self-check', RETIRED)
 expected = ["unknown key 'allow_unsafe_replayable_v1'", "unknown key 'mode'", "unknown key 'audience'",
-            "unknown key 'hide_denied_items'", "unknown key 'pool_max_requests_per_connection'"]
+            "unknown key 'hide_denied_items'", "unknown key 'pool_max_requests_per_connection'",
+            "unknown key 'gateway_error_codes'", "unknown key 'split_external_local_origin_errors'"]
 missed = expected.reject { |e| $errors.any? { |x| x.include?(e) } }
 extra = $errors.reject { |x| expected.any? { |e| x.include?(e) } }
 abort("self-check: retired keys not reported: #{missed.join(', ')}") unless missed.empty?
