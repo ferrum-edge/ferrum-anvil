@@ -669,6 +669,16 @@ const MCP_OPERATIONS: { id: McpOperation["kind"]; label: string }[] = [
   { id: "batch", label: "JSON-RPC batch" },
 ];
 
+/** Whether a batch's literal JSON gives a request id 1, the id initialize uses. */
+export function batchReusesInitializeId(messages: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(messages);
+    return Array.isArray(parsed) && parsed.some((m) => typeof m === "object" && m !== null && (m as { id?: unknown }).id === 1);
+  } catch {
+    return false;
+  }
+}
+
 function mcpOperationDefault(kind: McpOperation["kind"]): McpOperation {
   switch (kind) {
     case "tools_call":
@@ -679,7 +689,8 @@ function mcpOperationDefault(kind: McpOperation["kind"]): McpOperation {
     case "raw":
       return { kind, method: "", params: "" };
     case "batch":
-      return { kind, messages: '[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]' };
+      // Not 1, the id initialize uses in the session: a session never reuses a request id.
+      return { kind, messages: '[{"jsonrpc":"2.0","id":11,"method":"ping"},{"jsonrpc":"2.0","id":12,"method":"tools/list"}]' };
     default:
       return { kind };
   }
@@ -781,6 +792,11 @@ function McpEditor(props: {
           Messages (a JSON array of JSON-RPC requests and notifications; variables allowed)
           <textarea className="field mono" rows={6} value={op.messages} onChange={(e) => setOp({ ...op, messages: e.target.value })} />
         </label>
+      )}
+      {op.kind === "batch" && m.initialize !== false && batchReusesInitializeId(op.messages) && (
+        <p className="hint" role="note">
+          Request id 1 is the id initialize uses in this session, and a session never reuses a request id: give the batch&apos;s requests other ids.
+        </p>
       )}
       {op.kind === "raw" && (
         <>

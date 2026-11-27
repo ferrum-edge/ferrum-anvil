@@ -280,9 +280,11 @@ pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObse
     let rec = &out.record;
     let mut obs = observe_record(rec, wall_us);
     if step.kind == LoadUnitKind::McpSession {
-        // The record is one exchange of the session; the unit is all of it.
+        // The record is one exchange of the session; the unit is all of it:
+        // its time and the traffic of its other exchanges.
         obs.latency_us = wall_us;
         obs.setup_us = 0;
+        count_attempts(&mut obs, &out.session_attempts);
     }
     obs.proto = protocol_obs(out, step, obs.terminal);
     // A datagram exchange whose tunnel never opened sent nothing and had no
@@ -371,7 +373,13 @@ pub fn observe_record(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
         destination: origin(&rec.prepared.url),
         proto: ProtoObs::default(),
     };
-    for a in &rec.attempts {
+    count_attempts(&mut obs, &rec.attempts);
+    obs
+}
+
+/// Add the bytes and connections of `attempts` to `obs`.
+fn count_attempts(obs: &mut SendObservation, attempts: &[anvil_domain::execution::AttemptObservation]) {
+    for a in attempts {
         obs.bytes_sent += a.bytes.request_headers_logical + a.bytes.request_body;
         obs.bytes_received += a.bytes.response_headers_logical.unwrap_or(0) + a.bytes.response_body_wire.unwrap_or(0);
         if let Some(c) = &a.connection {
@@ -382,7 +390,6 @@ pub fn observe_record(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
             }
         }
     }
-    obs
 }
 
 /// Failure category (class + top finding / failure kind / status / assertion

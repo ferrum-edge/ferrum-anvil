@@ -479,7 +479,15 @@ fn batch(messages: &str) -> McpOperation {
 #[tokio::test]
 async fn an_event_stream_left_open_ends_once_the_response_has_arrived() {
     init();
-    let f = mcp::serve("127.0.0.1:0", McpOptions { sse: true, keep_open: true, ..Default::default() }).await.unwrap();
+    // The answer's chunk ends inside a comment (readable before a chunk
+    // boundary says so); and again with the stream gzip-encoded.
+    for gzip in [false, true] {
+        left_open_ends_at_the_answer(McpOptions { sse: true, keep_open: true, gzip, ..Default::default() }).await;
+    }
+}
+
+async fn left_open_ends_at_the_answer(opts: McpOptions) {
+    let f = mcp::serve("127.0.0.1:0", opts).await.unwrap();
     let e = Engine::new();
     let mut c = mcp_ctx(&f.url(), call("echo", r#"{"text":"hi"}"#));
     let timeouts = TimeoutOverrides { total_ms: Some(Some(20_000)), ..Default::default() };
@@ -507,7 +515,8 @@ async fn an_event_stream_left_open_ends_once_the_response_has_arrived() {
 #[tokio::test]
 async fn a_json_rpc_batch_is_answered_response_by_response() {
     init();
-    let messages = r#"[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"nope/nope"},{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}]"#;
+    // Ids other than initialize's 1: a session never reuses a request id.
+    let messages = r#"[{"jsonrpc":"2.0","id":11,"method":"ping"},{"jsonrpc":"2.0","id":12,"method":"nope/nope"},{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}]"#;
     for sse in [false, true] {
         let f = mcp::serve("127.0.0.1:0", McpOptions { sse, keep_open: sse, batches: true, ..Default::default() }).await.unwrap();
         let e = Engine::new();
@@ -517,10 +526,10 @@ async fn a_json_rpc_batch_is_answered_response_by_response() {
         assert_eq!(status(&o), Some(200), "sse {sse}: {}", o.record.outcome.summary);
         let n = notes(&o);
         assert!(
-            n.contains("MCP JSON-RPC batch: 2 response(s) to 2 request(s): id 1: result; id 2: error -32601 (Method not found)"),
+            n.contains("MCP JSON-RPC batch: 2 response(s) to 2 request(s): id 11: result; id 12: error -32601 (Method not found)"),
             "sse {sse}: {n}"
         );
-        assert!(!n.contains("no response to request id"), "sse {sse}: {n}");
+        assert!(!n.contains("no response to request id") && !n.contains("reuses request id"), "sse {sse}: {n}");
         assert_eq!(o.record.outcome.application, ApplicationState::Failure, "sse {sse}: {}", o.record.outcome.summary);
         assert!(codes(&o).contains(&"app.jsonrpc_error".to_string()), "sse {sse}: {:?}", codes(&o));
         if sse {
@@ -550,4 +559,55 @@ async fn a_batch_a_server_refuses_whole_and_an_empty_batch() {
         assert_eq!(failure, Some((FailureKind::BodySerialization, Some("mcp.operation.messages".into()))), "{bad:?}");
     }
     assert_eq!(f.state.calls().len(), before, "nothing was sent");
+}
+
+/// A finite event stream whose last chunk carries the answer ends on its own:
+/// it is complete, not stopped, and its connection stays reusable.
+#[tokio::test]
+async fn a_finite_event_stream_is_complete_not_stopped() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", McpOptions { sse: true, ..Default::default() }).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &mcp_ctx(&f.url(), call("echo", r#"{"text":"hi"}"#))).await;
+    let body = &o.record.response.as_ref().expect("a response").body;
+    assert_eq!(body.completeness, anvil_domain::execution::BodyCompleteness::Complete);
+    assert!(!notes(&o).contains("stopped reading"), "{}", notes(&o));
+    let accepted = f.log.entries().iter().filter(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. })).count();
+    assert_eq!(accepted, 1, "every exchange of the session reused the first connection");
+}
+
+/// A batch whose answer leaves a request without a response is not a
+/// success: the notes name the request, and the outcome is not evaluated.
+#[tokio::test]
+async fn a_batch_answer_missing_a_response_is_not_a_success() {
+    init();
+    let opts = McpOptions { batches: true, hostile: Hostile::BatchDropsLast, ..Default::default() };
+    let f = mcp::serve("127.0.0.1:0", opts).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &mcp_ctx(&f.url(), batch(r#"[{"jsonrpc":"2.0","id":11,"method":"ping"},{"jsonrpc":"2.0","id":12,"method":"ping"}]"#)))
+        .await;
+    let n = notes(&o);
+    assert!(n.contains("MCP JSON-RPC batch: no response to request id 12"), "{n}");
+    assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "{}", o.record.outcome.summary);
+    assert!(o.record.outcome.warnings.iter().any(|w| w.message.contains("1 request(s) of the JSON-RPC batch got no response")));
+}
+
+/// A batch's request ids are those actually sent, variables resolved: the
+/// stream left open ends once the resolved id is answered.
+#[tokio::test]
+async fn a_batch_is_matched_on_the_ids_actually_sent() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", McpOptions { sse: true, keep_open: true, batches: true, ..Default::default() }).await.unwrap();
+    let e = Engine::new();
+    let mut c = mcp_ctx(&f.url(), batch(r#"[{"jsonrpc":"2.0","id":"{{rid}}","method":"ping"}]"#));
+    let rid = VarEntry { name: "rid".into(), value: "ping-1".into(), secret: false, literal: false };
+    c.var_layers.push(VarLayer { label: "test".into(), vars: vec![rid] });
+    let timeouts = TimeoutOverrides { total_ms: Some(Some(20_000)), ..Default::default() };
+    c.settings_layers.push(("run".into(), SettingsOverrides { timeouts: Some(timeouts), ..Default::default() }));
+    let started = std::time::Instant::now();
+    let o = run(&e, &c).await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "waited for the open stream");
+    let n = notes(&o);
+    assert!(n.contains("MCP JSON-RPC batch: 1 response(s) to 1 request(s): id \"ping-1\": result"), "{n}");
+    assert_eq!(o.record.outcome.application, ApplicationState::Success, "{}", o.record.outcome.summary);
 }

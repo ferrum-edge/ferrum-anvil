@@ -40,7 +40,8 @@ use anvil_domain::execution::{BodyCompleteness, FailureKind, Phase, ResponseReco
 use anvil_domain::outcome::{ApplicationState, OutcomeWarning, WarningCode};
 use anvil_domain::request::{Body, KeyValue, McpOperation, McpSpec, Protocol};
 use anvil_domain::settings::{SettingsOverrides, TimeoutOverrides};
-use anvil_transport::http::BodyStop;
+use anvil_transport::decode::IncrementalDecoder;
+use anvil_transport::http::{BodyStart, BodyStop, BodyWatch};
 use anvil_transport::recorder::EventCtx;
 use anvil_transport::session::{REDACT_LOOKAHEAD_BYTES, redact_then_cut};
 use anvil_transport::sse::SseParser;
@@ -158,6 +159,11 @@ pub fn initialize_body(spec: &McpSpec) -> String {
 /// The operation's JSON-RPC request (or notification), or a batch's text as
 /// it was written.
 pub fn operation_body(op: &McpOperation) -> String {
+    operation_body_id(op, OPERATION_ID)
+}
+
+/// [`operation_body`] with request id `id` (a later page of a session).
+fn operation_body_id(op: &McpOperation, id: i64) -> String {
     if let McpOperation::Batch { messages } = op {
         return messages.clone();
     }
@@ -174,7 +180,7 @@ pub fn operation_body(op: &McpOperation) -> String {
         McpOperation::Raw { params, .. } => (!params.trim().is_empty()).then(|| params.clone()),
         McpOperation::Batch { .. } => None,
     };
-    let id = if op.is_notification() { String::new() } else { format!(r#","id":{OPERATION_ID}"#) };
+    let id = if op.is_notification() { String::new() } else { format!(r#","id":{id}"#) };
     let method = json_string(op.method().trim());
     match params {
         Some(p) => format!(r#"{{"jsonrpc":"2.0"{id},"method":{method},"params":{p}}}"#),
@@ -284,20 +290,35 @@ fn read_event_stream(body: &[u8], id: Option<i64>) -> (Option<Value>, usize, Opt
 /// its text is literal JSON; `None` when variables make it unreadable until
 /// it is sent.
 fn batch_ids(messages: &str) -> Option<Vec<Value>> {
-    let v: Value = serde_json::from_str(messages).ok()?;
+    batch_ids_of(messages.as_bytes())
+}
+
+/// The ids of the requests in a batch body (`None` when it is not a JSON
+/// array).
+fn batch_ids_of(body: &[u8]) -> Option<Vec<Value>> {
+    let v: Value = serde_json::from_slice(body).ok()?;
     Some(v.as_array()?.iter().filter_map(|m| m.get("id").filter(|id| !id.is_null()).cloned()).collect())
 }
+
+/// The ids of the batch actually sent (the prepared request body, variables
+/// resolved), recorded when its answer starts.
+type SentIds = Arc<Mutex<Option<Vec<Value>>>>;
 
 /// A batch's answer out of the values a body holds (a JSON array, one
 /// response, or a stream's events, each possibly an array): its responses as
 /// one array, or a lone error without an id (the server refused the whole
-/// batch) as it is.
-fn batch_answer(values: Vec<Value>) -> Option<Value> {
+/// batch) as it is. With the sent request ids known, a response to any other
+/// id is not part of the answer.
+fn batch_answer(values: Vec<Value>, ids: Option<&[Value]>) -> Option<Value> {
     let flat = values.into_iter().flat_map(|v| match v {
         Value::Array(a) => a,
         other => vec![other],
     });
-    let responses: Vec<Value> = flat.filter(is_response).collect();
+    let requested = |v: &Value| match (ids, v.get("id")) {
+        (_, None | Some(Value::Null)) | (None, _) => true,
+        (Some(ids), Some(id)) => ids.contains(id),
+    };
+    let responses: Vec<Value> = flat.filter(|v| is_response(v) && requested(v)).collect();
     match responses.as_slice() {
         [] => None,
         [lone] if lone.get("id").is_none_or(Value::is_null) => Some(lone.clone()),
@@ -320,7 +341,18 @@ impl Wanted {
     fn pick(&self, values: Vec<Value>) -> Option<Value> {
         match self {
             Wanted::Response(id) => values.into_iter().find(|v| is_response_to(v, *id)),
-            Wanted::Batch(_) => batch_answer(values),
+            Wanted::Batch(ids) => batch_answer(values, ids.as_deref()),
+        }
+    }
+
+    /// The request ids of a batch's answer left without a response (none for
+    /// a single request, a refused batch, or unknown ids).
+    fn unanswered(&self, answer: Option<&Value>) -> Vec<Value> {
+        match (self, answer) {
+            (Wanted::Batch(Some(ids)), Some(Value::Array(responses))) => {
+                ids.iter().filter(|id| !responses.iter().any(|r| r.get("id") == Some(*id))).cloned().collect()
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -337,20 +369,73 @@ impl Wanted {
     }
 }
 
-/// Whether `body` may have just completed an event: it ends with the blank
-/// line that dispatches one (LF, CRLF or CR line endings).
-fn ends_an_event(body: &[u8]) -> bool {
-    body.ends_with(b"\n\n") || body.ends_with(b"\r\n\r\n") || body.ends_with(b"\r\r")
+/// Most decoded bytes an answer watch reads (the record's own decoding has
+/// its own bound).
+const MAX_WATCH_DECODED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Watches one event stream for the answer: its content-coding removed
+/// incrementally and its events parsed across chunk boundaries, as they
+/// arrive. A stream it cannot decode or parse is never stopped early.
+struct AnswerWatch {
+    wanted: Wanted,
+    decoder: IncrementalDecoder,
+    parser: SseParser,
+    events: usize,
+    /// The JSON-RPC responses seen so far.
+    responses: Vec<Value>,
+    broken: bool,
+}
+
+impl BodyWatch for AnswerWatch {
+    fn feed(&mut self, chunk: &[u8]) -> bool {
+        if self.broken {
+            return false;
+        }
+        let Ok(decoded) = self.decoder.push(chunk) else {
+            self.broken = true;
+            return false;
+        };
+        let mut events = Vec::new();
+        if self.parser.feed_limited(&decoded, &mut events, MAX_SSE_EVENTS.saturating_sub(self.events)).is_err() {
+            self.broken = true;
+            return false;
+        }
+        self.events += events.len();
+        let values = events.iter().filter_map(|e| serde_json::from_str::<Value>(&e.data).ok());
+        let before = self.responses.len();
+        self.responses.extend(
+            values
+                .flat_map(|v| match v {
+                    Value::Array(a) => a,
+                    other => vec![other],
+                })
+                .filter(is_response),
+        );
+        self.responses.len() > before && self.wanted.pick(self.responses.clone()).is_some_and(|a| self.wanted.complete(&a))
+    }
 }
 
 /// Stop reading a POST's event stream once what the exchange waits for is
 /// in it (see [`Wanted::complete`]): the server may keep the stream open
-/// after answering. A JSON body is read to its end.
-fn stop_at_answer(wanted: Wanted) -> BodyStop {
-    Arc::new(move |content_type: Option<&str>, body: &[u8]| {
-        is_event_stream(content_type)
-            && ends_an_event(body)
-            && wanted.pick(stream_values(body).0).is_some_and(|answer| wanted.complete(&answer))
+/// after answering. A JSON body is read to its end. For a batch, the ids
+/// waited for are those of the body actually sent, recorded in `sent`.
+fn stop_at_answer(wanted: Wanted, sent: SentIds) -> BodyStop {
+    Arc::new(move |start: &BodyStart<'_>| {
+        let wanted = match &wanted {
+            Wanted::Batch(_) => {
+                let ids = batch_ids_of(start.request_body);
+                *sent.lock() = ids.clone();
+                Wanted::Batch(ids)
+            }
+            w => w.clone(),
+        };
+        if !is_event_stream(start.content_type) {
+            return None;
+        }
+        let decoder = IncrementalDecoder::new(start.content_encoding, MAX_WATCH_DECODED_BYTES)?;
+        let watch =
+            AnswerWatch { wanted, decoder, parser: SseParser::new(MAX_SSE_LINE_BYTES), events: 0, responses: Vec::new(), broken: false };
+        Some(Box::new(watch) as Box<dyn BodyWatch>)
     })
 }
 
@@ -373,9 +458,18 @@ pub fn operation_response(out: &ExecutionOutput) -> Option<Value> {
 /// The view an exchange's checks read: the JSON-RPC response (or a batch's
 /// responses) out of an event stream (a JSON body is read as it is).
 /// Records what the response showed.
-fn viewer(seen: &Mutex<Seen>, wanted: Option<Wanted>) -> impl Fn(Option<&ResponseRecord>, &[u8]) -> Option<Bytes> + Sync + '_ {
+fn viewer(
+    seen: &Mutex<Seen>,
+    wanted: Option<Wanted>,
+    sent: SentIds,
+) -> impl Fn(Option<&ResponseRecord>, &[u8]) -> Option<Bytes> + Sync + '_ {
     move |response: Option<&ResponseRecord>, body: &[u8]| {
         let r = response?;
+        // A batch's answer is read against the ids actually sent.
+        let wanted = wanted.as_ref().map(|w| match w {
+            Wanted::Batch(_) => Wanted::Batch(sent.lock().clone()),
+            w => w.clone(),
+        });
         let mut s = seen.lock();
         s.status = Some(r.status);
         s.session_id = r.header_values(SESSION_HEADER).first().map(|v| v.to_string());
@@ -603,6 +697,9 @@ struct Run<'a> {
     redactor: Redactor,
     /// The deadline was reached during an exchange.
     timed_out: bool,
+    /// Every attempt of every exchange, in order (a load unit counts the
+    /// session's whole traffic).
+    traffic: Vec<anvil_domain::execution::AttemptObservation>,
 }
 
 impl Run<'_> {
@@ -656,6 +753,7 @@ impl Run<'_> {
         if self.expired() {
             self.timed_out = true;
         }
+        self.traffic.extend(out.record.attempts.iter().cloned());
         out
     }
 
@@ -701,6 +799,8 @@ struct Notes {
     warnings: Vec<String>,
     /// Why the operation was not sent, when it was not.
     not_sent: Option<String>,
+    /// Requests of a batch its answer left without a response.
+    unanswered: usize,
 }
 
 /// The session's result: `out` (the operation's exchange, or the one before
@@ -750,6 +850,14 @@ fn finish(
             message: "The response holds no JSON-RPC response to the MCP request, so the MCP outcome was not evaluated".into(),
         });
         changed = true;
+    } else if notes.unanswered > 0 && answered && r.outcome.application == ApplicationState::Success {
+        // A batch is a success only when every request in it was answered.
+        r.outcome.application = ApplicationState::NotEvaluated;
+        r.outcome.warnings.push(OutcomeWarning {
+            code: WarningCode::PartialVisibility,
+            message: format!("{} request(s) of the JSON-RPC batch got no response, so the MCP outcome was not evaluated", notes.unanswered),
+        });
+        changed = true;
     } else if expects_response && seen.diagnosed_bytes > MAX_PARSE && r.outcome.application == ApplicationState::Success {
         // A JSON-RPC error or tool failure in a response this large is not
         // looked for, so a 2xx says nothing about the call.
@@ -773,13 +881,78 @@ fn finish(
 
 /// Run one MCP request (see the module documentation).
 pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> ExecutionOutput {
+    let mut none = |_: usize, _: Option<&Value>| -> Option<McpOperation> { None };
+    let mut outs = execute_session(engine, ctx, events, cancel, &mut none).await;
+    outs.pop().map(|(out, _)| out).unwrap_or_else(|| unreachable_output(ctx))
+}
+
+/// A session always yields at least one output; this is its stand-in.
+fn unreachable_output(ctx: &ExecutionContext) -> ExecutionOutput {
+    not_sent(ctx, Timestamp::now(), "the MCP session produced no exchange", "mcp", FailureKind::UnsupportedCombination)
+}
+
+/// One `tools/list` page [`list_tool_pages`] read: its execution and the
+/// JSON-RPC response it held.
+pub struct ToolPage {
+    pub output: ExecutionOutput,
+    pub response: Option<Value>,
+}
+
+/// Run `tools/list` with the MCP request `ctx` (its operation is replaced)
+/// and, while `next_cursor` returns a cursor for the page just read (the
+/// page's number from 1 and its JSON-RPC response), the next page **in the
+/// same session**, with request ids 2, 3, …: a pagination cursor belongs to
+/// the session that issued it. Returns every page sent, or the handshake's
+/// exchange when it failed (its response is then `None`).
+pub async fn list_tool_pages(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    events: EventCtx,
+    cancel: CancellationToken,
+    next_cursor: &mut (dyn FnMut(usize, Option<&Value>) -> Option<String> + Send),
+) -> Vec<ToolPage> {
+    let mut c = ctx.clone();
+    c.spec.protocol = Protocol::Mcp;
+    if let Some(m) = c.spec.mcp.as_mut() {
+        m.operation = McpOperation::ToolsList { cursor: None };
+    }
+    let mut next = |page: usize, response: Option<&Value>| -> Option<McpOperation> {
+        next_cursor(page, response).map(|cursor| McpOperation::ToolsList { cursor: Some(cursor) })
+    };
+    let outs = execute_session(engine, &c, events, cancel, &mut next).await;
+    outs.into_iter().map(|(output, response)| ToolPage { output, response }).collect()
+}
+
+/// One operation sent in the session, waiting for the session's end to be
+/// finished.
+struct Sent {
+    out: ExecutionOutput,
+    notes: Notes,
+    seen: Seen,
+    expects_response: bool,
+    /// Its attempts' place in [`Run::traffic`].
+    own: std::ops::Range<usize>,
+}
+
+/// Run one MCP session: the handshake, the request's operation, then, while
+/// `next` returns another operation for the one just answered (its number
+/// from 1 and its JSON-RPC response), that operation in the same session,
+/// with the next request id; then the close. Returns each operation's output
+/// with its JSON-RPC response (or the handshake's exchange when it failed).
+async fn execute_session(
+    engine: &Engine,
+    ctx: &ExecutionContext,
+    events: EventCtx,
+    cancel: CancellationToken,
+    next: &mut (dyn FnMut(usize, Option<&Value>) -> Option<McpOperation> + Send),
+) -> Vec<(ExecutionOutput, Option<Value>)> {
     let started_at = Timestamp::now();
     let Some(spec) = ctx.spec.mcp.as_ref() else {
         let why = format!("{NO_MCP_SETTINGS}; nothing was sent");
-        return not_sent(ctx, started_at, &why, "mcp", FailureKind::UnsupportedCombination);
+        return vec![(not_sent(ctx, started_at, &why, "mcp", FailureKind::UnsupportedCombination), None)];
     };
     if let Some((why, field)) = invalid(spec) {
-        return not_sent(ctx, started_at, &format!("{why}; nothing was sent"), field, FailureKind::BodySerialization);
+        return vec![(not_sent(ctx, started_at, &format!("{why}; nothing was sent"), field, FailureKind::BodySerialization), None)];
     }
     let method = spec.operation.method().trim().to_string();
     let total_ms = crate::settings::resolve(&ctx.settings_layers).timeouts.total_ms;
@@ -790,6 +963,7 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
         total_ms,
         redactor: Redactor::new(vec![], ctx.redaction_names.clone()),
         timed_out: false,
+        traffic: Vec::new(),
     };
     // The handshake and the close are not the execution the caller follows:
     // their progress events are not forwarded.
@@ -809,10 +983,11 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
                 ..Default::default()
             },
         ));
+        let none_sent: SentIds = Arc::new(Mutex::new(None));
         let out = {
-            let view = viewer(&seen, Some(Wanted::Response(INITIALIZE_ID)));
+            let view = viewer(&seen, Some(Wanted::Response(INITIALIZE_ID)), none_sent.clone());
             let view: BodyView<'_> = &view;
-            run.exchange(init, quiet.clone(), Some(view), Some(stop_at_answer(Wanted::Response(INITIALIZE_ID)))).await
+            run.exchange(init, quiet.clone(), Some(view), Some(stop_at_answer(Wanted::Response(INITIALIZE_ID), none_sent.clone()))).await
         };
         let seen = seen.into_inner();
         match handshake(&seen, &out, spec, &run.redactor) {
@@ -834,7 +1009,9 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
                 if let Some(sid) = refused.issued.as_deref() {
                     run.close(ctx, spec, sid, &version, &quiet, &mut notes.after).await;
                 }
-                return finish(out, notes, &run, refused.issued.as_deref(), &seen, true);
+                let mut out = finish(out, notes, &run, refused.issued.as_deref(), &seen, true);
+                out.session_attempts = run.traffic.get(out.record.attempts.len()..).map(<[_]>::to_vec).unwrap_or_default();
+                return vec![(out, None)];
             }
         }
         let notify = exchange(ctx, "POST", Some(INITIALIZED.into()), session.as_deref(), Some(&version), Checks::None);
@@ -853,7 +1030,10 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
             if let Some(sid) = session.as_deref() {
                 run.close(ctx, spec, sid, &version, &quiet, &mut notes.after).await;
             }
-            return finish(out, notes, &run, session.as_deref(), &Seen::default(), false);
+            let own = run.traffic.len().saturating_sub(out.record.attempts.len())..run.traffic.len();
+            let mut out = finish(out, notes, &run, session.as_deref(), &Seen::default(), false);
+            out.session_attempts = others(&run.traffic, &own);
+            return vec![(out, None)];
         }
         // A server that does not accept the notification may still answer
         // the operation: it is sent, and the refusal is reported.
@@ -863,40 +1043,95 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
             notes.warnings.push(format!("notifications/initialized was not accepted ({got}); the {method} request was still sent"));
         }
     }
-    // A batch of notifications only gets no JSON-RPC response.
-    let batch = match &spec.operation {
-        McpOperation::Batch { messages } => Some(batch_ids(messages)),
-        _ => None,
-    };
-    let wanted = match &batch {
-        Some(Some(ids)) if ids.is_empty() => None,
-        Some(ids) => Some(Wanted::Batch(ids.clone())),
-        None if spec.operation.is_notification() => None,
-        None => Some(Wanted::Response(OPERATION_ID)),
-    };
-    let seen = Mutex::new(Seen::default());
-    let op = exchange(ctx, "POST", Some(operation_body(&spec.operation)), session.as_deref(), Some(&version), Checks::All);
-    let out = {
-        let view = viewer(&seen, wanted.clone());
-        let view: BodyView<'_> = &view;
-        run.exchange(op, events, Some(view), wanted.clone().map(stop_at_answer)).await
-    };
-    let seen = seen.into_inner();
-    stream_notes(&seen, &method, batch.is_some(), &mut notes.after);
-    if let Some(ids) = &batch {
-        batch_notes(seen.message.as_ref(), ids.as_deref(), &run.redactor, &mut notes.after);
+    let mut operation = spec.operation.clone();
+    let mut id = OPERATION_ID;
+    let mut sent: Vec<Sent> = Vec::new();
+    let mut events = Some(events);
+    loop {
+        let method = operation.method().trim().to_string();
+        // A batch of notifications only gets no JSON-RPC response.
+        let batch = match &operation {
+            McpOperation::Batch { messages } => Some(batch_ids(messages)),
+            _ => None,
+        };
+        let wanted = match &batch {
+            Some(Some(ids)) if ids.is_empty() => None,
+            Some(ids) => Some(Wanted::Batch(ids.clone())),
+            None if operation.is_notification() => None,
+            None => Some(Wanted::Response(id)),
+        };
+        let seen = Mutex::new(Seen::default());
+        let sent_ids: SentIds = Arc::new(Mutex::new(None));
+        let op = exchange(ctx, "POST", Some(operation_body_id(&operation, id)), session.as_deref(), Some(&version), Checks::All);
+        // Only the first operation's progress is the caller's execution.
+        let op_events = events.take().unwrap_or_else(|| quiet.clone());
+        let out = {
+            let view = viewer(&seen, wanted.clone(), sent_ids.clone());
+            let view: BodyView<'_> = &view;
+            run.exchange(op, op_events, Some(view), wanted.clone().map(|w| stop_at_answer(w, sent_ids.clone()))).await
+        };
+        let own = run.traffic.len().saturating_sub(out.record.attempts.len())..run.traffic.len();
+        let seen = seen.into_inner();
+        let mut op_notes = if sent.is_empty() { std::mem::take(&mut notes) } else { Notes::default() };
+        if !sent.is_empty() {
+            op_notes.before.push(format!("MCP {method}: page {} of the same session (request id {id})", sent.len() + 1));
+        }
+        stream_notes(&seen, &method, batch.is_some(), &mut op_notes.after);
+        if batch.is_some() {
+            // Judged against the ids actually sent (variables resolved).
+            let ids = sent_ids.lock().clone();
+            batch_notes(seen.message.as_ref(), ids.as_deref(), &run.redactor, &mut op_notes.after);
+            let unanswered = Wanted::Batch(ids.clone()).unanswered(seen.message.as_ref());
+            op_notes.unanswered = unanswered.len();
+            if spec.initialize && ids.as_deref().is_some_and(|ids| ids.iter().any(|v| v.as_i64() == Some(INITIALIZE_ID))) {
+                op_notes.warnings.push(format!(
+                    "the JSON-RPC batch reuses request id {INITIALIZE_ID}, the id initialize used in this session; a server may refuse a reused id"
+                ));
+            }
+        }
+        if session.is_some() && out.record.response.as_ref().is_some_and(|r| r.status == 404) {
+            let why = "the server no longer knows the session (it expired or was ended); a new initialize opens another";
+            op_notes.after.push(format!("MCP {method}: HTTP 404 in the session: {why}"));
+        }
+        if run.timed_out {
+            op_notes.after.push(run.deadline_note(&method));
+        }
+        let message = seen.message.clone();
+        let more =
+            if cancel.is_cancelled() || run.expired() || !out.record.response.as_ref().is_some_and(|r| (200..300).contains(&r.status)) {
+                None
+            } else {
+                next(sent.len() + 1, message.as_ref())
+            };
+        sent.push(Sent { out, notes: op_notes, seen, expects_response: wanted.is_some(), own });
+        match more {
+            Some(op) => {
+                operation = op;
+                id += 1;
+            }
+            None => break,
+        }
     }
-    if session.is_some() && out.record.response.as_ref().is_some_and(|r| r.status == 404) {
-        let why = "the server no longer knows the session (it expired or was ended); a new initialize opens another";
-        notes.after.push(format!("MCP {method}: HTTP 404 in the session: {why}"));
+    if let (Some(sid), Some(last)) = (session.as_deref(), sent.last_mut()) {
+        run.close(ctx, spec, sid, &version, &quiet, &mut last.notes.after).await;
     }
-    if run.timed_out {
-        notes.after.push(run.deadline_note(&method));
-    }
-    if let Some(sid) = session.as_deref() {
-        run.close(ctx, spec, sid, &version, &quiet, &mut notes.after).await;
-    }
-    finish(out, notes, &run, session.as_deref(), &seen, wanted.is_some())
+    let traffic = std::mem::take(&mut run.traffic);
+    sent.into_iter()
+        .map(|s| {
+            let message = s.seen.message.clone();
+            let mut out = finish(s.out, s.notes, &run, session.as_deref(), &s.seen, s.expects_response);
+            out.session_attempts = others(&traffic, &s.own);
+            (out, message)
+        })
+        .collect()
+}
+
+/// The session's traffic other than one exchange's own attempts.
+fn others(
+    traffic: &[anvil_domain::execution::AttemptObservation],
+    own: &std::ops::Range<usize>,
+) -> Vec<anvil_domain::execution::AttemptObservation> {
+    traffic.iter().enumerate().filter(|(i, _)| !own.contains(i)).map(|(_, a)| a.clone()).collect()
 }
 
 /// The operation's POST as a send would make it once the session is open:

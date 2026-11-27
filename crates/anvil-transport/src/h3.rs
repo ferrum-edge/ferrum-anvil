@@ -2045,6 +2045,13 @@ impl H3Transport {
         let mut failure = None;
         let mut completeness = BodyCompleteness::Complete;
         let idle = plan.timeouts.body_idle_ms.map(Duration::from_millis);
+        let mut watch = plan.body_stop.as_ref().and_then(|stop| {
+            stop(&crate::http::BodyStart {
+                request_body: &plan.body,
+                content_type: content_type.as_deref(),
+                content_encoding: content_encoding.as_deref(),
+            })
+        });
         loop {
             let idle_deadline = idle.map(|d| Instant::now() + d);
             tokio::select! {
@@ -2062,7 +2069,12 @@ impl H3Transport {
                             failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::ResponseTooLargeLocal, "stopped reading at the local max_response_bytes limit"));
                             break;
                         }
-                        if plan.body_stop.as_ref().is_some_and(|stop| stop(content_type.as_deref(), &captured)) {
+                        // A body whose declared length has all arrived is
+                        // complete, not stopped.
+                        if let Some(w) = watch.as_mut()
+                            && w.feed(&data)
+                            && declared_length.is_none_or(|n| wire < n)
+                        {
                             completeness = BodyCompleteness::StoppedAfterAnswer;
                             break;
                         }

@@ -68,8 +68,9 @@ async fn discovered_tools_are_saved_beside_the_template_and_call_their_tool() {
     assert!(refused.is_err(), "only an MCP request discovers tools");
 }
 
-/// A server that lists its tools in pages: every page is read, following
-/// `nextCursor`, each in a session of its own, and every tool is saved.
+/// A server that lists its tools in pages, each cursor valid only in the
+/// session that issued it: every page is read in one session, following
+/// `nextCursor`, and every tool is saved.
 #[tokio::test]
 async fn every_page_of_tools_is_discovered() {
     anvil_fixtures::init();
@@ -84,7 +85,9 @@ async fn every_page_of_tools_is_discovered() {
     assert_eq!((d.pages, d.stopped.as_deref()), (3, None));
     let lists = f.state.calls().iter().filter(|c| c.method.as_deref() == Some("tools/list")).count();
     assert_eq!(lists, 3, "one tools/list per page");
-    assert_eq!(f.state.closed.lock().len(), 3, "each page in a session of its own, ended after it");
+    let sessions: std::collections::BTreeSet<_> = f.state.calls().iter().filter_map(|c| c.session.clone()).collect();
+    assert_eq!(sessions.len(), 1, "every page in one session");
+    assert_eq!(f.state.closed.lock().len(), 1, "the session was ended once, after the last page");
 }
 
 /// A secret a server echoes in its initialize error is redacted in the

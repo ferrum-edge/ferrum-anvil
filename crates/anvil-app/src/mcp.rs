@@ -2,7 +2,8 @@
 //! one request per listed tool beside it (its URL, headers, auth, settings and
 //! session options; arguments from each tool's `inputSchema`, see
 //! `anvil_import::mcp`). Every page the server lists is read, following
-//! `nextCursor`, each page sent like any request (history per the send
+//! `nextCursor` in one MCP session (a cursor belongs to the session that
+//! issued it), each page recorded like any send (history per the send
 //! options); nothing else is sent, and the saved requests are not run.
 //! Bounded: at most [`MAX_DISCOVERY_PAGES`] pages, and no page after
 //! [`anvil_import::mcp::MAX_DISCOVERED_TOOLS`] tools were listed. A cursor is
@@ -13,9 +14,8 @@
 use crate::exec::SendOptions;
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
-use anvil_domain::request::{McpOperation, Protocol};
+use anvil_domain::request::Protocol;
 use anvil_domain::workspace::RequestDefinition;
-use anvil_engine::ExecutionOutput;
 use anvil_import::mcp::MAX_DISCOVERED_TOOLS;
 use anvil_transport::recorder::EventCtx;
 use serde::Serialize;
@@ -53,14 +53,15 @@ pub struct McpDiscovered {
     pub execution_id: Id,
 }
 
-/// The `result` of a `tools/list` page, or why there is none.
-fn page_result(out: &ExecutionOutput) -> std::result::Result<Value, String> {
-    let Some(message) = anvil_engine::mcp::operation_response(out) else {
-        return Err(format!("tools/list got no JSON-RPC response: {}", out.record.outcome.summary));
+/// The `result` of a `tools/list` page's JSON-RPC response, or why there is
+/// none.
+fn page_message(response: Option<&Value>) -> std::result::Result<Value, String> {
+    let Some(message) = response else {
+        return Err("tools/list got no JSON-RPC response".into());
     };
     if let Some(e) = message.get("error") {
         let code = e.get("code").and_then(|c| c.as_i64()).map_or_else(|| "(not an integer)".to_string(), |c| c.to_string());
-        return Err(format!("tools/list was refused with JSON-RPC error {code}: {}", out.record.outcome.summary));
+        return Err(format!("tools/list was refused with JSON-RPC error {code}"));
     }
     Ok(message.get("result").cloned().unwrap_or_default())
 }
@@ -96,61 +97,100 @@ impl App {
         if template.spec.protocol != Protocol::Mcp || template.spec.mcp.is_none() {
             return Err(AppError::Invalid(format!("'{}' is not an MCP request; tools are discovered with one", template.name)));
         }
+        if self.is_locked() {
+            return Err(AppError::Locked);
+        }
+        let mut list = template.spec.clone();
+        list.assertions.clear();
+        list.extractions.clear();
+        let ctx = self.build_context_off_runtime(Some(*request_id), *ws, Some(list), opts.clone(), &cancel).await?;
         let mut tools: Vec<Value> = Vec::new();
-        let mut cursor: Option<String> = None;
         let mut cursors: HashSet<String> = HashSet::new();
-        let mut first: Option<Id> = None;
-        let mut pages = 0usize;
+        // Pages the cursor logic judged, and why reading stopped.
+        let mut judged = 0usize;
         let mut stopped: Option<String> = None;
-        loop {
-            let mut list = template.spec.clone();
-            if let Some(m) = list.mcp.as_mut() {
-                m.operation = McpOperation::ToolsList { cursor: cursor.clone() };
-            }
-            list.assertions.clear();
-            list.extractions.clear();
-            // Boxed: the send's future is not held inside this one's.
-            let out = Box::pin(self.send(Some(*request_id), ws, Some(list), opts.clone(), EventCtx::none(), cancel.clone())).await?;
-            pages += 1;
-            first.get_or_insert(out.record.id);
-            let listed = page_result(&out).and_then(|result| match result.get("tools").and_then(Value::as_array) {
-                Some(page) => Ok((page.clone(), result)),
-                None => Err("the tools/list result has no tools list".to_string()),
-            });
-            let (page, result) = match listed {
-                Ok(x) => x,
-                // The first page is the discovery; a later one only ends it.
-                Err(why) if pages == 1 => return Err(AppError::Invalid(why)),
-                Err(why) => {
-                    stopped = Some(format!("page {pages}: {why}"));
-                    break;
+        let mut failed: Option<String> = None;
+        let mut pages_out: Vec<anvil_engine::mcp::ToolPage>;
+        {
+            let mut next = |page: usize, response: Option<&Value>| -> Option<String> {
+                judged = page;
+                let listed = page_message(response).and_then(|result| match result.get("tools").and_then(Value::as_array) {
+                    Some(listed) => Ok((listed.clone(), result)),
+                    None => Err("the tools/list result has no tools list".to_string()),
+                });
+                let (listed, result) = match listed {
+                    Ok(x) => x,
+                    Err(why) => {
+                        failed = Some(why);
+                        return None;
+                    }
+                };
+                tools.extend(listed);
+                let next = match next_cursor(&result) {
+                    Ok(next) => next?,
+                    Err(why) => {
+                        stopped = Some(why);
+                        return None;
+                    }
+                };
+                let why = if page >= MAX_DISCOVERY_PAGES {
+                    Some(format!("the server lists more than {MAX_DISCOVERY_PAGES} pages; only those were read"))
+                } else if tools.len() >= MAX_DISCOVERED_TOOLS {
+                    Some(format!(
+                        "{} tools were listed in {page} page(s), at least the {MAX_DISCOVERED_TOOLS} a discovery saves",
+                        tools.len()
+                    ))
+                } else if !cursors.insert(next.clone()) {
+                    Some("the server sent a nextCursor it had sent before; reading stopped rather than loop".into())
+                } else {
+                    None
+                };
+                match why {
+                    Some(why) => {
+                        stopped = Some(why);
+                        None
+                    }
+                    None => Some(next),
                 }
             };
-            tools.extend(page);
-            let next = match next_cursor(&result) {
-                Ok(None) => break,
-                Ok(Some(next)) => next,
-                Err(why) => {
-                    stopped = Some(why);
-                    break;
+            // One session for every page: a cursor belongs to its session.
+            let listed =
+                Box::pin(anvil_engine::mcp::list_tool_pages(&self.engine, &ctx, EventCtx::none(), cancel.clone(), &mut next)).await;
+            pages_out = listed;
+        }
+        let pages = pages_out.len();
+        let first = pages_out.first().map(|p| p.output.record.id).unwrap_or_default();
+        let last_summaries: Vec<String> = pages_out.iter().map(|p| p.output.record.outcome.summary.clone()).collect();
+        // Every page sent is history like any send; a page that cannot be
+        // recorded after the first only ends the discovery.
+        if opts.record_history {
+            for (i, p) in std::mem::take(&mut pages_out).into_iter().enumerate() {
+                let (_, recorded) = self.record_off_runtime(p.output).await;
+                match recorded {
+                    Ok(()) => {}
+                    Err(e) if i == 0 => return Err(e),
+                    Err(e) => {
+                        stopped.get_or_insert_with(|| format!("page {}: not recorded in history: {e}", i + 1));
+                    }
                 }
-            };
-            let why = if pages >= MAX_DISCOVERY_PAGES {
-                Some(format!("the server lists more than {MAX_DISCOVERY_PAGES} pages; only those were read"))
-            } else if tools.len() >= MAX_DISCOVERED_TOOLS {
-                Some(format!("{} tools were listed in {pages} page(s), at least the {MAX_DISCOVERED_TOOLS} a discovery saves", tools.len()))
-            } else if !cursors.insert(next.clone()) {
-                Some("the server sent a nextCursor it had sent before; reading stopped rather than loop".into())
-            } else if cancel.is_cancelled() {
-                Some("the discovery was canceled".into())
-            } else {
-                None
-            };
-            if let Some(why) = why {
-                stopped = Some(why);
-                break;
             }
-            cursor = Some(next);
+        }
+        let summary = |page: usize| -> String { last_summaries.get(page.saturating_sub(1)).cloned().unwrap_or_default() };
+        // The page the session ended on without the cursor logic judging it
+        // (refused, canceled, out of time) ended the discovery there.
+        if judged < pages {
+            let why = format!("tools/list got no JSON-RPC response: {}", summary(pages));
+            if pages == 1 {
+                return Err(AppError::Invalid(why));
+            }
+            stopped.get_or_insert_with(|| format!("page {pages}: {why}"));
+        }
+        if let Some(why) = failed {
+            let why = format!("{why}: {}", summary(judged));
+            if judged <= 1 {
+                return Err(AppError::Invalid(why));
+            }
+            stopped = Some(format!("page {judged}: {why}"));
         }
         let result = serde_json::json!({ "tools": tools });
         let found = anvil_import::mcp::mcp_tool_requests(&template.spec, &result).map_err(AppError::Invalid)?;
@@ -166,7 +206,7 @@ impl App {
             notes_total: found.notes_total,
             pages,
             stopped,
-            execution_id: first.unwrap_or_default(),
+            execution_id: first,
         })
     }
 }

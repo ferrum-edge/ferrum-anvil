@@ -66,6 +66,10 @@ pub struct ExecutionOutput {
     /// and repeated datagram payloads). Not persisted; `None` for HTTP and
     /// for sessions that failed during preparation.
     pub session_facts: Option<anvil_transport::session::SessionFacts>,
+    /// The attempts of an MCP session's other exchanges (initialize, the
+    /// notification, other pages, the close), so a load unit counts the
+    /// session's whole traffic. Empty for every other execution.
+    pub session_attempts: Vec<anvil_domain::execution::AttemptObservation>,
 }
 
 /// Operational response facts, kept outside the persistable record. Debug

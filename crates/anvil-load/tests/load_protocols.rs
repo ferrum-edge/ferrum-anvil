@@ -1271,6 +1271,7 @@ async fn load_mcp_sessions_are_one_unit_each() {
     let r = run_one(plan(iterations(3, 1), vec![id], ConnectionMode::Fresh), mcp_ctx(&fresh.url(), echo)).await;
     assert_eq!((r.requests.completed, r.requests.application_failures), (3, 0));
     assert_eq!(accepted(&fresh.log), 3 * 4, "fresh: every exchange of every session opens a connection");
+    assert_eq!(r.requests.connections_opened, 3 * 4, "the report counts every exchange's connection: {:?}", r.requests);
 
     let id = Id::new();
     let fail = serde_json::json!({"kind": "tools_call", "name": "fail"});

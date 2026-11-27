@@ -172,6 +172,20 @@ struct BodyDecoding {
 }
 
 fn decode_body(r: &ResponseRecord, raw: &[u8], limit: u64, session: bool) -> BodyDecoding {
+    // Reading stopped once the body held the answer: the coded stream has no
+    // end yet, and what arrived decodes as a prefix.
+    if r.body.completeness == BodyCompleteness::StoppedAfterAnswer
+        && !r.body.display_truncated
+        && r.body.content_encoding.as_deref().is_some_and(|ce| !ce.trim().is_empty() && !ce.trim().eq_ignore_ascii_case("identity"))
+        && let Some(mut d) = decode::IncrementalDecoder::new(r.body.content_encoding.as_deref(), limit)
+        && let Ok(bytes) = d.push(raw)
+    {
+        return BodyDecoding {
+            bytes: Some(Bytes::from(bytes)),
+            status: Some(ContentDecoding::Complete),
+            detail: Some("decoded up to where reading stopped, after the answer had arrived".into()),
+        };
+    }
     let partial = r.body.display_truncated || r.body.completeness != BodyCompleteness::Complete;
     match decode::decode(r.body.content_encoding.as_deref(), raw, limit) {
         DecodeOutcome::Identity => BodyDecoding::default(),
@@ -476,7 +490,15 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     let mut record = record;
     redactor.record_metadata(&mut record);
     record.outcome.completeness = record.response.as_ref().map(|r| r.body.completeness);
-    ExecutionOutput { response_metadata, record, body: raw_body, decoded_body: decoded, extracted: extracted_values, session_facts: None }
+    ExecutionOutput {
+        response_metadata,
+        record,
+        body: raw_body,
+        decoded_body: decoded,
+        extracted: extracted_values,
+        session_facts: None,
+        session_attempts: vec![],
+    }
 }
 
 pub fn summary_line(
@@ -642,7 +664,15 @@ pub fn local_failure_with(
     };
     let mut record = record;
     redactor.record_metadata(&mut record);
-    ExecutionOutput { response_metadata: None, record, body: Bytes::new(), decoded_body: None, extracted: vec![], session_facts: None }
+    ExecutionOutput {
+        response_metadata: None,
+        record,
+        body: Bytes::new(),
+        decoded_body: None,
+        extracted: vec![],
+        session_facts: None,
+        session_attempts: vec![],
+    }
 }
 
 #[cfg(test)]

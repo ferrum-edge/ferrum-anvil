@@ -3,7 +3,7 @@
 // these tests check that the editor offers the wire formats and explains them.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { GrpcSpec, RequestDefinition, RequestSpec } from "./generated/contracts";
-import { newSpec, ProtocolEditor, RequestEditor, SettingsEditor, type Profiles } from "./RequestEditor";
+import { batchReusesInitializeId, newSpec, ProtocolEditor, RequestEditor, SettingsEditor, type Profiles } from "./RequestEditor";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (cmd: string, args?: unknown) => invoke(cmd, args) }));
@@ -162,6 +162,16 @@ describe("MCP protocol editor", () => {
     expect(messages.value).toBe(batch.messages);
     fireEvent.change(messages, { target: { value: "[]" } });
     expect(set).toHaveBeenLastCalledWith({ mcp: expect.objectContaining({ operation: { kind: "batch", messages: "[]" } }) });
+  });
+
+  it("flags a batch that reuses initialize's request id", () => {
+    const reused = { kind: "batch" as const, messages: '[{"jsonrpc":"2.0","id":1,"method":"ping"}]' };
+    const { unmount } = render(<ProtocolEditor spec={mcpSpec({ operation: reused })} set={() => {}} workspaceId="ws" requestId="r1" />);
+    expect(screen.getByRole("note").textContent).toContain("Request id 1 is the id initialize uses");
+    unmount();
+    render(<ProtocolEditor spec={mcpSpec({ operation: { kind: "batch", messages: '[{"jsonrpc":"2.0","id":11,"method":"ping"}]' } })} set={() => {}} workspaceId="ws" requestId="r1" />);
+    expect(screen.queryByRole("note")).toBeNull();
+    expect(batchReusesInitializeId("not json")).toBe(false);
   });
 
   it("asks for a saved request before discovering tools", () => {

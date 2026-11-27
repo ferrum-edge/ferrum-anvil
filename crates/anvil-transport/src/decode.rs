@@ -126,6 +126,94 @@ pub fn decode(content_encoding: Option<&str>, data: &[u8], limit: u64) -> Decode
     DecodeOutcome::Decoded { bytes: current, truncated_at_limit: truncated }
 }
 
+/// One content-coding removed incrementally, for a reader that must see the
+/// decoded bytes while the body is still arriving (an MCP event stream whose
+/// answer ends the read). Feed the coded bytes as they arrive; each push
+/// returns what they decode to so far. At most `limit` decoded bytes in all.
+/// A chain of several codings, or one Anvil does not decode, has none.
+pub struct IncrementalDecoder {
+    inner: Incremental,
+    produced: u64,
+    limit: u64,
+}
+
+enum Incremental {
+    Identity,
+    Gzip(flate2::write::MultiGzDecoder<Vec<u8>>),
+    /// `deflate` before its first two bytes say zlib-wrapped or raw.
+    DeflatePending(Vec<u8>),
+    Zlib(flate2::write::ZlibDecoder<Vec<u8>>),
+    RawDeflate(flate2::write::DeflateDecoder<Vec<u8>>),
+    Brotli(Box<brotli::DecompressorWriter<Vec<u8>>>),
+    Zstd(Box<zstd::stream::write::Decoder<'static, Vec<u8>>>),
+}
+
+impl IncrementalDecoder {
+    /// The decoder for `content_encoding` (`None` or `identity`: bytes pass
+    /// through), or `None` when it is not a single coding Anvil decodes.
+    pub fn new(content_encoding: Option<&str>, limit: u64) -> Option<Self> {
+        let codings: Vec<String> = content_encoding
+            .unwrap_or("")
+            .split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty() && s != "identity")
+            .collect();
+        let inner = match codings.as_slice() {
+            [] => Incremental::Identity,
+            [one] => match one.as_str() {
+                "gzip" | "x-gzip" => Incremental::Gzip(flate2::write::MultiGzDecoder::new(Vec::new())),
+                "deflate" => Incremental::DeflatePending(Vec::new()),
+                "br" => Incremental::Brotli(Box::new(brotli::DecompressorWriter::new(Vec::new(), 4096))),
+                "zstd" => Incremental::Zstd(Box::new(zstd::stream::write::Decoder::new(Vec::new()).ok()?)),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(IncrementalDecoder { inner, produced: 0, limit })
+    }
+
+    /// The bytes `chunk` decodes to (with what earlier chunks left pending);
+    /// an error once the coded stream is broken or the decoded total passes
+    /// the limit.
+    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<u8>, String> {
+        use std::io::Write;
+        fn drain<W: Write>(w: &mut W, chunk: &[u8], out: impl FnOnce(&mut W) -> &mut Vec<u8>) -> Result<Vec<u8>, String> {
+            w.write_all(chunk).map_err(|e| e.to_string())?;
+            w.flush().map_err(|e| e.to_string())?;
+            Ok(std::mem::take(out(w)))
+        }
+        if let Incremental::DeflatePending(held) = &mut self.inner {
+            held.extend_from_slice(chunk);
+            if held.len() < 2 {
+                return Ok(Vec::new());
+            }
+            let held = std::mem::take(held);
+            // RFC 9110 "deflate" is zlib-wrapped; some servers send raw deflate.
+            let zlib = (u16::from(held[0]) << 8 | u16::from(held[1])) % 31 == 0 && held[0] & 0x0F == 8;
+            self.inner = if zlib {
+                Incremental::Zlib(flate2::write::ZlibDecoder::new(Vec::new()))
+            } else {
+                Incremental::RawDeflate(flate2::write::DeflateDecoder::new(Vec::new()))
+            };
+            return self.push(&held);
+        }
+        let out = match &mut self.inner {
+            Incremental::Identity => Ok(chunk.to_vec()),
+            Incremental::Gzip(d) => drain(d, chunk, |d| d.get_mut()),
+            Incremental::Zlib(d) => drain(d, chunk, |d| d.get_mut()),
+            Incremental::RawDeflate(d) => drain(d, chunk, |d| d.get_mut()),
+            Incremental::Brotli(d) => drain(d.as_mut(), chunk, |d| d.get_mut()),
+            Incremental::Zstd(d) => drain(d.as_mut(), chunk, |d| d.get_mut()),
+            Incremental::DeflatePending(_) => Ok(Vec::new()),
+        }?;
+        self.produced = self.produced.saturating_add(out.len() as u64);
+        if self.produced > self.limit {
+            return Err(format!("the decoded body passed {} bytes", self.limit));
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +324,32 @@ mod tests {
     fn unknown_coding_reported() {
         assert!(matches!(decode(Some("compress"), b"x", 10), DecodeOutcome::Unsupported { .. }));
         assert_eq!(decode(Some("identity"), b"x", 10), DecodeOutcome::Identity);
+    }
+
+    #[test]
+    fn incremental_decoding_matches_whole_decoding_chunk_by_chunk() {
+        use std::io::Write;
+        let text = b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n".repeat(20);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&text).unwrap();
+        let gz = gz.finish().unwrap();
+        let mut zlib = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        zlib.write_all(&text).unwrap();
+        let zlib = zlib.finish().unwrap();
+        let zstd = zstd::stream::encode_all(&text[..], 0).unwrap();
+        let mut br = Vec::new();
+        brotli::BrotliCompress(&mut &text[..], &mut br, &Default::default()).unwrap();
+        for (coding, bytes) in [("gzip", gz), ("deflate", zlib), ("zstd", zstd), ("br", br), ("identity", text.clone())] {
+            let mut d = IncrementalDecoder::new(Some(coding), 1 << 20).unwrap();
+            let mut out = Vec::new();
+            for chunk in bytes.chunks(7) {
+                out.extend(d.push(chunk).unwrap());
+            }
+            assert_eq!(out, text, "{coding}");
+        }
+        assert!(IncrementalDecoder::new(Some("gzip, br"), 1 << 20).is_none());
+        assert!(IncrementalDecoder::new(Some("compress"), 1 << 20).is_none());
+        let mut small = IncrementalDecoder::new(None, 4).unwrap();
+        assert!(small.push(b"12345").is_err(), "over the limit");
     }
 }

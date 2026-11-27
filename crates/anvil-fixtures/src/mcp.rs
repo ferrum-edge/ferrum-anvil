@@ -80,6 +80,9 @@ pub struct McpOptions {
     pub page_size: Option<usize>,
     /// Answer the requests of a JSON-RPC batch instead of refusing it.
     pub batches: bool,
+    /// gzip-encode event streams (`Content-Encoding: gzip`), each chunk
+    /// flushed so it decodes on its own.
+    pub gzip: bool,
     /// Let clients end their session with `DELETE`.
     pub allow_delete: bool,
     pub hostile: Hostile,
@@ -87,7 +90,15 @@ pub struct McpOptions {
 
 impl Default for McpOptions {
     fn default() -> Self {
-        McpOptions { sse: false, keep_open: false, page_size: None, batches: false, allow_delete: true, hostile: Hostile::None }
+        McpOptions {
+            sse: false,
+            keep_open: false,
+            page_size: None,
+            batches: false,
+            gzip: false,
+            allow_delete: true,
+            hostile: Hostile::None,
+        }
     }
 }
 
@@ -110,6 +121,8 @@ pub enum Hostile {
     RedirectOperation(&'static str),
     /// The initialize request is answered `307` to this URL.
     RedirectInitialize(&'static str),
+    /// A JSON-RPC batch is answered without its last request's response.
+    BatchDropsLast,
 }
 
 /// One request the fixture received.
@@ -193,25 +206,45 @@ fn endless_stream() -> Response<FxBody> {
 /// An event stream that sends `first`, then only comments, until the client
 /// goes away (or a minute passes).
 fn open_stream(first: String) -> Response<FxBody> {
+    open_stream_with(first, false)
+}
+
+/// [`open_stream`], gzip-encoded when `gzip` (each chunk sync-flushed, so
+/// what arrived so far decodes).
+fn open_stream_with(first: String, gzip: bool) -> Response<FxBody> {
     let (mut tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, Infallible>>(4);
     tokio::spawn(async move {
         use futures::SinkExt;
-        if tx.send(Ok(Frame::data(Bytes::from(first)))).await.is_err() {
+        use std::io::Write;
+        let mut encoder = gzip.then(|| flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default()));
+        let mut encode = |plain: &[u8]| -> Bytes {
+            match encoder.as_mut() {
+                None => Bytes::copy_from_slice(plain),
+                Some(e) => {
+                    let _ = e.write_all(plain);
+                    let _ = e.flush();
+                    Bytes::from(std::mem::take(e.get_mut()))
+                }
+            }
+        };
+        let first = encode(first.as_bytes());
+        if tx.send(Ok(Frame::data(first))).await.is_err() {
             return;
         }
         for _ in 0..600 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            if tx.send(Ok(Frame::data(Bytes::from_static(b": still working\n\n")))).await.is_err() {
+            let chunk = encode(b" still working\n\n: more");
+            if tx.send(Ok(Frame::data(chunk))).await.is_err() {
                 return;
             }
         }
     });
     let body = StreamBody::new(rx).boxed();
-    Response::builder()
-        .status(200)
-        .header("content-type", "text/event-stream")
-        .body(body)
-        .unwrap_or_else(|_| Response::new(Full::new(Bytes::new()).boxed()))
+    let mut b = Response::builder().status(200).header("content-type", "text/event-stream");
+    if gzip {
+        b = b.header("content-encoding", "gzip");
+    }
+    b.body(body).unwrap_or_else(|_| Response::new(Full::new(Bytes::new()).boxed()))
 }
 
 fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
@@ -283,21 +316,26 @@ fn call_tool(params: &Value, session: &str) -> Result<Value, (i64, String)> {
 
 /// A `tools/list` result: every tool, or (with `page_size`) the page its
 /// `cursor` names, with the next page's cursor.
-fn tools_page(params: &Value, page_size: Option<usize>) -> Result<Value, (i64, String)> {
+fn tools_page(params: &Value, page_size: Option<usize>, session: &str) -> Result<Value, (i64, String)> {
     let all = tools().as_array().cloned().unwrap_or_default();
     let Some(size) = page_size.filter(|n| *n > 0) else { return Ok(json!({"tools": all})) };
     let unknown = || (-32602, "Invalid params: unknown cursor".to_string());
     let start = match params.get("cursor") {
         None | Some(Value::Null) => 0,
-        Some(Value::String(c)) => {
-            c.strip_prefix("page-").and_then(|n| n.parse::<usize>().ok()).filter(|n| *n < all.len()).ok_or_else(unknown)?
-        }
+        // A cursor belongs to the session that issued it (MCP pagination).
+        Some(Value::String(c)) => c
+            .strip_prefix("page-")
+            .and_then(|rest| rest.split_once('@'))
+            .filter(|(_, issued)| *issued == session)
+            .and_then(|(n, _)| n.parse::<usize>().ok())
+            .filter(|n| *n < all.len())
+            .ok_or_else(unknown)?,
         Some(_) => return Err(unknown()),
     };
     let end = (start + size).min(all.len());
     let mut result = json!({"tools": all[start..end].to_vec()});
     if end < all.len() {
-        result["nextCursor"] = json!(format!("page-{end}"));
+        result["nextCursor"] = json!(format!("page-{end}@{session}"));
     }
     Ok(result)
 }
@@ -306,7 +344,7 @@ fn tools_page(params: &Value, page_size: Option<usize>) -> Result<Value, (i64, S
 fn dispatch(method: &str, params: &Value, session: &str, opts: McpOptions) -> Result<Value, (i64, String)> {
     match method {
         "ping" => Ok(json!({})),
-        "tools/list" => tools_page(params, opts.page_size),
+        "tools/list" => tools_page(params, opts.page_size, session),
         "tools/call" => call_tool(params, session),
         "resources/list" => Ok(json!({"resources": [{"uri": "fixture://readme", "name": "readme", "mimeType": "text/plain"}]})),
         "resources/templates/list" => Ok(json!({"resourceTemplates": []})),
@@ -346,7 +384,9 @@ fn answer(opts: McpOptions, status: u16, message: &Value, session: Option<&str>)
 /// them with `keep_open`.
 fn answer_all(opts: McpOptions, status: u16, messages: &[Value], json: String, session: Option<&str>) -> Response<FxBody> {
     let mut resp = if opts.sse && opts.keep_open && status == 200 {
-        open_stream(event_stream(messages))
+        // The answer's chunk ends inside a comment that a later chunk ends:
+        // the answer is readable before the chunk boundary says so.
+        open_stream_with(format!("{}:", event_stream(messages)), opts.gzip)
     } else if opts.sse {
         reply(status, Some("text/event-stream"), event_stream(messages))
     } else {
@@ -557,6 +597,9 @@ fn answer_batch(state: &McpState, opts: McpOptions, r: &Asked<'_>, batch: &[Valu
             Err((code, text)) => rpc_error(id, code, &text),
         });
     }
+    if opts.hostile == Hostile::BatchDropsLast {
+        answers.pop();
+    }
     if answers.is_empty() {
         return reply(202, None, "");
     }
@@ -618,14 +661,15 @@ mod tests {
 
     #[test]
     fn tools_list_pages_link_by_cursor() {
-        let first = tools_page(&Value::Null, Some(3)).unwrap();
+        let first = tools_page(&Value::Null, Some(3), "s1").unwrap();
         assert_eq!(first["tools"].as_array().map(Vec::len), Some(3));
-        assert_eq!(first["nextCursor"], "page-3");
-        let last = tools_page(&json!({"cursor": "page-6"}), Some(3)).unwrap();
+        assert_eq!(first["nextCursor"], "page-3@s1");
+        let last = tools_page(&json!({"cursor": "page-6@s1"}), Some(3), "s1").unwrap();
         assert_eq!(last["tools"][0]["name"], "new_tool");
         assert!(last.get("nextCursor").is_none());
-        assert_eq!(tools_page(&json!({"cursor": "page-99"}), Some(3)).unwrap_err().0, -32602);
-        assert_eq!(tools_page(&Value::Null, None).unwrap()["tools"].as_array().map(Vec::len), Some(7));
+        assert_eq!(tools_page(&json!({"cursor": "page-99@s1"}), Some(3), "s1").unwrap_err().0, -32602);
+        assert_eq!(tools_page(&json!({"cursor": "page-3@s1"}), Some(3), "s2").unwrap_err().0, -32602, "another session's cursor");
+        assert_eq!(tools_page(&Value::Null, None, "s1").unwrap()["tools"].as_array().map(Vec::len), Some(7));
     }
 
     #[test]

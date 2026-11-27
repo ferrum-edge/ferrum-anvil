@@ -58,12 +58,27 @@ pub fn authority_host(authority: &str) -> Option<String> {
     authority.parse::<http::uri::Authority>().ok().map(|a| a.host().to_string())
 }
 
-/// Decides, from the response's `Content-Type` and the body bytes captured so
-/// far, that the response already holds what the request needs: reading then
-/// stops, recorded as [`BodyCompleteness::StoppedAfterAnswer`]. An MCP
-/// exchange stops an event stream once its JSON-RPC response has arrived.
-/// Called after every body chunk, with every byte captured so far.
-pub type BodyStop = Arc<dyn Fn(Option<&str>, &[u8]) -> bool + Send + Sync>;
+/// What a [`BodyStop`] knows when a response body starts: the exact request
+/// body that was sent and the response's media type and content-coding.
+pub struct BodyStart<'a> {
+    pub request_body: &'a [u8],
+    pub content_type: Option<&'a str>,
+    pub content_encoding: Option<&'a str>,
+}
+
+/// Watches one response body as it arrives.
+pub trait BodyWatch: Send {
+    /// The next body bytes, as received (still content-coded); `true` once
+    /// the body holds what the request needs.
+    fn feed(&mut self, chunk: &[u8]) -> bool;
+}
+
+/// Starts a watch over each response body of the plan (every attempt gets
+/// its own); `None` reads the body to its end. When a watch says the body
+/// holds what the request needs and the body has not ended, reading stops,
+/// recorded as [`BodyCompleteness::StoppedAfterAnswer`]. An MCP exchange stops
+/// an event stream once its JSON-RPC response has arrived.
+pub type BodyStop = Arc<dyn Fn(&BodyStart<'_>) -> Option<Box<dyn BodyWatch>> + Send + Sync>;
 
 /// Fully prepared single-attempt HTTP request (final bytes; auth already applied).
 #[derive(Clone)]
@@ -1368,6 +1383,17 @@ impl HttpTransport {
         let mut completeness = BodyCompleteness::Complete;
         let mut last_progress = Instant::now();
         let idle = plan.timeouts.body_idle_ms.map(Duration::from_millis);
+        let mut watch = if no_body {
+            None
+        } else {
+            plan.body_stop.as_ref().and_then(|stop| {
+                stop(&BodyStart {
+                    request_body: &plan.body,
+                    content_type: content_type.as_deref(),
+                    content_encoding: content_encoding.as_deref(),
+                })
+            })
+        };
         loop {
             let idle_deadline = idle.map(|d| Instant::now() + d);
             tokio::select! {
@@ -1391,7 +1417,12 @@ impl HttpTransport {
                                     format!("stopped reading after {} bytes: the local max_response_bytes limit was reached (this is a local limit, not a peer fault)", plan.limits.max_response_bytes)));
                                 break;
                             }
-                            if plan.body_stop.as_ref().is_some_and(|stop| stop(content_type.as_deref(), &captured)) {
+                            // A body that has ended is complete, not stopped:
+                            // its connection stays reusable.
+                            if let Some(w) = watch.as_mut()
+                                && w.feed(&data)
+                                && !body.is_end_stream()
+                            {
                                 completeness = BodyCompleteness::StoppedAfterAnswer;
                                 break;
                             }

@@ -1074,9 +1074,10 @@ timings and pages are not imported.
 
 "Discover tools" (`App::mcp_discover_tools`, `anvil mcp-discover <request>`,
 the desktop MCP tab) is not a file import: it sends `tools/list` with a saved
-MCP request, once per page the server lists (following `nextCursor`, each page
-a send of its own, recorded in history like any send), and saves one request
-per listed tool in the same folder
+MCP request, once per page the server lists, following `nextCursor` in one
+MCP session (a cursor belongs to the session that issued it; each page is
+recorded in history like any send), and saves one request per listed tool in
+the same folder
 (`anvil_import::mcp::mcp_tool_requests` builds them; nothing it saves is run).
 
 * Each request is a copy of the MCP request (URL, headers, auth, settings,
@@ -1096,8 +1097,8 @@ per listed tool in the same folder
   once 500 tools have been listed. A `nextCursor` is sent back only when it is
   plain text (1 to 4096 bytes, no control characters, no `{{` or `}}`, which
   the variable resolver would read as a reference), and reading stops at a
-  cursor the server sent before. A later page that fails ends the discovery
-  with what the earlier pages listed. The result says how many pages were read
+  cursor the server sent before. A later page that fails, is canceled or
+  cannot be recorded ends the discovery with what the earlier pages listed. The result says how many pages were read
   and, when pages were left unread, why (`pages`, `stopped`).
 * At most 500 tools are saved. Skipped tools are listed with the reason (the
   first 20; all are counted).
