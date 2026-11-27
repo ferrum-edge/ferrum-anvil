@@ -282,6 +282,9 @@ export type FilePurpose =
   | "run_report_export"
   | "lint_report_export"
   | "spec_revision_export"
+  | "jmeter_export"
+  | "jmeter_secrets_export"
+  | "jtl_import"
   | "jwt_svid_file"
   | "linked_file"
   | "linked_file_relocate";
@@ -468,6 +471,36 @@ export interface LoadComparison {
   compatible: boolean;
   differences: { aspect: string; a: string; b: string; impact: string; explanation: string }[];
   summary: string;
+}
+/** Why a plan cannot be exported to JMeter (one of every reason found). */
+export interface JmeterRefusal {
+  request: string | null;
+  /** Stable code, e.g. `strict_tls`, `unsupported_protocol`. */
+  code: string;
+  message: string;
+}
+export interface JmeterExportReport {
+  plan_id: string;
+  plan_name: string;
+  jmeter_version: string;
+  adapter_version: string;
+  mapping: { anvil: string; jmeter: string }[];
+  /** Behaviour JMeter does not reproduce exactly. */
+  differences: string[];
+  /** Properties the test plan reads (`anvil.secret.*`); never their values. */
+  secret_properties: { name: string; purpose: string }[];
+  /** Non-secret `-J` properties for the run command. */
+  jmeter_properties: [string, string][];
+  dataset: { file: string; rows: number; columns: string[]; source_sha256: string; csv_sha256: string; sensitive_columns: string[] } | null;
+  thread_groups: number;
+  expected_samples: number | null;
+  secrets_written: boolean;
+}
+export interface JmxExportOutcome {
+  report: JmeterExportReport | null;
+  refused: JmeterRefusal[];
+  /** Files written: the test plan, its dataset, the secrets file. */
+  written: string[];
 }
 
 // ----------------------------------------------------------- spec import
@@ -889,6 +922,11 @@ export const api = {
   deleteLoadReport: (runId: string) => call<void>("load_report_delete", { runId }),
   exportLoadReport: (runId: string, format: "json" | "csv" | "timeline_csv" | "html", grant: string) => call<number>("load_report_export", { runId, format, grant }),
   compareLoadReports: (a: string, b: string) => call<LoadComparison>("load_compare", { a, b }),
+  /** Export a saved plan to JMeter (LOAD-012): the plan to `grant` (purpose `jmeter_export`) with its dataset beside it, the secrets only to `secretsGrant` (purpose `jmeter_secrets_export`). */
+  exportJmx: (planId: string, grant: string, secretsGrant: string | null) => call<JmxExportOutcome>("load_export_jmx", { planId, grant, secretsGrant }),
+  /** Import a JMeter result file (`grant`, purpose `jtl_import`) as a load report; returns its run id. */
+  importJtl: (workspaceId: string, grant: string, planId: string | null, jmeterVersion: string | null) =>
+    call<string>("load_import_jtl", { workspaceId, grant, planId, jmeterVersion }),
   datasets: (workspaceId: string) => call<Dataset[]>("datasets_list", { workspaceId }),
   addDataset: (workspaceId: string, grant: string, name: string, sensitiveColumns: string[]) =>
     call<Dataset>("dataset_add", { workspaceId, grant, name, sensitiveColumns }),

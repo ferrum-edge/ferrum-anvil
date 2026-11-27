@@ -36,7 +36,7 @@ use anvil_domain::load::{
 use anvil_domain::{Id, Timestamp};
 use anvil_load::metrics::{MAX_EXAMPLE_CHARS, Metrics, ProtoAccum, SendObservation, Terminal};
 use hdrhistogram::Histogram;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 
 /// Earliest and latest accepted sample start (2000-01-01 and 2100-01-01, ms).
 const MIN_TS_MS: i64 = 946_684_800_000;

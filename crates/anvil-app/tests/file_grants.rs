@@ -604,3 +604,59 @@ fn a_fifo_is_never_granted_or_read_and_never_blocks() {
     let read = within_seconds(move || grants.read(&g.token, FilePurpose::Dataset).map(|f| f.bytes));
     assert_eq!(read.unwrap_err(), GrantError::Changed);
 }
+
+#[test]
+fn load_012_a_jmeter_export_writes_the_plan_and_its_dataset_beside_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("checkout.jmx");
+    let grants = FileGrants::default();
+    let g = grants.grant_write(FilePurpose::JmeterExport, &dest).unwrap();
+    assert_eq!(grants.chosen_name(&g.token, FilePurpose::JmeterExport).unwrap(), "checkout.jmx");
+    assert_eq!(anvil_app::file_grants::dataset_name(std::ffi::OsStr::new("checkout.jmx")), "checkout.dataset.csv");
+    assert_eq!(grants.write_with_dataset(&g.token, b"<jmeterTestPlan/>", Some((b"\"a\"\n", false))).unwrap(), 21);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"<jmeterTestPlan/>");
+    assert_eq!(std::fs::read(dir.path().join("checkout.dataset.csv")).unwrap(), b"\"a\"\n");
+    assert!(partial_files(dir.path()).is_empty());
+    // Spent, like any write grant; a grant of another purpose is refused.
+    assert_eq!(grants.write_with_dataset(&g.token, b"x", None).unwrap_err(), GrantError::Unknown);
+    let other = grants.grant_write(FilePurpose::LoadReportExport, &dir.path().join("r.html")).unwrap();
+    assert_eq!(grants.write_with_dataset(&other.token, b"x", None).unwrap_err(), GrantError::WrongPurpose);
+    assert_eq!(FilePurpose::JmeterExport.access(), Access::Write);
+    assert!(FilePurpose::JmeterSecretsExport.owner_only() && !FilePurpose::JmeterExport.owner_only());
+}
+
+#[cfg(unix)]
+#[test]
+fn load_012_the_jmeter_secrets_file_and_a_sensitive_dataset_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let grants = FileGrants::default();
+    let secrets = dir.path().join("plan.secrets.properties");
+    let g = grants.grant_write(FilePurpose::JmeterSecretsExport, &secrets).unwrap();
+    grants.write(&g.token, FilePurpose::JmeterSecretsExport, b"anvil.secret.var.token=x\n").unwrap();
+    assert_eq!(std::fs::metadata(&secrets).unwrap().permissions().mode() & 0o777, 0o600);
+    let g = grants.grant_write(FilePurpose::JmeterExport, &dir.path().join("plan.jmx")).unwrap();
+    grants.write_with_dataset(&g.token, b"<jmeterTestPlan/>", Some((b"\"secret\"\n", true))).unwrap();
+    assert_eq!(std::fs::metadata(dir.path().join("plan.dataset.csv")).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+#[test]
+fn load_012_a_jtl_grant_is_opened_for_streaming_and_never_read_whole() {
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let src = file(dir.path(), "results.jtl", b"timeStamp,elapsed\n");
+    let grants = FileGrants::default();
+    let g = grants.grant_read(FilePurpose::JtlImport, &src).unwrap();
+    assert_eq!(grants.read(&g.token, FilePurpose::JtlImport).unwrap_err(), GrantError::WrongPurpose);
+    let g = grants.grant_read(FilePurpose::JtlImport, &src).unwrap();
+    let (mut f, name) = grants.open_read(&g.token, FilePurpose::JtlImport).unwrap();
+    let mut text = String::new();
+    f.read_to_string(&mut text).unwrap();
+    assert_eq!((name.as_str(), text.as_str()), ("results.jtl", "timeStamp,elapsed\n"));
+    // A file replaced after it was chosen is refused.
+    std::fs::remove_file(&src).unwrap();
+    std::fs::write(&src, b"other").unwrap();
+    assert_eq!(grants.open_read(&g.token, FilePurpose::JtlImport).unwrap_err(), GrantError::Changed);
+    let d = grants.grant_read(FilePurpose::Dataset, &src).unwrap();
+    assert_eq!(grants.open_read(&d.token, FilePurpose::Dataset).unwrap_err(), GrantError::WrongPurpose);
+}

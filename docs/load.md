@@ -678,7 +678,7 @@ The native engine stays the default. The adapter exports a declared subset
 for teams that run JMeter, and every setting outside that subset is refused
 or listed.
 
-### Export (`anvil load export-jmx`, desktop **Export to JMeter…**)
+### Export (`anvil load export-jmx`; desktop: **Export to JMeter…** in the plan editor)
 
 The export writes a JMeter 5.x test plan (`.jmx`, targeted and tested with
 Apache JMeter 5.6.3) for `jmeter -n`. Each step is prepared the way a load run
@@ -756,14 +756,15 @@ records it, and the import excludes it again).
 **Secrets.** No secret value is written to the `.jmx`. Vault values, secret
 variables, credential-named variables and fields, and auth credentials become
 `anvil.secret.*` properties, which the report lists by name and purpose,
-never by value. Only `--secrets-file FILE` writes their values: a new
-owner-only properties file (never over an existing file) for `jmeter -q
-FILE`. Credentials then never appear in JMeter's command line. Without it,
+never by value. Only `--secrets-file FILE` (desktop: the export dialog's
+secrets option, then a second save dialog) writes their values: a new
+owner-only properties file for `jmeter -q FILE` (the CLI never writes over an
+existing file). Credentials then never appear in JMeter's command line. Without it,
 JMeter stops in the setUp thread group before any traffic. A dataset with
 sensitive columns needs the same explicit path, and its CSV is then written
 owner-only.
 
-### Import (`anvil load import-jtl`, desktop **Import JMeter results…**)
+### Import (`anvil load import-jtl`; desktop: **Import** under Reports)
 
 A JMeter result file, CSV (with field names, JMeter's default) or XML JTL,
 becomes a saved `LoadReport`. Its engine is `apache-jmeter`, and its engine

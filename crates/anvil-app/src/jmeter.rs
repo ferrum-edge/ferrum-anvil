@@ -5,9 +5,13 @@
 use crate::{App, AppError, Result};
 use anvil_domain::Id;
 use anvil_domain::load::{LoadPlan, LoadReport};
-use anvil_jmeter::{Export, ExportInput, ExportOptions, ExportRefused, JtlOptions};
+use anvil_jmeter::ExportInput;
 use std::collections::HashMap;
 use std::io::{Read, Seek};
+
+/// The adapter's types, for the shells (the desktop needs no direct dependency).
+pub use anvil_jmeter::export::{DatasetReport, Mapping, Reason, SecretProperty};
+pub use anvil_jmeter::{Export, ExportOptions, ExportRefused, ExportReport, JMETER_VERSION, JtlLimits, JtlOptions};
 
 impl App {
     /// Translate `plan` into a JMeter test plan. The plan's requests are

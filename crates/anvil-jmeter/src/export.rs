@@ -1576,7 +1576,15 @@ fn assertion_node(t: &mut Translator<'_>, a: &anvil_domain::assertions::Assertio
                 _ => return Err(refuse(&format!("status {comparison:?} {value}"))),
             };
             t.map("status assertion", "Response Assertion on the response code");
-            (response_assertion(&name(format!("status {comparison:?} {value}")), "Assertion.response_code", tt, &[value.clone()]), false)
+            (
+                response_assertion(
+                    &name(format!("status {comparison:?} {value}")),
+                    "Assertion.response_code",
+                    tt,
+                    std::slice::from_ref(value),
+                ),
+                false,
+            )
         }
         AssertionKind::StatusIn { values } => {
             if values.is_empty() {
@@ -1625,7 +1633,7 @@ fn assertion_node(t: &mut Translator<'_>, a: &anvil_domain::assertions::Assertio
                 _ => return Err(refuse(&format!("body {comparison:?}"))),
             };
             t.map("body assertion", "Response Assertion on the response text (substring or equality, not a pattern)");
-            (response_assertion(&name(format!("body {comparison:?}")), "Assertion.response_data", tt, &[value.clone()]), true)
+            (response_assertion(&name(format!("body {comparison:?}")), "Assertion.response_data", tt, std::slice::from_ref(value)), true)
         }
         AssertionKind::JsonPath { path, comparison, value } => {
             if !simple_json_path(path) {

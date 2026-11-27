@@ -10,6 +10,7 @@ import {
   onLoadProgress,
   type Dataset,
   type FileGrant,
+  type JmxExportOutcome,
   type LoadComparison,
   type LoadPlan,
   type LoadPlanCheck,
@@ -184,6 +185,7 @@ export function LoadView(props: {
   const [reports, setReports] = useState<LoadReportSummary[]>([]);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [sel, setSel] = useState<Sel>(null);
+  const [jtlDlg, setJtlDlg] = useState(false);
   // Unsaved plan edits and new plans, kept in memory for the session (never
   // written to disk). Only the shown workspace's drafts are read, so a switch
   // hides them and switching back restores them.
@@ -346,6 +348,10 @@ export function LoadView(props: {
           ))}
           <div className="side-section-head">
             <span>Reports</span>
+            <button className="btn ghost small" title="Import JMeter results (a JTL file) as a report" onClick={() => setJtlDlg(true)}>
+              <Icon name="download" size={14} />
+              Import
+            </button>
           </div>
           {reports.length === 0 && <div className="side-empty">No runs yet.</div>}
           {reports.map((r) => (
@@ -372,6 +378,19 @@ export function LoadView(props: {
           ))}
         </div>
       </aside>
+      {jtlDlg && (
+        <JtlImportDialog
+          workspaceId={props.workspaceId}
+          plans={plans}
+          onClose={() => setJtlDlg(false)}
+          onImported={async (runId) => {
+            setJtlDlg(false);
+            props.notify("JMeter results imported as a report.");
+            const r = await reload();
+            if (r?.some((x) => x.run_id === runId)) select({ kind: "report", id: runId });
+          }}
+        />
+      )}
       <SidebarResizer />
       <section className="work single">
         <div className="pane">
@@ -505,6 +524,7 @@ export function PlanEditor(props: {
   const [datasetDlg, setDatasetDlg] = useState(false);
   const [deletingDataset, setDeletingDataset] = useState<Dataset | null>(null);
   const [check, setCheck] = useState<LoadPlanCheck | null>(null);
+  const [jmxDlg, setJmxDlg] = useState(false);
   // A save, or a Run… (its save and preflight), is on its way: a new plan cannot be discarded meanwhile.
   const [saving, setSaving] = useState(false);
   // A Start load is on its way: a second one would start a second worker.
@@ -596,6 +616,14 @@ export function PlanEditor(props: {
           >
             <Icon name="play" size={12} />
             Run…
+          </button>
+          <button
+            className="btn"
+            disabled={otherWorkspace}
+            title={otherWorkspace ? "This plan belongs to another workspace." : "Save the plan and write it as an Apache JMeter test plan (nothing is sent)"}
+            onClick={() => setJmxDlg(true)}
+          >
+            Export to JMeter…
           </button>
           {props.onDiscard ? (
             <button
@@ -870,6 +898,8 @@ export function PlanEditor(props: {
         />
       )}
 
+      {jmxDlg && <JmeterExportDialog planName={p.name} save={() => saveIt()} onClose={() => setJmxDlg(false)} />}
+
       {preflight && (
         <Modal
           title="Confirm load run"
@@ -1099,6 +1129,200 @@ function DatasetDialog(props: { workspaceId: string; onClose: () => void; onAdde
 
 type Live = { runKey: string; planName: string; progress: LoadProgress | null; timeline: TimeBucket[] };
 
+/** The Apache JMeter release exported plans target (`anvil_jmeter::JMETER_VERSION`). */
+const JMETER_VERSION = "5.6.3";
+
+/** The command that runs an exported plan, as the CLI prints it. */
+function jmeterCommand(o: JmxExportOutcome): string {
+  const r = o.report;
+  let cmd = `jmeter -n -t ${o.written[0] ?? "plan.jmx"} -l results.jtl`;
+  if (r?.secrets_written && o.written.length > 1) cmd += ` -q ${o.written[o.written.length - 1]}`;
+  for (const [k, v] of r?.jmeter_properties ?? []) cmd += ` -J${k}=${v}`;
+  return cmd;
+}
+
+/**
+ * Export to JMeter… (LOAD-012): saves the plan, asks where to write the test
+ * plan (and, only when chosen, the owner-only secrets file), and shows what
+ * was written and what differs, or every reason the plan was refused.
+ */
+export function JmeterExportDialog(props: { planName: string; save: () => Promise<LoadPlan | null>; onClose: () => void }) {
+  const [secrets, setSecrets] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<JmxExportOutcome | null>(null);
+  const base = props.planName.replace(NON_FILE_NAME_CHARS, "_") || "plan";
+  const run = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      const saved = await props.save();
+      if (!saved) return;
+      const file = await api.chooseFile("jmeter_export", { file_name: `${base}.jmx`, filters: [{ name: "JMeter test plan", extensions: ["jmx"] }] });
+      if (!file) return;
+      let secretsFile: FileGrant | null = null;
+      if (secrets) {
+        secretsFile = await api.chooseFile("jmeter_secrets_export", { file_name: `${base}.secrets.properties` });
+        if (!secretsFile) return;
+      }
+      setOutcome(await api.exportJmx(saved.id, file.token, secretsFile?.token ?? null));
+    } catch (e) {
+      setErr(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const report = outcome?.report;
+  return (
+    <Modal
+      title="Export to JMeter"
+      wide
+      onClose={props.onClose}
+      footer={
+        <>
+          <button className="btn" onClick={props.onClose}>
+            Close
+          </button>
+          {!report && (
+            <button className="btn primary" disabled={busy} onClick={() => void run()}>
+              Choose file and export…
+            </button>
+          )}
+        </>
+      }
+    >
+      {!report && (
+        <>
+          <p>
+            Saves the plan and writes it as an Apache JMeter {JMETER_VERSION} test plan (.jmx) for <code>jmeter -n</code>, with its dataset beside it. Nothing
+            is sent. Settings JMeter cannot reproduce are refused or listed. A request Anvil sends with certificate verification is refused, because JMeter
+            accepts any certificate.
+          </p>
+          <label className="check top">
+            <input type="checkbox" checked={secrets} onChange={(e) => setSecrets(e.target.checked)} />
+            <span>
+              Also write the plan&apos;s secrets to a separate properties file that only you can read, for <code>jmeter -q</code>. Without it the test plan
+              names the properties and stops before any traffic until they are set.
+            </span>
+          </label>
+        </>
+      )}
+      {err && (
+        <div className="bad-box" role="alert">
+          {err}
+        </div>
+      )}
+      {outcome && outcome.refused.length > 0 && (
+        <div className="bad-box" role="alert" data-testid="jmx-refused">
+          <div>The plan cannot be exported to JMeter; nothing was written:</div>
+          <ul>
+            {outcome.refused.map((r, i) => (
+              <li key={i}>
+                {r.request ? `${r.request}: ` : ""}
+                {r.message} ({r.code})
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {outcome && report && (
+        <div data-testid="jmx-exported">
+          <p>Exported to {outcome.written.join(", ")}.</p>
+          <p>
+            Run: <code>{jmeterCommand(outcome)}</code>, then import <code>results.jtl</code> with Import under Reports.
+          </p>
+          {report.secret_properties.length > 0 && (
+            <div className={report.secrets_written ? "faint" : "warn-box"}>
+              {report.secrets_written
+                ? "The secrets file holds the values of these properties; keep it private and delete it after the run:"
+                : "Set these properties (for example in a file passed with -q), or the test plan stops before any traffic:"}
+              <ul>
+                {report.secret_properties.map((p) => (
+                  <li key={p.name}>
+                    <code>{p.name}</code> ({p.purpose})
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {report.differences.length > 0 && (
+            <>
+              <p className="hint">What JMeter does differently:</p>
+              <ul data-testid="jmx-differences">
+                {report.differences.map((d) => (
+                  <li key={d}>{d}</li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/** Import JMeter results… (LOAD-012): a JTL file becomes a report of the workspace, optionally of the plan it was exported from. */
+export function JtlImportDialog(props: { workspaceId: string; plans: LoadPlan[]; onClose: () => void; onImported: (runId: string) => void }) {
+  const [planId, setPlanId] = useState("");
+  const [version, setVersion] = useState(JMETER_VERSION);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const choose = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      const f = await api.chooseFile("jtl_import", { filters: [{ name: "JMeter results", extensions: ["jtl", "csv", "xml"] }] });
+      if (!f) return;
+      props.onImported(await api.importJtl(props.workspaceId, f.token, planId || null, version.trim() || null));
+    } catch (e) {
+      setErr(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      title="Import JMeter results"
+      onClose={props.onClose}
+      footer={
+        <>
+          <button className="btn" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" disabled={busy} onClick={() => void choose()}>
+            Choose results file…
+          </button>
+        </>
+      }
+    >
+      <p>
+        A JMeter result file (CSV or XML JTL) becomes a load report. Each sample counts as one HTTP request. With the plan it was exported from, the report
+        compares with that plan&apos;s Anvil runs. The comparison names the different engine and withholds latency deltas.
+      </p>
+      <label className="lbl">
+        Exported from plan
+        <select className="field" value={planId} onChange={(e) => setPlanId(e.target.value)}>
+          <option value="">(none)</option>
+          {props.plans.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="lbl">
+        JMeter version
+        <input className="field" value={version} onChange={(e) => setVersion(e.target.value)} />
+      </label>
+      {err && (
+        <div className="bad-box" role="alert">
+          {err}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function LivePanel(props: { live: Live; onCancel: () => void }) {
   const p = props.live.progress;
   const c = p?.snapshot.counts;
@@ -1265,6 +1489,7 @@ export function ReportView(props: { runId: string; reports: LoadReportSummary[];
             <h2>{r.plan.name}</h2>
             <span className={`badge ${r.completion === "completed" && !r.partial ? "ok" : "warn"}`}>{humanize(r.completion)}</span>
             {r.partial && <span className="badge warn">partial report</span>}
+            {r.engine === "apache-jmeter" && <span className="badge neutral">imported from JMeter</span>}
           </div>
           <div className="page-meta">
             {new Date(r.started_at).toLocaleString()} → {new Date(r.finished_at).toLocaleTimeString()}

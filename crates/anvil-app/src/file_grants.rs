@@ -83,6 +83,14 @@ pub enum FilePurpose {
     /// Write a description revised with contract-drift suggestions, or its
     /// JSON Patch.
     SpecRevisionExport,
+    /// Write a JMeter test plan (`.jmx`) and, beside it, its dataset as
+    /// `<name>.dataset.csv` (the backend derives that name).
+    JmeterExport,
+    /// Write the secrets of a JMeter export (a properties file for
+    /// `jmeter -q`), readable only by its owner.
+    JmeterSecretsExport,
+    /// Read a JMeter result file (JTL), streamed rather than read whole.
+    JtlImport,
     /// Bind a JWT-SVID token file that the backend reads at send time.
     JwtSvidFile,
     /// Bind a linked local file that a saved request or dataset names, so
@@ -112,7 +120,9 @@ impl FilePurpose {
             | FilePurpose::LoadReportExport
             | FilePurpose::RunReportExport
             | FilePurpose::LintReportExport
-            | FilePurpose::SpecRevisionExport => Access::Write,
+            | FilePurpose::SpecRevisionExport
+            | FilePurpose::JmeterExport
+            | FilePurpose::JmeterSecretsExport => Access::Write,
             FilePurpose::BundleImport
             | FilePurpose::Attachment
             | FilePurpose::PemCertificate
@@ -120,15 +130,16 @@ impl FilePurpose {
             | FilePurpose::Pkcs12File
             | FilePurpose::SpecSource
             | FilePurpose::Dataset
-            | FilePurpose::Ruleset => Access::Read,
+            | FilePurpose::Ruleset
+            | FilePurpose::JtlImport => Access::Read,
             FilePurpose::JwtSvidFile | FilePurpose::LinkedFile | FilePurpose::LinkedFileRelocate => Access::Bind,
         }
     }
 
     /// Whether a written file is created readable only by its owner (Unix):
-    /// bundles and backups can carry secrets.
+    /// bundles, backups and a JMeter export's secrets file carry secrets.
     pub fn owner_only(self) -> bool {
-        matches!(self, FilePurpose::BundleExport)
+        matches!(self, FilePurpose::BundleExport | FilePurpose::JmeterSecretsExport)
     }
 
     /// Largest file read for this purpose (0 for write purposes).
@@ -141,11 +152,15 @@ impl FilePurpose {
             FilePurpose::SpecSource => 32 * MIB,
             FilePurpose::Dataset => 64 * MIB,
             FilePurpose::Ruleset => MIB,
+            // Streamed (`FileGrants::open_read`); the importer bounds it again.
+            FilePurpose::JtlImport => 4 * 1024 * MIB,
             FilePurpose::BundleExport
             | FilePurpose::LoadReportExport
             | FilePurpose::RunReportExport
             | FilePurpose::LintReportExport
             | FilePurpose::SpecRevisionExport
+            | FilePurpose::JmeterExport
+            | FilePurpose::JmeterSecretsExport
             | FilePurpose::JwtSvidFile
             | FilePurpose::LinkedFile
             | FilePurpose::LinkedFileRelocate => 0,
@@ -387,10 +402,71 @@ impl FileGrants {
     /// stays usable until it expires or the app locks. Private-key grants are
     /// refused here and served only by one-shot vault ingestion.
     pub fn read(&self, token: &str, purpose: FilePurpose) -> Result<ReadFile, GrantError> {
-        if purpose.access() != Access::Read || purpose == FilePurpose::PemPrivateKey {
+        if purpose.access() != Access::Read || matches!(purpose, FilePurpose::PemPrivateKey | FilePurpose::JtlImport) {
             return Err(GrantError::WrongPurpose);
         }
         self.read_file(self.lookup(token, purpose)?, purpose)
+    }
+
+    /// Open the file behind a JTL grant for streaming, with its name. The
+    /// same checks as [`FileGrants::read`] apply (still the chosen file, not
+    /// reached through a link, within the purpose's size limit); the caller
+    /// reads it with its own bounds.
+    pub fn open_read(&self, token: &str, purpose: FilePurpose) -> Result<(File, String), GrantError> {
+        if purpose != FilePurpose::JtlImport {
+            return Err(GrantError::WrongPurpose);
+        }
+        let entry = self.lookup(token, purpose)?;
+        let Target::Read { path, id } = entry.target else {
+            return Err(GrantError::WrongPurpose);
+        };
+        if std::fs::canonicalize(&path).map_err(io)? != path {
+            return Err(GrantError::Changed);
+        }
+        let Some((file, meta)) = open_regular(&path).map_err(io)? else {
+            return Err(GrantError::Changed);
+        };
+        if file_id(&file, &meta).map_err(io)? != id {
+            return Err(GrantError::Changed);
+        }
+        if meta.len() > purpose.max_read_bytes() {
+            return Err(GrantError::TooLarge(size_label(purpose.max_read_bytes())));
+        }
+        Ok((file, entry.file_name))
+    }
+
+    /// The name chosen for a write grant (without its folder), so a command
+    /// can name a file it writes beside it before writing.
+    pub fn chosen_name(&self, token: &str, purpose: FilePurpose) -> Result<String, GrantError> {
+        if purpose.access() != Access::Write {
+            return Err(GrantError::WrongPurpose);
+        }
+        let entry = self.lookup(token, purpose)?;
+        match entry.target {
+            Target::Write { name, .. } => Ok(display_name(Some(&name))),
+            Target::Read { .. } => Err(GrantError::WrongPurpose),
+        }
+    }
+
+    /// [`FileGrants::write`] for a JMeter export: the test plan to the chosen
+    /// file and, when given, its dataset beside it as
+    /// `<chosen stem>.dataset.csv` in the same chosen folder (owner-only when
+    /// it holds secrets). The sibling's name is derived here, never supplied
+    /// by the renderer.
+    pub fn write_with_dataset(&self, token: &str, bytes: &[u8], dataset: Option<(&[u8], bool)>) -> Result<usize, GrantError> {
+        let purpose = FilePurpose::JmeterExport;
+        let (entry, generation) = self.take(token, purpose)?;
+        let result = write_target(&entry.target, bytes, purpose.owner_only()).and_then(|()| match (dataset, &entry.target) {
+            (Some((csv, owner_only)), Target::Write { dir, id, name }) => write_in(dir, *id, &dataset_name(name), csv, owner_only),
+            _ => Ok(()),
+        });
+        if result.is_err() {
+            let mut g = self.state.lock();
+            if g.generation == generation {
+                self.admit(&mut g, token.to_owned(), entry);
+            }
+        }
+        result.map(|()| bytes.len() + dataset.map_or(0, |(csv, _)| csv.len()))
     }
 
     /// [`FileGrants::read`], deciding from the start of the file how much of
@@ -405,7 +481,7 @@ impl FileGrants {
         prefix: usize,
         limit: impl FnOnce(&[u8], u64) -> Result<u64, String>,
     ) -> Result<ReadFile, GrantError> {
-        if purpose.access() != Access::Read || purpose == FilePurpose::PemPrivateKey {
+        if purpose.access() != Access::Read || matches!(purpose, FilePurpose::PemPrivateKey | FilePurpose::JtlImport) {
             return Err(GrantError::WrongPurpose);
         }
         self.read_file_checked(self.lookup(token, purpose)?, purpose, prefix, limit)
@@ -703,6 +779,16 @@ fn refuse_directory(dest: &Path) -> Result<(), GrantError> {
         Ok(m) if m.is_dir() => Err(GrantError::Invalid("the destination is a folder".into())),
         _ => Ok(()),
     }
+}
+
+/// The dataset file written beside a JMeter test plan: `<stem>.dataset.csv`.
+pub fn dataset_name(plan_file: &OsStr) -> OsString {
+    let stem = Path::new(plan_file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "plan".into());
+    OsString::from(format!("{stem}.dataset.csv"))
 }
 
 fn display_name(name: Option<&std::ffi::OsStr>) -> String {
