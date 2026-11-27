@@ -58,6 +58,13 @@ pub fn authority_host(authority: &str) -> Option<String> {
     authority.parse::<http::uri::Authority>().ok().map(|a| a.host().to_string())
 }
 
+/// Decides, from the response's `Content-Type` and the body bytes captured so
+/// far, that the response already holds what the request needs: reading then
+/// stops, recorded as [`BodyCompleteness::StoppedAfterAnswer`]. An MCP
+/// exchange stops an event stream once its JSON-RPC response has arrived.
+/// Called after every body chunk, with every byte captured so far.
+pub type BodyStop = Arc<dyn Fn(Option<&str>, &[u8]) -> bool + Send + Sync>;
+
 /// Fully prepared single-attempt HTTP request (final bytes; auth already applied).
 #[derive(Clone)]
 pub struct HttpPlan {
@@ -98,6 +105,9 @@ pub struct HttpPlan {
     /// no ticket, however many attempts, redirects or retries later it runs.
     /// `None`: taken when the attempt begins.
     pub fence: Option<CacheFence>,
+    /// Stop reading the body once it holds what the request needs (see
+    /// [`BodyStop`]); `None` reads it to its end.
+    pub body_stop: Option<BodyStop>,
 }
 
 /// The generations of one transport's connection pool and ticket cache.
@@ -1381,6 +1391,10 @@ impl HttpTransport {
                                     format!("stopped reading after {} bytes: the local max_response_bytes limit was reached (this is a local limit, not a peer fault)", plan.limits.max_response_bytes)));
                                 break;
                             }
+                            if plan.body_stop.as_ref().is_some_and(|stop| stop(content_type.as_deref(), &captured)) {
+                                completeness = BodyCompleteness::StoppedAfterAnswer;
+                                break;
+                            }
                         } else if let Ok(t) = frame.into_trailers() {
                             trailers_received = true;
                             trailers = t.iter().map(|(n, v)| HeaderEntry { name: n.as_str().to_string(), value: String::from_utf8_lossy(v.as_bytes()).into_owned() }).collect();
@@ -1444,7 +1458,8 @@ impl HttpTransport {
         let reusable = failure.is_none() && plan.keepalive && !conn_close && !tunneled;
         match &conn.sender {
             Sender::H1(_) => {
-                if reusable {
+                // A body left unread mid-stream leaves the connection unusable.
+                if reusable && completeness != BodyCompleteness::StoppedAfterAnswer {
                     self.pool.checkin(key, conn.clone(), generation);
                 } else if !kept_for_retry {
                     conn.closed.store(true, Ordering::SeqCst);

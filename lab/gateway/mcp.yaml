@@ -4,6 +4,7 @@
 # Settings:  mcp.conf (proxy HTTP 127.0.0.1:17180, admin 127.0.0.1:17190).
 # Fixtures:  17101  MCP server (Streamable HTTP, JSON answers) behind the gateway
 #            17102  the same server answering with event streams (addressed directly; not routed here)
+#            17103  HTTP echo server, the backend of the OpenAPI bridge route (/echo)
 #
 # mcp_gateway in aggregate-router mode (src/plugins/mcp_gateway.rs @ e27f210, McpGateway::new):
 # one upstream server, namespace "fx" (public tool names "fx.<tool>"). Policy (policy.tools, keyed
@@ -13,14 +14,24 @@
 # (policy.hide_denied_tools off), so tools/list tells a denial from a hidden tool. validation.validate_tool_arguments (on by default) checks tools/call arguments
 # against the listed inputSchema before forwarding.
 #
+# Per-consumer grants (MCP-009..011): /mcp-grants authenticates with key_auth (X-Lab-Api-Key) and
+# runs a second mcp_gateway instance (namespace "gx", the same upstream) whose gx.echo is allowed
+# only to consumers in group mcp-readers, never to one in mcp-suspended (denied_groups win).
+# Consumers: mcp-reader (mcp-readers), mcp-outsider (lab-other), mcp-suspended (both groups). The
+# keys are generated per lab start ({{MCP_*_KEY}}).
+#
+# A successful OpenAPI-bridged call (MCP-012): /echo is a literal-prefix route to the HTTP echo
+# fixture; its mcp_gateway instance (endpoint /echo/mcp) generates tool br.echo from one operation,
+# GET /echo/bridge, executed against the route's own backend.
+#
 # v0.9.21 removed discovery.hide_denied_items (#7136; an unknown key fails config load), which v0.9.20
 # needed set false here; policy.hide_denied_tools alone decides now.
 version: "1"
 
 resource_counts:
-  proxies: 1
-  consumers: 0
-  plugin_configs: 2
+  proxies: 3
+  consumers: 3
+  plugin_configs: 5
   upstreams: 0
 
 proxies:
@@ -35,6 +46,55 @@ proxies:
     pool_enable_http2: false
     plugins:
       - plugin_config_id: mcp-gateway
+
+  # MCP-009..011: per-consumer tool grants behind key_auth.
+  - id: mcp-grants
+    listen_path: /mcp-grants
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 17101
+    strip_listen_path: false
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: mcp-grants-key
+      - plugin_config_id: mcp-grants
+
+  # MCP-012: an OpenAPI bridge on a literal-prefix route; the bridged operation runs on its backend.
+  - id: mcp-bridge-echo
+    listen_path: /echo
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 17103
+    strip_listen_path: false
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: mcp-bridge-echo
+
+consumers:
+  - id: mcp-reader
+    username: mcp-reader
+    credentials:
+      keyauth:
+        - key: "{{MCP_READER_KEY}}"
+    acl_groups:
+      - mcp-readers
+
+  - id: mcp-outsider
+    username: mcp-outsider
+    credentials:
+      keyauth:
+        - key: "{{MCP_OUTSIDER_KEY}}"
+    acl_groups:
+      - lab-other
+
+  - id: mcp-suspended
+    username: mcp-suspended
+    credentials:
+      keyauth:
+        - key: "{{MCP_SUSPENDED_KEY}}"
+    acl_groups:
+      - mcp-readers
+      - mcp-suspended
 
 plugin_configs:
   - id: mcp-gateway
@@ -61,6 +121,61 @@ plugin_configs:
           fx.internal_audit: { action: hide_from_discovery }
       validation:
         validate_tool_arguments: true
+
+  - id: mcp-grants-key
+    plugin_name: key_auth
+    scope: proxy
+    proxy_id: mcp-grants
+    enabled: true
+    config:
+      key_location: "header:X-Lab-Api-Key"
+      hide_credentials: true
+
+  - id: mcp-grants
+    plugin_name: mcp_gateway
+    scope: proxy
+    proxy_id: mcp-grants
+    enabled: true
+    config:
+      mode: aggregate_router
+      endpoint:
+        path: /mcp-grants
+      servers:
+        gx:
+          upstream_url: "http://127.0.0.1:17101/mcp"
+          namespace: gx
+      policy:
+        default_action: deny
+        hide_denied_tools: false
+        tools:
+          gx.echo:
+            action: allow
+            allowed_groups: [mcp-readers]
+            denied_groups: [mcp-suspended]
+      validation:
+        validate_tool_arguments: true
+
+  - id: mcp-bridge-echo
+    plugin_name: mcp_gateway
+    scope: proxy
+    proxy_id: mcp-bridge-echo
+    enabled: true
+    config:
+      mode: aggregate_router
+      endpoint:
+        path: /echo/mcp
+      servers:
+        br:
+          namespace: br
+          openapi:
+            operations:
+              - name: echo
+                method: GET
+                path: /echo/bridge
+      policy:
+        default_action: deny
+        tools:
+          br.echo: { action: allow }
 
   - id: lab-access-log
     plugin_name: stdout_logging

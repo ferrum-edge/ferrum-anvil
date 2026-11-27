@@ -228,7 +228,10 @@ fn decode_body(r: &ResponseRecord, raw: &[u8], limit: u64, session: bool) -> Bod
 fn capture_gap(body: &BodyCapture, session: bool) -> Option<String> {
     let received = body.wire_bytes;
     match body.completeness {
-        BodyCompleteness::Complete | BodyCompleteness::NoBody => {}
+        // Reading stopped once the body held the answer the request needed
+        // (an MCP event stream after its JSON-RPC response): what the checks
+        // read is whole.
+        BodyCompleteness::Complete | BodyCompleteness::NoBody | BodyCompleteness::StoppedAfterAnswer => {}
         _ if session => {}
         BodyCompleteness::Incomplete => return Some(format!("the response ended before its framing completed after {received} bytes")),
         BodyCompleteness::Canceled => return Some(format!("reading the response body was canceled after {received} bytes")),
@@ -299,7 +302,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
             (None, Some(f)) if f.kind == FailureKind::Canceled => TransportState::Canceled,
             (None, _) => TransportState::Failed,
             (Some(r), _) => match r.body.completeness {
-                BodyCompleteness::Complete | BodyCompleteness::NoBody => TransportState::Completed,
+                BodyCompleteness::Complete | BodyCompleteness::NoBody | BodyCompleteness::StoppedAfterAnswer => TransportState::Completed,
                 BodyCompleteness::Canceled => TransportState::Canceled,
                 BodyCompleteness::Incomplete | BodyCompleteness::StoppedAtLocalLimit => TransportState::Incomplete,
             },
@@ -335,8 +338,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     for d in a.extra_findings {
         diagnosis.findings.push(anvil_diagnostics::render::render(d));
     }
-    let body_complete =
-        response.as_ref().map(|r| matches!(r.body.completeness, BodyCompleteness::Complete | BodyCompleteness::NoBody)).unwrap_or(false);
+    let body_complete = response.as_ref().map(|r| r.body.completeness.holds_the_answer()).unwrap_or(false);
     // A partial or undecodable body cannot show an application-level fault.
     let body_complete = body_complete && decoding_gap.is_none();
     // A SOAP fault or GraphQL error arrives in a 2xx body. When only a prefix

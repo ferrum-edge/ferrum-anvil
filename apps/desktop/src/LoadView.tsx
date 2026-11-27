@@ -51,6 +51,7 @@ const UNIT_WORDS: Record<LoadUnitKind, [string, string]> = {
   tcp_exchange: ["exchange", "exchanges"],
   udp_exchange: ["exchange", "exchanges"],
   dtls_exchange: ["exchange", "exchanges"],
+  mcp_session: ["session", "sessions"],
 };
 
 const PROTOCOL_LABEL: Record<Protocol, string> = { http: "HTTP", web_socket: "WebSocket", grpc: "gRPC", sse: "SSE", tcp: "TCP", udp: "UDP", mcp: "MCP" };

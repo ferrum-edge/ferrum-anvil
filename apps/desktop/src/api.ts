@@ -366,8 +366,7 @@ export interface LoadRefusal {
     | "sse_reconnect"
     | "hbone_persistent"
     | "early_data"
-    | "incomplete_request"
-    | "mcp_unsupported";
+    | "incomplete_request";
   request_id?: string | null;
   message: string;
 }
@@ -381,9 +380,11 @@ export interface McpDiscovered {
   /** What was changed from a listed schema (the first few). */
   notes: string[];
   notes_total: number;
-  /** The server lists more tools than its first page; only that page was read. */
-  more: boolean;
-  /** The execution that listed the tools (in history). */
+  /** The tools/list pages read (every page the server listed, following nextCursor, within the bounds). */
+  pages: number;
+  /** Why pages the server listed were left unread; null when every page was read. */
+  stopped: string | null;
+  /** The execution that listed the first page (in history). */
   execution_id: string;
 }
 /** What an edited plan would measure, or its typed refusal. Nothing is sent. */

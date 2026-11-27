@@ -100,6 +100,7 @@ fn plan(addr: SocketAddr) -> HttpPlan {
         display_url: format!("https://{addr}/"),
         early_data: EarlyDataIntent::Off,
         fence: None,
+        body_stop: None,
     }
 }
 

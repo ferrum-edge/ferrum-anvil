@@ -306,6 +306,7 @@ impl Lookup<'_> {
             proxy_header_withheld: None,
             early_data: anvil_transport::http::EarlyDataIntent::Off,
             fence: Some(self.epoch.transport()),
+            body_stop: None,
         })
     }
 }

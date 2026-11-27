@@ -602,7 +602,13 @@ export type EarlyDataNotUsed =
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "BodyCompleteness".
  */
-export type BodyCompleteness = "complete" | "incomplete" | "canceled" | "stopped_at_local_limit" | "no_body";
+export type BodyCompleteness =
+  | "complete"
+  | "incomplete"
+  | "canceled"
+  | "stopped_at_local_limit"
+  | "stopped_after_answer"
+  | "no_body";
 /**
  * Outcome of removing the response's content-coding for display,
  * assertions and extraction. Independent of the body completeness, which
@@ -963,7 +969,8 @@ export type LoadUnitKind =
   | "websocket_session"
   | "tcp_exchange"
   | "udp_exchange"
-  | "dtls_exchange";
+  | "dtls_exchange"
+  | "mcp_session";
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "ProxyKind".
@@ -1238,6 +1245,13 @@ export type McpOperation =
       method: string;
       params?: string;
       notification?: boolean;
+    }
+  | {
+      kind: "batch";
+      /**
+       * The JSON array of JSON-RPC messages, as JSON (variables allowed).
+       */
+      messages: string;
     };
 /**
  * How one stored ruleset participates in the current standards view.

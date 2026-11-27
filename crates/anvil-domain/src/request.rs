@@ -555,10 +555,16 @@ pub enum McpOperation {
         #[serde(default)]
         notification: bool,
     },
+    /// A JSON-RPC batch sent as one POST: requests and notifications in one JSON array. MCP from 2025-06-18 has no batches; this tests how a server or gateway treats one.
+    Batch {
+        /// The JSON array of JSON-RPC messages, as JSON (variables allowed).
+        messages: String,
+    },
 }
 
 impl McpOperation {
-    /// The JSON-RPC method name.
+    /// The JSON-RPC method name (a batch, which has none, is labelled
+    /// `JSON-RPC batch`).
     pub fn method(&self) -> &str {
         match self {
             McpOperation::ToolsList { .. } => "tools/list",
@@ -569,6 +575,7 @@ impl McpOperation {
             McpOperation::PromptsList { .. } => "prompts/list",
             McpOperation::PromptsGet { .. } => "prompts/get",
             McpOperation::Raw { method, .. } => method,
+            McpOperation::Batch { .. } => "JSON-RPC batch",
         }
     }
 

@@ -150,6 +150,20 @@ describe("MCP protocol editor", () => {
     expect(set).toHaveBeenCalledWith({ mcp: expect.objectContaining({ operation: { kind: "tools_call", name: "", arguments: "{}" } }) });
   });
 
+  it("edits a JSON-RPC batch as one JSON array", () => {
+    const set = vi.fn();
+    const { unmount } = render(<ProtocolEditor spec={mcpSpec({ operation: { kind: "tools_list" } })} set={set} workspaceId="ws" requestId="r1" />);
+    fireEvent.change(screen.getByLabelText("MCP operation"), { target: { value: "batch" } });
+    expect(set).toHaveBeenCalledWith({ mcp: expect.objectContaining({ operation: expect.objectContaining({ kind: "batch" }) }) });
+    unmount();
+    const batch = { kind: "batch" as const, messages: '[{"jsonrpc":"2.0","id":1,"method":"ping"}]' };
+    render(<ProtocolEditor spec={mcpSpec({ operation: batch })} set={set} workspaceId="ws" requestId="r1" />);
+    const messages = screen.getByLabelText(/Messages \(a JSON array/) as HTMLTextAreaElement;
+    expect(messages.value).toBe(batch.messages);
+    fireEvent.change(messages, { target: { value: "[]" } });
+    expect(set).toHaveBeenLastCalledWith({ mcp: expect.objectContaining({ operation: { kind: "batch", messages: "[]" } }) });
+  });
+
   it("asks for a saved request before discovering tools", () => {
     render(<ProtocolEditor spec={mcpSpec({ operation: { kind: "tools_list" } })} set={() => {}} workspaceId="ws" requestId="r1" dirty />);
     const discover = screen.getByRole("button", { name: /Discover tools/ }) as HTMLButtonElement;

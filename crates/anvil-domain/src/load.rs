@@ -269,6 +269,8 @@ pub enum LoadUnitKind {
     UdpExchange,
     /// One DTLS handshake, then the request's datagrams and response window.
     DtlsExchange,
+    /// One MCP session: initialize, notifications/initialized, the operation and the DELETE that ends it.
+    McpSession,
 }
 
 /// Version of [`ProtocolLoadMetrics`]; bumped when a field changes meaning.

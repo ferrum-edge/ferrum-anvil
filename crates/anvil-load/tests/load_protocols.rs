@@ -1234,3 +1234,54 @@ fn route_uses_each_protocols_schemes_and_the_no_proxy_list() {
     let c = via_http_proxy(Protocol::Tcp, "udp://api.test:7000", "");
     assert!(route(&c, "udp://api.test:7000", Protocol::Tcp).is_none());
 }
+
+// -------------------------------------------------------------------- MCP
+
+fn mcp_ctx(url: &str, operation: serde_json::Value) -> ExecutionContext {
+    let mut c = ctx(Protocol::Mcp, url);
+    c.spec.method = "POST".into();
+    c.spec.mcp = Some(serde_json::from_value(serde_json::json!({ "operation": operation })).unwrap());
+    c
+}
+
+/// An MCP request is one session per unit (initialize, the notification, the
+/// call, the DELETE): its latency is the whole session, persistent virtual
+/// users reuse their connections across sessions, and fresh mode opens one
+/// per exchange. A tool error, and a handshake that opens no session, are
+/// application failures.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn load_mcp_sessions_are_one_unit_each() {
+    use anvil_fixtures::mcp::{self, McpOptions};
+    let _g = serial().await;
+    let f = mcp::serve("127.0.0.1:0", McpOptions::default()).await.unwrap();
+    let echo = serde_json::json!({"kind": "tools_call", "name": "echo", "arguments": "{\"text\":\"hi\"}"});
+    let id = Id::new();
+    let r = run_one(plan(iterations(6, 2), vec![id], ConnectionMode::Persistent), mcp_ctx(&f.url(), echo.clone())).await;
+    let p = proto(&r);
+    assert_eq!(p.unit, LoadUnitKind::McpSession);
+    assert_eq!(p.semantics.unit_plural, "sessions");
+    assert_eq!((r.requests.started, r.requests.completed, r.requests.application_failures), (6, 6, 0), "{:?}", r.requests);
+    assert_eq!(f.state.tool_calls("echo"), 6, "one call per session");
+    assert_eq!(f.state.closed.lock().len(), 6, "every session was ended");
+    assert!(accepted(&f.log) <= 2, "persistent: each virtual user reuses its connection, {} accepted", accepted(&f.log));
+    assert_eq!(r.latency_success.count, 6);
+
+    let fresh = mcp::serve("127.0.0.1:0", McpOptions::default()).await.unwrap();
+    let id = Id::new();
+    let r = run_one(plan(iterations(3, 1), vec![id], ConnectionMode::Fresh), mcp_ctx(&fresh.url(), echo)).await;
+    assert_eq!((r.requests.completed, r.requests.application_failures), (3, 0));
+    assert_eq!(accepted(&fresh.log), 3 * 4, "fresh: every exchange of every session opens a connection");
+
+    let id = Id::new();
+    let fail = serde_json::json!({"kind": "tools_call", "name": "fail"});
+    let r = run_one(plan(iterations(3, 1), vec![id], ConnectionMode::Persistent), mcp_ctx(&f.url(), fail)).await;
+    assert_eq!((r.requests.completed, r.requests.application_failures), (3, 3), "a tool error is an application failure");
+
+    // Not an MCP server: initialize gets no JSON-RPC response, so the call is never sent.
+    let plain = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let id = Id::new();
+    let list = serde_json::json!({"kind": "tools_list"});
+    let r = run_one(plan(iterations(2, 1), vec![id], ConnectionMode::Persistent), mcp_ctx(&plain.url("/echo"), list)).await;
+    assert_eq!((r.requests.completed, r.requests.application_failures), (2, 2), "{:?}", r.requests);
+    assert_eq!(requests_to(&plain.log, "/echo"), 2, "only initialize was sent, once per session");
+}

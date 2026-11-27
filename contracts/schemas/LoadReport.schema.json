@@ -1080,6 +1080,11 @@
           "description": "One DTLS handshake, then the request's datagrams and response window.",
           "type": "string",
           "const": "dtls_exchange"
+        },
+        {
+          "description": "One MCP session: initialize, notifications/initialized, the operation and the DELETE that ends it.",
+          "type": "string",
+          "const": "mcp_session"
         }
       ]
     },

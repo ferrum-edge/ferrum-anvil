@@ -3160,6 +3160,24 @@
             "kind",
             "method"
           ]
+        },
+        {
+          "description": "A JSON-RPC batch sent as one POST: requests and notifications in one JSON array. MCP from 2025-06-18 has no batches; this tests how a server or gateway treats one.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "batch"
+            },
+            "messages": {
+              "description": "The JSON array of JSON-RPC messages, as JSON (variables allowed).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "messages"
+          ]
         }
       ]
     },

@@ -70,6 +70,7 @@ fn plan(url: &str, tls: Option<TlsSettings>) -> HttpPlan {
         display_url: url.into(),
         early_data: anvil_transport::http::EarlyDataIntent::Off,
         fence: None,
+        body_stop: None,
     }
 }
 

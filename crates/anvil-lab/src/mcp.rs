@@ -4,8 +4,9 @@
 //! runs MCP requests (a session each: initialize, notifications/initialized,
 //! the operation, DELETE) and must explain the gateway's policy outcomes
 //! (allow, deny, hide, schema validation, unknown tools, a request outside a
-//! session) with the release's catalog, while a tool's own failure stays the
-//! tool's. The fixture's record of the calls that reached it is the ground
+//! session, per-consumer tool grants) with the release's catalog, while a
+//! tool's own failure stays the tool's, and a call the OpenAPI bridge runs
+//! against its route's backend is answered as a tool result. The fixture's record of the calls that reached it is the ground
 //! truth that the gateway allowed or refused a call; it is never given to
 //! the engine.
 
@@ -17,7 +18,7 @@ use crate::scenario::{CheckKind, Checks, ScenarioResult};
 use anvil_domain::assertions::{Assertion, AssertionKind, Comparison};
 use anvil_domain::diagnostics::Confidence;
 use anvil_domain::outcome::{ApplicationState, AssertionState};
-use anvil_domain::request::{McpOperation, McpSpec, Protocol, RequestSpec};
+use anvil_domain::request::{KeyValue, McpOperation, McpSpec, Protocol, RequestSpec};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::mcp::{self, McpFixture, McpOptions};
 use anvil_transport::recorder::EventCtx;
@@ -29,6 +30,21 @@ pub const TARGET: Target = Target { base: "http://127.0.0.1:17180", port: 17180,
 const ADMIN_PORT: u16 = 17190;
 /// The gateway's MCP endpoint (`endpoint.path`).
 const ENDPOINT: &str = "/mcp";
+/// The grants route's MCP endpoint (key_auth, per-consumer grants).
+const GRANTS_ENDPOINT: &str = "/mcp-grants";
+/// The OpenAPI bridge route's MCP endpoint.
+const BRIDGE_ENDPOINT: &str = "/echo/mcp";
+
+/// The `key_auth` keys of the grants route's consumers, generated per lab
+/// start.
+pub struct Keys {
+    /// `mcp-reader`, in group `mcp-readers`.
+    pub reader: String,
+    /// `mcp-outsider`, in group `lab-other` only.
+    pub outsider: String,
+    /// `mcp-suspended`, in `mcp-readers` and `mcp-suspended`.
+    pub suspended: String,
+}
 
 pub struct Env {
     pub engine: Engine,
@@ -37,6 +53,9 @@ pub struct Env {
     /// 17102: the same server answering with event streams, addressed
     /// directly (the positive control; no gateway).
     pub direct_sse: McpFixture,
+    /// 17103: the HTTP echo server behind the OpenAPI bridge route.
+    pub bridge_backend: anvil_fixtures::http::Fixture,
+    pub keys: Keys,
     pub gateway: Gateway,
     pub trusted: bool,
 }
@@ -273,6 +292,110 @@ fn mcp008(env: &Env) -> Fut<'_> {
     })
 }
 
+/// An MCP request to the grants route's endpoint, authenticated with `key`.
+fn granted(env: &Env, key: &str, operation: McpOperation, assertions: Vec<AssertionKind>) -> ExecutionContext {
+    let mut c = as_mcp(request(&TARGET, env.trusted, "POST", GRANTS_ENDPOINT), operation, assertions);
+    c.spec.headers.push(KeyValue { sensitive: true, ..KeyValue::new("X-Lab-Api-Key", key) });
+    c
+}
+
+/// Whether the grants route lists `gx.echo` to the consumer of `key`.
+async fn listed_to(env: &Env, key: &str) -> Option<bool> {
+    let o = send(env, &granted(env, key, McpOperation::ToolsList { cursor: None }, vec![])).await;
+    let tools = anvil_engine::mcp::operation_response(&o)?.get("result")?.get("tools")?.as_array()?.clone();
+    Some(tools.iter().any(|t| t.get("name").and_then(|n| n.as_str()) == Some("gx.echo")))
+}
+
+/// MCP-009: a consumer the grant names (group mcp-readers) is listed the
+/// granted tool and its call is forwarded.
+fn mcp009(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let listed = listed_to(env, &env.keys.reader).await;
+        c.add(CheckKind::GroundTruth, "the grantee is listed gx.echo", listed == Some(true), format!("{listed:?}"));
+        let before = env.upstream.state.tool_calls("echo");
+        let text = "$.result.structuredContent.text".to_string();
+        let checks = vec![
+            AssertionKind::JsonRpcResult,
+            AssertionKind::McpIsError { is_error: false },
+            AssertionKind::JsonPath { path: text, comparison: Comparison::Equals, value: "granted".into() },
+        ];
+        let o = send(env, &granted(env, &env.keys.reader, call("gx.echo", r#"{"text":"granted"}"#), checks)).await;
+        c.success(CheckKind::Diagnosis, &o);
+        assertions_pass(&mut c, &o);
+        c.absent_prefix(&o, "ferrum.outcome");
+        reached(&mut c, env, "echo", before, true);
+        done(o, c)
+    })
+}
+
+/// A call the grant refuses to the consumer of `key`: the tool is not listed
+/// to it, the call gets -32001 (the answer a denied tool gets, naming neither
+/// the tool nor a group), explained as tool_denied, and is never forwarded;
+/// the grantee's call then succeeds.
+async fn not_granted(env: &Env, key: &str) -> Outcome {
+    let mut c = Checks::new();
+    let listed = listed_to(env, key).await;
+    c.add(CheckKind::GroundTruth, "gx.echo is not listed to this consumer", listed == Some(false), format!("{listed:?}"));
+    let before = env.upstream.state.tool_calls("echo");
+    let o = send(env, &granted(env, key, call("gx.echo", r#"{"text":"not granted"}"#), vec![AssertionKind::JsonRpcError { code: -32001 }]))
+        .await;
+    c.status_in(&o, &[200]);
+    assertions_pass(&mut c, &o);
+    outcome(&mut c, env, &o, "plugin.mcp_gateway.tool_denied");
+    reached(&mut c, env, "echo", before, false);
+    let r =
+        send(env, &granted(env, &env.keys.reader, call("gx.echo", r#"{"text":"recovered"}"#), vec![AssertionKind::JsonRpcResult])).await;
+    c.success(CheckKind::Recovery, &r);
+    Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+}
+
+/// MCP-010: a consumer in none of the grant's groups.
+fn mcp010(env: &Env) -> Fut<'_> {
+    Box::pin(not_granted(env, &env.keys.outsider))
+}
+
+/// MCP-011: a consumer in an allowed group and in a denied group: the denied
+/// group wins.
+fn mcp011(env: &Env) -> Fut<'_> {
+    Box::pin(not_granted(env, &env.keys.suspended))
+}
+
+/// MCP-012: a tool the OpenAPI bridge generates, called on a literal-prefix
+/// route: the gateway runs `GET /echo/bridge` against the route's own backend
+/// and answers with its JSON as the tool's structured content; no MCP server
+/// is called.
+fn mcp012(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let backend_before = env.bridge_backend.log.count_requests();
+        let mcp_before = env.upstream.state.calls().len();
+        let checks = vec![
+            AssertionKind::JsonRpcResult,
+            AssertionKind::McpIsError { is_error: false },
+            AssertionKind::JsonPath {
+                path: "$.result.structuredContent.method".into(),
+                comparison: Comparison::Equals,
+                value: "GET".into(),
+            },
+            AssertionKind::JsonPath {
+                path: "$.result.structuredContent.target".into(),
+                comparison: Comparison::Equals,
+                value: "/echo/bridge".into(),
+            },
+        ];
+        let o = send(env, &as_mcp(request(&TARGET, env.trusted, "POST", BRIDGE_ENDPOINT), call("br.echo", "{}"), checks)).await;
+        c.success(CheckKind::Diagnosis, &o);
+        assertions_pass(&mut c, &o);
+        c.absent_prefix(&o, "ferrum.outcome");
+        let hits = env.bridge_backend.log.count_requests() - backend_before;
+        c.add(CheckKind::GroundTruth, "the bridged operation reached the route's backend once", hits == 1, format!("{hits} request(s)"));
+        let mcp_calls = env.upstream.state.calls().len() - mcp_before;
+        c.add(CheckKind::GroundTruth, "no MCP server was called", mcp_calls == 0, format!("{mcp_calls} call(s)"));
+        done(o, c)
+    })
+}
+
 pub fn all() -> Vec<Def> {
     vec![
         Def { id: "CTRL-MCP-001", title: "MCP session straight to the server, answers as event streams", run: ctrl },
@@ -284,13 +407,17 @@ pub fn all() -> Vec<Def> {
         Def { id: "MCP-006", title: "Unknown tool: -32003 unknown_item", run: mcp006 },
         Def { id: "MCP-007", title: "Request without a session: 400 session_or_version_rejected", run: mcp007 },
         Def { id: "MCP-008", title: "Tool reports isError: the tool's failure, not the gateway's", run: mcp008 },
+        Def { id: "MCP-009", title: "Per-consumer grant: the grantee is listed the tool and its call is forwarded", run: mcp009 },
+        Def { id: "MCP-010", title: "Per-consumer grant: a consumer in no allowed group is refused -32001", run: mcp010 },
+        Def { id: "MCP-011", title: "Per-consumer grant: a denied group wins over an allowed one", run: mcp011 },
+        Def { id: "MCP-012", title: "OpenAPI-bridged tool call answered from the route's own backend", run: mcp012 },
     ]
 }
 
 pub fn profile() -> Profile {
     Profile {
         name: "mcp",
-        about: "MCP over Streamable HTTP through mcp_gateway (aggregate router): allow, deny, hide, schema validation (HTTP 17180)",
+        about: "MCP over Streamable HTTP through mcp_gateway (aggregate router): allow, deny, hide, schema validation, per-consumer grants, the OpenAPI bridge (HTTP 17180)",
         scenarios: || all().into_iter().map(|d| (d.id, d.title)).collect(),
         run: |args| Box::pin(run(args)) as BoxFut<_>,
         up: || Box::pin(up()) as BoxFut<_>,
@@ -300,8 +427,16 @@ pub fn profile() -> Profile {
 async fn start() -> anyhow::Result<Env> {
     let upstream = mcp::serve("127.0.0.1:17101", McpOptions::default()).await?;
     let direct_sse = mcp::serve("127.0.0.1:17102", McpOptions { sse: true, ..Default::default() }).await?;
-    let gateway = Gateway::start("mcp", "mcp.conf", "mcp.yaml", &[], ADMIN_PORT, &[]).await?;
-    Ok(Env { engine: Engine::new(), upstream, direct_sse, gateway, trusted: true })
+    let bridge_backend = anvil_fixtures::http::serve("127.0.0.1:17103", None).await?;
+    let key = |who: &str| format!("lab-mcp-{who}-{}", anvil_domain::Id::new());
+    let keys = Keys { reader: key("reader"), outsider: key("outsider"), suspended: key("suspended") };
+    let vars = [
+        ("MCP_READER_KEY", keys.reader.clone()),
+        ("MCP_OUTSIDER_KEY", keys.outsider.clone()),
+        ("MCP_SUSPENDED_KEY", keys.suspended.clone()),
+    ];
+    let gateway = Gateway::start("mcp", "mcp.conf", "mcp.yaml", &vars, ADMIN_PORT, &[]).await?;
+    Ok(Env { engine: Engine::new(), upstream, direct_sse, bridge_backend, keys, gateway, trusted: true })
 }
 
 async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {

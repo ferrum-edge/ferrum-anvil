@@ -834,14 +834,17 @@ impl AttemptTarget {
 }
 
 pub async fn execute(engine: &Engine, ctx: &ExecutionContext, events: EventCtx, cancel: CancellationToken) -> crate::ExecutionOutput {
-    execute_viewing(engine, ctx, events, cancel, None, None).await
+    execute_viewing(engine, ctx, events, cancel, None, None, None).await
 }
 
 /// [`execute`], with the checks reading what `view` picks from the response
 /// instead of its body (see [`record::BodyView`]). `keep` receives the
 /// redactor the record was redacted with, once a request was prepared (an
-/// MCP session redacts its notes with its exchanges' redactors).
+/// MCP session redacts its notes with its exchanges' redactors). `stop` ends
+/// reading a body that already holds what the request needs (see
+/// [`anvil_transport::http::BodyStop`]).
 #[allow(clippy::collapsible_if)] // the redirect branch reads clearer nested
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_viewing(
     engine: &Engine,
     ctx: &ExecutionContext,
@@ -849,6 +852,7 @@ pub(crate) async fn execute_viewing(
     cancel: CancellationToken,
     view: Option<record::BodyView<'_>>,
     keep: Option<&parking_lot::Mutex<Option<Redactor>>>,
+    stop: Option<anvil_transport::http::BodyStop>,
 ) -> crate::ExecutionOutput {
     let started_at = Timestamp::now();
     // Taken first, or when the context was built (`ExecutionContext::epoch`):
@@ -1038,6 +1042,7 @@ pub(crate) async fn execute_viewing(
             proxy_header_withheld,
             early_data: early_intent(&prep.settings.early_data, &current.method, current.target.scheme == "https", early_reason),
             fence: Some(epoch.transport()),
+            body_stop: stop.clone(),
         };
         let index = attempts.len() as u32;
         if matches!(reason, AttemptReason::ReusedConnectionClosed { .. })

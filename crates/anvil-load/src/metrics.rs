@@ -279,6 +279,11 @@ fn origin(url: &str) -> Option<String> {
 pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObservation {
     let rec = &out.record;
     let mut obs = observe_record(rec, wall_us);
+    if step.kind == LoadUnitKind::McpSession {
+        // The record is one exchange of the session; the unit is all of it.
+        obs.latency_us = wall_us;
+        obs.setup_us = 0;
+    }
     obs.proto = protocol_obs(out, step, obs.terminal);
     // A datagram exchange whose tunnel never opened sent nothing and had no
     // response window, so it is not completed (and never "no response
@@ -305,6 +310,9 @@ pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObse
             // captured, say) is not a success; it counts as an application
             // failure.
             LoadUnitKind::HttpRequest if not_determined_from_body(rec, step) => obs.application_failure = true,
+            // An operation not sent, or an answer that could not be judged,
+            // is not a success.
+            LoadUnitKind::McpSession if rec.outcome.application == ApplicationState::NotEvaluated => obs.application_failure = true,
             LoadUnitKind::UdpExchange | LoadUnitKind::DtlsExchange => match &obs.proto.dgram {
                 Some(d) if d.received == 0 => obs.no_response = true,
                 // The latency of an exchange is the observed time to first
@@ -533,7 +541,7 @@ fn protocol_obs(out: &ExecutionOutput, step: &StepUnit, terminal: Terminal) -> P
         ..Default::default()
     };
     match step.kind {
-        LoadUnitKind::HttpRequest => {}
+        LoadUnitKind::HttpRequest | LoadUnitKind::McpSession => {}
         LoadUnitKind::GrpcCall | LoadUnitKind::GrpcStream | LoadUnitKind::GrpcClientStream | LoadUnitKind::GrpcBidiStream => {
             if let ProtocolStatus::Grpc { http_status, grpc_status, source, .. } = status {
                 p.grpc_status = *grpc_status;
@@ -1109,6 +1117,8 @@ impl ProtoAccum {
                     }),
                 })
             }
+            // Its counts are the plan's own (sessions, statuses, latency).
+            LoadUnitKind::McpSession => {}
         }
         m
     }

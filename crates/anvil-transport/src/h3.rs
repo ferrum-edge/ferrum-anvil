@@ -2062,6 +2062,10 @@ impl H3Transport {
                             failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::ResponseTooLargeLocal, "stopped reading at the local max_response_bytes limit"));
                             break;
                         }
+                        if plan.body_stop.as_ref().is_some_and(|stop| stop(content_type.as_deref(), &captured)) {
+                            completeness = BodyCompleteness::StoppedAfterAnswer;
+                            break;
+                        }
                     }
                     Ok(None) => break,
                     // Trailers whose HEADERS frame is over the limit.
@@ -2095,7 +2099,8 @@ impl H3Transport {
         }
         let mut trailers = Vec::new();
         let mut trailers_received = false;
-        if failure.is_none() {
+        let stopped = completeness == BodyCompleteness::StoppedAfterAnswer;
+        if failure.is_none() && !stopped {
             // h3 hands the trailers over only once the stream ends (FIN): that
             // wait is bounded like the body's.
             let idle_deadline = idle.map(|d| Instant::now() + d);
@@ -2141,7 +2146,7 @@ impl H3Transport {
                 trailers = header_entries(&t);
             }
         }
-        if failure.as_ref().is_some_and(|f| f.kind != FailureKind::BodyReset) {
+        if stopped || failure.as_ref().is_some_and(|f| f.kind != FailureKind::BodyReset) {
             // Stop the response now: finishing the report never waits for
             // the peer (a dropped stream would be stopped with code 0).
             stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
@@ -2224,6 +2229,7 @@ mod tests {
             display_url: "https://example.test/".into(),
             early_data: EarlyDataIntent::Off,
             fence: None,
+            body_stop: None,
         };
         let (req, uri) = build_request(&plan).unwrap();
         assert_eq!(uri, "https://example.test/", "the Host is the :authority");

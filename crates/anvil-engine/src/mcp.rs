@@ -16,8 +16,9 @@
 //! A POST may be answered with JSON or with an event stream. From a stream,
 //! the checks and the diagnosis read the JSON-RPC response to the request
 //! (the event whose `id` is the request's); the stream's other messages are
-//! counted. The stream is read under the response limits of any HTTP
-//! request, and a stream the server leaves open ends at the body idle or
+//! counted. Reading stops once that response has arrived, and the stream is
+//! read under the response limits of any HTTP request: a stream that never
+//! carries the response ends when the server ends it, or at the body idle or
 //! total deadline.
 //!
 //! The record is the operation's (or, when the handshake fails, the
@@ -35,16 +36,18 @@ use crate::vars::Resolver;
 use crate::{Engine, ExecutionOutput, http_exec};
 use anvil_diagnostics::facts::MAX_PARSE;
 use anvil_domain::Timestamp;
-use anvil_domain::execution::{FailureKind, Phase, ResponseRecord, TransportFailure};
+use anvil_domain::execution::{BodyCompleteness, FailureKind, Phase, ResponseRecord, TransportFailure};
 use anvil_domain::outcome::{ApplicationState, OutcomeWarning, WarningCode};
 use anvil_domain::request::{Body, KeyValue, McpOperation, McpSpec, Protocol};
 use anvil_domain::settings::{SettingsOverrides, TimeoutOverrides};
+use anvil_transport::http::BodyStop;
 use anvil_transport::recorder::EventCtx;
 use anvil_transport::session::{REDACT_LOOKAHEAD_BYTES, redact_then_cut};
 use anvil_transport::sse::SseParser;
 use bytes::Bytes;
 use parking_lot::Mutex;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -100,6 +103,9 @@ struct Seen {
     events: Option<usize>,
     /// Why the event stream was not read to its end.
     stream_error: Option<String>,
+    /// Reading stopped once the JSON-RPC response had arrived, before the
+    /// server ended the stream.
+    stopped: bool,
     /// Bytes of what the diagnosis reads: the body, or the JSON-RPC response
     /// taken out of an event stream.
     diagnosed_bytes: usize,
@@ -113,6 +119,15 @@ fn invalid(spec: &McpSpec) -> Option<(&'static str, &'static str)> {
         McpOperation::PromptsGet { name, .. } if blank(name) => Some(("an MCP prompts/get needs the prompt's name", "mcp.operation.name")),
         McpOperation::ResourcesRead { uri } if blank(uri) => Some(("an MCP resources/read needs the resource's URI", "mcp.operation.uri")),
         McpOperation::Raw { method, .. } if blank(method) => Some(("a raw MCP message needs its JSON-RPC method", "mcp.operation.method")),
+        McpOperation::Batch { messages } if blank(messages) => {
+            Some(("an MCP batch needs its JSON array of messages", "mcp.operation.messages"))
+        }
+        // Checked when the text is literal JSON (variables may make it unreadable until it is sent).
+        McpOperation::Batch { messages }
+            if serde_json::from_str::<Value>(messages).is_ok_and(|v| v.as_array().is_none_or(Vec::is_empty)) =>
+        {
+            Some(("an MCP batch is a non-empty JSON array of JSON-RPC messages", "mcp.operation.messages"))
+        }
         _ if blank(&spec.protocol_version) => Some(("an MCP request needs the protocol version to offer", "mcp.protocol_version")),
         _ => None,
     }
@@ -140,8 +155,12 @@ pub fn initialize_body(spec: &McpSpec) -> String {
     format!(r#"{{"jsonrpc":"2.0","id":{INITIALIZE_ID},"method":"initialize","params":{params}}}"#)
 }
 
-/// The operation's JSON-RPC request (or notification).
+/// The operation's JSON-RPC request (or notification), or a batch's text as
+/// it was written.
 pub fn operation_body(op: &McpOperation) -> String {
+    if let McpOperation::Batch { messages } = op {
+        return messages.clone();
+    }
     let cursor = |c: &Option<String>| c.as_ref().map(|c| format!(r#"{{"cursor":{}}}"#, json_string(c)));
     let params = match op {
         McpOperation::ToolsList { cursor: c }
@@ -153,6 +172,7 @@ pub fn operation_body(op: &McpOperation) -> String {
         }
         McpOperation::ResourcesRead { uri } => Some(format!(r#"{{"uri":{}}}"#, json_string(uri.trim()))),
         McpOperation::Raw { params, .. } => (!params.trim().is_empty()).then(|| params.clone()),
+        McpOperation::Batch { .. } => None,
     };
     let id = if op.is_notification() { String::new() } else { format!(r#","id":{OPERATION_ID}"#) };
     let method = json_string(op.method().trim());
@@ -230,16 +250,108 @@ pub fn is_response_to(v: &Value, id: i64) -> bool {
     }
 }
 
-/// The JSON-RPC response to `id` in an event stream, the events read, and
-/// why the stream was not read to its end. Bounded: at most
-/// [`MAX_SSE_EVENTS`] events of lines up to [`MAX_SSE_LINE_BYTES`].
-fn read_event_stream(body: &[u8], id: Option<i64>) -> (Option<Value>, usize, Option<String>) {
+/// Whether `v` is a JSON-RPC response to some request: a result or an error
+/// with a number or string id, or an error with a null or no id.
+fn is_response(v: &Value) -> bool {
+    let Some(o) = v.as_object() else { return false };
+    let (result, error) = (o.contains_key("result"), o.contains_key("error"));
+    match o.get("id") {
+        Some(Value::Number(_) | Value::String(_)) => result || error,
+        Some(Value::Null) | None => error && !result,
+        _ => false,
+    }
+}
+
+/// The JSON values of an event stream's events, the events read, and why
+/// the stream was not read to its end. Bounded: at most [`MAX_SSE_EVENTS`]
+/// events of lines up to [`MAX_SSE_LINE_BYTES`].
+fn stream_values(body: &[u8]) -> (Vec<Value>, usize, Option<String>) {
     let mut parser = SseParser::new(MAX_SSE_LINE_BYTES);
     let mut events = Vec::new();
     let error = parser.feed_limited(body, &mut events, MAX_SSE_EVENTS).err();
-    let mut parsed = events.iter().filter_map(|e| serde_json::from_str::<Value>(&e.data).ok());
-    let message = id.and_then(|id| parsed.find(|v| is_response_to(v, id)));
-    (message, events.len(), error)
+    let values = events.iter().filter_map(|e| serde_json::from_str::<Value>(&e.data).ok()).collect();
+    (values, events.len(), error)
+}
+
+/// The JSON-RPC response to `id` in an event stream, the events read, and
+/// why the stream was not read to its end (see [`stream_values`]).
+fn read_event_stream(body: &[u8], id: Option<i64>) -> (Option<Value>, usize, Option<String>) {
+    let (values, events, error) = stream_values(body);
+    (id.and_then(|id| values.into_iter().find(|v| is_response_to(v, id))), events, error)
+}
+
+/// The ids of a batch's requests (its messages with a non-null `id`), when
+/// its text is literal JSON; `None` when variables make it unreadable until
+/// it is sent.
+fn batch_ids(messages: &str) -> Option<Vec<Value>> {
+    let v: Value = serde_json::from_str(messages).ok()?;
+    Some(v.as_array()?.iter().filter_map(|m| m.get("id").filter(|id| !id.is_null()).cloned()).collect())
+}
+
+/// A batch's answer out of the values a body holds (a JSON array, one
+/// response, or a stream's events, each possibly an array): its responses as
+/// one array, or a lone error without an id (the server refused the whole
+/// batch) as it is.
+fn batch_answer(values: Vec<Value>) -> Option<Value> {
+    let flat = values.into_iter().flat_map(|v| match v {
+        Value::Array(a) => a,
+        other => vec![other],
+    });
+    let responses: Vec<Value> = flat.filter(is_response).collect();
+    match responses.as_slice() {
+        [] => None,
+        [lone] if lone.get("id").is_none_or(Value::is_null) => Some(lone.clone()),
+        _ => Some(Value::Array(responses)),
+    }
+}
+
+/// What an exchange's checks read out of its answer.
+#[derive(Clone)]
+enum Wanted {
+    /// The JSON-RPC response to this request id.
+    Response(i64),
+    /// A batch's responses, with the ids of its requests when its text is
+    /// literal JSON.
+    Batch(Option<Vec<Value>>),
+}
+
+impl Wanted {
+    /// What the checks read out of the values a body holds.
+    fn pick(&self, values: Vec<Value>) -> Option<Value> {
+        match self {
+            Wanted::Response(id) => values.into_iter().find(|v| is_response_to(v, *id)),
+            Wanted::Batch(_) => batch_answer(values),
+        }
+    }
+
+    /// Whether `answer` is all the exchange waits for: the response, a
+    /// response to each request of a batch whose ids are known, or a refusal
+    /// of the whole batch.
+    fn complete(&self, answer: &Value) -> bool {
+        match (self, answer) {
+            (Wanted::Response(_), _) => true,
+            (Wanted::Batch(Some(ids)), Value::Array(responses)) => ids.iter().all(|id| responses.iter().any(|r| r.get("id") == Some(id))),
+            (Wanted::Batch(_), Value::Array(_)) => false,
+            (Wanted::Batch(_), _) => true,
+        }
+    }
+}
+
+/// Whether `body` may have just completed an event: it ends with the blank
+/// line that dispatches one (LF, CRLF or CR line endings).
+fn ends_an_event(body: &[u8]) -> bool {
+    body.ends_with(b"\n\n") || body.ends_with(b"\r\n\r\n") || body.ends_with(b"\r\r")
+}
+
+/// Stop reading a POST's event stream once what the exchange waits for is
+/// in it (see [`Wanted::complete`]): the server may keep the stream open
+/// after answering. A JSON body is read to its end.
+fn stop_at_answer(wanted: Wanted) -> BodyStop {
+    Arc::new(move |content_type: Option<&str>, body: &[u8]| {
+        is_event_stream(content_type)
+            && ends_an_event(body)
+            && wanted.pick(stream_values(body).0).is_some_and(|answer| wanted.complete(&answer))
+    })
 }
 
 /// The JSON-RPC response to `id` in a response body (JSON, or an event
@@ -258,22 +370,26 @@ pub fn operation_response(out: &ExecutionOutput) -> Option<Value> {
     response_in(ct, out.decoded_body.as_ref().unwrap_or(&out.body), OPERATION_ID)
 }
 
-/// The view an exchange's checks read: the JSON-RPC response out of an event
-/// stream (a JSON body is read as it is). Records what the response showed.
-fn viewer(seen: &Mutex<Seen>, id: Option<i64>) -> impl Fn(Option<&ResponseRecord>, &[u8]) -> Option<Bytes> + Sync + '_ {
+/// The view an exchange's checks read: the JSON-RPC response (or a batch's
+/// responses) out of an event stream (a JSON body is read as it is).
+/// Records what the response showed.
+fn viewer(seen: &Mutex<Seen>, wanted: Option<Wanted>) -> impl Fn(Option<&ResponseRecord>, &[u8]) -> Option<Bytes> + Sync + '_ {
     move |response: Option<&ResponseRecord>, body: &[u8]| {
         let r = response?;
         let mut s = seen.lock();
         s.status = Some(r.status);
         s.session_id = r.header_values(SESSION_HEADER).first().map(|v| v.to_string());
         if !is_event_stream(r.body.content_type.as_deref()) {
-            s.message = id.and_then(|id| serde_json::from_slice::<Value>(body).ok().filter(|v| is_response_to(v, id)));
+            let parsed = serde_json::from_slice::<Value>(body).ok();
+            s.message = wanted.as_ref().zip(parsed).and_then(|(w, v)| w.pick(vec![v]));
             s.diagnosed_bytes = body.len();
             return None;
         }
-        let (message, events, error) = read_event_stream(body, id);
+        let (values, events, error) = stream_values(body);
+        let message = wanted.as_ref().and_then(|w| w.pick(values));
         s.events = Some(events);
         s.stream_error = error;
+        s.stopped = r.body.completeness == BodyCompleteness::StoppedAfterAnswer;
         let view = message.as_ref().and_then(|m| serde_json::to_vec(m).ok()).map(Bytes::from);
         s.message = message;
         s.diagnosed_bytes = view.as_ref().map_or(body.len(), Bytes::len);
@@ -392,16 +508,70 @@ fn handshake(seen: &Seen, out: &ExecutionOutput, spec: &McpSpec, r: &Redactor) -
 }
 
 /// How the operation's response arrived, when it was an event stream.
-fn stream_notes(seen: &Seen, method: &str, notes: &mut Vec<String>) {
+fn stream_notes(seen: &Seen, method: &str, batch: bool, notes: &mut Vec<String>) {
     let Some(n) = seen.events else { return };
-    let read = if seen.message.is_some() {
-        "the JSON-RPC response was read from it".to_string()
-    } else {
-        format!("none of them was the JSON-RPC response to request {OPERATION_ID}")
+    let read = match (seen.message.is_some(), batch) {
+        (true, false) => "the JSON-RPC response was read from it".to_string(),
+        (true, true) => "the batch's JSON-RPC responses were read from it".to_string(),
+        (false, false) => format!("none of them was the JSON-RPC response to request {OPERATION_ID}"),
+        (false, true) => "none of them was a JSON-RPC response to the batch".to_string(),
     };
     notes.push(format!("MCP {method}: the response arrived as an event stream of {n} event(s); {read}"));
+    if seen.stopped {
+        notes.push(format!(
+            "MCP {method}: Anvil stopped reading the event stream once the JSON-RPC response had arrived (the server had not ended it)"
+        ));
+    }
     if let Some(e) = &seen.stream_error {
         notes.push(format!("MCP {method}: the event stream was not read to its end: {e}"));
+    }
+}
+
+/// A JSON-RPC id as a note shows it: a number, or a string quoted (redacted
+/// and cut like any server text).
+fn id_label(id: Option<&Value>, r: &Redactor) -> String {
+    match id {
+        Some(Value::Number(n)) => n.to_string(),
+        Some(v @ Value::String(_)) => format!("\"{}\"", quoted(Some(v), r)),
+        _ => "null".to_string(),
+    }
+}
+
+/// Most batch responses a note lists one by one.
+const MAX_BATCH_NOTED: usize = 10;
+
+/// What a batch's answer held: each response (at most [`MAX_BATCH_NOTED`]
+/// listed), the requests left without one, or the refusal of the whole batch.
+fn batch_notes(answer: Option<&Value>, ids: Option<&[Value]>, r: &Redactor, notes: &mut Vec<String>) {
+    let what = |v: &Value| match v.get("error") {
+        Some(e) => format!("id {}: error {}", id_label(v.get("id"), r), error_label(e, r)),
+        None => format!("id {}: result", id_label(v.get("id"), r)),
+    };
+    match answer {
+        None => {}
+        Some(Value::Array(responses)) => {
+            let mut listed: Vec<String> = responses.iter().take(MAX_BATCH_NOTED).map(what).collect();
+            if responses.len() > MAX_BATCH_NOTED {
+                listed.push(format!("and {} more", responses.len() - MAX_BATCH_NOTED));
+            }
+            let sent = ids.map(|ids| format!(" to {} request(s)", ids.len())).unwrap_or_default();
+            notes.push(format!("MCP JSON-RPC batch: {} response(s){sent}: {}", responses.len(), listed.join("; ")));
+            if let Some(ids) = ids {
+                let missing: Vec<String> = ids
+                    .iter()
+                    .filter(|id| !responses.iter().any(|x| x.get("id") == Some(*id)))
+                    .take(MAX_BATCH_NOTED)
+                    .map(|id| id_label(Some(id), r))
+                    .collect();
+                if !missing.is_empty() {
+                    notes.push(format!("MCP JSON-RPC batch: no response to request id {}", missing.join(", ")));
+                }
+            }
+        }
+        Some(lone) => {
+            let e = lone.get("error").map(|e| error_label(e, r)).unwrap_or_default();
+            notes.push(format!("MCP JSON-RPC batch: the server refused the whole batch with JSON-RPC error {e}"));
+        }
     }
 }
 
@@ -440,7 +610,13 @@ impl Run<'_> {
         self.deadline.is_some_and(|d| Instant::now() >= d)
     }
 
-    async fn exchange(&mut self, mut c: ExecutionContext, events: EventCtx, view: Option<BodyView<'_>>) -> ExecutionOutput {
+    async fn exchange(
+        &mut self,
+        mut c: ExecutionContext,
+        events: EventCtx,
+        view: Option<BodyView<'_>>,
+        stop: Option<BodyStop>,
+    ) -> ExecutionOutput {
         if let Some(d) = self.deadline {
             // Rounded up: the exchange's own deadline is never before the session's.
             let left = d.saturating_duration_since(Instant::now()).as_millis() + 1;
@@ -454,7 +630,7 @@ impl Run<'_> {
             // HTTP execution's future is large, and the session's future would
             // otherwise hold one for each of its exchanges. Dropped at the end
             // of this block, before `keep` is read.
-            let mut exec = Box::pin(http_exec::execute_viewing(self.engine, &c, events, child.clone(), view, Some(&keep)));
+            let mut exec = Box::pin(http_exec::execute_viewing(self.engine, &c, events, child.clone(), view, Some(&keep), stop));
             match self.deadline {
                 None => exec.await,
                 Some(d) => {
@@ -507,7 +683,7 @@ impl Run<'_> {
             after.push("MCP session not closed: the session deadline was reached".into());
         } else {
             let close = exchange(ctx, "DELETE", None, Some(sid), Some(version), Checks::None);
-            let closed = self.exchange(close, events.clone(), None).await;
+            let closed = self.exchange(close, events.clone(), None, None).await;
             after.push(close_note(&closed));
         }
     }
@@ -634,9 +810,9 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
             },
         ));
         let out = {
-            let view = viewer(&seen, Some(INITIALIZE_ID));
+            let view = viewer(&seen, Some(Wanted::Response(INITIALIZE_ID)));
             let view: BodyView<'_> = &view;
-            run.exchange(init, quiet.clone(), Some(view)).await
+            run.exchange(init, quiet.clone(), Some(view), Some(stop_at_answer(Wanted::Response(INITIALIZE_ID)))).await
         };
         let seen = seen.into_inner();
         match handshake(&seen, &out, spec, &run.redactor) {
@@ -662,7 +838,7 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
             }
         }
         let notify = exchange(ctx, "POST", Some(INITIALIZED.into()), session.as_deref(), Some(&version), Checks::None);
-        let out = run.exchange(notify, quiet.clone(), None).await;
+        let out = run.exchange(notify, quiet.clone(), None, None).await;
         notes.before.push(exchange_note("notifications/initialized", &out));
         let stop = if cancel.is_cancelled() {
             Some("the execution was canceled".to_string())
@@ -687,16 +863,29 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
             notes.warnings.push(format!("notifications/initialized was not accepted ({got}); the {method} request was still sent"));
         }
     }
-    let id = (!spec.operation.is_notification()).then_some(OPERATION_ID);
+    // A batch of notifications only gets no JSON-RPC response.
+    let batch = match &spec.operation {
+        McpOperation::Batch { messages } => Some(batch_ids(messages)),
+        _ => None,
+    };
+    let wanted = match &batch {
+        Some(Some(ids)) if ids.is_empty() => None,
+        Some(ids) => Some(Wanted::Batch(ids.clone())),
+        None if spec.operation.is_notification() => None,
+        None => Some(Wanted::Response(OPERATION_ID)),
+    };
     let seen = Mutex::new(Seen::default());
     let op = exchange(ctx, "POST", Some(operation_body(&spec.operation)), session.as_deref(), Some(&version), Checks::All);
     let out = {
-        let view = viewer(&seen, id);
+        let view = viewer(&seen, wanted.clone());
         let view: BodyView<'_> = &view;
-        run.exchange(op, events, Some(view)).await
+        run.exchange(op, events, Some(view), wanted.clone().map(stop_at_answer)).await
     };
     let seen = seen.into_inner();
-    stream_notes(&seen, &method, &mut notes.after);
+    stream_notes(&seen, &method, batch.is_some(), &mut notes.after);
+    if let Some(ids) = &batch {
+        batch_notes(seen.message.as_ref(), ids.as_deref(), &run.redactor, &mut notes.after);
+    }
     if session.is_some() && out.record.response.as_ref().is_some_and(|r| r.status == 404) {
         let why = "the server no longer knows the session (it expired or was ended); a new initialize opens another";
         notes.after.push(format!("MCP {method}: HTTP 404 in the session: {why}"));
@@ -707,7 +896,7 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
     if let Some(sid) = session.as_deref() {
         run.close(ctx, spec, sid, &version, &quiet, &mut notes.after).await;
     }
-    finish(out, notes, &run, session.as_deref(), &seen, id.is_some())
+    finish(out, notes, &run, session.as_deref(), &seen, wanted.is_some())
 }
 
 /// The operation's POST as a send would make it once the session is open:
