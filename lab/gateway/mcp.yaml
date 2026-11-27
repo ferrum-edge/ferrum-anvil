@@ -18,7 +18,7 @@
 # runs a second mcp_gateway instance (namespace "gx", the same upstream) whose gx.echo is allowed
 # only to consumers in group mcp-readers, never to one in mcp-suspended (denied_groups win).
 # Consumers: mcp-reader (mcp-readers), mcp-outsider (lab-other), mcp-suspended (both groups). The
-# keys are generated per lab start ({{MCP_*_KEY}}).
+# keys are generated per lab start (the MCP_*_KEY template variables).
 #
 # A successful OpenAPI-bridged call (MCP-012): /echo is a literal-prefix route to the HTTP echo
 # fixture; its mcp_gateway instance (endpoint /echo/mcp) generates tool br.echo from one operation,
