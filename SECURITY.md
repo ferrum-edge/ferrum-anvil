@@ -62,14 +62,15 @@ published.
   built bundles in `updater-e2e.yml`. Published releases so far use updater
   key id `BFE08514FEC0E65A`. `.deb` and `.rpm` installs update from the
   release page.
-- **Platform code signing.** The installers are not code-signed yet, so macOS
-  Gatekeeper and Windows SmartScreen warn. The release workflow supports
-  Apple Developer ID signing with notarization and Windows Azure Artifact
-  Signing, and records a platform as signed only after verifying the
-  signature on the build runner; the owner's certificates are not configured
-  yet ([#2](https://github.com/ferrum-edge/ferrum-anvil/issues/2)). Each
-  release's notes and `release-evidence.json` state per platform whether its
-  installers are signed. Linux packages have no platform code signing.
+- **Platform code signing.** The release workflow supports Apple Developer
+  ID signing with notarization and Windows Azure Artifact Signing, and
+  records a platform as signed only after verifying the signature on the
+  build runner. The 0.1.x releases' installers are not code-signed, so macOS
+  Gatekeeper and Windows SmartScreen warn for them
+  ([#2](https://github.com/ferrum-edge/ferrum-anvil/issues/2)). Whether a
+  given release's installers are signed is stated, per platform, in that
+  release's notes and `release-evidence.json`. Linux packages have no
+  platform code signing.
 
 Details: [docs/release.md](docs/release.md) and
 [docs/threat-model.md](docs/threat-model.md).
