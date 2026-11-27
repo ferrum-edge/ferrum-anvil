@@ -282,7 +282,7 @@ and v0.9.20 was retired when v0.9.21 was adopted.
 
 | Compatibility id | Release | Outcomes | Audit |
 |---|---|---|---|
-| `ferrum-edge-0.9.21` (default) | v0.9.21, `f991535` | **626** (620 − 1 removed + 7 new) | [audit/gateway-0.9.21-delta.md](audit/gateway-0.9.21-delta.md) (source delta; [qualification status](audit/gateway-0.9.21-delta.md#qualification-status)) |
+| `ferrum-edge-0.9.21` (default) | v0.9.21, `f991535` | **629** (620 − 1 removed + 10 new) | [audit/gateway-0.9.21-delta.md](audit/gateway-0.9.21-delta.md) (source delta; [qualification status](audit/gateway-0.9.21-delta.md#qualification-status)) |
 | `ferrum-edge-0.9.20` (hosted qualification recorded) | v0.9.20, `e4a606a` | **620** (556 − 2 removed + 66 new) | [audit/gateway-0.9.20-delta.md](audit/gateway-0.9.20-delta.md) (source delta covering v0.9.17–v0.9.20; [hosted qualification](audit/gateway-0.9.20-delta.md#qualification-status) recorded) |
 | `ferrum-edge-0.9.15` | v0.9.15, `25b3739` | **556** (553 − 1 removed + 4 new) | [audit/gateway-0.9.15-delta.md](audit/gateway-0.9.15-delta.md) (source delta; [hosted qualification](audit/gateway-0.9.15-delta.md#qualification-status) recorded) |
 | `ferrum-edge-0.9.14` | v0.9.14, `9bd4d5f` | **553 carried IDs** | [audit/gateway-0.9.14-delta.md](audit/gateway-0.9.14-delta.md) (source delta covering v0.9.12–v0.9.14; hosted qualification recorded) |
@@ -522,7 +522,12 @@ admin listener and the token Anvil sends to it:
 
 For the final response of a request to a destination matching the profile,
 Anvil looks up a well-formed reference as soon as the response arrives,
-through the engine transport and the request's DNS settings. A lookup is
+through the engine transport and the request's DNS settings. That covers HTTP
+requests and the HTTP head of an automation (non-interactive) session: a gRPC
+or gRPC-Web call (Ferrum Edge v0.9.21 references gRPC-Web rejections, which
+resolve with status 200) and a refused WebSocket handshake. An interactive
+session (client-streaming or bidirectional gRPC, an opened WebSocket) looks
+nothing up. A lookup is
 bounded on its own: connect within 2 s and everything within 5 s (or the
 request's shorter timeouts), including one retry 250 ms later when the
 record has no detail yet. The header alone is never evidence: a backend, a plugin or a server
@@ -617,9 +622,15 @@ only presentation; every card shows its own confidence.
   key locations 401, the pooled connection ceiling's 503 and the connect timeout's 504, both
   `connection_failure`) match the 0.9.20 catalog but not 0.9.15, and the refusals new in 0.9.21
   (the token plugins' ambiguous query alias 401, the transformers' duplicate-member 400/502,
-  untranslated gRPC-Web 415 on assertion routes, the repeated `Content-Type` 400 and the MCP
-  OpenAPI bridge's out-of-route -32603) match the 0.9.21 catalog but not 0.9.20, while
-  `hmac_auth`'s removed v1 nonce refusal matches only 0.9.20.
+  the relabelled gRPC-Web 415 on assertion routes, the repeated `Content-Type` 400,
+  `ai_prompt_shield`'s duplicate-member 400 and the MCP OpenAPI bridge's out-of-route -32603)
+  match the 0.9.21 catalog but not 0.9.20, while `hmac_auth`'s removed v1 nonce refusal matches
+  only 0.9.20. The gateway's gRPC renderings (HTTP 200, a grpc-status and its grpc-message: the
+  untranslated gRPC-Web refusal on assertion routes, route protocol admission and an open circuit
+  breaker) match the 0.9.21 catalog exactly by grpc-status and grpc-message; another message
+  with the same grpc-status is only a candidate. A tokenless WebSocket handshake refusal on 0.9.21,
+  which relays the backend's own refusal, keeps the relayed-backend alternative at unknown
+  confidence unless a bound reference names the gateway's rejection.
   Release notes follow the profile's release, and an unknown release gets no catalog.
 - Engine scenario tests over real sockets (`crates/anvil-engine/tests`).
 - The real-gateway lab ([lab/](lab/)), run against every supported release

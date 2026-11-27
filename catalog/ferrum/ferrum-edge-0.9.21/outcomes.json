@@ -3944,7 +3944,7 @@
         "GW-001",
         "TRUST-008"
       ],
-      "notes": "Runs through after_proxy reject hooks (headers may be decorated) then the token is restored authoritatively. rejection_phase=circuit_breaker_open in logs. v0.9.21 (#7155): gRPC-Web clients on HTTP/1.1 and HTTP/2 get a framed HTTP 200 trailer-frame grpc-status 14 (keeping X-Gateway-Error: circuit_breaker_open) instead of the native-gRPC header-only status. v0.9.21 (#7158): HTTP/3 logs rejection_phase circuit_breaker_open too; the H3-only circuit_breaker spelling is gone."
+      "notes": "Runs through after_proxy reject hooks (headers may be decorated) then the token is restored authoritatively. rejection_phase=circuit_breaker_open in logs. v0.9.21 (#7155): gRPC-Web clients on HTTP/1.1 and HTTP/2 get a framed HTTP 200 trailer-frame grpc-status 14 (keeping X-Gateway-Error: circuit_breaker_open) instead of the native-gRPC header-only status. v0.9.21 (#7158): HTTP/3 logs rejection_phase circuit_breaker_open too; the H3-only circuit_breaker spelling is gone. Its HTTP 200 gRPC rendering (native Trailers-Only and the gRPC-Web trailer frame) is gateway.admission.circuit_open.grpc."
     },
     {
       "id": "gateway.admission.per_ip_concurrency",
@@ -7642,7 +7642,7 @@
       "remediation": "Retry later; operator: WebSocket limits.",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "Global and per-IP limits send identical bytes; no X-Gateway-Error. v0.9.15 (#6079): the per-IP budget groups native IPv6 clients by FERRUM_PER_IP_IPV6_PREFIX (default /64; 128 restores per-address), so IPv6 clients that share a prefix share one budget; IPv4 and IPv4-mapped IPv6 stay per-address."
+      "notes": "Global and per-IP limits send identical bytes; no X-Gateway-Error. v0.9.15 (#6079): the per-IP budget groups native IPv6 clients by FERRUM_PER_IP_IPV6_PREFIX (default /64; 128 restores per-address), so IPv6 clients that share a prefix share one budget; IPv4 and IPv4-mapped IPv6 stay per-address. v0.9.21 (#7414): a backend's own 3xx-5xx answer to the upgrade is relayed unchanged without X-Gateway-Error, so the same tokenless status and body can be the backend's; Anvil keeps that alternative open unless a bound diagnostic reference shows the gateway's rejection."
     },
     {
       "id": "protocol.ws.origin_not_allowed",
@@ -7910,7 +7910,7 @@
       "fixture_ids": [
         "UP-018"
       ],
-      "notes": "Same body as the reqwest HTTP lane but without X-Gateway-Error."
+      "notes": "Same body as the reqwest HTTP lane but without X-Gateway-Error. v0.9.21 (#7414): a backend's own 3xx-5xx answer to the upgrade is relayed unchanged without X-Gateway-Error, so the same tokenless status and body can be the backend's; Anvil keeps that alternative open unless a bound diagnostic reference shows the gateway's rejection."
     },
     {
       "id": "protocol.ws.upgrade_internal_error",
@@ -19796,6 +19796,18 @@
           "line": 2932,
           "symbol": "schema_violation_message (Response)",
           "sha": "f991535"
+        },
+        {
+          "path": "src/plugins/body_validator.rs",
+          "line": 1006,
+          "symbol": "response JSON parse failure -> RESPONSE_INVALID_JSON_DETAIL",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/plugins/body_validator.rs",
+          "line": 1019,
+          "symbol": "response required-field miss -> RESPONSE_MISSING_REQUIRED_FIELD_DETAIL",
+          "sha": "f991535"
         }
       ],
       "condition": "Backend (or synthetic, including an empty response_mock success) response whose status is in response_status_codes (default 2XX; never 206/226) and whose media type matches response_content_types (default application/json, application/*+json, application/xml, application/*+xml, text/xml) fails response_json_schema / response_required_fields / response XML checks, is non-UTF-8, or is empty for a body-bearing status; or a gRPC / gRPC-Web response fails response descriptor checks. enforcement_mode=block only.",
@@ -19806,7 +19818,7 @@
         "other_headers": {
           "Content-Type": "application/json"
         },
-        "body_shape": "{\"error\":\"Response body validation failed\",\"details\":\"{detail}\"}",
+        "body_shape": "{\"error\":\"Response body validation failed\",\"details\":\"<detail>\"} | {\"details\":\"<detail>\",\"error\":\"Response body validation failed\"}",
         "grpc_status": 14,
         "ws_close_code": null,
         "transport": "complete HTTP response"
@@ -19820,7 +19832,7 @@
       "fixture_ids": [
         "GW-015"
       ],
-      "notes": "Backend response replaced. Exempt: 1xx/204/205/304/HEAD with empty body; empty gRPC error reply with single valid non-zero grpc-status. INFERRED (merge auditor): on the H1/H2 backend path the final builder (src/proxy/mod.rs:48224) writes X-Gateway-Error from x_gateway_error_for_response(ctx, connection_error, final_status) = backend_error for any final status >= 500; gRPC renderings (HTTP 200) carry none; if the operator configures a < 500 status, none. Public reason detail: Coarser: schema failures -> \"Response body does not satisfy the configured JSON Schema (keyword '{keyword}')\" (no location); non-UTF-8 -> \"Response body is not valid UTF-8\"; but the shared JSON/XML helpers still emit \"Invalid JSON: {serde error with line/column of backend body}\", dup-key reasons, \"Missing required field: {configured name}\", XML categories. Distinguishability: 502 JSON with error/details; distinguishable from gateway proxy 502s by body shape. gRPC: HTTP 200 grpc-status 14 grpc-message \"Response body validation failed\" (response-phase gRPC normalization inferred). gRPC status derived from src/proxy/grpc_proxy.rs:3040 mapping. v0.9.19 (#6845): BREAKING scope change. Response validation now applies only to response_status_codes (default [\"2XX\"], src/plugins/body_validator.rs:468, :152), so a backend 404/422/500 error document keeps its own status and body instead of becoming this 502; 206/226 fragments are never validated (:1472). Default response_content_types add application/*+json and application/*+xml (:3290, :3292), so application/problem+json success bodies are now validated. gRPC-Web responses are validated too. An empty synthetic success is validated. log_only mode never rejects. Do not attribute a non-2XX backend error to body_validator on default config."
+      "notes": "Backend response replaced. Exempt: 1xx/204/205/304/HEAD with empty body; empty gRPC error reply with single valid non-zero grpc-status. INFERRED (merge auditor): on the H1/H2 backend path the final builder (src/proxy/mod.rs:48224) writes X-Gateway-Error from x_gateway_error_for_response(ctx, connection_error, final_status) = backend_error for any final status >= 500; gRPC renderings (HTTP 200) carry none; if the operator configures a < 500 status, none. Public reason detail (v0.9.21, GHSA-84xq-rr63-39pw): the response side never describes the upstream body's shape: an unparseable body is the fixed \"Response body is not valid JSON\" (src/plugins/body_validator.rs:1858), a missing required field the fixed \"Response body is missing a required field\" (:1863; protobuf: \"Response message is missing a required protobuf field\", :1868), non-UTF-8 \"Response body is not valid UTF-8\", schema failures \"Response body does not satisfy the configured JSON Schema (keyword '<keyword>')\", plus duplicate-member and XML categories; no line/column and no field name. The two key orders in body_shape cover either JSON serialization. Distinguishability: 502 JSON with error/details; distinguishable from gateway proxy 502s by body shape. gRPC: HTTP 200 grpc-status 14 grpc-message \"Response body validation failed\" (response-phase gRPC normalization inferred). gRPC status derived from src/proxy/grpc_proxy.rs:3040 mapping. v0.9.19 (#6845): BREAKING scope change. Response validation now applies only to response_status_codes (default [\"2XX\"], src/plugins/body_validator.rs:468, :152), so a backend 404/422/500 error document keeps its own status and body instead of becoming this 502; 206/226 fragments are never validated (:1472). Default response_content_types add application/*+json and application/*+xml (:3290, :3292), so application/problem+json success bodies are now validated. gRPC-Web responses are validated too. An empty synthetic success is validated. log_only mode never rejects. Do not attribute a non-2XX backend error to body_validator on default config."
     },
     {
       "id": "plugin.body_validator.response_event_stream",
@@ -29207,9 +29219,15 @@
           "line": 2190,
           "symbol": "handle_uninspectable_deferred_body",
           "sha": "f991535"
+        },
+        {
+          "path": "src/plugins/ai_prompt_shield.rs",
+          "line": 1605,
+          "symbol": "handle_ambiguous_body (duplicate member names, 400)",
+          "sha": "f991535"
         }
       ],
-      "condition": "Compressed body was not decoded, or the deferred body is non-UTF-8/malformed, with action reject/redact.",
+      "condition": "With action reject/redact: a compressed body was not decoded, or the deferred body is non-UTF-8/malformed (encoded-prompt message); or, in every scan mode, a governed JSON body repeats an object member name (the JSON message; the MCP message under scan_fields: mcp_arguments).",
       "error_class": null,
       "public_signal": {
         "http_status": 400,
@@ -29217,14 +29235,14 @@
         "other_headers": {
           "Content-Type": "application/json (proxy default)"
         },
-        "body_shape": "{\"error\":\"Request body could not be inspected\",\"message\":\"Request blocked because the encoded prompt body could not be inspected safely.\"}",
+        "body_shape": "{\"error\":\"Request body could not be inspected\",\"message\":\"Request blocked because the encoded prompt body could not be inspected safely.\"} | {\"error\":\"Request body could not be inspected\",\"message\":\"Request blocked because the JSON request body has duplicate member names.\"} | {\"error\":\"Request body could not be inspected\",\"message\":\"Request blocked because the MCP request body has duplicate member names.\"}",
         "grpc_status": null,
         "ws_close_code": null,
         "transport": "Pre-dispatch (final-body hook)."
       },
       "evidence_visibility": "public",
       "shared_signal_with": [],
-      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, its ai_prompt_shield plugin produced this outcome; the condition is: Compressed body was not decoded, or the deferred body is non-UTF-8/malformed, with action reject/redact.",
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, its ai_prompt_shield plugin refused the request because it could not inspect the body safely: the message says whether the body could not be decoded or repeats a JSON member name.",
       "must_not_claim": "That the backend application produced this response (unless the destination is not a trusted Ferrum endpoint, in which case the body alone proves nothing).",
       "remediation": "Caller: adjust the prompt/model/tool usage or token budget per the policy; operator can confirm the matched policy in gateway logs.",
       "owner": "caller",
@@ -33784,7 +33802,7 @@
       "remediation": "Gateway operator: serve this gRPC or WebSocket traffic from a separate route without the HTTP-only plugin, or authenticate it with a plugin that supports the flavor; a custom enforcement plugin must declare the flavors it supports or opt in through gates_request_admission(). Caller: use plain HTTP or gRPC-Web on this route if the API allows it.",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "New in v0.9.15; earlier releases served these requests without the plugin. Transaction log rejection_phase route_protocol_admission (operator-only; a diagnostic reference records it as rejection.phase, never as detail.rejection_phase). No X-Gateway-Error: token_for_rejection_phase maps the phase to none. The capability is computed when the plugin cache is built. In mesh mode a live HBONE tunnel admitted on such a view is revoked (authorization_denied) when a reload adds the plugin (src/proxy/hbone_admission_fence.rs:2146). Body family: plain_error_json. Distinguishability: unique body; the reject-path response-header plugins still decorate it. v0.9.17 (#6125): view_omits_route_admission_policy now ORs view_omits_route_grpc_admission_policy (src/plugin_cache.rs:6593) and the gRPC-Web view sets OMITS_ROUTE_ADMISSION_POLICY through grpc_web_view_omits_grpc_admission_policy; the earlier note 'gRPC-Web keeps every HTTP plugin and is never refused this way' no longer holds. The same release refuses a bare Sidecar CONNECT to an HTTP application port (mesh slice). v0.9.19 (#6709): HEAD gets no body on HTTP/2 and HTTP/3. v0.9.21 (#7155): gRPC-Web on HTTP/1.1 and HTTP/2 gets a framed HTTP 200 trailer-frame grpc-status 7 instead of the native-gRPC header-only status; with FERRUM_DIAGNOSTIC_REFS=all its reference resolves with status 200 (#7407)."
+      "notes": "New in v0.9.15; earlier releases served these requests without the plugin. Transaction log rejection_phase route_protocol_admission (operator-only; a diagnostic reference records it as rejection.phase, never as detail.rejection_phase). No X-Gateway-Error: token_for_rejection_phase maps the phase to none. The capability is computed when the plugin cache is built. In mesh mode a live HBONE tunnel admitted on such a view is revoked (authorization_denied) when a reload adds the plugin (src/proxy/hbone_admission_fence.rs:2146). Body family: plain_error_json. Distinguishability: unique body; the reject-path response-header plugins still decorate it. v0.9.17 (#6125): view_omits_route_admission_policy now ORs view_omits_route_grpc_admission_policy (src/plugin_cache.rs:6593) and the gRPC-Web view sets OMITS_ROUTE_ADMISSION_POLICY through grpc_web_view_omits_grpc_admission_policy; the earlier note 'gRPC-Web keeps every HTTP plugin and is never refused this way' no longer holds. The same release refuses a bare Sidecar CONNECT to an HTTP application port (mesh slice). v0.9.19 (#6709): HEAD gets no body on HTTP/2 and HTTP/3. v0.9.21 (#7155): gRPC-Web on HTTP/1.1 and HTTP/2 gets a framed HTTP 200 trailer-frame grpc-status 7 instead of the native-gRPC header-only status; with FERRUM_DIAGNOSTIC_REFS=all its reference resolves with status 200 (#7407). Its HTTP 200 gRPC rendering (native Trailers-Only and the gRPC-Web trailer frame) is gateway.routing.protocol_not_permitted.grpc."
     },
     {
       "id": "gateway.routing.websocket_upgrade_requires_get",
@@ -34441,11 +34459,12 @@
       "notes": "New in v0.9.21 (#7469, GHSA-pq95-952r-2x32). The ambiguous bytes are never forwarded. backend_error follows the backend-response builder's >=500 mapping as for the other response-side replacements (plugin.body_validator.response_validation_failed); not lab-observed. A BOM-prefixed backend response under a body policy is still refused by the shared response representation gate. Unique body. Never sent by v0.9.20."
     },
     {
-      "id": "gateway.routing.grpc_web_untranslated_on_assertion_route",
+      "id": "gateway.routing.grpc_web_relabelled_on_assertion_route",
       "family": "gateway_admission",
       "protocols": [
         "http1",
-        "http2"
+        "http2",
+        "http3"
       ],
       "source": [
         {
@@ -34456,18 +34475,24 @@
         },
         {
           "path": "src/proxy/mod.rs",
-          "line": 34886,
-          "symbol": "refuse_untranslated_grpc_web_on_assertion_route",
+          "line": 34903,
+          "symbol": "refuse_relabelled_grpc_web_on_assertion_route",
           "sha": "f991535"
         },
         {
           "path": "src/proxy/mod.rs",
-          "line": 34682,
-          "symbol": "refusal before any before_proxy hook",
+          "line": 34757,
+          "symbol": "end of a before_proxy pass",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 34944,
+          "symbol": "untranslated_grpc_web_refusal (415)",
           "sha": "f991535"
         }
       ],
-      "condition": "A recognized gRPC-Web request that no grpc_web translator claimed, on a route where a plugin owns gateway-asserted request headers (jwks_auth / oauth2_introspection / oidc_relying_party claim_headers or output_claim_headers, opa decision_request_headers, spiffe_identity forward_identity). Refused before any before_proxy hook runs.",
+      "condition": "A request that is not gRPC-Web on the client side, on a route where a plugin owns gateway-asserted request headers (jwks_auth / oauth2_introspection / oidc_relying_party claim_headers or output_claim_headers, opa decision_request_headers, spiffe_identity forward_identity), whose outbound content-type (any spelling a backend folds onto it) a before_proxy hook rewrote to a gRPC-Web media type without the grpc_web translator translating the request. Refused at the end of the before_proxy pass. A gRPC-Web client on such a route gets gateway.routing.grpc_web_untranslated_on_assertion_route instead.",
       "error_class": null,
       "public_signal": {
         "http_status": 415,
@@ -34482,12 +34507,12 @@
       },
       "evidence_visibility": "public",
       "shared_signal_with": [],
-      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, the route refused an untranslated gRPC-Web request because the route asserts identity headers to its backend and only the grpc_web translator can keep a client from restating them; nothing was sent upstream.",
-      "must_not_claim": "That the credentials are invalid, that the method does not exist, or that the backend refused the request.",
-      "remediation": "Gateway operator: add the grpc_web plugin to this route to serve gRPC-Web clients; caller: use native gRPC or plain HTTP if the API allows it.",
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, the route refused the request because a plugin relabelled it as gRPC-Web on a route that asserts identity headers to its backend, and only the grpc_web translator can keep a client from restating them; nothing was sent upstream.",
+      "must_not_claim": "That the client sent gRPC-Web, that the credentials are invalid, or that the backend refused the request.",
+      "remediation": "Gateway operator: remove the transform that sets a gRPC-Web content-type on this route, or add the grpc_web plugin; the configuration is refused at publication in most such cases (upgrade guide, #7064).",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "New in v0.9.21 (#7064). Cited for the HTTP/1.1 and HTTP/2 path; the native HTTP/3 path was not separately checked. Whether a gRPC-Web client sees this JSON 415 or the generic gRPC-Web reject rendering (generic.reject.grpc_web_rendering) was not settled; the upgrade guide states 415. Unique body. Never sent by v0.9.20."
+      "notes": "New in v0.9.21 (#7064). The plain HTTP answer of untranslated_grpc_web_refusal (src/proxy/mod.rs:34944): the client is not gRPC-Web, so there is no retained gRPC-Web response type and no framing. Native HTTP/3 reaches the same before_proxy runner (src/http3/server.rs:5785). Unique body. Never sent by v0.9.20."
     },
     {
       "id": "plugin.mcp_gateway.openapi_bridge_outside_route",
@@ -34532,6 +34557,194 @@
       "owner": "gateway_operator",
       "fixture_ids": [],
       "notes": "v0.9.21 (#7410, GHSA-26x8-8jq5-f73p) confines every bridged call to the listen prefix; v0.9.20 already answered this message for a stripping prefix route but the catalog did not list it. Other -32603 messages: plugin.mcp_gateway.invalid_upstream_response. Body family: jsonrpc_error"
+    },
+    {
+      "id": "gateway.routing.grpc_web_untranslated_on_assertion_route",
+      "family": "gateway_admission",
+      "protocols": [
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 34886,
+          "symbol": "refuse_untranslated_grpc_web_on_assertion_route",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 34682,
+          "symbol": "refusal before any before_proxy hook",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 39440,
+          "symbol": "before_proxy reject rendered by boxed_build_grpc_web_reject_response",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 33154,
+          "symbol": "build_grpc_web_reject_response (HTTP 200 trailer frame)",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/grpc_proxy.rs",
+          "line": 3059,
+          "symbol": "http_reject_status_to_grpc_status: 415 -> INTERNAL",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 29716,
+          "symbol": "extract_grpc_reject_message (JSON error -> grpc-message)",
+          "sha": "f991535"
+        }
+      ],
+      "condition": "A gRPC-Web request that no grpc_web translator claimed, on a route where a plugin owns gateway-asserted request headers (jwks_auth / oauth2_introspection / oidc_relying_party claim_headers or output_claim_headers, opa decision_request_headers, spiffe_identity forward_identity). Refused before any before_proxy hook runs.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 200,
+        "x_gateway_error": null,
+        "other_headers": {
+          "content-type": "application/grpc-web+proto | application/grpc-web-text (the negotiated gRPC-Web type)",
+          "x-grpc-web": "1"
+        },
+        "body_shape": "gRPC-Web trailer frame carrying grpc-status 13 and grpc-message (base64 in -text mode)",
+        "grpc_status": 13,
+        "grpc_message": "gRPC-Web must be translated on a route with gateway-asserted headers",
+        "ws_close_code": null,
+        "transport": "HTTP 200 gRPC-Web response whose body is one trailer frame"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, the route refused this untranslated gRPC-Web call because the route asserts identity headers to its backend and only the grpc_web translator can keep a client from restating them in the body trailer frame; nothing was sent upstream.",
+      "must_not_claim": "That the service or method failed (grpc-status 13 here is the gateway's mapping of its 415), that the credentials are invalid, or that the backend refused the call.",
+      "remediation": "Gateway operator: add the grpc_web plugin to this route to serve gRPC-Web clients; caller: use native gRPC if the API offers it.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "New in v0.9.21 (#7064). A gRPC-Web client always has a retained gRPC-Web response type (the frontend records it before any hook, src/proxy/mod.rs:36851), so the 415 refusal is rendered in its framing: HTTP 200, grpc-status 13 (the 415 maps to INTERNAL, src/proxy/grpc_proxy.rs:3059) and grpc-message from the JSON error. Matched exactly by grpc-status and grpc-message; without the message it is one of the gRPC status-only candidates. The upgrade guide's 415 is the HTTP status the plugin result and the transaction log carry. The relabelled-request JSON 415 is gateway.routing.grpc_web_relabelled_on_assertion_route. Never sent by v0.9.20."
+    },
+    {
+      "id": "gateway.routing.protocol_not_permitted.grpc",
+      "family": "gateway_admission",
+      "protocols": [
+        "grpc",
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 270,
+          "symbol": "ROUTE_PROTOCOL_NOT_PERMITTED_BODY",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 38010,
+          "symbol": "route admission refusal normalized for gRPC",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 38026,
+          "symbol": "build_grpc_web_reject_response (gRPC-Web trailer frame, #7155)",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/grpc_proxy.rs",
+          "line": 3045,
+          "symbol": "http_reject_status_to_grpc_status: 403 -> PERMISSION_DENIED",
+          "sha": "f991535"
+        }
+      ],
+      "condition": "The gRPC rendering of gateway.routing.protocol_not_permitted: a native gRPC or gRPC-Web request refused before any plugin runs because the flavor's plugin view omits admission policy another view of the route runs.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 200,
+        "x_gateway_error": null,
+        "other_headers": {
+          "grpc-status": "7",
+          "content-type": "application/grpc (Trailers-Only) | application/grpc-web+proto | application/grpc-web-text (trailer frame)"
+        },
+        "body_shape": "empty (trailers-only) for native gRPC; gRPC-Web trailer frame for gRPC-Web",
+        "grpc_status": 7,
+        "grpc_message": "Request protocol not permitted on this route",
+        "ws_close_code": null,
+        "transport": "native gRPC: HTTP 200 Trailers-Only; gRPC-Web on HTTP/1.1 and HTTP/2 (from v0.9.21, #7155) and HTTP/3: HTTP 200 with one body trailer frame"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "If the response came from a Ferrum Edge gateway, the route refused this gRPC call's protocol because an authentication or admission plugin the route runs for another flavor cannot run on it; no plugin ran and nothing was sent upstream.",
+      "must_not_claim": "That the credentials are invalid, that a policy decision denied the caller, that the method does not exist, or that the backend refused the call.",
+      "remediation": "Gateway operator: serve this gRPC traffic from a route whose plugins support the flavor, or add a plugin that does.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "The JSON 403 HTTP and WebSocket form is gateway.routing.protocol_not_permitted. v0.9.21 (#7155): gRPC-Web on HTTP/1.1 and HTTP/2 gets the framed refusal instead of the native-gRPC header-only status it could not read; with FERRUM_DIAGNOSTIC_REFS=all its reference resolves with status 200 (#7407). The transaction log keeps 403."
+    },
+    {
+      "id": "gateway.admission.circuit_open.grpc",
+      "family": "gateway_admission",
+      "protocols": [
+        "grpc",
+        "http1",
+        "http2",
+        "http3"
+      ],
+      "source": [
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 40666,
+          "symbol": "circuit-breaker-open reject body",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 40678,
+          "symbol": "boxed_build_grpc_web_reject_response (gRPC-Web trailer frame, #7155)",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/mod.rs",
+          "line": 302,
+          "symbol": "CIRCUIT_BREAKER_OPEN_HEADERS (X-Gateway-Error restored)",
+          "sha": "f991535"
+        },
+        {
+          "path": "src/proxy/grpc_proxy.rs",
+          "line": 3054,
+          "symbol": "http_reject_status_to_grpc_status: 503 -> UNAVAILABLE",
+          "sha": "f991535"
+        }
+      ],
+      "condition": "The gRPC rendering of gateway.admission.circuit_open: the circuit breaker for the proxy/target is open (or the half-open probe slot is taken) for a native gRPC or gRPC-Web call.",
+      "error_class": null,
+      "public_signal": {
+        "http_status": 200,
+        "x_gateway_error": "circuit_breaker_open",
+        "other_headers": {
+          "grpc-status": "14",
+          "content-type": "application/grpc (Trailers-Only) | application/grpc-web+proto | application/grpc-web-text (trailer frame)"
+        },
+        "body_shape": "empty (trailers-only) for native gRPC; gRPC-Web trailer frame for gRPC-Web",
+        "grpc_status": 14,
+        "grpc_message": "Service temporarily unavailable (circuit breaker open)",
+        "ws_close_code": null,
+        "transport": "native gRPC: HTTP 200 Trailers-Only; gRPC-Web on HTTP/1.1 and HTTP/2 (from v0.9.21, #7155) and HTTP/3: HTTP 200 with one body trailer frame; X-Gateway-Error circuit_breaker_open kept on the head"
+      },
+      "evidence_visibility": "public",
+      "shared_signal_with": [],
+      "minimum_truthful_diagnosis": "Ferrum Edge rejected this gRPC call at its circuit breaker because recent failures to this upstream exceeded the configured threshold; this attempt was not sent upstream.",
+      "must_not_claim": "That no earlier retry attempt in the same request reached a backend, or that the backend is still failing now.",
+      "remediation": "Wait for the breaker cooldown and retry; API owner/gateway operator: investigate the upstream's recent failures.",
+      "owner": "gateway_operator",
+      "fixture_ids": [],
+      "notes": "The JSON 503 HTTP form is gateway.admission.circuit_open. v0.9.21 (#7155): gRPC-Web on HTTP/1.1 and HTTP/2 gets the framed refusal (keeping X-Gateway-Error: circuit_breaker_open), and HTTP/3 logs rejection_phase circuit_breaker_open (#7158). The transaction log keeps 503."
     }
   ],
   "drift": [
@@ -34572,7 +34785,7 @@
       "refs": "v0.9.20 -> v0.9.21",
       "client_visible_effect": "A backend's 3xx-5xx answer to a WebSocket upgrade is relayed without X-Gateway-Error instead of the gateway 502 backend_error.",
       "evidence": "src/proxy/mod.rs:16792; src/http3/websocket.rs:416 (#7414, GHSA-7x2j-3389-2h35)",
-      "anvil_impact": "Narrow protocol.ws.backend_connect_failed; a relayed refusal is the backend's response.",
+      "anvil_impact": "Narrow protocol.ws.backend_connect_failed; the catalog sets websocket_backend_refusals_relayed, so a tokenless WebSocket handshake refusal keeps the relayed-backend alternative open (unknown confidence) unless a bound reference shows the gateway's rejection.",
       "outcome_ids": [
         "protocol.ws.backend_connect_failed"
       ]
@@ -34607,11 +34820,12 @@
       "change_id": "grpc_web_assertion_route",
       "kind": "new",
       "refs": "v0.9.20 -> v0.9.21",
-      "client_visible_effect": "Untranslated gRPC-Web on a route with gateway-asserted headers is refused 415.",
-      "evidence": "src/proxy/mod.rs:34886 (#7064)",
-      "anvil_impact": "New outcome.",
+      "client_visible_effect": "On a route with gateway-asserted headers, an untranslated gRPC-Web call is refused with an HTTP 200 trailer frame (grpc-status 13, grpc-message 'gRPC-Web must be translated on a route with gateway-asserted headers'), and a request a plugin relabels as gRPC-Web with a JSON 415.",
+      "evidence": "src/proxy/mod.rs:34886; src/proxy/mod.rs:34903; src/proxy/mod.rs:39440 (#7064)",
+      "anvil_impact": "Two new outcomes: the framed refusal, matched by grpc-status and grpc-message, and the JSON 415.",
       "outcome_ids": [
-        "gateway.routing.grpc_web_untranslated_on_assertion_route"
+        "gateway.routing.grpc_web_untranslated_on_assertion_route",
+        "gateway.routing.grpc_web_relabelled_on_assertion_route"
       ]
     },
     {
@@ -34642,7 +34856,7 @@
       "refs": "v0.9.20 -> v0.9.21",
       "client_visible_effect": "ai_prompt_shield, ai_semantic_firewall, a2a_gateway and ai_rate_limiter screen duplicate JSON member names.",
       "evidence": "src/plugins/ai_prompt_shield.rs:1622 (GHSA-49cr-v28q-9hgp, #7417)",
-      "anvil_impact": "ai_prompt_shield's JSON message noted; the others reuse existing refusal bodies.",
+      "anvil_impact": "ai_prompt_shield's JSON and MCP duplicate-member bodies join plugin.ai_prompt_shield.uninspectable's body shape; the others reuse existing bodies.",
       "outcome_ids": [
         "plugin.ai_prompt_shield.uninspectable"
       ]
@@ -34653,10 +34867,12 @@
       "refs": "v0.9.20 -> v0.9.21",
       "client_visible_effect": "gRPC-Web on H1/H2 gets framed 200 trailer-frame refusals for route protocol admission and an open circuit breaker.",
       "evidence": "#7155; #7407",
-      "anvil_impact": "Notes on the affected outcomes; matching by gRPC status is unchanged.",
+      "anvil_impact": "New gRPC renderings gateway.routing.protocol_not_permitted.grpc and gateway.admission.circuit_open.grpc (HTTP 200, grpc-status 7 / 14 and their grpc-message), which also cover native gRPC Trailers-Only; the JSON 403/503 outcomes keep the HTTP form.",
       "outcome_ids": [
         "gateway.admission.circuit_open",
+        "gateway.admission.circuit_open.grpc",
         "gateway.routing.protocol_not_permitted",
+        "gateway.routing.protocol_not_permitted.grpc",
         "gateway.routing.grpc_requires_post"
       ]
     },
@@ -34682,13 +34898,25 @@
         "plugin.ip_restriction.ip_not_allowed",
         "plugin.ip_restriction.ip_denied"
       ]
+    },
+    {
+      "change_id": "body_validator_response_details_fixed",
+      "kind": "changed",
+      "refs": "v0.9.20 -> v0.9.21",
+      "client_visible_effect": "body_validator's response-side 502 details are fixed texts (\"Response body is not valid JSON\", \"Response body is missing a required field\"); no line/column or field name.",
+      "evidence": "src/plugins/body_validator.rs:1858, :1863 (GHSA-84xq-rr63-39pw)",
+      "anvil_impact": "plugin.body_validator.response_validation_failed matches any detail in either JSON key order.",
+      "outcome_ids": [
+        "plugin.body_validator.response_validation_failed"
+      ]
     }
   ],
   "qualification": {
     "state": "reviewed_candidate_qualified",
     "live_0_9_21_evidence": true,
     "baseline": "ferrum-edge-0.9.20",
-    "scope": "Carried observable inventory with the v0.9.20 -> v0.9.21 source delta (619 of the 620 v0.9.20 outcomes; plugin.hmac_auth.nonce_not_accepted_v1 is removed), plus 7 outcomes for new or newly reachable client-visible refusals (source-audited, no Lab fixture); not a comprehensive inventory of new admin, Kubernetes translation, mesh or control-plane behaviour. Hosted all-profile Lab run 45974458935 (workflow_dispatch, profile=all, release=v0.9.21) on the adoption branch at db543c01, all profiles on v0.9.21: Ubuntu 554 passed / 0 failed / 21 skipped; macOS 558 passed / 0 failed / 19 skipped (Ubuntu's extra skips are AUTH-030 and AUTH-031, which need xmllint). Full evidence: docs/audit/gateway-0.9.21-delta.md."
+    "scope": "Carried observable inventory with the v0.9.20 -> v0.9.21 source delta (619 of the 620 v0.9.20 outcomes; plugin.hmac_auth.nonce_not_accepted_v1 is removed), plus 10 outcomes for new, newly reachable or newly framed client-visible refusals (source-audited, no Lab fixture); not a comprehensive inventory of new admin, Kubernetes translation, mesh or control-plane behaviour. Hosted all-profile Lab run 45974458935 (workflow_dispatch, profile=all, release=v0.9.21) on the adoption branch at db543c01, all profiles on v0.9.21: Ubuntu 554 passed / 0 failed / 21 skipped; macOS 558 passed / 0 failed / 19 skipped (Ubuntu's extra skips are AUTH-030 and AUTH-031, which need xmllint). Full evidence: docs/audit/gateway-0.9.21-delta.md."
   },
-  "error_class_semantics_note": "request_reached_wire below records the unchanged retry::request_reached_wire(ErrorClass) classification defaults, not proof of actual backend handoff. Terminal gateway policy, client cancellation and authorization expiry can retain conservative class defaults. In v0.9.11 BackendResponse.request_on_wire (src/retry.rs:1936) independently carries handoff state; authorization refusals are health-neutral before and after transmission. Public markers cannot infer that internal state. v0.9.14 (#6019, #6022): a backend HTTP/2 RST_STREAM or GOAWAY with any reason except NO_ERROR, before response headers on a reqwest route, during a buffered body read, or while a direct-H2/gRPC body streams, is protocol_error (was request_error) and is charged to circuit breakers and passive health (src/retry.rs:1696 is_backend_h2_reset); a reset the gateway raises itself is not. Buffered-collector read errors report their real class instead of response_body_too_large. No class, token, status or request_reached_wire default changed; these are operator-visible classifications, not public signals. v0.9.15 leaves src/retry.rs byte-identical: no class, token, status or request_reached_wire default changed, and the new route_protocol_admission refusal maps to no token. v0.9.17 (#6127) adds the loop_detected token and never retries a backend 508; v0.9.19 changes client-visible statuses for connection_timeout (504) and backend_connection_limit (503) without changing request_reached_wire. No ErrorClass variant was added or removed."
+  "error_class_semantics_note": "request_reached_wire below records the unchanged retry::request_reached_wire(ErrorClass) classification defaults, not proof of actual backend handoff. Terminal gateway policy, client cancellation and authorization expiry can retain conservative class defaults. In v0.9.11 BackendResponse.request_on_wire (src/retry.rs:1936) independently carries handoff state; authorization refusals are health-neutral before and after transmission. Public markers cannot infer that internal state. v0.9.14 (#6019, #6022): a backend HTTP/2 RST_STREAM or GOAWAY with any reason except NO_ERROR, before response headers on a reqwest route, during a buffered body read, or while a direct-H2/gRPC body streams, is protocol_error (was request_error) and is charged to circuit breakers and passive health (src/retry.rs:1696 is_backend_h2_reset); a reset the gateway raises itself is not. Buffered-collector read errors report their real class instead of response_body_too_large. No class, token, status or request_reached_wire default changed; these are operator-visible classifications, not public signals. v0.9.15 leaves src/retry.rs byte-identical: no class, token, status or request_reached_wire default changed, and the new route_protocol_admission refusal maps to no token. v0.9.17 (#6127) adds the loop_detected token and never retries a backend 508; v0.9.19 changes client-visible statuses for connection_timeout (504) and backend_connection_limit (503) without changing request_reached_wire. No ErrorClass variant was added or removed.",
+  "websocket_backend_refusals_relayed": true
 }

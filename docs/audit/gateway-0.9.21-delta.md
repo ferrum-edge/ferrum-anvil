@@ -5,7 +5,7 @@
 | Baseline | `v0.9.20`, `e4a606a00352674daaef08636e3e359e6c48ba18` (source-audited and hosted-qualified in [gateway-0.9.20-delta.md](gateway-0.9.20-delta.md)) |
 | Audited target | `v0.9.21`, `f9915358c8032214f4034a17c28cdf72d14006c3` (merge of Edge #7472), [release 454250773][release], published 2026-11-22T06:29:03Z |
 | Contracts | Published `contracts-edge-0.9.21`, `92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f` |
-| Catalog | [`ferrum-edge-0.9.21/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.21/outcomes.json), 626 outcome IDs: the 620 of 0.9.20 − 1 removed + 7 new |
+| Catalog | [`ferrum-edge-0.9.21/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.21/outcomes.json), 629 outcome IDs: the 620 of 0.9.20 − 1 removed + 10 new |
 | Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.21.lock`; the only supported release. v0.9.20 was retired with this adoption ([why](#v0920-is-retired)) |
 | Hosted qualification | All-profile Lab run 45974458935 on the adoption branch at `db543c01`: Ubuntu 554/0/21, macOS 558/0/19 ([details](#qualification-status)) |
 | Audit date | 2026-11-27 |
@@ -64,14 +64,15 @@ summarized in [Not client-diagnostic](#not-client-diagnostic) and not catalogued
 |---|---|---|
 | `jwt_auth`, `jwks_auth`, `oauth2_introspection`: a `;`-aliased query token is refused with 401 `{"error":"Ambiguous token query parameter"}`, `WWW-Authenticate: Bearer error="invalid_request"` | #7464, GHSA-c259-vchc-3vgr; `src/plugins/utils/token_extract.rs:41` | three new outcomes with one shared signal |
 | `request_transformer` / `response_transformer` with JSON body rules refuse duplicate-member or unevaluable JSON: 400 for a request, 502 replacing a backend response | #7469, GHSA-pq95-952r-2x32; `src/plugins/request_transformer.rs:1158`, `src/plugins/response_transformer.rs:265` | two new outcomes; `plugin.request_transformer.no_runtime_failure` narrowed |
-| Untranslated gRPC-Web on a route with gateway-asserted headers: 415 | #7064; `src/proxy/mod.rs:34886` | new outcome |
+| Untranslated gRPC-Web on a route with gateway-asserted headers: HTTP 200 trailer frame, grpc-status 13 (the plugin's 415, mapped); a request a plugin relabels as gRPC-Web: JSON 415 | #7064; `src/proxy/mod.rs:34886`, `:34903` | two new outcomes; the framed one matches by grpc-status and grpc-message |
 | Repeated or list-valued `Content-Type`: 400 before routing (gRPC framing for gRPC clients) | #7064; `src/proxy/mod.rs:58153` | two bodies added to `frontend_parse.protocol_header_violation` |
 | A backend's 3xx–5xx answer to a WebSocket upgrade is relayed (status, filtered headers, body up to 64 KiB), with no `X-Gateway-Error` | #7414, GHSA-7x2j-3389-2h35; `src/proxy/mod.rs:16792`, `src/http3/websocket.rs:416` | `protocol.ws.backend_connect_failed` narrowed; a relayed refusal is the backend's response |
 | `mcp_gateway` OpenAPI bridge calls outside the route's literal listen prefix: JSON-RPC −32603 | #7410, GHSA-26x8-8jq5-f73p; `src/plugins/mcp_gateway.rs:2318` | new outcome (message existed, uncatalogued) |
 | `hmac_auth` `ferrum-hmac-v1` profile removed | #7114 | `plugin.hmac_auth.nonce_not_accepted_v1` removed |
-| gRPC-Web on H1/H2 gets framed 200 trailer-frame refusals for route protocol admission and an open breaker | #7155 | notes only; gRPC status unchanged |
+| gRPC-Web on H1/H2 gets framed 200 trailer-frame refusals for route protocol admission and an open breaker | #7155 | new gRPC renderings `gateway.routing.protocol_not_permitted.grpc` and `gateway.admission.circuit_open.grpc` (HTTP 200, also native Trailers-Only), matched by grpc-status and grpc-message |
 | `a2a_gateway` with Agent Card rewriting requires classification under any policy | GHSA-q25c-76f4-fp7h; `src/plugins/a2a_gateway.rs:1663` | same −32001 deny response; condition widened in notes |
-| Duplicate JSON member screens in `ai_prompt_shield`, `ai_semantic_firewall`, `a2a_gateway`, `ai_rate_limiter` | GHSA-49cr-v28q-9hgp, #7417 | `ai_prompt_shield` message noted; the others reuse existing bodies |
+| Duplicate JSON member screens in `ai_prompt_shield`, `ai_semantic_firewall`, `a2a_gateway`, `ai_rate_limiter` | GHSA-49cr-v28q-9hgp, #7417 | `ai_prompt_shield`'s JSON and MCP duplicate-member bodies join `plugin.ai_prompt_shield.uninspectable`; the others reuse existing bodies |
+| `body_validator` response-side 502 details are fixed texts (no line/column, no field name) | GHSA-84xq-rr63-39pw; `src/plugins/body_validator.rs:1858`, `:1863` | `plugin.body_validator.response_validation_failed` matches any detail, either key order |
 | New operator-only rejection phases; `circuit_breaker` alias dropped | #7156, #7157, #7158, #7163, #7407 | `rejection_phases_operator_only` note |
 
 The nine `X-Gateway-Error` tokens, the 19 `ErrorClass` values, the class-to-token mapping and
@@ -148,14 +149,24 @@ On a route where a plugin owns gateway-asserted request headers, a recognized gR
 no `grpc_web` translator claimed is refused before any `before_proxy` hook
 (`refuse_untranslated_grpc_web_on_assertion_route`, `src/proxy/mod.rs:34886`; called at `:34682`).
 Such plugins are `claim_headers` / `output_claim_headers`, `opa` `decision_request_headers`, and
-`spiffe_identity` `forward_identity`. The refusal is 415
-`{"error":"gRPC-Web must be translated on a route with gateway-asserted headers"}` (`:34989`). New
-outcome `gateway.routing.grpc_web_untranslated_on_assertion_route`.
+`spiffe_identity` `forward_identity`. The plugin result is 415
+`{"error":"gRPC-Web must be translated on a route with gateway-asserted headers"}` (`:34989`), but a
+gRPC-Web client never sees that JSON: the H1/H2 frontend records every gRPC-Web request's response
+type before any hook (`retain_negotiated_response_content_type`, `:36851`), so the `before_proxy`
+reject is rendered by `boxed_build_grpc_web_reject_response` (`:39440`, `build_grpc_web_reject_response`
+at `:33154`) as HTTP 200 with one body trailer frame. That frame carries grpc-status 13 (415 maps to
+INTERNAL, `src/proxy/grpc_proxy.rs:3059`) and the JSON error as grpc-message
+(`extract_grpc_reject_message`, `src/proxy/mod.rs:29716`). New outcome
+`gateway.routing.grpc_web_untranslated_on_assertion_route` records that framed form. Anvil matches it
+exactly by grpc-status and grpc-message; without the message it is a status-only candidate.
 
-Not settled: whether a gRPC-Web client receives the JSON 415 or the generic gRPC-Web reject
-rendering. The upgrade guide says 415. The native HTTP/3 path was not separately checked. Client
-copies of owned headers are now stripped even when a trigger skips the owning instance. That
-changes what reaches the backend, not the client-visible signal.
+The JSON 415 does reach a client in one case. A request that is not gRPC-Web on the client side, but
+whose outbound content-type a `before_proxy` hook rewrote to a gRPC-Web type, is refused at the end
+of the pass (`refuse_relabelled_grpc_web_on_assertion_route`, `:34903`; called at `:34757`). New
+outcome `gateway.routing.grpc_web_relabelled_on_assertion_route` records it. Native HTTP/3 runs the
+same `before_proxy` runner (`src/http3/server.rs:5785`). Client copies of owned headers are now
+stripped even when a trigger skips the owning instance. That changes what reaches the backend, not the
+client-visible signal.
 
 ### Operator-only phases and diagnostic references (#7156, #7157, #7158, #7163, #7407)
 
@@ -180,11 +191,19 @@ changes what reaches the backend, not the client-visible signal.
 On HTTP/1.1 and HTTP/2, gRPC-Web clients get a framed HTTP 200 trailer-frame refusal instead of the
 native-gRPC header-only status:
 
-- route protocol admission: grpc-status 7 (`gateway.routing.protocol_not_permitted`);
-- an open circuit breaker: grpc-status 14, keeping `X-Gateway-Error: circuit_breaker_open`
-  (`gateway.admission.circuit_open`).
+- route protocol admission: grpc-status 7, grpc-message `Request protocol not permitted on this
+  route` (`src/proxy/mod.rs:38026`);
+- an open circuit breaker: grpc-status 14, grpc-message `Service temporarily unavailable (circuit
+  breaker open)`, keeping `X-Gateway-Error: circuit_breaker_open` (`src/proxy/mod.rs:40678`).
 
-The gRPC status each outcome records is unchanged.
+The JSON 403 and 503 outcomes (`gateway.routing.protocol_not_permitted`,
+`gateway.admission.circuit_open`) keep the plain HTTP form. Earlier catalogs recorded the gRPC status
+on them, but `match_signal` filters on the HTTP status first, so an HTTP 200 gRPC rendering never
+matched. The new outcomes `gateway.routing.protocol_not_permitted.grpc` and
+`gateway.admission.circuit_open.grpc` record the HTTP 200 form: native gRPC Trailers-Only and the
+gRPC-Web trailer frame. Each carries a `grpc_message` that Anvil compares with the call's decoded
+`grpc-message`. A different service's grpc-status 7, 13 or 14 with another message is therefore never
+an exact match; it is only one of the status candidates.
 
 ### Unchanged taxonomy surfaces
 
@@ -219,7 +238,21 @@ The gateway 502 `{"error":"Backend WebSocket connection failed"}` remains, with 
 - the pre-wire dial failures.
 
 `protocol.ws.backend_connect_failed` is narrowed accordingly. The absent-marker release note now
-says a relayed WebSocket refusal carries no token. Successful upgrades also forward the backend's
+says a relayed WebSocket refusal carries no token.
+
+The relay also removes the uniqueness of the gateway's own tokenless WebSocket refusals. Examples are
+`protocol.ws.backend_connection_limit` (503 `Backend connection limit exceeded`) and
+`protocol.ws.connection_limit`. A backend can send the same status and body, and the gateway relays it
+unchanged. `build_websocket_backend_refusal_response` (`src/proxy/mod.rs:16849`) adds no gateway
+marker, so no response header tells the two apart. The catalog therefore sets
+`websocket_backend_refusals_relayed: true`. For a tokenless 3xx–5xx WebSocket handshake that matches a
+gateway outcome, Anvil then reports the match at unknown confidence with no owner. It adds the
+relayed-backend alternative and the "does not prove" sentence. The exception is a bound diagnostic
+reference whose record names the gateway's rejection, which keeps the gateway attribution.
+Earlier catalogs keep their attribution, because those releases replaced a backend refusal with
+their 502.
+
+Successful upgrades also forward the backend's
 end-to-end handshake headers (#7391), and `preserve_host_header` applies to WebSocket backends
 (#7392). Neither changes a failure signal.
 
@@ -300,6 +333,12 @@ share one signal and name each other. `key_auth` keeps its own body.
     other response-side replacements. It was not lab-observed.
   - Two new outcomes. `plugin.request_transformer.no_runtime_failure` is narrowed: the plugin now
     has a runtime refusal.
+- **`body_validator` (GHSA-84xq-rr63-39pw).** The response-side details no longer describe the
+  upstream body. An unparseable body is the fixed `Response body is not valid JSON`
+  (`src/plugins/body_validator.rs:1858`). A missing required field is `Response body is missing a
+  required field` (`:1863`; protobuf `:1868`). There is no line/column and no field name. The 0.9.20
+  entry kept a literal `"{detail}"` that no body equals. `plugin.body_validator.response_validation_failed`
+  now matches any detail, in either JSON key order.
 - **`ip_restriction`:** `mode` is removed (#7114). An address failing both lists is always
   `IP address not allowed`.
 - **`response_caching`:** `cache_key_include_*` is removed. `Vary`/`ETag`/`Last-Modified` are read
@@ -324,8 +363,11 @@ share one signal and name each other. `key_auth` keeps its own body.
 - **Duplicate-member screens (GHSA-49cr-v28q-9hgp).**
   - `ai_prompt_shield` refuses with
     `Request blocked because the JSON request body has duplicate member names.`
-    (`src/plugins/ai_prompt_shield.rs:1624`; MCP form `:1622`). This is recorded on
-    `plugin.ai_prompt_shield.uninspectable`.
+    (`handle_ambiguous_body`, `src/plugins/ai_prompt_shield.rs:1605`; under
+    `scan_fields: mcp_arguments` the MCP message). HTTP 400 with
+    `error: "Request body could not be inspected"`. Both bodies are now alternatives of
+    `plugin.ai_prompt_shield.uninspectable`'s body shape; the 0.9.20 catalog quoted the MCP form
+    only in notes, where the matcher never looks.
   - `ai_semantic_firewall` treats such a body as uninspectable, and `ai_rate_limiter` (with
     `model_limits`) refuses it. Neither adds a new body literal at v0.9.21. Which existing body each
     answers with was not re-read emitter by emitter.

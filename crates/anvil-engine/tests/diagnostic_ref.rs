@@ -9,11 +9,11 @@ use anvil_diagnostics::gateway_detail::{GatewayDetail, LookupOutcome, MAX_QUOTE_
 use anvil_domain::auth::AuthConfig;
 use anvil_domain::diagnostics::{Confidence, DiagnosticFinding, EvidenceSource};
 use anvil_domain::integration::{DiagnosticDetailAccess, IntegrationKind, IntegrationProfile};
-use anvil_domain::request::RequestSpec;
+use anvil_domain::request::{AttachmentRef, GrpcMode, GrpcSchemaSource, GrpcSpec, GrpcWire, KeyValue, Protocol, RequestSpec};
 use anvil_domain::secret::{REDACTED, SecretRef, SensitiveValue};
 use anvil_domain::settings::SettingsOverrides;
 use anvil_domain::tls::{HostBinding, TlsProfile};
-use anvil_engine::context::MemorySecrets;
+use anvil_engine::context::{MemoryAttachments, MemorySecrets};
 use anvil_engine::{Engine, ExecutionContext, ExecutionOutput};
 use anvil_fixtures::http as fx;
 use anvil_transport::recorder::EventCtx;
@@ -532,5 +532,83 @@ async fn g01_a_secret_in_the_gateway_error_is_never_quoted_lowercased() {
     for form in [SECRET.to_string(), SECRET.to_ascii_lowercase()] {
         assert!(!record.contains(&form[..14]), "the secret reached the record as {}", &form[..14]);
     }
+    token_stays_in_the_lookup(&o, &f);
+}
+
+/// A `ferrum.diagnostic_ref.v1` record of a gateway rejection a gRPC-Web
+/// client received as HTTP 200 over HTTP/1.1 (Ferrum Edge v0.9.21 references
+/// gRPC-Web rejections in `all` mode, resolving with `status: 200`; #7407).
+fn grpc_web_rejection_record(reference: &str) -> String {
+    let now = anvil_domain::Timestamp::now().to_rfc3339();
+    serde_json::json!({
+        "schema_version": "ferrum.diagnostic_ref.v1",
+        "ref": reference,
+        "namespace": "ferrum",
+        "created_at": now,
+        "expires_at": "2099-01-01T00:00:00Z",
+        "protocol": "http1",
+        "status": 200,
+        "gateway_error": null,
+        "detail_available": true,
+        "detail": {
+            "error_class": null,
+            "body_error_class": null,
+            "rejection_phase": null,
+            "route_timeout_phase": null,
+            "backend_dispatch": "not_dispatched",
+            "proxy_id": "orders",
+            "backend_target": null,
+            "duration_bucket": "lt_10ms",
+            "rejection": {"source": "gateway", "phase": "route_protocol_admission"}
+        }
+    })
+    .to_string()
+}
+
+/// G01 for a gRPC-Web call: the session execution looks the reference on
+/// the call's HTTP 200 head up exactly as an HTTP request does, and the bound
+/// record is the gateway's own rejection.
+#[tokio::test]
+async fn g01_a_grpc_web_rejection_reference_is_looked_up() {
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let admin = Admin::start(200, vec![], grpc_web_rejection_record(REF)).await;
+    let secret = vault_ref();
+    let e = Engine::new();
+    let url = format!("grpc://{}", f.addr);
+    let mut c = ctx(&url, Some(access(&admin, Some("ferrum"), &secret)), &secret);
+    let sha = anvil_transport::certs::sha256_hex(anvil_fixtures::grpc::ECHO_PROTO.as_bytes());
+    let attachment = AttachmentRef::Stored {
+        sha256: sha.clone(),
+        size: anvil_fixtures::grpc::ECHO_PROTO.len() as u64,
+        file_name: "echo.proto".into(),
+        media_type: None,
+    };
+    let mut spec = RequestSpec::http("GET", &url);
+    spec.protocol = Protocol::Grpc;
+    spec.grpc = Some(GrpcSpec {
+        service: "anvil.lab.v1.Echo".into(),
+        method: "Unary".into(),
+        mode: GrpcMode::Unary,
+        schema: GrpcSchemaSource::ProtoFiles { files: vec![attachment] },
+        messages: vec![r#"{"message":"x","failWith":7}"#.into()],
+        metadata: vec![KeyValue::new("x-fixture-response-header", &format!("X-Ferrum-Diagnostic-Ref: {REF}"))],
+        deadline_ms: None,
+        plaintext: false,
+        wire: GrpcWire::GrpcWeb,
+    });
+    c.spec = spec;
+    let mut store = std::collections::HashMap::new();
+    store.insert(sha, bytes::Bytes::from_static(anvil_fixtures::grpc::ECHO_PROTO.as_bytes()));
+    c.attachments = Arc::new(MemoryAttachments(store));
+    let o = run(&e, &c).await;
+    let response = o.record.response.as_ref().expect("the gRPC-Web head");
+    assert_eq!((response.status, response.http_version.as_str()), (200, "HTTP/1.1"));
+    let heads = admin.heads();
+    assert_eq!(heads.len(), 1, "one lookup: {:?}", codes(&o));
+    assert!(heads[0].starts_with(&format!("GET /diagnostics/v1/refs/{REF} HTTP/1.1\r\n")), "{}", heads[0].lines().next().unwrap_or(""));
+    let d = finding(&o, "ferrum.detail.rejected");
+    assert_eq!(d.confidence, Confidence::Confirmed, "both legs are direct loopback connections");
+    assert!(d.evidence.iter().any(|x| x.source == EvidenceSource::GatewayDetail));
     token_stays_in_the_lookup(&o, &f);
 }
