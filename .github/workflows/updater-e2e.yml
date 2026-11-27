@@ -24,6 +24,8 @@ on:
       # Registers the updater plugin and the update commands.
       - "apps/desktop/src-tauri/src/lib.rs"
       - "apps/desktop/src-tauri/tauri.conf.json"
+      # The NSIS template the Windows lanes install and update through.
+      - "apps/desktop/src-tauri/windows/installer.nsi"
       - "apps/desktop/src-tauri/Cargo.toml"
       - "apps/desktop/e2e/updater/**"
       - "apps/desktop/e2e/helpers.ts"
@@ -39,6 +41,8 @@ on:
       # Registers the updater plugin and the update commands.
       - "apps/desktop/src-tauri/src/lib.rs"
       - "apps/desktop/src-tauri/tauri.conf.json"
+      # The NSIS template the Windows lanes install and update through.
+      - "apps/desktop/src-tauri/windows/installer.nsi"
       - "apps/desktop/src-tauri/Cargo.toml"
       - "apps/desktop/e2e/updater/**"
       - "apps/desktop/e2e/helpers.ts"
@@ -64,11 +68,10 @@ env:
   # Smaller debug bundles (the update artifact is downloaded into memory).
   CARGO_PROFILE_DEV_DEBUG: "0"
   UPDATE_PORT: "18797"
-  OFFERED: "0.2.0"
 
 jobs:
   updater-e2e:
-    name: Updater E2E · ${{ matrix.os }}
+    name: Updater E2E · ${{ matrix.os }} · ${{ matrix.bundles }}
     strategy:
       fail-fast: false
       matrix:
@@ -117,6 +120,10 @@ jobs:
           echo "::add-mask::$pass"
           npx tauri signer generate --ci -p "$pw" -w "$work/keys/updater.key" -f > /dev/null
           npx tauri signer generate --ci -p "$pw" -w "$work/keys/other.key" -f > /dev/null
+          # The offered version: newer than the shipped one whatever that is
+          # (the next major), so the updater sees an update at 0.x and at 1.x alike.
+          OFFERED="$(node -p 'const [m] = require("./src-tauri/tauri.conf.json").version.split("."); `${Number(m) + 1}.0.0`')"
+          export OFFERED
           PUBKEY="$(tr -d '[:space:]' < "$work/keys/updater.key.pub")" WORK="$work" node -e '
             const fs = require("node:fs");
             const shipped = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).plugins.updater;
@@ -152,6 +159,8 @@ jobs:
             echo "REL003=$work"
             echo "REL003_KEY_PASSWORD=$pw"
             echo "ANVIL_E2E_PASSPHRASE=$pass"
+            echo "OFFERED=$OFFERED"
+            echo "ANVIL_E2E_UPDATE_OFFERED=$OFFERED"
           } >> "$GITHUB_ENV"
 
       - name: Trust the test CA (system trust store)
@@ -227,7 +236,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $installer = $env:REL003_INSTALLER
+          # A Windows path (the bash steps write it with forward slashes, which
+          # msiexec refuses with 1619, "could not be opened").
+          $installer = [IO.Path]::GetFullPath($env:REL003_INSTALLER)
           if ($env:BUNDLES -eq "nsis") {
             $p = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
           } else {
@@ -339,7 +350,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: updater-e2e-screenshots-${{ matrix.os }}-${{ github.run_id }}
+          name: updater-e2e-screenshots-${{ matrix.os }}-${{ matrix.bundles }}-${{ github.run_id }}
           path: apps/desktop/e2e/screenshots/*.png
           if-no-files-found: ignore
           retention-days: 30

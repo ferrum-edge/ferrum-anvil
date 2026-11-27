@@ -7916,7 +7916,7 @@
     },
     {
      "path": "apps/desktop/e2e/updater/rel003-1-refusal.e2e.ts",
-     "line": 28,
+     "line": 30,
      "kind": "native_e2e"
     },
     {
@@ -7926,7 +7926,7 @@
     },
     {
      "path": "apps/desktop/e2e/updater/rel003-2-install.e2e.ts",
-     "line": 12,
+     "line": 33,
      "kind": "native_e2e"
     },
     {
@@ -7946,12 +7946,7 @@
     },
     {
      "path": "apps/desktop/e2e/updater/update.ts",
-     "line": 37,
-     "kind": "native_e2e"
-    },
-    {
-     "path": "apps/desktop/e2e/updater/update.ts",
-     "line": 146,
+     "line": 49,
      "kind": "native_e2e"
     },
     {

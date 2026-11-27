@@ -3,7 +3,7 @@
 // unlocks the same profile with the same workspaces. Then the control: an
 // update signed by the bundle's key for the version it is offered as installs
 // through the same `update_install` command and replaces the bundle with the
-// 0.2.0 build. On Windows the plugin hands the verified installer (NSIS
+// offered build. On Windows the plugin hands the verified installer (NSIS
 // `/P /UPDATE`, or msiexec `/i … /passive`) to the shell and ends the app
 // (`std::process::exit`), and the installer restarts it: the install is
 // observed from outside, in the installed executable's version.
@@ -45,7 +45,10 @@ describe("REL-003: after the refusals, the relaunched bundle is unchanged and a 
     expect((await invoke<unknown[]>("workspaces_list")).ok).toEqual(recorded.workspaces);
   });
 
-  it("installs a validly signed update", async () => {
+  it("installs a validly signed update", async function (this: Mocha.Context) {
+    // Windows waits for the download, the installer and the restart: up to
+    // 2 + 5 + 5 + 2 + 1 minutes, within this test's own timeout.
+    this.timeout(16 * 60_000);
     const server = await startUpdateServer();
     if (process.platform === "win32") {
       try {
@@ -68,6 +71,12 @@ describe("REL-003: after the refusals, the relaunched bundle is unchanged and a 
         await until("the restarted app to stop", () => runningInstalledApps().length === 0, 60_000);
         // The install changed no profile file.
         expect(contents(required("ANVIL_DATA_DIR"), notShm)).toEqual(profileBefore);
+        // The update ended the app this session drove, as designed: nothing
+        // answers its WebDriver session any more. Forget the session so the
+        // runner does not try to delete it (wdio-runner endSession skips a
+        // browser without a sessionId); every other test keeps the ordinary
+        // teardown.
+        (browser as unknown as { sessionId?: string }).sessionId = undefined;
       } finally {
         await server.close();
       }
@@ -81,8 +90,8 @@ describe("REL-003: after the refusals, the relaunched bundle is unchanged and a 
 
       expect(r.err).toBeUndefined();
       expect(server.requests).toEqual(["/latest.json", "/update"]);
-      // Linux: the AppImage file is now the 0.2.0 AppImage. macOS: the .app
-      // folder now holds the 0.2.0 bundle the archive was made from.
+      // Linux: the AppImage file is now the offered AppImage. macOS: the .app
+      // folder now holds the offered bundle the archive was made from.
       const expected = process.platform === "darwin" ? contents(fixturePath("expected.app")) : contents(fixturePath("update.bin"));
       expect(contents(installed())).toEqual(expected);
       expect(snapshot(required("ANVIL_DATA_DIR"), notShm)).toEqual(profileBefore);
