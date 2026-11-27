@@ -48,9 +48,25 @@ fn rsa_identity() -> (String, String) {
     (certificate(RSA_2048_PKCS8, "anvil-test-rsa"), RSA_2048_PKCS8.to_string())
 }
 
+/// A password made per run (the signature tests never depend on its value).
+fn run_password() -> String {
+    hex::encode(rand::random::<[u8; 12]>())
+}
+
 fn sign(envelope: &str, identity: &SigningIdentity, username: bool, ttl: Option<u32>, prefixes: &[String]) -> wsse::Inserted {
+    sign_with(envelope, identity, username, ttl, prefixes, &run_password())
+}
+
+fn sign_with(
+    envelope: &str,
+    identity: &SigningIdentity,
+    username: bool,
+    ttl: Option<u32>,
+    prefixes: &[String],
+    password: &str,
+) -> wsse::Inserted {
     let spec = HeaderSpec {
-        username_token: username.then_some(("alice", "tok-SENSITIVE-wsse-pw", WssePasswordType::PasswordDigest)),
+        username_token: username.then_some(("alice", password, WssePasswordType::PasswordDigest)),
         timestamp_ttl_secs: ttl,
         saml: None,
         signature: Some(SignatureSpec { identity, inclusive_prefixes: prefixes }),
@@ -125,7 +141,8 @@ fn rsa_and_ecdsa_signatures_cover_body_timestamp_and_username_token() {
     {
         let identity = SigningIdentity::from_pem(cert, key, XmlSignatureAlgorithm::Auto).unwrap();
         assert_eq!(identity.algorithm().uri(), method);
-        let inserted = sign(ENVELOPE, &identity, true, Some(300), &[]);
+        let password = run_password();
+        let inserted = sign_with(ENVELOPE, &identity, true, Some(300), &[], &password);
         let out = String::from_utf8(inserted.body).unwrap();
         assert_eq!(verify(&out).unwrap(), ["Timestamp", "UsernameToken", "Body"], "{out}");
         let signed = inserted.signed.unwrap();
@@ -137,7 +154,7 @@ fn rsa_and_ecdsa_signatures_cover_body_timestamp_and_username_token() {
         ));
         let body_id = &signed.references[2];
         assert!(out.contains(&format!(r#"<soap:Body xmlns:wsu="{WSU_NS}" wsu:Id="{body_id}">"#)), "{out}");
-        assert!(!out.contains("PRIVATE KEY") && !out.contains("tok-SENSITIVE-wsse-pw"));
+        assert!(!out.contains("PRIVATE KEY") && !out.contains(&password));
     }
 }
 

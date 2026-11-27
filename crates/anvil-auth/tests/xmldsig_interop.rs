@@ -243,6 +243,8 @@ fn signed_envelopes_verify_with_xmlsec1_and_tampering_fails() {
         ("ec-sec1", openssl_identity(&dir, "ec-sec1", "ec", true)),
     ];
     let mut verified = 0;
+    // Made per run: xmlsec1 checks the signature, never the password.
+    let password = hex::encode(rand::random::<[u8; 12]>());
     for (name, (cert, key)) in &identities {
         let identity = SigningIdentity::from_pem(cert, key, XmlSignatureAlgorithm::Auto).unwrap_or_else(|e| panic!("{name}: {e}"));
         for envelope in corpus().into_iter().filter(|x| x.contains(":Envelope")) {
@@ -251,7 +253,7 @@ fn signed_envelopes_verify_with_xmlsec1_and_tampering_fails() {
                 [(true, Some(300), vec![]), (false, Some(60), vec!["t".to_string()]), (false, None, vec![String::new()])]
             {
                 let spec = HeaderSpec {
-                    username_token: username.then_some(("alice", "interop-password", WssePasswordType::PasswordDigest)),
+                    username_token: username.then_some(("alice", password.as_str(), WssePasswordType::PasswordDigest)),
                     timestamp_ttl_secs: ttl,
                     saml: None,
                     signature: Some(SignatureSpec { identity: &identity, inclusive_prefixes: &prefixes }),

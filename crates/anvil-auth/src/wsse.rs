@@ -221,8 +221,7 @@ fn parse_bounded<'t>(text: &'t str, what: &str, malformed: &str) -> Result<roxml
 
 /// An element id no envelope already uses: `prefix-` and 16 random hex digits.
 fn fresh_id(prefix: &str) -> String {
-    let mut b = [0u8; 8];
-    rand::fill(&mut b);
+    let b: [u8; 8] = rand::random();
     format!("{prefix}-{}", hex::encode(b))
 }
 
@@ -261,8 +260,8 @@ pub fn insert(body: &[u8], spec: &HeaderSpec<'_>, now: Timestamp) -> Result<Inse
     // cannot collide with ids already in the envelope.
     let (ts_id, ut_id) = if signing.is_some() { (fresh_id("TS"), fresh_id("UT")) } else { ("TS-1".to_string(), "UT-1".to_string()) };
     let created = now.to_rfc3339_opts(SecondsFormat::Secs, true);
-    let mut nonce = [0u8; 16];
-    rand::fill(&mut nonce);
+    // Fresh per send from the thread-local CSPRNG (OS-seeded ChaCha).
+    let nonce: [u8; 16] = rand::random();
 
     // The Security header up to (not including) its end tag.
     let mut security = format!(r#"<wsse:Security xmlns:wsse="{WSSE_NS}" xmlns:wsu="{WSU_NS}">"#);
@@ -469,8 +468,7 @@ mod tests {
 
     /// A password made per run: only the audited vectors depend on its value.
     fn password() -> String {
-        let mut bytes = [0u8; 12];
-        rand::fill(&mut bytes);
+        let bytes: [u8; 12] = rand::random();
         hex::encode(bytes)
     }
 
