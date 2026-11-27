@@ -592,7 +592,7 @@ async fn g01_a_grpc_web_rejection_reference_is_looked_up() {
         mode: GrpcMode::Unary,
         schema: GrpcSchemaSource::ProtoFiles { files: vec![attachment] },
         messages: vec![r#"{"message":"x","failWith":7}"#.into()],
-        metadata: vec![KeyValue::new("x-fixture-response-header", &format!("X-Ferrum-Diagnostic-Ref: {REF}"))],
+        metadata: vec![KeyValue::new("x-fixture-response-header", format!("X-Ferrum-Diagnostic-Ref: {REF}"))],
         deadline_ms: None,
         plaintext: false,
         wire: GrpcWire::GrpcWeb,

@@ -1470,7 +1470,8 @@ mod tests {
 
         // The same signal over plain HTTP is not a relayed upgrade refusal.
         let f = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.21");
-        assert!(!find(&f, "ferrum.outcome").is_some_and(|o| o.alternatives.iter().any(|a| a.contains("relayed its answer unchanged"))));
+        let plain = find(&f, "ferrum.outcome");
+        assert!(plain.is_none_or(|o| o.alternatives.iter().all(|a| !a.contains("relayed its answer unchanged"))), "{plain:?}");
 
         // A bound reference whose record names the gateway's rejection settles the author.
         let record = br#"{"schema_version":"ferrum.diagnostic_ref.v1","ref":"fd1_3f9c2a7e5b1d4c8a9e0f6b2d7c4a1e5f","namespace":"ferrum","created_at":"2026-11-27T10:00:00Z","expires_at":"2099-01-01T00:00:00Z","protocol":"http1","status":503,"gateway_error":null,"detail_available":true,"detail":{"error_class":null,"body_error_class":null,"rejection_phase":null,"route_timeout_phase":null,"backend_dispatch":"not_dispatched","proxy_id":"ws","backend_target":null,"duration_bucket":"lt_10ms","rejection":{"source":"gateway","phase":"backend_admission"}}}"#;
