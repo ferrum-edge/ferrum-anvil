@@ -423,12 +423,12 @@ fn e21_grpcweb_assert(env: &Env) -> Fut<'_> {
         let url = format!("grpc://{HTTP}/e21-grpcweb-assert");
         let o = send(env, &web_ctx(env, &url, "Unary", GrpcMode::Unary, r#"{"message":"a"}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto))
             .await;
-        let (http, st, _, msg) = grpc_status(&o);
+        let (http, st, src, msg) = grpc_status(&o);
         c.add(
             CheckKind::GroundTruth,
             "HTTP 200 trailer frame with grpc-status 13 and the assertion-route message",
-            http == Some(200) && st == Some(13) && msg == E21_ASSERT_MSG,
-            format!("{http:?} {st:?} {msg}"),
+            http == Some(200) && src == Some(GrpcStatusSource::TrailerFrame) && st == Some(13) && msg == E21_ASSERT_MSG,
+            format!("{http:?} {st:?} {src:?} {msg}"),
         );
         c.add(CheckKind::GroundTruth, "the backend received nothing", requests_since(&env.fx.grpc.log, before).is_empty(), "");
         e21_catalog(&mut c, env, &o, "gateway.routing.grpc_web_untranslated_on_assertion_route");
@@ -460,35 +460,62 @@ fn e21_grpcweb_relabel(env: &Env) -> Fut<'_> {
     })
 }
 
-/// EXT-E21-GRPC-ADMISSION: a native gRPC call on a route whose HTTP-only
-/// admission policy (request_deduplication enforce_required) its gRPC view
-/// omits: refused before any plugin runs, as HTTP 200 Trailers-Only
-/// grpc-status 7 with the route-admission message.
+/// A gRPC refusal in the rendering its wire gets: native gRPC as HTTP 200
+/// Trailers-Only, gRPC-Web (HTTP/1.1 here) as HTTP 200 with one body trailer
+/// frame (#7155), each carrying `code` and `message`.
+fn e21_grpc_refusal(c: &mut Checks, o: &ExecutionOutput, web: bool, code: i32, message: &str) {
+    let (http, st, src, msg) = grpc_status(o);
+    let (want, what) = if web {
+        (GrpcStatusSource::TrailerFrame, "gRPC-Web: HTTP 200 with a body trailer frame")
+    } else {
+        (GrpcStatusSource::TrailersOnly, "native gRPC: HTTP 200 Trailers-Only")
+    };
+    c.add(
+        CheckKind::GroundTruth,
+        format!("{what}, grpc-status {code} and the gateway's message"),
+        http == Some(200) && src == Some(want) && st == Some(code) && msg == message,
+        format!("{http:?} {st:?} {src:?} {msg}"),
+    );
+}
+
+/// The same unary call as native gRPC or as gRPC-Web.
+fn e21_call(env: &Env, url: &str, web: bool) -> ExecutionContext {
+    if web {
+        web_ctx(env, url, "Unary", GrpcMode::Unary, r#"{"message":"a"}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto)
+    } else {
+        grpc_ctx(env, url, "Unary", GrpcMode::Unary, &[r#"{"message":"a"}"#], None)
+    }
+}
+
+/// EXT-E21-GRPC-ADMISSION: a native gRPC call, then a gRPC-Web one, on a
+/// route whose HTTP-only admission policy (request_deduplication
+/// enforce_required) its gRPC view omits: each refused before any plugin
+/// runs with grpc-status 7 and the route-admission message, in its wire's
+/// rendering (#7155).
 fn e21_grpc_admission(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let from = op_from(env);
         let before = env.fx.grpc.log.entries().len();
         let url = format!("grpc://{HTTP}/e21-grpc-admission");
-        let o = send(env, &grpc_ctx(env, &url, "Unary", GrpcMode::Unary, &[r#"{"message":"a"}"#], None)).await;
-        let (http, st, src, msg) = grpc_status(&o);
-        c.add(
-            CheckKind::GroundTruth,
-            "HTTP 200 with grpc-status 7 and the route-admission message",
-            http == Some(200) && st == Some(7) && msg == E21_ADMISSION_MSG,
-            format!("{http:?} {st:?} {src:?} {msg}"),
-        );
-        c.add(CheckKind::GroundTruth, "the backend received nothing", requests_since(&env.fx.grpc.log, before).is_empty(), "");
+        let o = send(env, &e21_call(env, &url, false)).await;
+        e21_grpc_refusal(&mut c, &o, false, 7, E21_ADMISSION_MSG);
         e21_catalog(&mut c, env, &o, "gateway.routing.protocol_not_permitted.grpc");
+        let web = send(env, &e21_call(env, &url, true)).await;
+        e21_grpc_refusal(&mut c, &web, true, 7, E21_ADMISSION_MSG);
+        e21_catalog(&mut c, env, &web, "gateway.routing.protocol_not_permitted.grpc");
+        c.add(CheckKind::GroundTruth, "the backend received nothing", requests_since(&env.fx.grpc.log, before).is_empty(), "");
         let ops = op_log(env, from, "e21-grpc-admission").await;
         let r = grpc_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+        Outcome { main: Some(web), recovery: Some(r), checks: c, operator_log: ops }
     })
 }
 
 /// EXT-E21-GRPC-BREAKER: native gRPC calls to an unbound backend behind a
 /// breaker that opens on one connection failure. The breaker's refusal is
-/// HTTP 200 Trailers-Only grpc-status 14 with the breaker message.
+/// grpc-status 14 with the breaker message and `X-Gateway-Error:
+/// circuit_breaker_open`: HTTP 200 Trailers-Only for native gRPC, then, while
+/// the breaker is still open, a body trailer frame for gRPC-Web (#7155).
 fn e21_grpc_breaker(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -497,7 +524,7 @@ fn e21_grpc_breaker(env: &Env) -> Fut<'_> {
         let mut last = None;
         let mut opened = false;
         for _ in 0..4 {
-            let o = send(env, &grpc_ctx(env, &url, "Unary", GrpcMode::Unary, &[r#"{"message":"a"}"#], None)).await;
+            let o = send(env, &e21_call(env, &url, false)).await;
             let (_, st, _, msg) = grpc_status(&o);
             opened = st == Some(14) && msg == E21_BREAKER_MSG;
             last = Some(o);
@@ -506,25 +533,45 @@ fn e21_grpc_breaker(env: &Env) -> Fut<'_> {
             }
         }
         let o = last.expect("at least one call");
-        let (http, st, src, msg) = grpc_status(&o);
+        c.add(CheckKind::GroundTruth, "the breaker opened within four calls", opened, outcome_line(&o));
+        e21_grpc_refusal(&mut c, &o, false, 14, E21_BREAKER_MSG);
+        let marker = header(&o, "x-gateway-error");
         c.add(
             CheckKind::GroundTruth,
-            "within four calls: HTTP 200 with grpc-status 14 and the breaker message",
-            opened && http == Some(200),
-            format!("{http:?} {st:?} {src:?} {msg}"),
+            "native: X-Gateway-Error circuit_breaker_open",
+            marker.iter().any(|m| m == "circuit_breaker_open"),
+            format!("{marker:?}"),
         );
-        let marker = header(&o, "x-gateway-error");
-        c.add(CheckKind::GroundTruth, "the breaker refusal's X-Gateway-Error (recorded)", true, format!("{marker:?}"));
-        let ops = op_log(env, from, "e21-grpc-breaker").await;
+        e21_catalog(&mut c, env, &o, "gateway.admission.circuit_open.grpc");
+        // The breaker stays open for 2 s: the gRPC-Web call meets it too.
+        let web = send(env, &e21_call(env, &url, true)).await;
+        e21_grpc_refusal(&mut c, &web, true, 14, E21_BREAKER_MSG);
+        let marker = header(&web, "x-gateway-error");
+        c.add(
+            CheckKind::GroundTruth,
+            "gRPC-Web: X-Gateway-Error circuit_breaker_open",
+            marker.iter().any(|m| m == "circuit_breaker_open"),
+            format!("{marker:?}"),
+        );
+        e21_catalog(&mut c, env, &web, "gateway.admission.circuit_open.grpc");
+        // The connection failure that opened the breaker writes its own line
+        // first; wait for the rejection's.
+        let (ops, logged) = crate::fixtures_policy::op_log_field(
+            &env.gateway,
+            from,
+            "e21-grpc-breaker",
+            "/metadata/rejection_phase",
+            &["circuit_breaker_open"],
+        )
+        .await;
         c.add(
             CheckKind::GroundTruth,
             "the operator log records the circuit_breaker_open rejection",
-            ops.iter().any(|l| l.contains("circuit_breaker_open")),
+            logged,
             format!("{} lines", ops.len()),
         );
-        e21_catalog(&mut c, env, &o, "gateway.admission.circuit_open.grpc");
         let r = grpc_recovery(env, &mut c).await;
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+        Outcome { main: Some(web), recovery: Some(r), checks: c, operator_log: ops }
     })
 }
 
@@ -548,22 +595,21 @@ fn e21_ws_relay(env: &Env) -> Fut<'_> {
             format!("{handshake:?} {:?}", header(&o, "x-gateway-error")),
         );
         c.add(CheckKind::GroundTruth, "the backend received the upgrade", !requests_since(&env.fx.echo.log, before).is_empty(), "");
-        let relayed_body = crate::fixtures_policy::body_text(&o).trim() == body;
-        c.add(CheckKind::GroundTruth, "the backend's body was relayed (recorded)", true, format!("{relayed_body}"));
+        let got = crate::fixtures_policy::body_text(&o);
+        c.add(CheckKind::GroundTruth, "the backend's body was relayed byte for byte", got.trim() == body, got.clone());
         if env.trusted {
+            // The relayed body is the gateway's own connection-ceiling text: the
+            // catalog outcome is matched, but only as a candidate.
             let f = o.record.findings.iter().find(|f| f.code == "ferrum.outcome");
-            let ok = if relayed_body {
-                f.is_some_and(|f| {
-                    f.confidence == Confidence::Unknown && f.alternatives.iter().any(|a| a.contains("relayed its answer unchanged"))
-                })
-            } else {
-                f.is_none_or(|f| f.confidence <= Confidence::Unknown)
-            };
+            let candidate = f.is_some_and(|f| {
+                f.confidence == Confidence::Unknown && f.alternatives.iter().any(|a| a.contains("relayed its answer unchanged"))
+            });
+            let matched = crate::fixtures_policy::catalog_outcome(&o);
             c.add(
                 CheckKind::Diagnosis,
-                "a gateway outcome for the relayed refusal is only a candidate (unknown, relayed-backend alternative)",
-                ok,
-                format!("{:?}", codes(&o)),
+                "protocol.ws.backend_connection_limit is only a candidate (unknown, relayed-backend alternative)",
+                candidate && matched.as_deref() == Some("protocol.ws.backend_connection_limit"),
+                format!("{matched:?} {:?}", codes(&o)),
             );
         }
         let r = send(env, &ws_ctx(env, &format!("ws://{HTTP}/ws?close_after=1"), WsBootstrap::Http1Upgrade, &["recover"], 3_000)).await;

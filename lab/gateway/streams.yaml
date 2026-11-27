@@ -266,7 +266,7 @@ proxies:
       - plugin_config_id: e21-dedup-required
 
   # EXT-E21-GRPC-BREAKER: one connection failure to the UNBOUND 19409 opens the breaker; the
-  # next native gRPC call gets the gateway's breaker refusal in its gRPC rendering.
+  # next native gRPC call, then a gRPC-Web one, get the breaker refusal in their renderings.
   - id: e21-grpc-breaker
     listen_path: /e21-grpc-breaker
     backend_scheme: http

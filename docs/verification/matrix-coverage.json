@@ -5231,6 +5231,21 @@
      "path": "crates/anvil-engine/tests/matrix_local_tls.rs",
      "line": 415,
      "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-transport/tests/h2_refused_resend.rs",
+     "line": 136,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-transport/tests/h2_refused_resend.rs",
+     "line": 216,
+     "kind": "integration_test"
+    },
+    {
+     "path": "crates/anvil-transport/tests/h2_refused_resend.rs",
+     "line": 240,
+     "kind": "integration_test"
     }
    ],
    "lab": null,

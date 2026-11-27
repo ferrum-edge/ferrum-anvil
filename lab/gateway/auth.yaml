@@ -22,9 +22,9 @@
 version: "1"
 
 resource_counts:
-  proxies: 22
+  proxies: 24
   consumers: 2
-  plugin_configs: 24
+  plugin_configs: 26
   upstreams: 0
 
 proxies:
@@ -86,6 +86,28 @@ proxies:
     pool_enable_http2: false
     plugins:
       - plugin_config_id: e21-jwt-query
+
+  # The same refusal from jwks_auth and oauth2_introspection (each reads `from_params: [token]`),
+  # whose rejection branches are their own: each is exercised, not assumed identical.
+  - id: e21-jwks-query
+    listen_path: /auth/e21-jwks-query
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: e21-jwks-query
+
+  - id: e21-introspect-query
+    listen_path: /auth/e21-introspect-query
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: e21-introspect-query
 
   # AUTH-008/009/010: JWKS-validated ES256 tokens from the lab identity provider.
   - id: auth008-jwks
@@ -365,6 +387,35 @@ plugin_configs:
       token_lookup: "query:token"
       consumer_claim_field: anvil_consumer
       require_exp: true
+
+  - id: e21-jwks-query
+    plugin_name: jwks_auth
+    scope: proxy
+    proxy_id: e21-jwks-query
+    enabled: true
+    config:
+      providers:
+        - jwks_uri: "http://127.0.0.1:19102/.well-known/jwks.json"
+          issuer: "https://idp.anvil-lab.invalid"
+          audiences: [anvil-lab-api]
+          from_params: [token]
+
+  - id: e21-introspect-query
+    plugin_name: oauth2_introspection
+    scope: proxy
+    proxy_id: e21-introspect-query
+    enabled: true
+    config:
+      providers:
+        - introspection_endpoint: "http://127.0.0.1:19102/introspect"
+          issuer: "https://idp.anvil-lab.invalid"
+          audiences: [anvil-lab-api]
+          client_auth:
+            method: none
+          positive_cache_ttl_secs: 0
+          negative_cache_ttl_secs: 0
+          request_timeout_ms: 2000
+          from_params: [token]
 
   - id: auth008-jwks
     plugin_name: jwks_auth

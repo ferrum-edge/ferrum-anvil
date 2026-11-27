@@ -487,38 +487,64 @@ fn auth007(env: &Env) -> Fut<'_> {
     })
 }
 
-/// EXT-E21-QUERY-ALIAS: jwt_auth with `token_lookup: query:token`; the token
-/// name behind a `;` sub-parameter is refused with 401 "Ambiguous token query
-/// parameter" (v0.9.21, #7464). jwks_auth and oauth2_introspection send the
-/// identical signal, so a trusted diagnosis names all three as candidates.
+/// A `;`-aliased query token (`?carrier=x;token=abc`) on `route`, whose token
+/// plugin reads the `token` query parameter: 401 "Ambiguous token query
+/// parameter" with `Bearer error="invalid_request"` (v0.9.21, #7464,
+/// GHSA-c259-vchc-3vgr), the backend untouched. jwt_auth, jwks_auth and
+/// oauth2_introspection each have their own rejection branch, so each is
+/// exercised; their signals are identical, so a trusted diagnosis names all
+/// three as candidates. Recovery: `?token=<recovery>` reaches the backend.
+async fn query_alias(env: &Env, route: &str, recovery: String) -> Outcome {
+    let mut c = Checks::new();
+    let before = env.fx.echo.log.count_requests();
+    let path = format!("{route}/echo?carrier=x;token=abc");
+    let o = go(env, &ctx(env, "GET", &path, AuthConfig::None)).await;
+    signal(&mut c, &o, 401, "Ambiguous token query parameter");
+    // The record redacts WWW-Authenticate; read the gateway's own header.
+    challenge_is(&mut c, raw_challenge(&path, &[]).await, "error=\"invalid_request\"");
+    backend_untouched(&mut c, env, before);
+    gateway_outcome(&mut c, env, &o);
+    if env.trusted {
+        let ids = crate::fixtures_policy::catalog_ids(&o);
+        let want = [
+            "plugin.jwt_auth.ambiguous_query_token",
+            "plugin.jwks_auth.ambiguous_query_token",
+            "plugin.oauth2_introspection.ambiguous_query_token",
+        ];
+        c.add(
+            CheckKind::Diagnosis,
+            "the three token plugins' shared outcome is named",
+            want.iter().all(|w| ids.iter().any(|i| i == w)),
+            format!("{ids:?}"),
+        );
+    }
+    let r = go(env, &ctx(env, "GET", &format!("{route}/echo?token={recovery}"), AuthConfig::None)).await;
+    c.success(CheckKind::Recovery, &r);
+    Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+}
+
+/// EXT-E21-QUERY-ALIAS: jwt_auth (`token_lookup: query:token`).
 fn e21_query_alias(env: &Env) -> Fut<'_> {
     Box::pin(async move {
-        let mut c = Checks::new();
-        let before = env.fx.echo.log.count_requests();
-        let o = go(env, &ctx(env, "GET", "/auth/e21-jwt-query/echo?carrier=x;token=abc", AuthConfig::None)).await;
-        signal(&mut c, &o, 401, "Ambiguous token query parameter");
-        // The record redacts WWW-Authenticate; read the gateway's own header.
-        challenge_is(&mut c, raw_challenge("/auth/e21-jwt-query/echo?carrier=x;token=abc", &[]).await, "error=\"invalid_request\"");
-        backend_untouched(&mut c, env, before);
-        gateway_outcome(&mut c, env, &o);
-        if env.trusted {
-            let ids = crate::fixtures_policy::catalog_ids(&o);
-            let want = [
-                "plugin.jwt_auth.ambiguous_query_token",
-                "plugin.jwks_auth.ambiguous_query_token",
-                "plugin.oauth2_introspection.ambiguous_query_token",
-            ];
-            c.add(
-                CheckKind::Diagnosis,
-                "the three token plugins' shared outcome is named",
-                want.iter().all(|w| ids.iter().any(|i| i == w)),
-                format!("{ids:?}"),
-            );
-        }
         let token = env.fx.hs256(&env.fx.secrets.alice_jwt_secret, 300, None, serde_json::json!({"anvil_consumer": "alice"}));
-        let r = go(env, &ctx(env, "GET", &format!("/auth/e21-jwt-query/echo?token={token}"), AuthConfig::None)).await;
-        c.success(CheckKind::Recovery, &r);
-        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+        query_alias(env, "/auth/e21-jwt-query", token).await
+    })
+}
+
+/// EXT-E21-QUERY-ALIAS-JWKS: jwks_auth (`from_params: [token]`).
+fn e21_query_alias_jwks(env: &Env) -> Fut<'_> {
+    Box::pin(async move { query_alias(env, "/auth/e21-jwks-query", env.fx.good_token()).await })
+}
+
+/// EXT-E21-QUERY-ALIAS-INTROSPECT: oauth2_introspection (`from_params: [token]`).
+fn e21_query_alias_introspect(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let good = "idp-at-lab-registered-e21q";
+        env.fx.idp.register_token(
+            good,
+            serde_json::json!({"username": "alice", "sub": "alice", "iss": ISSUER, "aud": AUDIENCE, "token_type": "bearer"}),
+        );
+        query_alias(env, "/auth/e21-introspect-query", good.to_string()).await
     })
 }
 
@@ -1786,6 +1812,12 @@ pub fn all() -> Vec<Def> {
         Def { id: "AUTH-031", title: "SOAP SAML assertion: replay, audience, expiry, issuer and key trust", run: auth031 },
         Def { id: "AUTH-017", title: "OIDC browser session is not Anvil's session", run: auth017 },
         Def { id: "EXT-E21-QUERY-ALIAS", title: "jwt_auth refuses a ;-aliased query token (v0.9.21)", run: e21_query_alias },
+        Def { id: "EXT-E21-QUERY-ALIAS-JWKS", title: "jwks_auth refuses a ;-aliased query token (v0.9.21)", run: e21_query_alias_jwks },
+        Def {
+            id: "EXT-E21-QUERY-ALIAS-INTROSPECT",
+            title: "oauth2_introspection refuses a ;-aliased query token (v0.9.21)",
+            run: e21_query_alias_introspect,
+        },
         Def {
             id: "AUTH-017.lookalike",
             title: "Ordinary redirect and plain bearer challenge are not browser logins",

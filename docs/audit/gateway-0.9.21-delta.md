@@ -330,7 +330,8 @@ share one signal and name each other. `key_auth` keeps its own body.
   - `response_transformer` replaces such a backend response with 502
     (`src/plugins/response_transformer.rs:265`, `finalize_client_visible_response_body` at `:1580`).
   - The 502's `backend_error` token follows the backend-response builder's ≥500 mapping, as for the
-    other response-side replacements. It was not lab-observed.
+    other response-side replacements. Lab-observed on v0.9.21 (EXT-E21-RESP-DUP; see
+    [Qualification status](#qualification-status)).
   - Two new outcomes. `plugin.request_transformer.no_runtime_failure` is narrowed: the plugin now
     has a runtime refusal.
 - **`body_validator` (GHSA-84xq-rr63-39pw).** The response-side details no longer describe the
@@ -456,27 +457,30 @@ systems.
 
 ### New outcomes exercised live (EXT-E21)
 
-The adoption left the new v0.9.21 outcomes source-audited only. Twelve Lab extension scenarios
+The adoption left the new v0.9.21 outcomes source-audited only. Fourteen Lab extension scenarios
 (`EXT-E21-*`, branch `claude/v1-no-loose-ends`) now exercise each of them, and the two signals the
 adoption could not settle from source, against the pinned gateway. `fixture_ids` lists
 failure-matrix seeds only, so it stays empty for these outcomes. Evidence: hosted all-profile run
 [46069656125](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/46069656125), head `59859d06`:
-Ubuntu 26.04 **578 passed / 0 failed / 21 skipped**, macOS 15 **582 / 0 / 19** (24 more passes than run 45974458935: each new scenario passes trusted and untrusted).
+Ubuntu 26.04 **578 passed / 0 failed / 21 skipped**, macOS 15 **582 / 0 / 19** (24 more passes than
+run 45974458935: each of the twelve scenarios then passes trusted and untrusted). After review, the
+gRPC-Web renderings of the admission and breaker refusals, the jwks_auth and oauth2_introspection
+query-token routes, and stricter body and source checks were added: run RUN_REVIEW (below).
 
 | Outcome or signal | Scenario | What the real gateway sent |
 |---|---|---|
-| `plugin.jwt_auth.ambiguous_query_token` (and the identical `jwks_auth` / `oauth2_introspection` signals, named together as candidates) | EXT-E21-QUERY-ALIAS | 401 `Ambiguous token query parameter`, `Bearer error="invalid_request"` |
+| `plugin.jwt_auth.ambiguous_query_token`, `plugin.jwks_auth.ambiguous_query_token`, `plugin.oauth2_introspection.ambiguous_query_token` | EXT-E21-QUERY-ALIAS, -JWKS, -INTROSPECT (one route per plugin) | each: 401 `Ambiguous token query parameter`, `Bearer error="invalid_request"`, backend untouched; a trusted diagnosis names all three as candidates |
 | `plugin.request_transformer.ambiguous_json_body` | EXT-E21-REQ-DUP | 400 with the documented error, no `X-Gateway-Error`, backend untouched |
 | `plugin.response_transformer.ambiguous_json_body` | EXT-E21-RESP-DUP | 502 with `X-Gateway-Error: backend_error` after the backend answered: the stamped token is confirmed live |
-| `gateway.routing.grpc_web_untranslated_on_assertion_route` | EXT-E21-GRPCWEB-ASSERT | HTTP 200 trailer frame, grpc-status 13, grpc-message from the JSON error: the framed shape is confirmed for a gRPC-Web client |
+| `gateway.routing.grpc_web_untranslated_on_assertion_route` | EXT-E21-GRPCWEB-ASSERT | HTTP 200 with the status in the body trailer frame (status source checked), grpc-status 13, grpc-message from the JSON error |
 | `gateway.routing.grpc_web_relabelled_on_assertion_route` | EXT-E21-GRPCWEB-RELABEL | the JSON 415 for a plain request relabelled by a transformer (a list-valued content-type that publication admits) |
 | `plugin.mcp_gateway.openapi_bridge_outside_route` | EXT-E21-MCP-BRIDGE | JSON-RPC -32603 for a bridge served from a regex route; backend never called |
-| `gateway.routing.protocol_not_permitted.grpc` | EXT-E21-GRPC-ADMISSION | Trailers-Only grpc-status 7, `Request protocol not permitted on this route` |
-| `gateway.admission.circuit_open.grpc` | EXT-E21-GRPC-BREAKER | Trailers-Only grpc-status 14 with the breaker message; operator log `circuit_breaker_open` |
+| `gateway.routing.protocol_not_permitted.grpc` | EXT-E21-GRPC-ADMISSION | grpc-status 7, `Request protocol not permitted on this route`: native gRPC Trailers-Only, and gRPC-Web over HTTP/1.1 in a body trailer frame (#7155) |
+| `gateway.admission.circuit_open.grpc` | EXT-E21-GRPC-BREAKER | grpc-status 14 with the breaker message and `X-Gateway-Error: circuit_breaker_open`: native Trailers-Only, and gRPC-Web in a body trailer frame (#7155); operator log `rejection_phase` `circuit_breaker_open` |
 | `plugin.ai_prompt_shield.uninspectable` (duplicate members) | EXT-E21-SHIELD-DUP | 400 with the duplicate-member message |
 | `plugin.body_validator.response_validation_failed` (fixed detail) | EXT-E21-BODYVAL-RESP | 502 `backend_error` with `Response body is missing a required field` |
 | `frontend_parse.protocol_header_violation` (Content-Type singleton) | EXT-E21-CT-LIST | 400 `Content-Type header contains more than one media type` |
-| WebSocket backend refusals relayed (#7414) | EXT-E21-WS-RELAY | the backend's 503 relayed with no `X-Gateway-Error`; a trusted diagnosis keeps any gateway outcome at unknown confidence |
+| WebSocket backend refusals relayed (#7414) | EXT-E21-WS-RELAY | the backend's 503 and its body relayed byte for byte with no `X-Gateway-Error`; a trusted diagnosis matches `protocol.ws.backend_connection_limit` only as a candidate (unknown confidence, relayed-backend alternative) |
 
 The real gateway corrected two Lab assumptions and one catalog note:
 

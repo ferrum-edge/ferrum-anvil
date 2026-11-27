@@ -184,6 +184,17 @@ async fn resend_takes_a_new_connection(t: &HttpTransport, post: &HttpPlan, kind:
     assert_ne!(conn_id(again), pooled);
 }
 
+/// Ground truth: whether the origin held `post` on a stream above its
+/// `GOAWAY`'s last-stream-id (the fixture names each held request by its
+/// body, unique per `POST`).
+fn above_last_stream(o: &RefusingOrigin, post: &HttpPlan) -> bool {
+    let last = o.goaway_last_stream().expect("the origin sent its GOAWAY");
+    let held = o.held();
+    assert_eq!(held.len(), IN_FLIGHT, "{held:?}");
+    let h = held.iter().find(|h| h.body == post.body.as_ref()).unwrap_or_else(|| panic!("the origin held no {:?}: {held:?}", post.body));
+    h.stream > last
+}
+
 /// The one `POST` above the `GOAWAY`'s last-stream-id: typed as a graceful
 /// `GOAWAY`, not processed, and left to the caller to send again.
 fn assert_unprocessed(e: &HttpExecution) {
@@ -204,10 +215,12 @@ fn assert_unprocessed(e: &HttpExecution) {
 #[tokio::test]
 async fn proto_004_a_graceful_goaway_amid_streams_fails_only_the_streams_above_its_last_stream_id() {
     let (o, t, pooled, executions) = posts_in_flight_at_goaway(Refusal::GoAwayAmidStreams).await;
-    let (answered, refused): (Vec<_>, Vec<_>) = executions.iter().partition(|(_, e)| e.outputs[0].observation.response_status == Some(200));
-    assert_eq!(answered.len(), IN_FLIGHT - 1, "the streams at or below the last-stream-id were processed");
+    // Split by the origin's own record of which stream carried which POST.
+    let (answered, refused): (Vec<_>, Vec<_>) = executions.iter().partition(|(p, _)| !above_last_stream(&o, p));
+    assert_eq!(answered.len(), IN_FLIGHT - 1, "two streams at or below the last-stream-id");
     for (_, e) in &answered {
         let a = &e.outputs[0];
+        assert_eq!(a.observation.response_status, Some(200), "a POST the origin processed was answered");
         assert!(a.observation.failure.is_none(), "{:?}", a.observation.failure);
         assert_eq!(a.observation.dispatch, DispatchState::Sent);
         assert_eq!(e.resend_on_new_connection, None);
@@ -226,13 +239,14 @@ async fn proto_004_a_graceful_goaway_amid_streams_fails_only_the_streams_above_i
 #[tokio::test]
 async fn proto_004_a_goaway_amid_streams_then_close_keeps_the_streams_at_or_below_its_last_stream_id_uncertain() {
     let (o, t, pooled, executions) = posts_in_flight_at_goaway(Refusal::GoAwayAmidStreamsThenClose).await;
-    let (refused, uncertain): (Vec<_>, Vec<_>) =
-        executions.iter().partition(|(_, e)| e.outputs[0].observation.dispatch == DispatchState::NotDispatched);
-    assert_eq!(refused.len(), 1, "only the stream above the last-stream-id is unprocessed: {:?}", outcomes(&executions));
+    // Split by the origin's own record of which stream carried which POST.
+    let (refused, uncertain): (Vec<_>, Vec<_>) = executions.iter().partition(|(p, _)| above_last_stream(&o, p));
+    assert_eq!(refused.len(), 1, "one stream above the last-stream-id: {:?}", outcomes(&executions));
     assert_eq!(uncertain.len(), IN_FLIGHT - 1);
     for (_, e) in &uncertain {
         let a = &e.outputs[0];
         assert!(a.response.is_none());
+        assert_ne!(a.observation.dispatch, DispatchState::NotDispatched, "a POST the origin may have processed is not called unprocessed");
         let f = a.observation.failure.as_ref().expect("the close failed this POST");
         // The close after the GOAWAY cuts these streams short: an I/O end,
         // never the GOAWAY's own error (which would call them unprocessed).
