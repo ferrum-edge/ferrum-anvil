@@ -51,6 +51,7 @@ describe("REL-003: after the refusals, the relaunched bundle is unchanged and a 
     this.timeout(16 * 60_000);
     const server = await startUpdateServer();
     if (process.platform === "win32") {
+      let started = false;
       try {
         const profileBefore = contents(required("ANVIL_DATA_DIR"), notShm);
         server.offer(fixture("update.sig").toString("utf8").trim(), fixture("update.bin"));
@@ -60,6 +61,7 @@ describe("REL-003: after the refusals, the relaunched bundle is unchanged and a 
           const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
           void internals.invoke("update_install", { version: v }).catch(() => {});
         }, OFFERED);
+        started = true;
         await until("the update to be downloaded", () => server.requests.includes("/update"), 120_000);
         await until(`the installed executable to report ${OFFERED}`, () => installedExeVersion() === OFFERED, 300_000);
         await until("the update installer to finish", () => runningInstallers().length === 0, 300_000);
@@ -71,14 +73,18 @@ describe("REL-003: after the refusals, the relaunched bundle is unchanged and a 
         await until("the restarted app to stop", () => runningInstalledApps().length === 0, 60_000);
         // The install changed no profile file.
         expect(contents(required("ANVIL_DATA_DIR"), notShm)).toEqual(profileBefore);
-        // The update ended the app this session drove, as designed: nothing
-        // answers its WebDriver session any more. Forget the session so the
-        // runner does not try to delete it (wdio-runner endSession skips a
-        // browser without a sessionId); every other test keeps the ordinary
-        // teardown.
-        (browser as unknown as { sessionId?: string }).sessionId = undefined;
       } finally {
         await server.close();
+        if (started) {
+          // Once update_install was started, the updater ends the app this
+          // session drove (by design), whatever the checks above found:
+          // nothing answers its WebDriver session any more. Forget the session
+          // so the runner does not try to delete it (wdio-runner endSession
+          // skips a browser without a sessionId) and a failed check is
+          // reported as itself. Every other test keeps the ordinary teardown.
+          stopInstalledApps();
+          (browser as unknown as { sessionId?: string }).sessionId = undefined;
+        }
       }
       return;
     }
