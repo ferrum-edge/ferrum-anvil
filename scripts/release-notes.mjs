@@ -171,6 +171,31 @@ export function checkEvidence(evidence, version) {
   if (evidence.signing !== expected) {
     throw new Error("release evidence signing and platform_signing disagree");
   }
+  // Version 2: the summary must be the one its own targets give, and only
+  // Linux targets may have no platform signing.
+  if (evidence.version >= 2) {
+    const targets = evidence.targets;
+    if (
+      !Array.isArray(targets) ||
+      targets.length === 0 ||
+      targets.some(
+        (t) =>
+          !t ||
+          typeof t !== "object" ||
+          !Object.hasOwn(PLATFORM_OF_OS, t.os) ||
+          typeof t.signed !== "boolean" ||
+          t.signing_applicable !== (t.os !== "Linux") ||
+          (t.signed && !t.signing_applicable),
+      )
+    ) {
+      throw new Error("release evidence targets have an invalid signing record");
+    }
+    const summary = signingSummary(targets);
+    const same = (a, b) => JSON.stringify(Object.entries(a).sort()) === JSON.stringify(Object.entries(b).sort());
+    if (summary.signed !== evidence.signed || summary.signing !== evidence.signing || !same(summary.platform_signing, platforms)) {
+      throw new Error("release evidence platform_signing disagrees with its targets");
+    }
+  }
   const updater = evidence.updater;
   if (!updater || typeof updater !== "object" || Array.isArray(updater)) {
     throw new Error("release evidence updater must be an object");

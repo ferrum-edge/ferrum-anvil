@@ -83,7 +83,24 @@ Compatibility release: Anvil adopts a gateway.
 - No lead paragraph.
 `;
 
+// Version 2 targets consistent with a platform_signing summary: one target per
+// platform (two for "partial", one signed and one not).
+const OS_OF = { macos: "macOS", windows: "Windows", linux: "Linux" };
+function targetsFor(platforms) {
+  return Object.entries(platforms ?? {}).flatMap(([p, status]) => {
+    const t = (signed) => ({ os: OS_OF[p] ?? p, signed, signing_applicable: p !== "linux" });
+    if (status === "partial") return [t(true), t(false)];
+    return [t(status === "signed")];
+  });
+}
+
 function evidence(overrides = {}) {
+  const e = baseEvidence(overrides);
+  if (!("targets" in overrides)) e.targets = targetsFor(e.platform_signing);
+  return e;
+}
+
+function baseEvidence(overrides = {}) {
   return {
     format: "anvil-release-evidence",
     version: 2,
@@ -287,6 +304,13 @@ test("refuses invalid evidence", () => {
     [evidence({ platform_signing: {} }), /platform_signing has an invalid shape/],
     [evidence({ platform_signing: { ios: "unsigned" } }), /platform_signing has an invalid shape/],
     [evidence({ platform_signing: { macos: "maybe" } }), /platform_signing has an invalid shape/],
+    // Version 2 summaries must match their own targets (F5).
+    [evidence({ signed: true, signing: SIGNED, platform_signing: SIGNED_PLATFORMS, targets: targetsFor({ macos: "signed", windows: "unsigned", linux: "not applicable" }) }), /disagrees with its targets/],
+    [evidence({ signed: true, signing: SIGNED, platform_signing: { macos: "signed", windows: "signed" }, targets: targetsFor({ macos: "signed" }) }), /disagrees with its targets/],
+    [evidence({ targets: [] }), /invalid signing record/],
+    [evidence({ targets: undefined }), /invalid signing record/],
+    [evidence({ targets: [{ os: "Linux", signed: false, signing_applicable: true }] }), /invalid signing record/],
+    [evidence({ targets: [{ os: "Windows", signed: false, signing_applicable: false }] }), /invalid signing record/],
     [evidence({ updater: { signed: true, key_id: null } }), /updater has an invalid shape/],
     [evidence({ updater: { signed: false, key_id: "`) [x](y" } }), /updater has an invalid shape/],
     [evidence({ source: { repository: "a/b c", commit: COMMIT } }), /source\.repository/],
@@ -431,4 +455,23 @@ test("signing-route.sh: half-configured routes fail, precedence applies only to 
   assert.deepEqual(run([...mac, ...api, ...ats], "Windows").outputs, { route: "artifact-signing-oidc", macos: "none", windows: "artifact-signing-oidc" });
   // A dry run reads nothing.
   assert.deepEqual(run([...mac, ...api, ...ats], "macOS", "").outputs, { route: "none", macos: "none", windows: "none" });
+});
+
+test("only bundle-windows can request an OIDC token, and it runs no release check", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
+  // Top-level jobs, each with its own text.
+  const jobs = Object.fromEntries(
+    workflow
+      .split(/\n(?=  [a-z][a-z0-9-]*:\n)/)
+      .slice(1)
+      .map((block) => [block.match(/^  ([a-z][a-z0-9-]*):/)[1], block]),
+  );
+  const withToken = Object.entries(jobs).filter(([, text]) => /^\s+id-token: write/m.test(text)).map(([name]) => name);
+  assert.deepEqual(withToken, ["bundle-windows"]);
+  assert.ok(!jobs["bundle-windows"].includes("check-artifacts.sh"), "the release check (runtime probe) is not in the job with OIDC");
+  assert.ok(jobs["check-windows"].includes("bash scripts/release/check-artifacts.sh"));
+  assert.ok(!/environment:|secrets\./.test(jobs["check-windows"]), "check-windows has no environment and no secret");
+  assert.match(jobs["bundle-windows"], /Binaries match the build job's recorded digests/);
+  assert.match(jobs.publish, /needs: \[preflight, build, check-windows\]/);
+  assert.match(jobs.build, /name: compiled-\$\{\{ matrix\.target \}\}[\s\S]*?retention-days: 30/);
 });
