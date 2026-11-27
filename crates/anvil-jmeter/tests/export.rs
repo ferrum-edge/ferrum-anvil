@@ -4,13 +4,13 @@
 
 mod common;
 
-use anvil_domain::assertions::{Assertion, AssertionKind, Comparison, Extraction, ExtractionSource};
+use anvil_domain::assertions::{AssertionKind, Comparison, Extraction, ExtractionSource};
 use anvil_domain::auth::{AuthConfig, KeyLocation};
 use anvil_domain::load::{AbortRule, Stage, WeightedStep, Workload};
 use anvil_domain::request::{Body, KeyValue, Protocol, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::{HttpVersionPolicy, RedirectPolicy, SettingsOverrides};
-use anvil_jmeter::{ExportOptions, ExportRefused, export};
+use anvil_jmeter::{ExportOptions, ExportRefused};
 use common::*;
 
 fn refused(r: Result<anvil_jmeter::Export, ExportRefused>) -> ExportRefused {

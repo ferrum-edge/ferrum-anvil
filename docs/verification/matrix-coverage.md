@@ -8,9 +8,9 @@ A skip or block is never counted as a pass.
 | Status | Cases |
 |---|---|
 | ✅ live (real gateway) | 100 |
-| ✅ automated test | 75 |
+| ✅ automated test | 76 |
 | ✅ executed check script | 4 |
-| ➖ not applicable — see reason | 2 |
+| ➖ not applicable — see reason | 1 |
 | ◐ partial — see reason | 1 |
 | **Total** | **182** |
 
@@ -229,7 +229,7 @@ A skip or block is never counted as a pass.
 | LOAD-009 | Cancel and worker crash | ✅ automated test | `crates/anvil-load/tests/load_scenarios.rs` |
 | LOAD-010 | Bounded error sampling | ✅ automated test | `crates/anvil-load/src/metrics.rs`, `crates/anvil-load/tests/load_scenarios.rs` |
 | LOAD-011 | Report export/reimport | ✅ automated test | `crates/anvil-load/src/html.rs`, `crates/anvil-load/src/report.rs`, `crates/anvil-load/tests/load_scenarios.rs` |
-| LOAD-012 | JMeter parity gate | ➖ not applicable — see reason — The optional JMeter adapter is not built in this release (plan 14.3: only after native load works). Native load covers the required workloads; see docs/load.md. | — |
+| LOAD-012 | JMeter parity gate | ✅ automated test — The Apache JMeter adapter (crates/anvil-jmeter, docs/load.md 'JMeter adapter') exports a declared subset of HTTP load plans as JMeter test plans and imports CSV and XML JTL results. A request that Anvil sends with certificate and host-name verification is refused (JMeter's HTTP samplers accept any certificate), as are HTTP/2 and HTTP/3, other protocol units and every setting JMeter cannot reproduce; the rest of the differences are listed in each export report. Tests: crates/anvil-jmeter/tests/export.rs and tests/jtl.rs (CI), crates/anvil-cli/tests/cli_jmeter.rs, and the hosted round trip with Apache JMeter 5.6.3 (.github/workflows/jmeter.yml, tests/jmeter_roundtrip.rs): JMeter runs the exported plans against the loopback fixture server, its results import with the fixture's request counts and the native engine's unit counts, it completes requests against an untrusted certificate (the evidence for refusing strict TLS) and a plan without its secret properties sends nothing. | `apps/desktop/src/LoadView.test.tsx`, `crates/anvil-app/tests/file_grants.rs`, `crates/anvil-cli/tests/cli_jmeter.rs` |
 | LOAD-013 | Datagram accounting | ✅ live (real gateway) | lab `results/lab/20261104T100546Z-streams` — passed LOAD-013-grpc, LOAD-013-udp, LOAD-013-ws; `apps/desktop/src/LoadView.test.tsx`, `crates/anvil-app/tests/specs_load.rs`, `crates/anvil-cli/tests/cli_load.rs` |
 | LOAD-014 | Warmup and run comparison | ✅ automated test | `crates/anvil-load/src/compare.rs` |
 

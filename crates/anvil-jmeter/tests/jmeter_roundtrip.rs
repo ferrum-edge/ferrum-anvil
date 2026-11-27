@@ -73,7 +73,7 @@ async fn run_jmeter(out: &anvil_jmeter::Export, format: &str, secrets: bool) -> 
     }
     let output = cmd.output().await.expect("JMeter starts");
     let log = std::fs::read_to_string(dir.path().join("jmeter.log")).unwrap_or_default();
-    let tail = |s: &str| s.chars().rev().take(6000).collect::<Vec<_>>().into_iter().rev().collect::<String>();
+    let tail = |s: &str| s[s.char_indices().rev().nth(5999).map_or(0, |(i, _)| i)..].to_string();
     assert!(
         output.status.success() && !log.contains("Error in NonGUIDriver"),
         "JMeter failed ({}):\nstdout: {}\nstderr: {}\nlog: {}",
