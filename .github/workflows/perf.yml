@@ -1,0 +1,154 @@
+# Desktop performance: cold start and webview helper memory of the
+# release-profile app (default features: no e2e feature, no test hooks) on
+# macOS, Linux and Windows. See docs/performance.md.
+#
+# build    compiles the app once per OS (macOS as the .app bundle)
+# measure  two independent runners per OS each start it six times with a
+#          fresh data directory (scripts/perf/measure_desktop.py): time until
+#          the UI's first backend request, then the resident memory of the app
+#          and of its webview helper processes after 10 s at the first-run
+#          screen
+# summary  one table over all jobs, including the spread across runners
+#
+# The numbers are a run artifact (perf-summary) and the run summary. Nothing
+# here gates a merge or a release: the runners are shared VMs, and the spread
+# the summary shows is what a budget would have to absorb.
+name: Desktop performance
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/perf.yml"
+      - "scripts/perf/**"
+  schedule:
+    - cron: "17 5 * * 1" # weekly, Monday
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: Build · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-26.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: perf
+      - name: Build the release-profile app (default features)
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            npx tauri build --ci --bundles app
+          else
+            npx tauri build --ci --no-bundle
+          fi
+      - name: Stage the app
+        shell: bash
+        run: |
+          mkdir -p perf-app
+          case "$RUNNER_OS" in
+            macOS) ditto -c -k --keepParent "target/release/bundle/macos/Ferrum Anvil.app" perf-app/app.zip ;;
+            Windows) cp target/release/anvil-desktop.exe perf-app/ ;;
+            Linux) cp target/release/anvil-desktop perf-app/ ;;
+          esac
+          ls -la perf-app
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-app-${{ runner.os }}
+          path: perf-app/
+          if-no-files-found: error
+          retention-days: 7
+
+  measure:
+    name: Measure · ${{ matrix.os }} · runner ${{ matrix.runner }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-26.04, windows-2025]
+        runner: [1, 2]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: perf-app-${{ runner.os }}
+          path: perf-app/
+      - name: WebKitGTK runtime and Xvfb (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          # The same packages the build installs (.github/actions/setup); their
+          # -dev names are stable across Ubuntu releases and pull in the runtime libraries.
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev xvfb xauth
+      - name: Measure
+        shell: bash
+        env:
+          LABEL: runner ${{ matrix.runner }}
+        run: |
+          out="perf-$RUNNER_OS-${{ matrix.runner }}.json"
+          case "$RUNNER_OS" in
+            macOS)
+              ditto -x -k perf-app/app.zip perf-app/
+              python3 -I scripts/perf/measure_desktop.py --app "perf-app/Ferrum Anvil.app/Contents/MacOS/anvil-desktop" --runs 6 --idle 10 --label "$LABEL" --out "$out" ;;
+            Linux)
+              chmod +x perf-app/anvil-desktop
+              xvfb-run -a python3 -I scripts/perf/measure_desktop.py --app perf-app/anvil-desktop --runs 6 --idle 10 --label "$LABEL" --out "$out" ;;
+            Windows)
+              python -I scripts/perf/measure_desktop.py --app perf-app/anvil-desktop.exe --runs 6 --idle 10 --label "$LABEL" --out "$out" ;;
+          esac
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: perf-result-${{ runner.os }}-${{ matrix.runner }}
+          path: perf-*.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  summary:
+    name: Summary
+    needs: measure
+    if: always()
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: perf-result-*
+          path: results/
+          merge-multiple: true
+      - name: Summarize
+        run: |
+          shopt -s nullglob
+          files=(results/perf-*.json)
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::no measurement results"; exit 1; }
+          python3 -I scripts/perf/summarize.py "${files[@]}" | tee results/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: perf-summary
+          path: results/
+          retention-days: 90
