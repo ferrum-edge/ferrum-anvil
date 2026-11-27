@@ -65,7 +65,17 @@ use state::{DesktopState, LockReason};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{Emitter, Manager};
 
+/// When this process started running Anvil code: startup milestones in the
+/// log are measured from here.
+static STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Time since [`run`] began.
+pub(crate) fn since_start() -> Duration {
+    STARTED.get().map(Instant::elapsed).unwrap_or_default()
+}
+
 pub fn run() {
+    let _ = STARTED.set(Instant::now());
     anvil_transport::init();
     // Give Tauri a runtime whose workers have larger stacks than the default.
     // The runtime must outlive the app, so it is intentionally leaked.
