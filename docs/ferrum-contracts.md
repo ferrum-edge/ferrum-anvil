@@ -132,6 +132,40 @@ a lab run diagnoses with the audited catalog of its gateway's release, and
 5. Run the normal CI suite. Its pinned-contract checks must pass before
    merging the update.
 
+### Pending for the Edge 1.0.0 and `contracts-edge-1.0.0` adoption
+
+Edge `main` is prepared as 1.0.0 (`f1b4d3739d`, not published). Anvil still
+pins v0.9.21 and `contracts-edge-0.9.21`. The adoption PR, once both are
+published, follows the v0.9.21 adoption
+([audit](audit/gateway-0.9.21-delta.md)):
+
+- **Lab pin.** Add `lab/gateway/releases/v1.0.0.lock` and repin
+  `lab/gateway/RELEASE.lock` from the published asset digests. Retire or keep
+  v0.9.21. Update the `crates/anvil-lab/src/gateway.rs` supported-release and
+  ordering tests and the `lab.yml` comment.
+- **Lab profiles.** `lab/gateway/lint-profiles.rb` already leaves out the
+  passive health-check keys 1.0.0 removes (`gateway_error_codes`,
+  `split_external_local_origin_errors`). Every Lab profile and Admin body
+  (`cpdp-seed-*.json`, the `cpdp` tick route) was checked against the
+  `f1b4d3739d` `openapi.yaml` and uses only declared keys. Every key of the
+  native mesh documents was found in that commit's mesh config structs; that
+  check was by name only. Repeat both checks at the published tag.
+- **Catalog.** Derive `catalog/ferrum/ferrum-edge-1.0.0/outcomes.json` from
+  0.9.21 and set `DEFAULT_COMPATIBILITY_ID`. Embed the new catalog. In
+  `crates/anvil-diagnostics/src/ferrum.rs`,
+  `unknown_compatibility_ids_get_no_catalog_and_only_the_shared_vocabulary`
+  uses `ferrum-edge-1.0.0` as an unknown id; change that. Update the
+  per-release test lists, `Dialogs.tsx` `FERRUM_COMPATIBILITY`, e2e spec 06
+  and the `.gitleaks.toml` catalog allowlist path.
+- **Contracts.** Follow the bump steps above. Then update
+  `contracts_adoption.rs` (tag, commit, provenance, `PINNED_RELEASES`, file
+  list, fixture count) and the canonical fixture counts in
+  `diagnostic_import.rs`, `cmd_diagnostic_import.rs` and e2e spec 11.
+- **Docs and evidence.** Add a `docs/audit/gateway-1.0.0-delta.md` audit. Update
+  the README gateway and contracts lines and `docs/lab/`, `diagnostics.md`,
+  this page, ADR 0007, the matrix-status reasons and `completion-report.md`.
+  Dispatch the hosted Lab against the new pin.
+
 The pinned contract checks perform no network access; the downloaded files and
 hashes are committed with the change. Only the weekly Edge main check reads the
 two public repositories at their current `main` (see
