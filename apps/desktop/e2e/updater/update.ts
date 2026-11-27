@@ -222,10 +222,30 @@ export function stopInstalledApps(): void {
   }
 }
 
+/**
+ * Forget the WebDriver session of an app that has ended, so the runner's
+ * teardown (wdio-runner `endSession`, which skips a browser without a
+ * `sessionId`) does not try to delete a session nobody answers any more. The
+ * `browser` exported by `@wdio/globals` is a read-only proxy (it has no `set`
+ * trap): assigning through it lands on the proxy target and leaves the
+ * runner's instance untouched, so this clears the instance the runner
+ * registered itself.
+ */
+export function forgetEndedSession(): void {
+  const registered = (globalThis as unknown as { _wdioGlobals?: Map<string, { sessionId?: string }> })._wdioGlobals?.get("browser");
+  if (!registered) throw new Error("no WebdriverIO browser instance is registered");
+  registered.sessionId = undefined;
+}
+
 export async function until(what: string, check: () => boolean, timeoutMs: number): Promise<void> {
-  const end = Date.now() + timeoutMs;
-  while (Date.now() < end) {
-    if (check()) return;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (check()) {
+      // Progress goes to the worker's output as it happens, so a run whose
+      // reporter output is lost still shows how far it got.
+      console.log(`updater e2e: ${what} after ${Math.round((Date.now() - start) / 1000)} s`);
+      return;
+    }
     await new Promise((r) => setTimeout(r, 1000));
   }
   throw new Error(`timed out after ${timeoutMs / 1000} s waiting for ${what}`);
