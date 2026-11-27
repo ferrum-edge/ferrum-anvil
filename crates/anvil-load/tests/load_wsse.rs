@@ -96,6 +96,8 @@ async fn auth_029_load_sends_fresh_wsse_nonce_and_created_per_iteration() {
             password_type: WssePasswordType::PasswordDigest,
             timestamp_ttl_secs: Some(60),
             saml_assertion: None,
+            username_token: true,
+            signature: None,
         },
     };
     let mut ctx = ExecutionContext::standalone(spec);

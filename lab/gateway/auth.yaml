@@ -233,7 +233,7 @@ proxies:
     plugins:
       - plugin_config_id: auth029-soap-digest
 
-  # AUTH-030: X.509 XML signature over Body and Timestamp; trusts only the lab signer.
+  # AUTH-030: X.509 XML signature (Anvil-signed) over Body and Timestamp; trusts only the lab signer.
   - id: auth030-soap-x509
     listen_path: /soap/x509
     backend_scheme: http
@@ -245,7 +245,7 @@ proxies:
       - plugin_config_id: auth030-soap-x509
 
   # AUTH-031: signed SAML 2.0 bearer assertion from the lab IdP, alongside a
-  # PasswordDigest UsernameToken (Anvil's WS-Security header always carries one).
+  # PasswordDigest UsernameToken, which AUTH-031's WS-Security profile sends.
   - id: auth031-soap-saml
     listen_path: /soap/saml
     backend_scheme: http

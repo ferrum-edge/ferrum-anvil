@@ -7,6 +7,7 @@
 //! I/O except OAuth token acquisition through the [`oauth::TokenHttp`] trait,
 //! which the engine implements with the same instrumented transport.
 
+pub mod c14n;
 pub mod digest;
 pub mod dpop;
 pub mod hmac_sig;
@@ -14,9 +15,12 @@ pub mod jwt;
 pub mod jwt_svid;
 pub mod oauth;
 pub mod wsse;
+pub mod xmldsig;
 
 use anvil_domain::Timestamp;
-use anvil_domain::auth::{BodyDigestHeader, HmacAlgorithm, HmacProfile, JwtAlgorithm, JwtClaims, KeyLocation, WssePasswordType};
+use anvil_domain::auth::{
+    BodyDigestHeader, HmacAlgorithm, HmacProfile, JwtAlgorithm, JwtClaims, KeyLocation, WssePasswordType, XmlSignatureAlgorithm,
+};
 use anvil_domain::secret::REDACTED;
 use base64::Engine;
 use zeroize::Zeroizing;
@@ -103,11 +107,15 @@ pub enum ResolvedAuth {
         nonce: Option<String>,
     },
     Wsse {
+        /// Send a UsernameToken (with `username` and `password`).
+        username_token: bool,
         username: String,
         password: Zeroizing<String>,
         password_type: WssePasswordType,
         timestamp_ttl_secs: Option<u32>,
         saml_assertion: Option<Zeroizing<String>>,
+        /// Sign the Body, Timestamp and UsernameToken with an X.509 key.
+        signature: Option<WsseSigning>,
     },
     /// JWT-SVID: the engine fetches/reads and checks the token first and
     /// passes it here (empty until then).
@@ -123,6 +131,22 @@ impl std::fmt::Debug for ResolvedAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ResolvedAuth({})", self.label())
     }
+}
+
+/// The X.509 signing key of a WS-Security profile, resolved from the vault
+/// (a PKCS#12 bundle already converted to PEM by the engine).
+#[derive(Clone)]
+pub struct WsseSigning {
+    /// Certificate chain PEM (public).
+    pub cert_chain_pem: String,
+    /// Private key PEM (PKCS#8, PKCS#1 or SEC1).
+    pub private_key_pem: Zeroizing<String>,
+    pub algorithm: XmlSignatureAlgorithm,
+    /// InclusiveNamespaces PrefixList prefixes (`""` for `#default`).
+    pub inclusive_prefixes: Vec<String>,
+    /// Other secret values the key came from (a PKCS#12 bundle and its
+    /// password), registered for redaction with the key.
+    pub source_secrets: Vec<Zeroizing<String>>,
 }
 
 #[derive(Clone)]
@@ -196,7 +220,19 @@ impl ResolvedAuth {
             ResolvedAuth::OAuth2 { .. } => "oauth2(access token)".into(),
             ResolvedAuth::Hmac(p) => format!("hmac({:?}, user {})", p.profile, show(&p.username)),
             ResolvedAuth::Dpop { .. } => "dpop(bound access token)".into(),
-            ResolvedAuth::Wsse { username, password_type, .. } => format!("ws-security({password_type:?}, user {})", show(username)),
+            ResolvedAuth::Wsse { username_token, username, password_type, signature, .. } => {
+                let mut parts = Vec::new();
+                if *username_token {
+                    parts.push(format!("{password_type:?}, user {}", show(username)));
+                }
+                if signature.is_some() {
+                    parts.push("X.509 signature".to_string());
+                }
+                if parts.is_empty() {
+                    parts.push("no UsernameToken".to_string());
+                }
+                format!("ws-security({})", parts.join(", "))
+            }
             ResolvedAuth::JwtSvid { header_name, .. } => format!("jwt_svid({})", show(header_name)),
             ResolvedAuth::Multi(v) => format!("multi[{}]", v.iter().map(|a| a.label_hiding(hidden)).collect::<Vec<_>>().join(", ")),
         }
@@ -504,24 +540,37 @@ fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: Timestamp, out: &
             out.facts.push(("dpop.jkt".into(), proof.jkt));
             out.facts.push(("dpop.htu".into(), proof.htu));
         }
-        ResolvedAuth::Wsse { username, password, password_type, timestamp_ttl_secs, saml_assertion } => {
-            let inserted = wsse::insert_security_token(
-                &req.body,
-                username,
-                password,
-                *password_type,
-                *timestamp_ttl_secs,
-                saml_assertion.as_deref().map(|s| s.as_str()),
-                now,
-            )?;
-            out.secrets.push(password.to_string());
-            // A PasswordDigest and its Nonce authenticate on their own (they
-            // can be replayed where the service keeps no nonce cache).
-            out.secrets.extend(inserted.token_secrets);
-            // A PasswordText password is sent XML-escaped.
-            let escaped = wsse::xml_escape(password);
-            if escaped != password.as_str() {
-                out.secrets.push(escaped);
+        ResolvedAuth::Wsse { username_token, username, password, password_type, timestamp_ttl_secs, saml_assertion, signature } => {
+            let identity = match signature {
+                Some(s) => {
+                    // Registered before the key is read, so even a refusal
+                    // that echoed part of it could be redacted.
+                    out.secrets.push(s.private_key_pem.to_string());
+                    out.secrets.extend(s.source_secrets.iter().map(|v| v.to_string()));
+                    Some(xmldsig::SigningIdentity::from_pem(&s.cert_chain_pem, &s.private_key_pem, s.algorithm)?)
+                }
+                None => None,
+            };
+            let spec = wsse::HeaderSpec {
+                username_token: username_token.then_some((username.as_str(), password.as_str(), *password_type)),
+                timestamp_ttl_secs: *timestamp_ttl_secs,
+                saml: saml_assertion.as_deref().map(|s| s.as_str()),
+                signature: match (&identity, signature) {
+                    (Some(identity), Some(s)) => Some(wsse::SignatureSpec { identity, inclusive_prefixes: &s.inclusive_prefixes }),
+                    _ => None,
+                },
+            };
+            let inserted = wsse::insert(&req.body, &spec, now)?;
+            if *username_token {
+                out.secrets.push(password.to_string());
+                // A PasswordDigest and its Nonce authenticate on their own (they
+                // can be replayed where the service keeps no nonce cache).
+                out.secrets.extend(inserted.token_secrets);
+                // A PasswordText password is sent XML-escaped.
+                let escaped = wsse::xml_escape(password);
+                if escaped != password.as_str() {
+                    out.secrets.push(escaped);
+                }
             }
             // The SAML assertion is a credential too: it is embedded
             // verbatim, trimmed, so both forms are redacted.
@@ -535,6 +584,11 @@ fn apply_step(auth: &ResolvedAuth, req: &SignableRequest, now: Timestamp, out: &
                 if escaped != trimmed {
                     out.secrets.push(escaped);
                 }
+            }
+            if let Some(signed) = inserted.signed {
+                out.facts.push(("wsse.signature.algorithm".into(), signed.algorithm.into()));
+                out.facts.push(("wsse.signature.references".into(), signed.references.join(" ")));
+                out.facts.push(("wsse.signature.certificate_sha256".into(), signed.certificate_sha256));
             }
             out.body = Some(inserted.body);
         }
@@ -593,11 +647,13 @@ mod tests {
         let assertion = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">audit-only-assertion-3v9k</saml:Assertion>"#;
         let password = "audit-only-pw-<&>-5c1d";
         let auth = ResolvedAuth::Wsse {
+            username_token: true,
             username: "alice".into(),
             password: Zeroizing::new(password.into()),
             password_type: WssePasswordType::PasswordText,
             timestamp_ttl_secs: None,
             saml_assertion: Some(Zeroizing::new(format!("\n  {assertion}\n"))),
+            signature: None,
         };
         let envelope = r#"<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body/></soap:Envelope>"#;
         let req = SignableRequest {
@@ -628,11 +684,13 @@ mod tests {
         assert!(!applied.secrets.iter().fold(body, |b, s| b.replace(s.as_str(), "")).contains("audit-only"), "a secret is not registered");
         // Without an assertion, nothing more than the password forms.
         let auth = ResolvedAuth::Wsse {
+            username_token: true,
             username: "alice".into(),
             password: Zeroizing::new("plain-password".into()),
             password_type: WssePasswordType::PasswordDigest,
             timestamp_ttl_secs: Some(300),
             saml_assertion: None,
+            signature: None,
         };
         let applied = apply(&auth, &req, Timestamp::now()).unwrap();
         let body = String::from_utf8(applied.body.expect("a WS-Security body")).unwrap();

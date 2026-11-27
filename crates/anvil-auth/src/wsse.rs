@@ -1,13 +1,20 @@
-//! SOAP WS-Security UsernameToken (PasswordText / PasswordDigest) with an
-//! optional wsu:Timestamp, and verbatim embedding of a user-supplied SAML
-//! assertion (Anvil never mints assertions).
+//! SOAP WS-Security header: UsernameToken (PasswordText / PasswordDigest),
+//! an optional wsu:Timestamp, verbatim embedding of a user-supplied SAML
+//! assertion (Anvil never mints assertions), and an optional X.509 XML
+//! signature (XML-DSig) over the Body, the Timestamp and the UsernameToken.
 //!
 //! The header is inserted into the existing envelope by byte position (found
 //! with a DTD-free XML parser), so the rest of the user's envelope bytes are
-//! preserved exactly. X.509 XML signatures are not produced: they require an
-//! audited XML-DSig/C14N implementation, which is recorded as unavailable.
-
+//! preserved exactly; a signed Body only gains its `wsu:Id` (and the `wsu`
+//! declaration it needs) in its start tag. A signature follows the WS-Security
+//! X.509 Token Profile: the certificate is a `wsse:BinarySecurityToken`
+//! (X509v3) referenced from `ds:KeyInfo` by a `wsse:SecurityTokenReference`;
+//! `ds:SignedInfo` and every Reference use Exclusive XML Canonicalization
+//! ([`crate::c14n`]) and SHA-256 digests; the signature is RSA-SHA256 or
+//! ECDSA-P256-SHA256 ([`crate::xmldsig`]).
 use crate::AuthError;
+use crate::c14n;
+use crate::xmldsig::{self, SigningIdentity};
 use anvil_domain::auth::WssePasswordType;
 use anvil_domain::{SecondsFormat, TimeDelta, Timestamp};
 use anvil_xml_limits::{XmlLimits, check_xml_limits};
@@ -19,6 +26,8 @@ const WSU_NS: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-ws
 const PW_TEXT: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText";
 const PW_DIGEST: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest";
 const B64_ENC: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary";
+/// The X.509 Token Profile's single-certificate token type.
+pub const X509V3: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3";
 /// XML nodes one envelope may have, as a request body lint allows.
 const MAX_ENVELOPE_NODES: u32 = 1_000_000;
 /// What an envelope may contain before it is parsed (it can come from an
@@ -101,6 +110,51 @@ pub struct Inserted {
     /// secrets of the request. Empty for PasswordText, whose password is the
     /// secret. The `Created` time is not secret.
     pub token_secrets: Vec<String>,
+    /// What was signed, when the header carries an X.509 signature.
+    pub signed: Option<Signed>,
+}
+
+/// Shows sizes and the signature facts only: the body and the token secrets
+/// can hold credentials.
+impl std::fmt::Debug for Inserted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inserted")
+            .field("body_bytes", &self.body.len())
+            .field("token_secrets", &self.token_secrets.len())
+            .field("signed", &self.signed)
+            .finish()
+    }
+}
+
+/// Non-secret facts about an X.509 signature, for evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signed {
+    /// `RSA-SHA256` or `ECDSA-P256-SHA256`.
+    pub algorithm: &'static str,
+    /// The `wsu:Id` of each signed element, in document order.
+    pub references: Vec<String>,
+    /// Hex SHA-256 of the certificate sent in the BinarySecurityToken.
+    pub certificate_sha256: String,
+}
+
+/// What one Security header holds.
+pub struct HeaderSpec<'a> {
+    /// Username, password and password type; `None` sends no UsernameToken.
+    pub username_token: Option<(&'a str, &'a str, WssePasswordType)>,
+    /// Add a `wsu:Timestamp` with this lifetime in seconds.
+    pub timestamp_ttl_secs: Option<u32>,
+    /// A signed SAML assertion to embed verbatim.
+    pub saml: Option<&'a str>,
+    /// Sign the Body, the Timestamp and the UsernameToken.
+    pub signature: Option<SignatureSpec<'a>>,
+}
+
+/// The X.509 signature to add.
+pub struct SignatureSpec<'a> {
+    pub identity: &'a SigningIdentity,
+    /// InclusiveNamespaces PrefixList for every Reference's exclusive
+    /// canonicalization (`""` is the default namespace). Usually empty.
+    pub inclusive_prefixes: &'a [String],
 }
 
 /// Byte offset just past the `>` closing the start tag at the start of
@@ -145,29 +199,108 @@ pub fn insert_security_token(
     saml: Option<&str>,
     now: Timestamp,
 ) -> Result<Inserted, AuthError> {
-    let mut nonce = [0u8; 16];
-    rand::fill(&mut nonce);
-    let header_xml = security_header(username, password, ptype, ttl, saml, now, &nonce);
-    let token_secrets = match ptype {
-        WssePasswordType::PasswordText => vec![],
-        WssePasswordType::PasswordDigest => {
-            let created = now.to_rfc3339_opts(SecondsFormat::Secs, true);
-            vec![password_digest(&nonce, &created, password), base64::engine::general_purpose::STANDARD.encode(nonce)]
-        }
-    };
-    let text = std::str::from_utf8(body).map_err(|_| AuthError::Invalid("SOAP envelope is not UTF-8".into()))?;
+    let spec = HeaderSpec { username_token: Some((username, password, ptype)), timestamp_ttl_secs: ttl, saml, signature: None };
+    insert(body, &spec, now)
+}
+
+/// Parse an envelope (or a rewrite of one) within the XML limits. `what`
+/// starts each refusal (`SOAP envelope`, `WS-Security envelope`).
+fn parse_bounded<'t>(text: &'t str, what: &str, malformed: &str) -> Result<roxmltree::Document<'t>, AuthError> {
     // Counted in one pass before the parser does work that grows with the
     // square of the namespace declarations or of an element's attributes.
     // The scan stops at a DOCTYPE, which the parser then refuses.
-    check_xml_limits(text, &ENVELOPE_XML_LIMITS)
-        .map_err(|e| AuthError::Invalid(format!("SOAP envelope is too complex to parse safely: {e}")))?;
+    check_xml_limits(text, &ENVELOPE_XML_LIMITS).map_err(|e| AuthError::Invalid(format!("{what} is too complex to parse safely: {e}")))?;
     let opts = roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_ENVELOPE_NODES, ..Default::default() };
-    let doc = roxmltree::Document::parse_with_options(text, opts).map_err(|e| match e {
+    roxmltree::Document::parse_with_options(text, opts).map_err(|e| match e {
         roxmltree::Error::NodesLimitReached => {
-            AuthError::Invalid(format!("SOAP envelope is too complex to parse safely: more than {MAX_ENVELOPE_NODES} nodes"))
+            AuthError::Invalid(format!("{what} is too complex to parse safely: more than {MAX_ENVELOPE_NODES} nodes"))
         }
-        e => AuthError::Invalid(format!("SOAP envelope is not well-formed XML: {e}")),
-    })?;
+        e => AuthError::Invalid(format!("{malformed}: {e}")),
+    })
+}
+
+/// An element id no envelope already uses: `prefix-` and 16 random hex digits.
+fn fresh_id(prefix: &str) -> String {
+    let b: [u8; 8] = rand::random();
+    format!("{prefix}-{}", hex::encode(b))
+}
+
+/// The one element whose `wsu:Id` is `id`.
+fn by_wsu_id<'a, 'i>(doc: &'a roxmltree::Document<'i>, id: &str) -> Result<roxmltree::Node<'a, 'i>, AuthError> {
+    let mut found = doc.descendants().filter(|n| n.is_element() && n.attribute((WSU_NS, "Id")) == Some(id));
+    let node = found.next().ok_or_else(|| AuthError::Invalid(format!("no element has the wsu:Id '{id}' to sign")))?;
+    if found.next().is_some() {
+        return Err(AuthError::Invalid(format!(
+            "several elements of the envelope have the wsu:Id '{id}'; a signed id must be unique (XML signature wrapping)"
+        )));
+    }
+    Ok(node)
+}
+
+/// The canonicalizer the signer uses: the one place to change to swap in
+/// another implementation of [`c14n::Canonicalizer`].
+fn canonicalizer() -> &'static dyn c14n::Canonicalizer {
+    &c14n::Native
+}
+
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Insert a fresh Security header, as `spec` describes, into the SOAP
+/// envelope.
+pub fn insert(body: &[u8], spec: &HeaderSpec<'_>, now: Timestamp) -> Result<Inserted, AuthError> {
+    if spec.username_token.is_none() && spec.timestamp_ttl_secs.is_none() && spec.saml.is_none() && spec.signature.is_none() {
+        return Err(AuthError::Invalid(
+            "the WS-Security header would be empty: add a UsernameToken, a Timestamp, a SAML assertion or an X.509 signature".into(),
+        ));
+    }
+    let signing = spec.signature.as_ref();
+    // Unsigned headers keep their fixed ids; signed ones get fresh ids that
+    // cannot collide with ids already in the envelope.
+    let (ts_id, ut_id) = if signing.is_some() { (fresh_id("TS"), fresh_id("UT")) } else { ("TS-1".to_string(), "UT-1".to_string()) };
+    let created = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    // Fresh per send from the thread-local CSPRNG (OS-seeded ChaCha).
+    let nonce: [u8; 16] = rand::random();
+
+    // The Security header up to (not including) its end tag.
+    let mut security = format!(r#"<wsse:Security xmlns:wsse="{WSSE_NS}" xmlns:wsu="{WSU_NS}">"#);
+    if let Some(t) = spec.timestamp_ttl_secs {
+        let expires = (now + TimeDelta::seconds(t as i64)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        security.push_str(&format!(
+            r#"<wsu:Timestamp wsu:Id="{ts_id}"><wsu:Created>{created}</wsu:Created><wsu:Expires>{expires}</wsu:Expires></wsu:Timestamp>"#
+        ));
+    }
+    let mut token_secrets = Vec::new();
+    if let Some((username, password, ptype)) = spec.username_token {
+        let nonce_b64 = b64(&nonce);
+        let (ptype_uri, pw) = match ptype {
+            WssePasswordType::PasswordText => (PW_TEXT, xml_escape(password)),
+            WssePasswordType::PasswordDigest => {
+                let digest = password_digest(&nonce, &created, password);
+                token_secrets = vec![digest.clone(), nonce_b64.clone()];
+                (PW_DIGEST, digest)
+            }
+        };
+        security.push_str(&format!(
+            r#"<wsse:UsernameToken wsu:Id="{ut_id}"><wsse:Username>{}</wsse:Username><wsse:Password Type="{ptype_uri}">{pw}</wsse:Password><wsse:Nonce EncodingType="{B64_ENC}">{nonce_b64}</wsse:Nonce><wsu:Created>{created}</wsu:Created></wsse:UsernameToken>"#,
+            xml_escape(username)
+        ));
+    }
+    if let Some(a) = spec.saml {
+        security.push_str(a.trim());
+    }
+    let token_id = fresh_id("X509");
+    if let Some(sig) = signing {
+        security.push_str(&format!(
+            r#"<wsse:BinarySecurityToken EncodingType="{B64_ENC}" ValueType="{X509V3}" wsu:Id="{token_id}">{}</wsse:BinarySecurityToken>"#,
+            b64(sig.identity.certificate_der())
+        ));
+    }
+    const SECURITY_END: &str = "</wsse:Security>";
+
+    let text = std::str::from_utf8(body).map_err(|_| AuthError::Invalid("SOAP envelope is not UTF-8".into()))?;
+    let doc = parse_bounded(text, "SOAP envelope", "SOAP envelope is not well-formed XML")?;
     let env = doc.root_element();
     if env.tag_name().name() != "Envelope" {
         return Err(AuthError::Invalid("WS-Security requires a SOAP Envelope body".into()));
@@ -180,8 +313,11 @@ pub fn insert_security_token(
     let env_ns = env.tag_name().namespace().unwrap_or("");
     let prefix = env.lookup_prefix(env_ns).unwrap_or("");
     let qual = |local: &str| if prefix.is_empty() { local.to_string() } else { format!("{prefix}:{local}") };
-    let mut out = String::with_capacity(text.len() + header_xml.len() + 64);
-    if let Some(header) = env.children().find(|n| n.is_element() && n.tag_name().name() == "Header") {
+    let body_el = env.children().find(|n| n.is_element() && n.tag_name().name() == "Body");
+
+    // Where the header goes: `at..replace_end` of the original text becomes
+    // `open` + header + `close`.
+    let (at, replace_end, open, close) = if let Some(header) = env.children().find(|n| n.is_element() && n.tag_name().name() == "Header") {
         // Insert right after the Header start tag. The tag may carry quoted
         // attribute values containing a literal `>`, so the boundary scan
         // must be quote-aware rather than taking the first `>`.
@@ -190,41 +326,140 @@ pub fn insert_security_token(
             .map(|i| range.start + i)
             .ok_or_else(|| AuthError::Invalid("malformed Header".into()))?;
         if text[range.start..start_tag_end].ends_with("/>") {
-            out.push_str(&text[..range.start]);
-            out.push_str(&format!("<{}>{header_xml}</{}>", qual("Header"), qual("Header")));
-            out.push_str(&text[range.end..]);
+            (range.start, range.end, format!("<{}>", qual("Header")), format!("</{}>", qual("Header")))
         } else {
-            out.push_str(&text[..start_tag_end]);
-            out.push_str(&header_xml);
-            out.push_str(&text[start_tag_end..]);
+            (start_tag_end, start_tag_end, String::new(), String::new())
         }
     } else {
-        let body_el = env
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "Body")
-            .ok_or_else(|| AuthError::Invalid("SOAP envelope has no Body".into()))?;
-        let at = body_el.range().start;
-        out.push_str(&text[..at]);
-        out.push_str(&format!("<{}>{header_xml}</{}>", qual("Header"), qual("Header")));
-        out.push_str(&text[at..]);
+        let b = body_el.ok_or_else(|| AuthError::Invalid("SOAP envelope has no Body".into()))?;
+        let at = b.range().start;
+        (at, at, format!("<{}>", qual("Header")), format!("</{}>", qual("Header")))
+    };
+
+    // A signed Body needs a wsu:Id: its own, or one added to its start tag
+    // (with a `wsu` binding when none is in scope there).
+    let mut body_id = None;
+    let mut body_splice: Option<(usize, String)> = None;
+    if signing.is_some() {
+        let b = body_el.ok_or_else(|| AuthError::Invalid("SOAP envelope has no Body to sign".into()))?;
+        if let Some(id) = b.attribute((WSU_NS, "Id")) {
+            body_id = Some(id.to_string());
+        } else {
+            let id = fresh_id("Body");
+            let (p, declare) = ["wsu", "wsu1", "anvilwsu"]
+                .into_iter()
+                .find_map(|p| match b.lookup_namespace_uri(Some(p)) {
+                    Some(u) if u == WSU_NS => Some((p, false)),
+                    None => Some((p, true)),
+                    Some(_) => None,
+                })
+                .ok_or_else(|| AuthError::Invalid("the SOAP Body binds every candidate prefix for wsu:Id to another namespace".into()))?;
+            let range = b.range();
+            let end = start_tag_end(&text[range.start..range.end])
+                .map(|i| range.start + i)
+                .ok_or_else(|| AuthError::Invalid("malformed Body".into()))?;
+            let pos = if text[..end].ends_with("/>") { end - 2 } else { end - 1 };
+            let decl = if declare { format!(r#" xmlns:{p}="{WSU_NS}""#) } else { String::new() };
+            body_splice = Some((pos, format!(r#"{decl} {p}:Id="{id}""#)));
+            body_id = Some(id);
+        }
     }
+
+    // Splice the header (and the Body id) in, back to front so earlier
+    // offsets stay valid.
+    let mut out = String::with_capacity(text.len() + security.len() + 4096);
+    out.push_str(text);
+    let header_text = format!("{open}{security}{SECURITY_END}{close}");
+    let mut header_pos = at;
+    match &body_splice {
+        Some((pos, s)) if *pos > at => {
+            out.insert_str(*pos, s);
+            out.replace_range(at..replace_end, &header_text);
+        }
+        Some((pos, s)) => {
+            out.replace_range(at..replace_end, &header_text);
+            out.insert_str(*pos, s);
+            header_pos += s.len();
+        }
+        None => out.replace_range(at..replace_end, &header_text),
+    }
+    drop(doc);
+
+    let mut signed = None;
+    if let Some(sig) = signing {
+        let signature_at = header_pos + open.len() + security.len();
+        let doc = parse_bounded(&out, "WS-Security envelope", "rewritten SOAP envelope is not well-formed XML")?;
+        let opts = c14n::Options { with_comments: false, inclusive_prefixes: sig.inclusive_prefixes.to_vec() };
+        let mut ids = Vec::new();
+        if spec.timestamp_ttl_secs.is_some() {
+            ids.push(ts_id.clone());
+        }
+        if spec.username_token.is_some() {
+            ids.push(ut_id.clone());
+        }
+        ids.push(body_id.clone().unwrap_or_default());
+        let transform = if sig.inclusive_prefixes.is_empty() {
+            format!(r#"<ds:Transform Algorithm="{}"/>"#, c14n::EXC_C14N)
+        } else {
+            format!(
+                r#"<ds:Transform Algorithm="{0}"><ec:InclusiveNamespaces xmlns:ec="{0}" PrefixList="{1}"/></ds:Transform>"#,
+                c14n::EXC_C14N,
+                xml_escape(&c14n::format_prefix_list(sig.inclusive_prefixes))
+            )
+        };
+        // Each signed id must name exactly one element (XML signature
+        // wrapping), checked here whichever canonicalizer is used.
+        let mut starts = Vec::new();
+        for id in &ids {
+            starts.push(by_wsu_id(&doc, id)?.range().start);
+        }
+        drop(doc);
+        let targets: Vec<c14n::Target> = starts.iter().map(|&at| c14n::Target::ElementAt(at)).collect();
+        let canonical = canonicalizer().canonicalize(&out, &targets, &opts).map_err(|e| AuthError::Invalid(e.to_string()))?;
+        let mut references = String::new();
+        for (id, canonical) in ids.iter().zip(&canonical) {
+            let digest = b64(sha2::Sha256::digest(canonical.as_bytes()).as_ref());
+            references.push_str(&format!(
+                r##"<ds:Reference URI="#{}"><ds:Transforms>{transform}</ds:Transforms><ds:DigestMethod Algorithm="{}"/><ds:DigestValue>{digest}</ds:DigestValue></ds:Reference>"##,
+                xml_escape(id),
+                xmldsig::DIGEST_SHA256
+            ));
+        }
+        let signature_open = format!(r#"<ds:Signature xmlns:ds="{}">"#, xmldsig::DS_NS);
+        let signed_info = format!(
+            r#"<ds:SignedInfo><ds:CanonicalizationMethod Algorithm="{}"/><ds:SignatureMethod Algorithm="{}"/>{references}</ds:SignedInfo>"#,
+            c14n::EXC_C14N,
+            sig.identity.algorithm().uri()
+        );
+        let head = format!("{signature_open}{signed_info}<ds:SignatureValue>");
+        let tail = format!(
+            r##"</ds:SignatureValue><ds:KeyInfo><wsse:SecurityTokenReference><wsse:Reference URI="#{token_id}" ValueType="{X509V3}"/></wsse:SecurityTokenReference></ds:KeyInfo></ds:Signature>"##
+        );
+        out.insert_str(signature_at, &format!("{head}{tail}"));
+        // SignedInfo is canonicalized where it stands, with the namespaces
+        // it inherits from the envelope.
+        parse_bounded(&out, "WS-Security envelope", "rewritten SOAP envelope is not well-formed XML")?;
+        let signed_info_at = c14n::Target::ElementAt(signature_at + signature_open.len());
+        let canonical_signed_info = canonicalizer()
+            .canonicalize(&out, &[signed_info_at], &c14n::Options::default())
+            .map_err(|e| AuthError::Invalid(e.to_string()))?
+            .pop()
+            .ok_or_else(|| AuthError::Invalid("the generated ds:SignedInfo could not be canonicalized".into()))?;
+        let value = sig.identity.sign(canonical_signed_info.as_bytes())?;
+        out.insert_str(signature_at + head.len(), &b64(&value));
+        signed = Some(Signed {
+            algorithm: sig.identity.algorithm().label(),
+            references: ids,
+            certificate_sha256: sig.identity.certificate_sha256(),
+        });
+    }
+
     // The splice is textual; never return a rewrite that no longer parses.
     // The rewrite holds content the scan above never saw (a configured SAML
     // assertion, and the Security header's declarations in the envelope's
     // scope), so it is bounded the same way before this parse.
-    check_xml_limits(&out, &ENVELOPE_XML_LIMITS)
-        .map_err(|e| AuthError::Invalid(format!("WS-Security envelope is too complex to parse safely: {e}")))?;
-    roxmltree::Document::parse_with_options(
-        &out,
-        roxmltree::ParsingOptions { allow_dtd: false, nodes_limit: MAX_ENVELOPE_NODES, ..Default::default() },
-    )
-    .map_err(|e| match e {
-        roxmltree::Error::NodesLimitReached => {
-            AuthError::Invalid(format!("WS-Security envelope is too complex to parse safely: more than {MAX_ENVELOPE_NODES} nodes"))
-        }
-        e => AuthError::Invalid(format!("rewritten SOAP envelope is not well-formed XML: {e}")),
-    })?;
-    Ok(Inserted { body: out.into_bytes(), token_secrets })
+    parse_bounded(&out, "WS-Security envelope", "rewritten SOAP envelope is not well-formed XML")?;
+    Ok(Inserted { body: out.into_bytes(), token_secrets, signed })
 }
 
 #[cfg(test)]
@@ -233,8 +468,7 @@ mod tests {
 
     /// A password made per run: only the audited vectors depend on its value.
     fn password() -> String {
-        let mut bytes = [0u8; 12];
-        rand::fill(&mut bytes);
+        let bytes: [u8; 12] = rand::random();
         hex::encode(bytes)
     }
 

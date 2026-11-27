@@ -746,6 +746,61 @@ export type JwtAlgorithm = "HS256" | "HS384" | "HS512" | "RS256" | "ES256";
  */
 export type OAuthGrant = ("client_credentials" | "refresh_token") | "authorization_code_pkce";
 /**
+ * Private key and certificate an XML signature is made with.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "XmlSigningIdentity".
+ */
+export type XmlSigningIdentity =
+  | {
+      format: "pem";
+      /**
+       * Certificate chain PEM (not secret). The certificate the key
+       * belongs to is the one sent.
+       */
+      cert_chain_pem: string;
+      /**
+       * A field that may carry sensitive material (password, token, key).
+       *
+       * * `Template` — text that may contain `{{variable}}` references. A literal
+       *   (non-variable) template in a sensitive field is itself treated as
+       *   sensitive: it is masked in the UI, redacted in history, and replaced by a
+       *   placeholder in safe-share exports.
+       * * `Secret` — a vault reference.
+       */
+      private_key_pem:
+        | {
+            kind: "template";
+            value: string;
+          }
+        | {
+            kind: "secret";
+            secret: SecretRef;
+          };
+    }
+  | {
+      format: "pkcs12";
+      /**
+       * A field that may carry sensitive material (password, token, key).
+       *
+       * * `Template` — text that may contain `{{variable}}` references. A literal
+       *   (non-variable) template in a sensitive field is itself treated as
+       *   sensitive: it is masked in the UI, redacted in history, and replaced by a
+       *   placeholder in safe-share exports.
+       * * `Secret` — a vault reference.
+       */
+      bundle_b64:
+        | {
+            kind: "template";
+            value: string;
+          }
+        | {
+            kind: "secret";
+            secret: SecretRef;
+          };
+      password: SensitiveValue;
+    };
+/**
  * Where a JWT-SVID comes from.
  *
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
@@ -1502,6 +1557,14 @@ export type BodyDigestHeader = "content_digest" | "legacy_digest";
  * via the `definition` "WssePasswordType".
  */
 export type WssePasswordType = "password_text" | "password_digest";
+/**
+ * Signature algorithm of an XML signature. `auto` follows the key: RSA
+ * signs RSA-SHA256, a P-256 EC key ECDSA-SHA256. SHA-1 is never used.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "XmlSignatureAlgorithm".
+ */
+export type XmlSignatureAlgorithm = "auto" | "rsa_sha256" | "ecdsa_p256_sha256";
 /**
  * This interface was referenced by `AnvilContracts`'s JSON-Schema
  * via the `definition` "ConnectionMode".
@@ -3552,6 +3615,39 @@ export interface WsseConfig {
    * mints assertions).
    */
   saml_assertion?: SensitiveValue | null;
+  /**
+   * Send a UsernameToken with the username and password. Turn it off for
+   * a header that carries only a Timestamp, a SAML assertion or an X.509
+   * signature.
+   */
+  username_token?: boolean;
+  /**
+   * Sign the SOAP Body, the Timestamp and the UsernameToken with an X.509
+   * key (XML-DSig, exclusive canonicalization, SHA-256).
+   */
+  signature?: WsseSignatureConfig | null;
+}
+/**
+ * X.509 XML signature of a WS-Security header. The certificate the key
+ * belongs to is sent as a BinarySecurityToken (X509v3) referenced from the
+ * signature's KeyInfo.
+ *
+ * This interface was referenced by `AnvilContracts`'s JSON-Schema
+ * via the `definition` "WsseSignatureConfig".
+ */
+export interface WsseSignatureConfig {
+  identity: XmlSigningIdentity;
+  /**
+   * Signature algorithm of an XML signature. `auto` follows the key: RSA
+   * signs RSA-SHA256, a P-256 EC key ECDSA-SHA256. SHA-1 is never used.
+   */
+  algorithm?: "auto" | "rsa_sha256" | "ecdsa_p256_sha256";
+  /**
+   * InclusiveNamespaces PrefixList applied to every signed reference
+   * (space-separated prefixes, `#default` for the default namespace).
+   * Usually empty.
+   */
+  inclusive_prefix_list?: string;
 }
 /**
  * JWT-SVID bearer auth (SPIFFE JWT-SVID specification). Anvil checks the

@@ -4979,12 +4979,12 @@
    "references": [
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1429,
+     "line": 1466,
      "kind": "lab"
     },
     {
      "path": "crates/anvil-lab/src/auth.rs",
-     "line": 1750,
+     "line": 1808,
      "kind": "lab"
     }
    ],

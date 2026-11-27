@@ -12,7 +12,7 @@ use crate::{Engine, SensitiveEpoch};
 use anvil_auth::{ResolvedAuth, SignableRequest};
 use anvil_diagnostics::FerrumTrust;
 use anvil_domain::Timestamp;
-use anvil_domain::auth::AuthConfig;
+use anvil_domain::auth::{AuthConfig, XmlSigningIdentity};
 use anvil_domain::execution::*;
 use anvil_domain::integration::{DiagnosticDetailAccess, IntegrationKind, IntegrationProfile};
 use anvil_domain::secret::REDACTED;
@@ -155,13 +155,43 @@ fn resolve_auth(
             dpop_scheme: config.dpop_scheme,
             nonce: None,
         },
-        AuthConfig::Wsse { config } => ResolvedAuth::Wsse {
-            username: displayed(&config.username, "auth.username", hidden)?,
-            password: sens(&config.password, "auth.password")?,
-            password_type: config.password_type,
-            timestamp_ttl_secs: config.timestamp_ttl_secs,
-            saml_assertion: config.saml_assertion.as_ref().map(|s| sens(s, "auth.saml_assertion")).transpose()?,
-        },
+        AuthConfig::Wsse { config } => {
+            let signature = match &config.signature {
+                None => None,
+                Some(sig) => {
+                    let inclusive_prefixes = anvil_auth::c14n::parse_prefix_list(&sig.inclusive_prefix_list)
+                        .map_err(|e| fail(format!("the WS-Security signature's InclusiveNamespaces PrefixList is invalid: {e}")))?;
+                    let (cert_chain_pem, private_key_pem, source_secrets) = match &sig.identity {
+                        XmlSigningIdentity::Pem { cert_chain_pem, private_key_pem } => {
+                            (cert_chain_pem.clone(), sens(private_key_pem, "auth.signature.private_key_pem")?, Vec::new())
+                        }
+                        XmlSigningIdentity::Pkcs12 { bundle_b64, password } => {
+                            let bundle = sens(bundle_b64, "auth.signature.bundle_b64")?;
+                            let pw = sens(password, "auth.signature.password")?;
+                            let (chain, key) = crate::pkcs12::decode(&bundle, &pw)
+                                .map_err(|m| fail(format!("WS-Security signing key: {m}")).with_field("auth.signature.pkcs12"))?;
+                            (chain, key, vec![bundle, pw])
+                        }
+                    };
+                    Some(anvil_auth::WsseSigning {
+                        cert_chain_pem,
+                        private_key_pem,
+                        algorithm: sig.algorithm,
+                        inclusive_prefixes,
+                        source_secrets,
+                    })
+                }
+            };
+            ResolvedAuth::Wsse {
+                username_token: config.username_token,
+                username: displayed(&config.username, "auth.username", hidden)?,
+                password: sens(&config.password, "auth.password")?,
+                password_type: config.password_type,
+                timestamp_ttl_secs: config.timestamp_ttl_secs,
+                saml_assertion: config.saml_assertion.as_ref().map(|s| sens(s, "auth.saml_assertion")).transpose()?,
+                signature,
+            }
+        }
         AuthConfig::JwtSvid { config } => {
             // The Workload API step (`crate::workload::prepare`) has already
             // fetched and checked the token and put it here as a value; any

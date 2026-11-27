@@ -73,22 +73,22 @@ bearer/DPoP access token, as a user would. The LDAP fixture implements the
 simple-bind + base-search flow `ldap_auth` uses (bounded BER, no password
 logging); it verifies adapter behaviour, not any real directory.
 
-**Signed SOAP fixtures (AUTH-030/031).** Anvil does not sign XML: X.509
-XML signing is unavailable in Anvil (the WS-Security auth profile offers
-UsernameToken and embeds a *user-supplied* SAML assertion verbatim; a
-pre-signed envelope is sent as the request body, byte for byte). For these
-scenarios the lab plays the external signer and the SAML identity provider,
-with audited tools already on the host and never a hand-written
-canonicalizer: libxml2's Exclusive XML Canonicalization (`xmllint
---exc-c14n`, the implementation xmlsec1 also uses) and OpenSSL RSA-SHA256.
-Throwaway RSA-2048 keys and self-signed certificates are generated per run
-under `lab/.run/auth/soap/` and trusted only by the lab gateway's routes. Each
-signed element is canonicalized in a standalone form declaring exactly the
-namespaces it visibly uses, so it equals the in-context exclusive canonical
-form; the gateway's own, independent canonicalizer accepting the result is
-the cross-check; `xmlsec1` is not used. Without `xmllint`, AUTH-030/031 are
-reported as skipped with that reason; `openssl` is required to start the auth
-profile at all (the gateway config references the certificates).
+**Signed SOAP (AUTH-030/031).** Throwaway RSA-2048 keys and self-signed
+certificates are generated with OpenSSL per run under `lab/.run/auth/soap/`
+and trusted only by the lab gateway's routes; `openssl` is required to start
+the auth profile at all (the gateway config references the certificates).
+AUTH-030's envelopes are signed by Anvil itself: its WS-Security profile is
+given the trusted (or the untrusted) key and certificate as PEM, exactly as a
+user would configure it, and signs Body and Timestamp at send time
+(exclusive C14N, SHA-256, RSA-SHA256, certificate in a BinarySecurityToken;
+see [../wsse-signing.md](../wsse-signing.md)). The gateway's own, independent
+canonicalizer and verifier accepting them is the cross-check; xmlsec1 and
+libxml2 check the same signer on CI (`xmldsig-interop` workflow). For AUTH-031
+the lab plays the SAML identity provider (Anvil never mints assertions), with
+audited tools already on the host: libxml2's Exclusive XML Canonicalization
+(`xmllint --exc-c14n`) and OpenSSL RSA-SHA256, each assertion canonicalized in
+a standalone form declaring exactly the namespaces it visibly uses. Without
+`xmllint`, AUTH-031 is reported as skipped with that reason.
 
 ## `tls` scenarios
 
@@ -182,7 +182,7 @@ records redact `WWW-Authenticate`.
 | AUTH-029 | AUTH-029 | `soap_ws_security` PasswordDigest (in-process nonce store, 2 s clock skew): Anvil's WS-Security auth → 200; wrong password → 401 `WS-Security: invalid credentials`; an envelope Anvil's own signer produced, captured and sent twice as raw bytes → 200, then 401 `WS-Security: nonce replay detected` | Anvil sent the captured bytes verbatim (body hash); the replay rejection is a generic 401 plus a gateway-outcome claim ≤ likely; no confirmed claim about the password, signature, expiry or replay; the password never on the wire and never in the record; three fresh Anvil envelopes in a row accepted (fresh nonce and `Created` per send — the load path is covered by `crates/anvil-load/tests/load_wsse.rs`) |
 | AUTH-029.text | AUTH-029 | PasswordText with `remove_credential` → 200; the right password sent as PasswordText to the PasswordDigest route → 401 `WS-Security: Password Type does not match the configured password_type` | The backend received the envelope without the password; the profile mismatch is not reported as a wrong password; password not recorded |
 | AUTH-029.expired | AUTH-029 | An envelope Anvil generated with a 1 s Timestamp lifetime, sent raw 4 s later → 401 `WS-Security: Timestamp has expired` | Generic 401, no confirmed expiry/clock claim (0.9.5 renders all WS-Security structural rejections as one `{"error":"<message>"}` family, so no gateway outcome is claimed); backend untouched; a fresh envelope recovers |
-| AUTH-030 | AUTH-030 | `x509_signature` (RSA-SHA256, exclusive C14N, Body and Timestamp signed): lab-signed envelope → 200; the signed Body altered after signing → 401 `WS-Security: Reference digest mismatch`; a valid signature by an untrusted key → 401 `WS-Security: signing certificate is not trusted` | Anvil sent the signed envelope byte for byte (body hash; the backend received exactly those bytes); a certificate problem inside XML is never reported as a TLS failure (`client.tls.*` absent); no confirmed signature/certificate claim; backend untouched on rejection; a freshly signed envelope recovers |
+| AUTH-030 | AUTH-030 | `x509_signature` (RSA-SHA256, exclusive C14N, Body and Timestamp signed): Anvil's WS-Security profile signs with the trusted key at send time (no UsernameToken) → 200; an envelope Anvil signed, its Body altered after signing and sent raw → 401 `WS-Security: Reference digest mismatch`; Anvil signing correctly with an untrusted key → 401 `WS-Security: signing certificate is not trusted` | The backend received the Body Anvil signed unchanged, with Anvil's BinarySecurityToken and two references; the record names the algorithm and the signed references and never holds either private key; a certificate problem inside XML is never reported as a TLS failure (`client.tls.*` absent); no confirmed signature/certificate claim; backend untouched on rejection; a freshly signed envelope recovers |
 | AUTH-031 | AUTH-031 | `saml` (+ PasswordDigest UsernameToken): Anvil embeds a lab-issued signed SAML 2.0 bearer assertion verbatim → 200; the same assertion again → 401 `WS-Security: SAML assertion has already been used`; wrong audience, expired, untrusted issuer and untrusted signing certificate → their 401s | The backend received the assertion byte for byte; the assertion's signature never appears in the record; replay gets a gateway outcome ≤ likely, the other rejections a generic 401 with no confirmed SAML claim; a new assertion recovers (a SAML bearer assertion is single-use by design) |
 | AUTH-017 | AUTH-017 | `oidc_relying_party` (discovery at the lab IdP). Ground truth first: the lab's raw-HTTP "system browser" completes the real login (gateway 302 → IdP login page → credentials → callback → session cookie → 200). Then Anvil, without that cookie: API request → 401 `Authentication required` + `Bearer realm="oidc"`; browser-shaped request (`Accept: text/html`) → 302, followed to the IdP login page (200 HTML) | `auth.browser_session_required` (likely) says the request stopped at a login step, that a browser session stays in the browser and Anvil never imports browser cookies, and names the supported paths (an API credential or an explicitly configured, authorized session cookie); the followed login page is recorded as application **not evaluated**, never success; Anvil sent no Cookie, never submitted IdP credentials and carried no Authorization/Cookie to the IdP. Recovery: the session cookie configured explicitly as a secret → 200, and its value never appears in the record |
 | AUTH-017.lookalike | AUTH-017 | An ordinary backend redirect (even one whose target mentions `client_id`) and a backend 401 with a plain `Bearer` challenge | No `auth.browser_session_required`; the redirect stays a successful exchange |
@@ -199,7 +199,7 @@ Skip reasons name the release under test (`Ferrum Edge 0.9.5` / `0.9.7`); each f
 | TLS-017, TLS-018 | Out of this profile (forward-proxy leg; Anvil's own redirect policy). |
 | AUTH-011..014 | Client-side OAuth flows with no gateway leg; covered by anvil-auth unit tests. |
 | AUTH-025.nonce | Infeasible: neither 0.9.5 nor 0.9.7 has a DPoP-Nonce / `use_dpop_nonce` challenge. |
-| AUTH-030, AUTH-031 (conditional) | Only on hosts without `xmllint`: the lab cannot produce signed fixtures without an audited canonicalizer, and Anvil itself never signs XML. Both ran live in the recorded runs. |
+| AUTH-031 (conditional) | Only on hosts without `xmllint`: the lab's SAML identity provider cannot sign assertions without an audited canonicalizer (Anvil never mints assertions). It ran live in the recorded runs. AUTH-030 needs only `openssl`: Anvil signs its envelopes. |
 
 ## Diagnostics fixes found by these profiles
 
@@ -297,9 +297,10 @@ or the wrong thing.
   outcome catalogs as one `{"error":"{message}"}` family, so Anvil gives
   them only the generic 401 meaning (no gateway attribution, no specific
   cause). Honest, but less specific than the body text.
-- AUTH-030/031 depend on `xmllint` and `openssl` on the host (signed fixtures
-  are generated per run; nothing signed is committed). Anvil has no XML
-  signer; a user must bring a pre-signed envelope or a signed assertion.
+- AUTH-030 depends on `openssl` (the per-run keys) and AUTH-031 also on
+  `xmllint` (the lab-issued assertions); nothing signed is committed. Ferrum
+  Edge v0.9.21 verifies RSA signatures only, so AUTH-030 signs with RSA;
+  Anvil's ECDSA P-256 signatures are verified by xmlsec1 on CI.
 - AUTH-017 drives the browser side with a raw HTTP client, not a real
   browser; the IdP login page is a fixture. The recovery path shown is an
   explicitly configured session cookie (the lab route carries only the OIDC
