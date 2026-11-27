@@ -3,7 +3,12 @@
 #
 #   TARGET=<triple> RUNNER_LABEL=<runner> APP=<raw binary> ROUTE=<route> \
 #   UPDATER=true|false UPDATER_PUBKEY=<key> [PFX_THUMBPRINT=<sha1>] [PROFILE_EKU=<oid>] \
-#   scripts/release/verify-signing.sh
+#   [BUILD_RUSTC=<rustc -V> BUILD_CARGO=<cargo -V>] scripts/release/verify-signing.sh
+#
+# BUILD_RUSTC / BUILD_CARGO name the toolchain of the job that compiled the
+# binaries when that is not this job (Windows: the build job compiles,
+# bundle-windows runs this); otherwise this runner's rustc and cargo are
+# recorded.
 #
 # A target is recorded as signed only after its signatures verify here:
 #   macOS    the .app (codesign --deep --strict, a Team ID, no ad-hoc
@@ -88,12 +93,12 @@ if [ "$ROUTE" != "none" ]; then
 fi
 # shellcheck disable=SC2016 # JavaScript source, not shell
 node -e '
-  const [target, os, arch, runner, signed, method, detail, updater, pubkey, applicable, route] = process.argv.slice(1);
+  const [target, os, arch, runner, signed, method, detail, updater, pubkey, applicable, route, buildRustc, buildCargo] = process.argv.slice(1);
   const { execSync } = require("node:child_process");
   const v = (c) => { try { return execSync(c, { encoding: "utf8" }).trim(); } catch { return null; } };
   const info = {
     target, os, arch, runner,
-    toolchain: { rustc: v("rustc -V"), cargo: v("cargo -V"), node: process.version, tauri_cli: v("node apps/desktop/node_modules/@tauri-apps/cli/tauri.js -V") },
+    toolchain: { rustc: buildRustc || v("rustc -V"), cargo: buildCargo || v("cargo -V"), node: process.version, tauri_cli: v("node apps/desktop/node_modules/@tauri-apps/cli/tauri.js -V") },
     signing: { signed: signed === "true", applicable: applicable === "true", route, method, detail },
     // Built with the owner updater key: the public key compiled into the
     // app (found in the binary above), which the publish job verifies
@@ -101,4 +106,4 @@ node -e '
     updater: updater === "true" ? { configured: true, pubkey, embedded: true } : { configured: false },
   };
   require("node:fs").writeFileSync(`dist/${target}/build-info.json`, JSON.stringify(info, null, 2) + "\n");
-' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "${RUNNER_LABEL:-}" "$signed" "$method" "$detail" "${UPDATER:-false}" "${UPDATER_PUBKEY:-}" "$applicable" "$ROUTE"
+' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "${RUNNER_LABEL:-}" "$signed" "$method" "$detail" "${UPDATER:-false}" "${UPDATER_PUBKEY:-}" "$applicable" "$ROUTE" "${BUILD_RUSTC:-}" "${BUILD_CARGO:-}"

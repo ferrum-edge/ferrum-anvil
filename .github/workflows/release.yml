@@ -21,9 +21,10 @@
 # route fails the run, and so does a configured route whose signature (or
 # notarization) does not verify: a release never ships unsigned by accident.
 # Each credential is mapped only into the steps of the platform and route that
-# use it. Windows is compiled by the build matrix and bundled and signed by the
-# separate bundle-windows job, the only job with `id-token: write`, which
-# compiles nothing (see docs/release.md).
+# use it. Windows is compiled by the build matrix, bundled and signed by the
+# separate bundle-windows job (the only job with `id-token: write`; it
+# compiles nothing and never executes build output) and release-checked by
+# check-windows, which has no credential (see docs/release.md).
 # A target is recorded as signed only after the signature is verified on the
 # runner; otherwise it is "unsigned — owner credentials not configured".
 # Signed updater artifacts and latest.json also need the variable
@@ -157,6 +158,13 @@ jobs:
     environment: ${{ needs.preflight.outputs.tag != '' && 'release' || '' }}
     permissions:
       contents: read
+    # Set by the Windows leg only (an empty output does not override another
+    # matrix leg's): the digests bundle-windows checks before signing, and the
+    # toolchain that compiled the Windows binaries, for its build-info.json.
+    outputs:
+      windows_sha256: ${{ steps.stage.outputs.sha256 }}
+      windows_rustc: ${{ steps.stage.outputs.rustc }}
+      windows_cargo: ${{ steps.stage.outputs.cargo }}
     strategy:
       fail-fast: false
       matrix:
@@ -410,12 +418,16 @@ jobs:
           fi
 
       - name: Stage the compiled Windows binaries for bundle-windows
+        id: stage
         if: ${{ matrix.split }}
         shell: bash
         run: |
           mkdir -p "compiled/$TARGET/bin"
           cp "target/$TARGET/release/anvil-desktop.exe" "target/$TARGET/release/anvil.exe" "compiled/$TARGET/bin/"
           ls -la "compiled/$TARGET/bin" "compiled/$TARGET/sbom"
+          sums="$(cd "compiled/$TARGET/bin" && sha256sum anvil-desktop.exe anvil.exe | tr -d '*' | awk '{printf "%s:%s ", $2, $1}')"
+          echo "Recorded digests: $sums"
+          { echo "sha256=${sums% }"; echo "rustc=$(rustc -V)"; echo "cargo=$(cargo -V)"; } >> "$GITHUB_OUTPUT"
 
       - name: Upload compiled Windows binaries
         if: ${{ matrix.split }}
@@ -425,7 +437,9 @@ jobs:
           name: compiled-${{ matrix.target }}
           path: compiled/${{ matrix.target }}/
           if-no-files-found: error
-          retention-days: 3
+          # bundle-windows waits for a second `release` approval, which GitHub
+          # allows for up to 30 days; the artifact must outlive that wait.
+          retention-days: 30
 
       - name: Upload build
         if: ${{ !matrix.split }}
@@ -440,10 +454,14 @@ jobs:
   # build job compiled. This is the only job with `id-token: write`: Azure
   # Artifact Signing's OIDC login trusts this repository's `release`
   # environment subject, and no other job in that environment can request a
-  # token. It installs no Rust build cache and runs no compiler or dependency
-  # build script (`npm ci --ignore-scripts`; `tauri bundle` reads
-  # `cargo metadata --no-deps` only). It runs for dry runs too, unsigned, so
-  # a dry run exercises the same structure.
+  # token. It never executes anything the build produced: the binaries are
+  # only checked against the build job's recorded digests, patched and
+  # packaged by the Tauri bundler and passed to SignTool. It installs no Rust
+  # build cache and runs no compiler, dependency build script or npm
+  # lifecycle script (`npm ci --ignore-scripts`; `tauri bundle` reads
+  # `cargo metadata --no-deps` only). The release check, whose runtime probe
+  # launches the app, runs afterwards in check-windows, which has no OIDC
+  # permission. Both run for dry runs too, unsigned.
   bundle-windows:
     name: Bundle and sign · x86_64-pc-windows-msvc
     needs: [preflight, build]
@@ -481,9 +499,31 @@ jobs:
         working-directory: apps/desktop
         run: npm ci --ignore-scripts --no-audit --no-fund
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        id: compiled
+        continue-on-error: true
         with:
           name: compiled-x86_64-pc-windows-msvc
           path: compiled/
+      - name: The compiled binaries are still available
+        if: steps.compiled.outcome != 'success'
+        shell: bash
+        run: |
+          echo "::error::the compiled-x86_64-pc-windows-msvc artifact could not be downloaded (it is kept 30 days; an approval that waited longer, or a deleted artifact, leaves nothing to sign). Re-run the whole workflow (Re-run all jobs), not only the failed jobs: the Windows build job must compile again."
+          exit 1
+      - name: Binaries match the build job's recorded digests
+        shell: bash
+        env:
+          RECORDED: ${{ needs.build.outputs.windows_sha256 }}
+        run: |
+          [ -n "$RECORDED" ] || { echo "::error::the build job recorded no Windows binary digests"; exit 1; }
+          for entry in $RECORDED; do
+            name="${entry%%:*}"; want="${entry#*:}"
+            got="$(sha256sum "compiled/bin/$name" | awk '{print $1}')"
+            [ "$got" = "$want" ] || { echo "::error::compiled/bin/$name has SHA-256 $got, not the $want the build job recorded"; exit 1; }
+            echo "ok: $name $got"
+          done
+          files=(compiled/bin/*)
+          [ "${#files[@]}" -eq 2 ] || { echo "::error::compiled/bin holds ${#files[@]} files, not the two binaries: ${files[*]}"; exit 1; }
       - name: Place the compiled binaries where tauri bundle expects them
         shell: bash
         run: |
@@ -556,27 +596,6 @@ jobs:
       # bundle.windows.signCommand, so Tauri signs the app binary, the WiX and
       # NSIS helpers, the uninstaller and both installers as it bundles them.
       # Microsoft's setup: https://learn.microsoft.com/azure/artifact-signing/how-to-signing-integrations
-      - name: OIDC subject this job presents (claims only, never the token)
-        if: steps.route.outputs.windows == 'artifact-signing-oidc'
-        shell: bash
-        run: |
-          # The Entra ID federated credential must match `sub` exactly.
-          resp="$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange")"
-          RESP="$resp" node -e '
-            const t = JSON.parse(process.env.RESP).value;
-            const p = JSON.parse(Buffer.from(t.split(".")[1], "base64url").toString("utf8"));
-            console.log(JSON.stringify({ sub: p.sub, aud: p.aud, iss: p.iss, environment: p.environment, job_workflow_ref: p.job_workflow_ref }, null, 2));
-          '
-
-      - name: Azure login for Artifact Signing (OIDC route, tagged release only)
-        if: steps.route.outputs.windows == 'artifact-signing-oidc'
-        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-          allow-no-subscriptions: ${{ vars.AZURE_SUBSCRIPTION_ID == '' }}
-
       - name: Artifact Signing sign command (tagged release only)
         id: winats
         if: startsWith(steps.route.outputs.windows, 'artifact-signing')
@@ -638,6 +657,38 @@ jobs:
             ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 -LiteralPath $cfg
           "config=$cfg" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
+      - name: OIDC subject this job presents (claims only, never the token)
+        if: steps.route.outputs.windows == 'artifact-signing-oidc'
+        shell: bash
+        run: |
+          # The Entra ID federated credential must match `sub` exactly.
+          resp="$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange")"
+          RESP="$resp" node -e '
+            const t = JSON.parse(process.env.RESP).value;
+            const p = JSON.parse(Buffer.from(t.split(".")[1], "base64url").toString("utf8"));
+            console.log(JSON.stringify({ sub: p.sub, aud: p.aud, iss: p.iss, environment: p.environment, job_workflow_ref: p.job_workflow_ref }, null, 2));
+          '
+
+      - name: Azure login for Artifact Signing (OIDC route, tagged release only)
+        if: steps.route.outputs.windows == 'artifact-signing-oidc'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: ${{ vars.AZURE_SUBSCRIPTION_ID == '' }}
+
+      # Right after the login, while the GitHub token azure/login exchanged is
+      # still fresh: fetch (and cache in the Azure CLI) the Artifact Signing
+      # access token SignTool's dlib will ask the CLI for, so a slow bundling
+      # step cannot outlive the login. Only its expiry is printed.
+      - name: Artifact Signing access token (OIDC route)
+        if: steps.route.outputs.windows == 'artifact-signing-oidc'
+        shell: bash
+        run: |
+          expires="$(az account get-access-token --scope https://codesigning.azure.net/.default --query expiresOn -o tsv)"
+          echo "Artifact Signing access token cached; expires $expires"
+
       - name: Bundle and sign (MSI and NSIS)
         shell: bash
         working-directory: apps/desktop
@@ -682,13 +733,6 @@ jobs:
         shell: bash
         run: bash scripts/release/collect.sh
 
-      - name: Release check (no WebDriver server, no test hooks)
-        shell: bash
-        env:
-          APP: ${{ steps.collect.outputs.app }}
-          PROBE: "true"
-        run: bash scripts/release/check-artifacts.sh
-
       - name: Verify signatures (records signed only if verified; fails if configured signing did not verify)
         shell: bash
         env:
@@ -699,12 +743,72 @@ jobs:
           ROUTE: ${{ steps.route.outputs.route }}
           PFX_THUMBPRINT: ${{ steps.wincert.outputs.signer }}
           PROFILE_EKU: ${{ vars.ARTIFACT_SIGNING_PROFILE_EKU }}
+          # The toolchain of the job that compiled the binaries, not this one.
+          BUILD_RUSTC: ${{ needs.build.outputs.windows_rustc }}
+          BUILD_CARGO: ${{ needs.build.outputs.windows_cargo }}
         run: bash scripts/release/verify-signing.sh
 
+      - name: Upload bundled installers for the release check
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Outside the release-* pattern the publish job downloads: only
+          # check-windows publishes the Windows release artifact.
+          name: bundled-x86_64-pc-windows-msvc
+          path: dist/x86_64-pc-windows-msvc/
+          if-no-files-found: error
+          retention-days: 30
+
+  # The release check of the Windows installers, CLI archive and app binary,
+  # including the runtime probe that launches the app. It executes build
+  # output, so it runs in its own job with no OIDC permission, no environment
+  # and no credential, and only it uploads release-x86_64-pc-windows-msvc.
+  check-windows:
+    name: Release check · x86_64-pc-windows-msvc
+    needs: [preflight, build, bundle-windows]
+    permissions:
+      contents: read
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - name: Checked out the preflight commit
+        shell: bash
+        env:
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+        run: '[ "$(git rev-parse HEAD)" = "$COMMIT" ] || { echo "::error::HEAD $(git rev-parse HEAD) is not the preflight commit $COMMIT"; exit 1; }'
+      - name: Rust toolchain (the checker's cargo tree graph check)
+        shell: bash
+        run: |
+          rustup toolchain install
+          cargo -V
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundled-x86_64-pc-windows-msvc
+          path: dist/x86_64-pc-windows-msvc/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: compiled-x86_64-pc-windows-msvc
+          path: compiled/
+      - name: Place the compiled app binary
+        shell: bash
+        run: |
+          mkdir -p "target/$TARGET/release"
+          cp compiled/bin/anvil-desktop.exe "target/$TARGET/release/"
+      - name: Release check (no WebDriver server, no test hooks)
+        shell: bash
+        env:
+          APP: target/x86_64-pc-windows-msvc/release/anvil-desktop.exe
+          PROBE: "true"
+        run: bash scripts/release/check-artifacts.sh
       - name: Add the SBOMs from the build job
         shell: bash
         run: cp compiled/sbom/*.cdx.json "dist/$TARGET/" && ls -la "dist/$TARGET"
-
       - name: Upload build
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -715,7 +819,7 @@ jobs:
 
   publish:
     name: Assemble release evidence
-    needs: [preflight, build, bundle-windows]
+    needs: [preflight, build, check-windows]
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
