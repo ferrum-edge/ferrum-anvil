@@ -119,6 +119,51 @@ fn is_ncname(s: &str) -> bool {
         })
 }
 
+/// What to canonicalize in a document given as text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// The element whose start tag begins at this byte offset.
+    ElementAt(usize),
+    /// The whole document.
+    Document,
+}
+
+/// The canonicalizer behind the WS-Security signer, as one small interface
+/// over document text, so another implementation (a binding to an audited
+/// library such as libxml2) can replace [`Native`] without touching the
+/// signer. Callers bound and validate the document first (XML limits, no
+/// DTD) and check that every signed id names exactly one element; an
+/// implementation canonicalizes, nothing more.
+pub trait Canonicalizer: Send + Sync {
+    /// The canonical form of each target of `xml`, in order.
+    fn canonicalize(&self, xml: &str, targets: &[Target], opts: &Options) -> Result<Vec<String>, C14nError>;
+}
+
+/// Anvil's own implementation ([`canonicalize`] over roxmltree).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Native;
+
+impl Canonicalizer for Native {
+    fn canonicalize(&self, xml: &str, targets: &[Target], opts: &Options) -> Result<Vec<String>, C14nError> {
+        let parse = roxmltree::ParsingOptions { allow_dtd: false, ..Default::default() };
+        let doc = roxmltree::Document::parse_with_options(xml, parse)
+            .map_err(|e| C14nError(format!("the document is not well-formed XML: {e}")))?;
+        targets
+            .iter()
+            .map(|t| match *t {
+                Target::Document => canonicalize(doc.root(), opts),
+                Target::ElementAt(at) => {
+                    let node = doc
+                        .descendants()
+                        .find(|n| n.is_element() && n.range().start == at)
+                        .ok_or_else(|| C14nError(format!("no element starts at byte {at}")))?;
+                    canonicalize(node, opts)
+                }
+            })
+            .collect()
+    }
+}
+
 /// Why a subtree could not be canonicalized.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("exclusive canonicalization: {0}")]
@@ -407,6 +452,16 @@ mod tests {
             .unwrap();
         let out = canonicalize(doc.root_element(), &Options::default()).unwrap();
         assert_eq!(out.len(), depth * 7);
+    }
+
+    #[test]
+    fn the_native_canonicalizer_canonicalizes_targets_by_offset() {
+        let xml = r#"<a:r xmlns:a="urn:a"><a:e x="1"/><f/></a:r>"#;
+        let at = xml.find("<a:e").unwrap();
+        let out = Native.canonicalize(xml, &[Target::ElementAt(at), Target::Document], &Options::default()).unwrap();
+        assert_eq!(out, [r#"<a:e xmlns:a="urn:a" x="1"></a:e>"#, r#"<a:r xmlns:a="urn:a"><a:e x="1"></a:e><f></f></a:r>"#]);
+        assert!(Native.canonicalize(xml, &[Target::ElementAt(1)], &Options::default()).is_err());
+        assert!(Native.canonicalize("<!DOCTYPE r []><r/>", &[Target::Document], &Options::default()).is_err());
     }
 
     #[test]

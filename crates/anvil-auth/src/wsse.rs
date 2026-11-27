@@ -226,6 +226,12 @@ fn by_wsu_id<'a, 'i>(doc: &'a roxmltree::Document<'i>, id: &str) -> Result<roxml
     Ok(node)
 }
 
+/// The canonicalizer the signer uses: the one place to change to swap in
+/// another implementation of [`c14n::Canonicalizer`].
+fn canonicalizer() -> &'static dyn c14n::Canonicalizer {
+    &c14n::Native
+}
+
 fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
@@ -390,9 +396,17 @@ pub fn insert(body: &[u8], spec: &HeaderSpec<'_>, now: Timestamp) -> Result<Inse
                 xml_escape(&c14n::format_prefix_list(sig.inclusive_prefixes))
             )
         };
-        let mut references = String::new();
+        // Each signed id must name exactly one element (XML signature
+        // wrapping), checked here whichever canonicalizer is used.
+        let mut starts = Vec::new();
         for id in &ids {
-            let canonical = c14n::canonicalize(by_wsu_id(&doc, id)?, &opts).map_err(|e| AuthError::Invalid(e.to_string()))?;
+            starts.push(by_wsu_id(&doc, id)?.range().start);
+        }
+        drop(doc);
+        let targets: Vec<c14n::Target> = starts.iter().map(|&at| c14n::Target::ElementAt(at)).collect();
+        let canonical = canonicalizer().canonicalize(&out, &targets, &opts).map_err(|e| AuthError::Invalid(e.to_string()))?;
+        let mut references = String::new();
+        for (id, canonical) in ids.iter().zip(&canonical) {
             let digest = b64(sha2::Sha256::digest(canonical.as_bytes()).as_ref());
             references.push_str(&format!(
                 r##"<ds:Reference URI="#{}"><ds:Transforms>{transform}</ds:Transforms><ds:DigestMethod Algorithm="{}"/><ds:DigestValue>{digest}</ds:DigestValue></ds:Reference>"##,
@@ -400,7 +414,6 @@ pub fn insert(body: &[u8], spec: &HeaderSpec<'_>, now: Timestamp) -> Result<Inse
                 xmldsig::DIGEST_SHA256
             ));
         }
-        drop(doc);
         let signature_open = format!(r#"<ds:Signature xmlns:ds="{}">"#, xmldsig::DS_NS);
         let signed_info = format!(
             r#"<ds:SignedInfo><ds:CanonicalizationMethod Algorithm="{}"/><ds:SignatureMethod Algorithm="{}"/>{references}</ds:SignedInfo>"#,
@@ -414,15 +427,13 @@ pub fn insert(body: &[u8], spec: &HeaderSpec<'_>, now: Timestamp) -> Result<Inse
         out.insert_str(signature_at, &format!("{head}{tail}"));
         // SignedInfo is canonicalized where it stands, with the namespaces
         // it inherits from the envelope.
-        let canonical_signed_info = {
-            let doc = parse_bounded(&out, "WS-Security envelope", "rewritten SOAP envelope is not well-formed XML")?;
-            let at = signature_at + signature_open.len();
-            let node = doc
-                .descendants()
-                .find(|n| n.is_element() && n.range().start == at && n.has_tag_name((xmldsig::DS_NS, "SignedInfo")))
-                .ok_or_else(|| AuthError::Invalid("the generated ds:SignedInfo could not be found again".into()))?;
-            c14n::canonicalize(node, &c14n::Options::default()).map_err(|e| AuthError::Invalid(e.to_string()))?
-        };
+        parse_bounded(&out, "WS-Security envelope", "rewritten SOAP envelope is not well-formed XML")?;
+        let signed_info_at = c14n::Target::ElementAt(signature_at + signature_open.len());
+        let canonical_signed_info = canonicalizer()
+            .canonicalize(&out, &[signed_info_at], &c14n::Options::default())
+            .map_err(|e| AuthError::Invalid(e.to_string()))?
+            .pop()
+            .ok_or_else(|| AuthError::Invalid("the generated ds:SignedInfo could not be canonicalized".into()))?;
         let value = sig.identity.sign(canonical_signed_info.as_bytes())?;
         out.insert_str(signature_at + head.len(), &b64(&value));
         signed = Some(Signed {
