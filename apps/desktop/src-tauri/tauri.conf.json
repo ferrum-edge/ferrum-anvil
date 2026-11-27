@@ -51,6 +51,11 @@
     },
     "macOS": {
       "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "nsis": {
+        "template": "windows/installer.nsi"
+      }
     }
   },
   "plugins": {

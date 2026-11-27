@@ -1,11 +1,15 @@
 // Tests of scripts/release-notes.mjs, run in hosted CI with `node --test`.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   DRAFT_TEXT,
+  PARTIAL,
   SIGNED,
   UNSIGNED,
   absoluteLinks,
@@ -13,6 +17,7 @@ import {
   changelogSection,
   checkEvidence,
   releaseNotes,
+  signingSummary,
   summaryParagraph,
 } from "../release-notes.mjs";
 
@@ -78,15 +83,33 @@ Compatibility release: Anvil adopts a gateway.
 - No lead paragraph.
 `;
 
+// Version 2 targets consistent with a platform_signing summary: one target per
+// platform (two for "partial", one signed and one not).
+const OS_OF = { macos: "macOS", windows: "Windows", linux: "Linux" };
+function targetsFor(platforms) {
+  return Object.entries(platforms ?? {}).flatMap(([p, status]) => {
+    const t = (signed) => ({ os: OS_OF[p] ?? p, signed, signing_applicable: p !== "linux" });
+    if (status === "partial") return [t(true), t(false)];
+    return [t(status === "signed")];
+  });
+}
+
 function evidence(overrides = {}) {
+  const e = baseEvidence(overrides);
+  if (!("targets" in overrides)) e.targets = targetsFor(e.platform_signing);
+  return e;
+}
+
+function baseEvidence(overrides = {}) {
   return {
     format: "anvil-release-evidence",
-    version: 1,
+    version: 2,
     release: { version: "1.2.0", tag: "anvil-v1.2.0", publication: "draft" },
     source: { repository: "ferrum-edge/ferrum-anvil", commit: COMMIT, ref: "refs/tags/anvil-v1.2.0" },
     build: { workflow: "Release", run_id: 37859968362, run_attempt: 1, run_url: RUN_URL },
     signed: false,
     signing: UNSIGNED,
+    platform_signing: { macos: "unsigned", windows: "unsigned", linux: "not applicable" },
     updater: { signed: true, manifest: "latest.json", key_id: "BFE08514FEC0E65A", platforms: ["linux-x86_64-appimage"], detail: "verified" },
     ...overrides,
   };
@@ -204,10 +227,61 @@ test("summary lists, lowercase headings and relative links reach the body", () =
   assert.ok(body.includes("\n\n- A format changes.\n\nBuilt from"));
 });
 
-test("signed release has a signing line instead of the warning", () => {
-  const body = releaseNotes({ changelog, version: "1.2.0", evidence: evidence({ signed: true, signing: SIGNED }) });
+const SIGNED_PLATFORMS = { macos: "signed", windows: "signed", linux: "not applicable" };
+
+test("signed release has a signing line instead of the warning, and says Linux has no platform signing", () => {
+  const body = releaseNotes({ changelog, version: "1.2.0", evidence: evidence({ signed: true, signing: SIGNED, platform_signing: SIGNED_PLATFORMS }) });
   assert.ok(!body.includes("[!WARNING]"));
-  assert.ok(body.startsWith("**Signing:** the installers are code-signed and verified on the build runner. Verify downloads with `SHA256SUMS`."));
+  assert.ok(
+    body.startsWith(
+      "**Signing:** the macOS and Windows installers are code-signed and verified on the build runner. " +
+        "Linux packages (`.deb`, `.rpm`, AppImage) have no platform code signing. Verify downloads with `SHA256SUMS`.",
+    ),
+    body,
+  );
+});
+
+test("partly signed release keeps the warning and names each platform's status", () => {
+  const body = releaseNotes({
+    changelog,
+    version: "1.2.0",
+    evidence: evidence({ signing: PARTIAL, platform_signing: { macos: "signed", windows: "unsigned", linux: "not applicable" } }),
+  });
+  const [first, second] = body.split("\n");
+  // release.yml's release job checks exactly these two line prefixes for signed: false.
+  assert.equal(first, "> [!WARNING]");
+  assert.ok(
+    second.startsWith(
+      "> **Unsigned installers.** Not every installer is code-signed. Code-signed and verified on the build runner: macOS. " +
+        "Not code-signed: Windows (Windows SmartScreen will warn). Linux packages (`.deb`, `.rpm`, AppImage) have no platform code signing.",
+    ),
+    second,
+  );
+  assert.ok(!second.includes("not code-signed yet (no Apple Developer ID or Windows certificate)"));
+  const some = releaseNotes({
+    changelog,
+    version: "1.2.0",
+    evidence: evidence({ signing: PARTIAL, platform_signing: { macos: "partial", windows: "signed" } }),
+  });
+  assert.ok(some.includes("Code-signed and verified on the build runner: Windows. Only some macOS installers are code-signed (see `release-evidence.json`)."), some);
+});
+
+test("signingSummary: Linux is never signed or unsigned, and every macOS and Windows target must be signed", () => {
+  const t = (os, signed, applicable = os !== "Linux") => ({ os, signed, signing_applicable: applicable });
+  const none = signingSummary([t("macOS", false), t("macOS", false), t("Linux", false), t("Windows", false)]);
+  assert.deepEqual(none, { signed: false, signing: UNSIGNED, platform_signing: { macos: "unsigned", linux: "not applicable", windows: "unsigned" } });
+  const all = signingSummary([t("macOS", true), t("macOS", true), t("Linux", false), t("Windows", true)]);
+  assert.deepEqual(all, { signed: true, signing: SIGNED, platform_signing: { macos: "signed", linux: "not applicable", windows: "signed" } });
+  const mac = signingSummary([t("macOS", true), t("macOS", true), t("Linux", false), t("Windows", false)]);
+  assert.deepEqual(mac, { signed: false, signing: PARTIAL, platform_signing: { macos: "signed", linux: "not applicable", windows: "unsigned" } });
+  const half = signingSummary([t("macOS", true), t("macOS", false), t("Windows", true)]);
+  assert.equal(half.platform_signing.macos, "partial");
+  assert.equal(half.signing, PARTIAL);
+  // A Linux-only set has nothing to sign: never "signed".
+  assert.deepEqual(signingSummary([t("Linux", false)]), { signed: false, signing: UNSIGNED, platform_signing: { linux: "not applicable" } });
+  assert.throws(() => signingSummary([t("FreeBSD", false)]), /unknown build OS/);
+  // Every summary is accepted by the notes' evidence check.
+  for (const s of [none, all, mac, half]) assert.doesNotThrow(() => checkEvidence(evidence(s), "1.2.0"));
 });
 
 test("refuses a tag that is not the version's", () => {
@@ -222,6 +296,21 @@ test("refuses invalid evidence", () => {
     [evidence({ release: { version: "1.1.0" } }), /not 1\.2\.0/],
     [evidence({ signing: "signed" }), /signing has an invalid value/],
     [evidence({ signed: true }), /disagree/],
+    [evidence({ signing: PARTIAL }), /signing and platform_signing disagree/],
+    [evidence({ platform_signing: { macos: "signed", windows: "unsigned" } }), /signing and platform_signing disagree/],
+    [evidence({ signed: true, signing: SIGNED, platform_signing: { macos: "signed", windows: "partial" } }), /signing and platform_signing disagree/],
+    [evidence({ signed: true, signing: SIGNED, platform_signing: { linux: "not applicable" } }), /signing and platform_signing disagree/],
+    [evidence({ platform_signing: undefined }), /platform_signing has an invalid shape/],
+    [evidence({ platform_signing: {} }), /platform_signing has an invalid shape/],
+    [evidence({ platform_signing: { ios: "unsigned" } }), /platform_signing has an invalid shape/],
+    [evidence({ platform_signing: { macos: "maybe" } }), /platform_signing has an invalid shape/],
+    // Version 2 summaries must match their own targets (F5).
+    [evidence({ signed: true, signing: SIGNED, platform_signing: SIGNED_PLATFORMS, targets: targetsFor({ macos: "signed", windows: "unsigned", linux: "not applicable" }) }), /disagrees with its targets/],
+    [evidence({ signed: true, signing: SIGNED, platform_signing: { macos: "signed", windows: "signed" }, targets: targetsFor({ macos: "signed" }) }), /disagrees with its targets/],
+    [evidence({ targets: [] }), /invalid signing record/],
+    [evidence({ targets: undefined }), /invalid signing record/],
+    [evidence({ targets: [{ os: "Linux", signed: false, signing_applicable: true }] }), /invalid signing record/],
+    [evidence({ targets: [{ os: "Windows", signed: false, signing_applicable: false }] }), /invalid signing record/],
     [evidence({ updater: { signed: true, key_id: null } }), /updater has an invalid shape/],
     [evidence({ updater: { signed: false, key_id: "`) [x](y" } }), /updater has an invalid shape/],
     [evidence({ source: { repository: "a/b c", commit: COMMIT } }), /source\.repository/],
@@ -277,4 +366,112 @@ test("the notes artifact is outside the publish job's release-* download pattern
   const names = workflow.match(/name: notes-\$\{\{ needs\.preflight\.outputs\.version \}\}/g) ?? [];
   assert.equal(names.length, 2, "the notes are uploaded and downloaded as notes-<version>");
   assert.ok(!workflow.includes("release-notes-"));
+});
+
+test("the release job's signing-status check matches the notes' first lines", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
+  assert.ok(workflow.includes(`true) [[ "$first" == '**Signing:** '* ]] ;;`));
+  assert.ok(workflow.includes(`false) [ "$first" = '> [!WARNING]' ] && [[ "$(sed -n 2p "$notes")" == '> **Unsigned installers.** '* ]] ;;`));
+  const signed = releaseNotes({ changelog, version: "1.2.0", evidence: evidence({ signed: true, signing: SIGNED, platform_signing: SIGNED_PLATFORMS }) });
+  assert.ok(signed.split("\n")[0].startsWith("**Signing:** "));
+  for (const ev of [evidence(), evidence({ signing: PARTIAL, platform_signing: { macos: "signed", windows: "unsigned", linux: "not applicable" } })]) {
+    const lines = releaseNotes({ changelog, version: "1.2.0", evidence: ev }).split("\n");
+    assert.equal(lines[0], "> [!WARNING]");
+    assert.ok(lines[1].startsWith("> **Unsigned installers.** "));
+  }
+});
+
+test("version 1 evidence (releases up to 0.1.9, no platform_signing) still renders as published", () => {
+  // The shape of anvil-v0.1.9's published release-evidence.json.
+  const v1 = (overrides = {}) => {
+    const e = evidence({ version: 1, ...overrides });
+    delete e.platform_signing;
+    return e;
+  };
+  const unsigned = releaseNotes({ changelog, version: "1.2.0", evidence: v1() });
+  assert.ok(unsigned.startsWith("> [!WARNING]\n> **Unsigned installers.** The installers are not code-signed yet (no Apple Developer ID or Windows certificate)"));
+  const signed = releaseNotes({ changelog, version: "1.2.0", evidence: v1({ signed: true, signing: SIGNED }) });
+  assert.ok(signed.startsWith("**Signing:** the installers are code-signed and verified on the build runner. Verify downloads with `SHA256SUMS`."), signed);
+  assert.throws(() => checkEvidence(v1({ signing: PARTIAL }), "1.2.0"), /partial signing needs platform_signing/);
+  // A version 1 record that does carry the field is checked like version 2.
+  assert.throws(() => checkEvidence(evidence({ version: 1, platform_signing: { macos: "maybe" } }), "1.2.0"), /platform_signing has an invalid shape/);
+  assert.throws(() => checkEvidence(evidence({ version: 3 }), "1.2.0"), /format or version/);
+});
+
+test("the vendored NSIS template is Tauri CLI's own, with only the uninstaller signing exit code checked", () => {
+  // Upstream: crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi at
+  // tag @tauri-apps/cli-v2.12.6. Bumping @tauri-apps/cli fails this test until
+  // the template is refreshed from the new tag and the hash below updated.
+  const lock = JSON.parse(readFileSync(join(root, "apps", "desktop", "package-lock.json"), "utf8"));
+  assert.equal(lock.packages["node_modules/@tauri-apps/cli"].version, "2.12.6", "refresh apps/desktop/src-tauri/windows/installer.nsi from the new Tauri CLI tag");
+  const conf = JSON.parse(readFileSync(join(root, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"));
+  assert.equal(conf.bundle.windows.nsis.template, "windows/installer.nsi");
+  const vendored = readFileSync(join(root, "apps", "desktop", "src-tauri", "windows", "installer.nsi"), "utf8");
+  const checked = "  !uninstfinalize '${UNINSTALLERSIGNCOMMAND}' = 0\n";
+  assert.equal(vendored.split(checked).length, 2, "exactly one checked uninstaller signing hook");
+  const upstream = vendored.replace(checked, "  !uninstfinalize '${UNINSTALLERSIGNCOMMAND}'\n");
+  assert.equal(createHash("sha256").update(upstream).digest("hex"), "d00089d3b1a2c4a30d7b6e098079100cb8f25e980f84d4515aca4597b95e967d");
+});
+
+test("signing-route.sh: half-configured routes fail, precedence applies only to complete sets, values are never read", () => {
+  const run = (has, os = "Windows", tag = "anvil-v1.2.0") => {
+    const dir = mkdtempSync(join(tmpdir(), "route-"));
+    const out = join(dir, "out");
+    const env = { PATH: process.env.PATH, TAG: tag, RUNNER_OS: os, TARGET: "t", GITHUB_OUTPUT: out };
+    for (const n of has) env[`HAS_${n}`] = "true";
+    const r = spawnSync("bash", [join(root, "scripts", "release", "signing-route.sh")], { env, encoding: "utf8" });
+    let outputs = {};
+    try {
+      outputs = Object.fromEntries(readFileSync(out, "utf8").trim().split("\n").map((l) => l.split("=")));
+    } catch {}
+    rmSync(dir, { recursive: true, force: true });
+    return { status: r.status, text: r.stdout + r.stderr, outputs };
+  };
+  const ats = ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "ARTIFACT_SIGNING_ENDPOINT", "ARTIFACT_SIGNING_ACCOUNT", "ARTIFACT_SIGNING_CERTIFICATE_PROFILE"];
+  const pfx = ["WINDOWS_CERTIFICATE", "WINDOWS_CERTIFICATE_PASSWORD"];
+  const mac = ["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD"];
+  const api = ["APPLE_API_ISSUER", "APPLE_API_KEY", "APPLE_API_KEY_P8"];
+  const appleId = ["APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID"];
+
+  assert.deepEqual(run([]).outputs, { route: "none", macos: "none", windows: "none" });
+  assert.equal(run(ats).outputs.windows, "artifact-signing-oidc");
+  assert.equal(run([...ats, "AZURE_CLIENT_SECRET"]).outputs.windows, "artifact-signing-secret");
+  assert.equal(run(pfx).outputs.windows, "pfx");
+  assert.equal(run([...ats, ...pfx]).outputs.windows, "artifact-signing-oidc");
+  // A half-set .pfx fails even though Artifact Signing is complete (F8).
+  const half = run([...ats, "WINDOWS_CERTIFICATE"]);
+  assert.equal(half.status, 1);
+  assert.match(half.text, /Windows \.pfx signing is partly configured .*missing: WINDOWS_CERTIFICATE_PASSWORD/);
+  assert.match(run(["AZURE_CLIENT_ID"]).text, /Azure Artifact Signing is partly configured/);
+  // macOS: notarization is required; the API key wins over the Apple ID.
+  assert.equal(run([...mac, ...api], "macOS").outputs.macos, "api-key");
+  assert.equal(run([...mac, ...appleId], "macOS").outputs.macos, "apple-id");
+  assert.equal(run([...mac, ...api, ...appleId], "macOS").outputs.macos, "api-key");
+  assert.match(run(mac, "macOS").text, /needs notarization credentials too/);
+  assert.match(run([...mac, "APPLE_API_KEY"], "macOS").text, /API-key notarization is partly configured/);
+  assert.match(run([...mac, ...api, "APPLE_ID"], "macOS").text, /Apple ID notarization is partly configured/);
+  // Another OS's route never takes effect: credentials gated on it stay unmapped.
+  assert.deepEqual(run([...mac, ...api, ...ats], "Linux").outputs, { route: "none", macos: "none", windows: "none" });
+  assert.deepEqual(run([...mac, ...api, ...ats], "Windows").outputs, { route: "artifact-signing-oidc", macos: "none", windows: "artifact-signing-oidc" });
+  // A dry run reads nothing.
+  assert.deepEqual(run([...mac, ...api, ...ats], "macOS", "").outputs, { route: "none", macos: "none", windows: "none" });
+});
+
+test("only bundle-windows can request an OIDC token, and it runs no release check", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
+  // Top-level jobs, each with its own text.
+  const jobs = Object.fromEntries(
+    workflow
+      .split(/\n(?=  [a-z][a-z0-9-]*:\n)/)
+      .slice(1)
+      .map((block) => [block.match(/^  ([a-z][a-z0-9-]*):/)[1], block]),
+  );
+  const withToken = Object.entries(jobs).filter(([, text]) => /^\s+id-token: write/m.test(text)).map(([name]) => name);
+  assert.deepEqual(withToken, ["bundle-windows"]);
+  assert.ok(!jobs["bundle-windows"].includes("check-artifacts.sh"), "the release check (runtime probe) is not in the job with OIDC");
+  assert.ok(jobs["check-windows"].includes("bash scripts/release/check-artifacts.sh"));
+  assert.ok(!/environment:|secrets\./.test(jobs["check-windows"]), "check-windows has no environment and no secret");
+  assert.match(jobs["bundle-windows"], /Binaries match the build job's recorded digests/);
+  assert.match(jobs.publish, /needs: \[preflight, build, check-windows\]/);
+  assert.match(jobs.build, /name: compiled-\$\{\{ matrix\.target \}\}[\s\S]*?retention-days: 30/);
 });

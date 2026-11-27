@@ -36,7 +36,7 @@ nightly lab run does not replace either.
 it runs on a PR, it must pass before merging. A pull request's Ubuntu lab job
 runs every profile against the default pin (about 11 to 12 minutes, inside the
 time the Rust jobs already take), and its macOS job runs the core profile. The
-nightly run repeats it on both systems (v0.9.20 is the only supported release). Before this,
+nightly run repeats it on both systems (the Lab supports one release at a time: the default pin in `lab/gateway/RELEASE.lock`). Before this,
 pull requests ran only the core profile, so a dependency bump that broke the
 `tls` profile's DTLS mTLS scenario (PROTO-022) merged green and failed every
 nightly job afterwards. A failing scenario is read from the job's uploaded
@@ -80,7 +80,7 @@ packages together by hand, then update both lockfiles in the same change.
 | **Rust** (3 OSes) | `npm run build` (anvil-desktop embeds `apps/desktop/dist` at compile time) → `cargo fmt --all --check` (Linux) → `cargo clippy --locked --workspace --all-targets -- -D warnings` → `cargo check -p anvil-desktop` → `cargo check -p anvil-desktop --features e2e` → `cargo check --target x86_64-apple-darwin -p anvil-auth -p anvil-transport` (macOS only, the AWS-LC crates for the cross-built release target) → `cargo check -p anvil-auth` (Windows only, the crate on its own) → `cargo test --locked --workspace --exclude anvil-desktop --no-fail-fast` → `cargo test --locked -p anvil-desktop --lib` (not on Windows) → `cargo test -p anvil-storage --test os_keychain -- --ignored` (the real OS credential store; on Linux inside a D-Bus session with an unlocked gnome-keyring) |
 | **Frontend** | `npm ci` → `npm run typecheck` → `npm run e2e:typecheck` → `npm test` (vitest, jsdom) → `npm run build` → `npm audit --omit=dev --audit-level=high` |
 | **Contract & catalog drift** | `cargo run -p anvil-cli -- schema --out contracts/schemas` and `npm run contracts`, then fail if `contracts/` or `apps/desktop/src/generated/` changed; `cargo test -p anvil-diagnostics --test catalog_drift` |
-| **Supply chain & licensing** | `cargo deny --locked check` (cargo-deny 0.20.2); `node scripts/licenses.mjs --check`; `node --test scripts/tests/release-notes.test.mjs` (release notes generator, including the current version's CHANGELOG section); `node --test scripts/tests/updater-manifest.test.mjs` (the signature checks behind `latest.json` refuse another key, a bad signature, an altered artifact and a wrong signed version); `python3 -I scripts/tests/test_release_smoke_record.py` (the release smoke's failure classes: step, finalize and summary, including a job that stopped before recording); `python3 -I scripts/tests/test_matrix_coverage.py` (the failure-matrix classifier's `pinned` cap and `requires` gate; on pull requests, `ci.yml` runs as it is on `main`, because the "trusted required workflows" ruleset pins it there, so `release-smoke.yml`'s `unit-tests` job also runs both Python test files against the PR's own scripts); `scripts/release-check.sh` (dependency-graph check only) |
+| **Supply chain & licensing** | `cargo deny --locked check` (cargo-deny 0.20.2); `node scripts/licenses.mjs --check`; `node --test scripts/tests/release-notes.test.mjs` (release notes generator, including the current version's CHANGELOG section, per-platform signing and version 1 evidence; the release signing-route selection; the vendored NSIS template against its Tauri CLI version); `node --test scripts/tests/updater-manifest.test.mjs` (the signature checks behind `latest.json` refuse another key, a bad signature, an altered artifact and a wrong signed version); `python3 -I scripts/tests/test_release_smoke_record.py` (the release smoke's failure classes: step, finalize and summary, including a job that stopped before recording); `python3 -I scripts/tests/test_matrix_coverage.py` (the failure-matrix classifier's `pinned` cap and `requires` gate; on pull requests, `ci.yml` runs as it is on `main`, because the "trusted required workflows" ruleset pins it there, so `release-smoke.yml`'s `unit-tests` job also runs both Python test files against the PR's own scripts); `scripts/release-check.sh` (dependency-graph check only) |
 | **Release checker** (Ubuntu 26.04) | the pinned trusted AppImage extractor (`.github/actions/trusted-appimage-extractor`) → `python3 -I scripts/tests/test_release_check.py` |
 | **Secret scan** | gitleaks 8.30.1 (downloaded and SHA-256 verified) over the full history of the checked-out commit and over the working tree, with `.gitleaks.toml`. For a PR the commit is its merge commit, so the PR's commits and all of `main` are scanned; other branches are not |
 
@@ -177,10 +177,10 @@ release asset for the runner's OS and architecture with `gh release download`
 (authenticated by the workflow's `github.token`) into `lab/bin/<release>/`.
 It refuses to keep a binary whose SHA-256 differs from its lock:
 
-- `lab/gateway/RELEASE.lock`: the default pin (v0.9.20, hosted Anvil qualification recorded in
-  [its audit](audit/gateway-0.9.20-delta.md#qualification-status));
-- `lab/gateway/releases/<release>.lock`: every supported release (v0.9.20;
-  v0.9.5 to v0.9.15 were retired, see [lab/README.md](lab/README.md)).
+- `lab/gateway/RELEASE.lock`: the default pin (its release and hosted Anvil
+  qualification are recorded in the matching `docs/audit/gateway-<release>-delta.md`);
+- `lab/gateway/releases/<release>.lock`: every supported release (only the
+  default pin; earlier releases were retired, see [lab/README.md](lab/README.md)).
 
 Each lock pins macOS (arm64, x86_64), Linux (x86_64, arm64) and Windows
 (x86_64) assets. The workflow passes the release in `ANVIL_LAB_RELEASE`: pull
@@ -199,7 +199,9 @@ artifact per OS and release.
 | actions/upload-artifact | v7.0.2 `cf430e030ddbb5b0abf93d22962f4752f3646cd9` |
 | actions/download-artifact | v8.0.2 `9000827ccba6bdab643e8b6fd33ac0654aef8333` |
 | Swatinem/rust-cache | v2.9.3 `d1527c8f67ef9af357290475d4af4b0fab8f12e0` |
-| taiki-e/install-action | v2.90.3 `cfdb7ed4ccc7c7dce37759eae89dc5674b469b39` |
+| taiki-e/install-action | v2.90.8 `fe3acb53a98b62c772db35de75ce0e4595e7ca8c` |
+| azure/login | v3.1.0 `a641126d1b8aa4d1fa005f4f92df94a3a4c4c906` (release workflow, Artifact Signing OIDC route only) |
+| Microsoft.ArtifactSigning.Client | 1.0.151, nuget.org SHA-512 pinned in `release.yml` (Artifact Signing routes only) |
 | Node.js | 22.23.3 |
 | cargo-deny / cargo-cyclonedx | 0.20.2 / 0.5.9 |
 | gitleaks | 8.30.1 (linux x64 SHA-256 `551f6fc8…f2470eb`) |
@@ -209,5 +211,12 @@ artifact per OS and release.
 
 ## Not yet exercised
 
-The signing branches of `release.yml` have not run, because no signing
-credentials are configured (see [release.md](release.md#signing-and-what-unsigned-means)).
+The platform code-signing routes of `release.yml` (macOS Developer ID and
+notarization by App Store Connect API key or Apple ID; Windows Azure Artifact
+Signing or `.pfx`, in the `bundle-windows` job) had not run as of
+`anvil-v0.1.9`, because no platform signing credentials were configured; every
+0.1.x release is unsigned and its evidence says so. A later release's notes
+and `release-evidence.json` say per platform whether it is signed (see
+[release.md](release.md#signing-and-what-unsigned-means)). The updater-signing
+branch has run: every published release from `anvil-v0.1.0` to `anvil-v0.1.9`
+was built with the owner's updater key and ships a signed `latest.json`.

@@ -11,10 +11,24 @@
 # `release` environment, which should hold the owner's credentials (Apple and
 # Windows code signing, TAURI_SIGNING_PRIVATE_KEY for the updater), and the
 # workflow passes none of them to a dry run. They reach only the bundle step,
-# never the compile step. A target is recorded as signed only after the
-# signature is verified on the runner; otherwise it is "unsigned — owner
-# credentials not configured". Signed updater artifacts and latest.json also
-# need the variable ANVIL_UPDATER_PUBKEY. See docs/release.md.
+# never the compile step. Which signing route each platform takes is chosen
+# from which secrets and variables exist (the "Signing route" step):
+#   macOS:   Developer ID certificate + notarization with an App Store Connect
+#            API key (preferred) or an Apple ID app-specific password
+#   Windows: Azure Artifact Signing through Tauri's bundle.windows.signCommand
+#            (OIDC or client secret; preferred) or an exportable .pfx
+# With none configured a platform builds unsigned, as before. A half-configured
+# route fails the run, and so does a configured route whose signature (or
+# notarization) does not verify: a release never ships unsigned by accident.
+# Each credential is mapped only into the steps of the platform and route that
+# use it. Windows is compiled by the build matrix, bundled and signed by the
+# separate bundle-windows job (the only job with `id-token: write`; it
+# compiles nothing and never executes build output) and release-checked by
+# check-windows, which has no credential (see docs/release.md).
+# A target is recorded as signed only after the signature is verified on the
+# runner; otherwise it is "unsigned — owner credentials not configured".
+# Signed updater artifacts and latest.json also need the variable
+# ANVIL_UPDATER_PUBKEY. See docs/release.md.
 name: Release
 
 on:
@@ -137,9 +151,20 @@ jobs:
     name: Build · ${{ matrix.target }}
     needs: preflight
     # A tagged release runs in the protected `release` environment (required
-    # reviewers, anvil-v* deployment rule; the updater key lives there). A dry
-    # run uses no environment and never sees the updater key.
+    # reviewers, anvil-v* deployment rule; the updater key and the Apple
+    # credentials live there). A dry run uses no environment and never sees a
+    # credential. No build job can request an OIDC token (no id-token
+    # permission): only bundle-windows, which compiles nothing, can.
     environment: ${{ needs.preflight.outputs.tag != '' && 'release' || '' }}
+    permissions:
+      contents: read
+    # Set by the Windows leg only (an empty output does not override another
+    # matrix leg's): the digests bundle-windows checks before signing, and the
+    # toolchain that compiled the Windows binaries, for its build-info.json.
+    outputs:
+      windows_sha256: ${{ steps.stage.outputs.sha256 }}
+      windows_rustc: ${{ steps.stage.outputs.rustc }}
+      windows_cargo: ${{ steps.stage.outputs.cargo }}
     strategy:
       fail-fast: false
       matrix:
@@ -148,18 +173,25 @@ jobs:
             os: macos-15
             bundles: app,dmg
             probe: true
+            split: false
           - target: x86_64-apple-darwin
             os: macos-15
             bundles: app,dmg
             probe: false # cross-built on arm64; not launched
+            split: false
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-26.04 # modern Linux baseline for the .deb/.rpm/AppImage
             bundles: deb,rpm,appimage
             probe: true
+            split: false
+          # Compiled here; bundled, signed, checked and uploaded by the
+          # bundle-windows job, which needs no compiler and runs no
+          # dependency build script while it holds the signing identity.
           - target: x86_64-pc-windows-msvc
             os: windows-2025
-            bundles: msi,nsis
-            probe: true
+            bundles: ""
+            probe: false
+            split: true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     env:
@@ -218,6 +250,7 @@ jobs:
         with:
           tool: cargo-cyclonedx@0.5.9
 
+
       - name: Updater config (tagged release with the owner's updater key only)
         id: updater
         shell: bash
@@ -226,25 +259,33 @@ jobs:
           # Whether the key exists, never the key itself.
           HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
           TAG: ${{ needs.preflight.outputs.tag }}
-        run: |
-          # Signed updater artifacts need both halves of the owner's updater key
-          # and a real tag: dry runs never sign updates. The public key is
-          # compiled into the app, so build and bundle both get this config.
-          # One normalized key (all whitespace stripped) is compiled in and recorded.
-          pubkey="$(tr -d '[:space:]' <<<"${ANVIL_UPDATER_PUBKEY:-}")"
-          if [ -n "$TAG" ] && [ "$HAS_KEY" = "true" ] && [ -n "$pubkey" ]; then
-            cfg="$RUNNER_TEMP/anvil-updater.conf.json"
-            PUBKEY="$pubkey" node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({ bundle: { createUpdaterArtifacts: true }, plugins: { updater: { pubkey: process.env.PUBKEY } } }))' "$cfg"
-            { echo "updater=true"; echo "config=$cfg"; echo "pubkey=$pubkey"; } >> "$GITHUB_OUTPUT"
-            echo "Updater key configured; creating signed updater artifacts."
-          else
-            if [ -z "$TAG" ]; then
-              echo "Dry run: no updater artifacts."
-            elif [ "$HAS_KEY" = "true" ] || [ -n "$pubkey" ]; then
-              echo "::warning::only one of TAURI_SIGNING_PRIVATE_KEY / ANVIL_UPDATER_PUBKEY is set; building without updater artifacts"
-            fi
-            { echo "updater=false"; echo "config="; echo "pubkey="; } >> "$GITHUB_OUTPUT"
-          fi
+        run: bash scripts/release/updater-config.sh
+
+      - name: Signing route (tagged release only; reads whether secrets exist, never their values)
+        id: route
+        shell: bash
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          HAS_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+          HAS_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
+          HAS_APPLE_ID: ${{ secrets.APPLE_ID != '' }}
+          HAS_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD != '' }}
+          HAS_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID != '' }}
+          HAS_APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER != '' }}
+          HAS_APPLE_API_KEY: ${{ secrets.APPLE_API_KEY != '' }}
+          HAS_APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+          HAS_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+          HAS_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+          HAS_AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
+          HAS_AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID != '' }}
+          HAS_AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID != '' }}
+          HAS_AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID != '' }}
+          HAS_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT != '' }}
+          HAS_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT != '' }}
+          HAS_ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE != '' }}
+          HAS_ARTIFACT_SIGNING_PROFILE_EKU: ${{ vars.ARTIFACT_SIGNING_PROFILE_EKU != '' }}
+        run: bash scripts/release/signing-route.sh
 
       - name: Build desktop app (release profile, default features — no e2e; no signing credentials)
         shell: bash
@@ -259,77 +300,57 @@ jobs:
           if [ -n "${UPDATER_CONFIG:-}" ]; then args+=(--config "$UPDATER_CONFIG"); fi
           npx tauri "${args[@]}"
 
-      - name: Import Windows signing certificate (tagged release with owner credentials only)
-        id: wincert
-        if: runner.os == 'Windows' && needs.preflight.outputs.tag != ''
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          if (-not $env:WINDOWS_CERTIFICATE -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
-            "config=" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-            Write-Host "Windows signing credentials not configured; building unsigned."
-            exit 0
-          }
-          $pfx = Join-Path $env:RUNNER_TEMP "anvil-signing.pfx"
-          try {
-            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-            $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-            # A PFX with a chain imports several certificates: record them all for removal first.
-            $imported = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw)
-            "thumbprints=$(($imported | ForEach-Object Thumbprint) -join ' ')" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-          } finally {
-            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
-          }
-          $cert = $imported | Where-Object HasPrivateKey | Select-Object -First 1
-          if (-not $cert) { throw "the Windows signing PFX holds no certificate with a private key" }
-          $cfg = @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" } } } | ConvertTo-Json -Compress -Depth 5
-          "config=$cfg" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-
-      - name: Bundle and sign
+      - name: Bundle and sign (macOS and Linux)
+        if: ${{ !matrix.split }}
         shell: bash
         working-directory: apps/desktop
         env:
-          APPLE_CERTIFICATE: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_ID: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_TEAM_ID || '' }}
-          WIN_SIGN_CONFIG: ${{ steps.wincert.outputs.config }}
+          # Each credential is mapped only for the route that uses it, and the
+          # route outputs are "none" on a runner of another OS, so no Apple
+          # value reaches a Linux shell (or a dry run) at all.
+          MACOS_ROUTE: ${{ steps.route.outputs.macos }}
+          APPLE_CERTIFICATE: ${{ steps.route.outputs.macos != 'none' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ steps.route.outputs.macos != 'none' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.route.outputs.macos != 'none' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_TEAM_ID: ${{ steps.route.outputs.macos != 'none' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_ID: ${{ steps.route.outputs.macos == 'apple-id' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ steps.route.outputs.macos == 'apple-id' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_API_ISSUER: ${{ steps.route.outputs.macos == 'api-key' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ steps.route.outputs.macos == 'api-key' && secrets.APPLE_API_KEY || '' }}
+          APPLE_API_KEY_P8: ${{ steps.route.outputs.macos == 'api-key' && secrets.APPLE_API_KEY_P8 || '' }}
           UPDATER_CONFIG: ${{ steps.updater.outputs.config }}
-          # Only a tagged release (in the `release` environment) receives any
-          # signing credential; a dry run is always unsigned.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.preflight.outputs.tag != '' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.preflight.outputs.tag != '' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          # Only a tagged release with the owner's updater key (in the
+          # `release` environment) receives it; a dry run never does.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.updater.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ steps.updater.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           BUNDLES: ${{ matrix.bundles }}
           # The AppImage leaves libwayland-client to the host, like libEGL and
           # the rest of the graphics stack (AppImageCommunity excludelist; Mesa
           # loads its EGL driver against the host's copy). Read by linuxdeploy.
           LINUXDEPLOY_EXCLUDED_LIBRARIES: libwayland-client.so*
         run: |
+          if [ "${MACOS_ROUTE:-none}" = "api-key" ]; then
+            [[ "$APPLE_API_KEY" =~ ^[A-Z0-9]{8,16}$ ]] || { echo "::error::APPLE_API_KEY must be the App Store Connect key ID (letters and digits), not the key itself"; exit 1; }
+            keydir="$RUNNER_TEMP/anvil-asc-key"
+            trap 'rm -rf "$keydir"' EXIT
+            (umask 077 && mkdir -p "$keydir" && printf '%s\n' "$APPLE_API_KEY_P8" > "$keydir/AuthKey_$APPLE_API_KEY.p8")
+            export APPLE_API_KEY_PATH="$keydir/AuthKey_$APPLE_API_KEY.p8"
+            grep -q -- '-----BEGIN PRIVATE KEY-----' "$APPLE_API_KEY_PATH" || { echo "::error::APPLE_API_KEY_P8 must hold the contents of the AuthKey_<key id>.p8 file"; exit 1; }
+          fi
+          unset APPLE_API_KEY_P8
           # Unset empty credentials so Tauri never attempts a half-configured signing.
-          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_ISSUER APPLE_API_KEY TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
             [ -n "${!v:-}" ] || unset "$v"
           done
-          if [ -z "${UPDATER_CONFIG:-}" ]; then unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; fi
           # The same --config values as the build (Tauri merges them in order).
           args=(bundle --ci --target "$TARGET" --bundles "$BUNDLES")
-          if [ -n "${WIN_SIGN_CONFIG:-}" ]; then args+=(--config "$WIN_SIGN_CONFIG"); fi
           if [ -n "${UPDATER_CONFIG:-}" ]; then args+=(--config "$UPDATER_CONFIG"); fi
           npx tauri "${args[@]}"
-
-      - name: Remove Windows signing certificates
-        if: always() && steps.wincert.outputs.thumbprints != ''
-        shell: pwsh
-        env:
-          THUMBPRINTS: ${{ steps.wincert.outputs.thumbprints }}
-        run: |
-          foreach ($t in $env:THUMBPRINTS -split ' ' | Where-Object { $_ }) {
-            $c = Get-Item -Path "Cert:\CurrentUser\My\$t" -ErrorAction SilentlyContinue
-            if ($c -and $c.HasPrivateKey) { Remove-Item -Path $c.PSPath -DeleteKey } elseif ($c) { Remove-Item -Path $c.PSPath }
-          }
+          # Tauri notarizes and staples the .app only; the DMG users download
+          # gets its own notarization and stapled ticket here.
+          if [ "${MACOS_ROUTE:-none}" != "none" ]; then
+            bash ../../scripts/release/macos-notarize-dmg.sh "../../target/$TARGET/release/bundle"
+          fi
 
       - name: AppImage leaves libwayland-client to the host (Linux)
         if: runner.os == 'Linux'
@@ -358,126 +379,70 @@ jobs:
         run: cargo build --locked --release -p anvil-cli --target "$TARGET"
 
       - name: Collect artifacts
+        if: ${{ !matrix.split }}
         id: collect
         shell: bash
-        run: |
-          out="dist/$TARGET"
-          mkdir -p "$out"
-          b="target/$TARGET/release/bundle"
-          shopt -s nullglob
-          for f in "$b"/dmg/*.dmg "$b"/deb/*.deb "$b"/rpm/*.rpm "$b"/appimage/*.AppImage "$b"/msi/*.msi "$b"/nsis/*-setup.exe \
-                   "$b"/appimage/*.AppImage.sig "$b"/msi/*.msi.sig "$b"/nsis/*-setup.exe.sig; do
-            name="$(basename "$f" | tr ' ' '-')"
-            cp "$f" "$out/$name"
-          done
-          # Updater archives (only with the updater key). Both macOS targets
-          # produce "<Product>.app.tar.gz"; name them like the DMGs.
-          for f in "$b"/macos/*.app.tar.gz; do
-            [ -f "$f.sig" ] || { echo "::error::$f has no updater signature"; exit 1; }
-            arch="${TARGET%%-*}"; [ "$arch" = "x86_64" ] && arch=x64
-            name="$(basename "$f" .app.tar.gz | tr ' ' '-')_${VERSION}_${arch}.app.tar.gz"
-            cp "$f" "$out/$name"
-            cp "$f.sig" "$out/$name.sig"
-          done
-          stage="$RUNNER_TEMP/anvil-cli-$VERSION-$TARGET"
-          mkdir -p "$stage"
-          cp LICENSE LICENSE-COMMERCIAL.md THIRD_PARTY_LICENSES.md "$stage/"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cp "target/$TARGET/release/anvil.exe" "$stage/"
-            (cd "$RUNNER_TEMP" && 7z a -tzip -bso0 "anvil-cli-$VERSION-$TARGET.zip" "anvil-cli-$VERSION-$TARGET")
-            mv "$RUNNER_TEMP/anvil-cli-$VERSION-$TARGET.zip" "$out/"
-            echo "app=target/$TARGET/release/anvil-desktop.exe" >> "$GITHUB_OUTPUT"
-          else
-            cp "target/$TARGET/release/anvil" "$stage/"
-            tar -C "$RUNNER_TEMP" -czf "$out/anvil-cli-$VERSION-$TARGET.tar.gz" "anvil-cli-$VERSION-$TARGET"
-            echo "app=target/$TARGET/release/anvil-desktop" >> "$GITHUB_OUTPUT"
-          fi
-          ls -la "$out"
+        run: bash scripts/release/collect.sh
 
       - name: Release check (no WebDriver server, no test hooks)
+        if: ${{ !matrix.split }}
         shell: bash
         env:
           APP: ${{ steps.collect.outputs.app }}
           PROBE: ${{ matrix.probe }}
-        run: |
-          out="dist/$TARGET"
-          args=(--report "$out/release-check-$VERSION-$TARGET.json")
-          [ "$PROBE" = "true" ] && args+=(--runtime-probe)
-          shopt -s nullglob
-          files=("$out"/*.dmg "$out"/*.deb "$out"/*.rpm "$out"/*.AppImage "$out"/*.msi "$out"/*-setup.exe "$out"/*.app.tar.gz "$out"/anvil-cli-* "$APP")
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            xvfb-run -a scripts/release-check.sh "${args[@]}" "${files[@]}"
-          else
-            scripts/release-check.sh "${args[@]}" "${files[@]}"
-          fi
+        run: bash scripts/release/check-artifacts.sh
 
-      - name: Verify signatures (records signed only if verified)
-        id: signing
+      - name: Verify signatures (records signed only if verified; fails if configured signing did not verify)
+        if: ${{ !matrix.split }}
         shell: bash
         env:
           RUNNER_LABEL: ${{ matrix.os }}
           UPDATER: ${{ steps.updater.outputs.updater }}
           UPDATER_PUBKEY: ${{ steps.updater.outputs.pubkey }}
           APP: ${{ steps.collect.outputs.app }}
-        run: |
-          out="dist/$TARGET"
-          # Evidence that the updater public key is compiled into the app binary.
-          if [ "$UPDATER" = "true" ]; then
-            [ -n "$UPDATER_PUBKEY" ] || { echo "::error::updater configured without a public key"; exit 1; }
-            LC_ALL=C grep -aqF "$UPDATER_PUBKEY" "$APP" || { echo "::error::the updater public key is not in $APP"; exit 1; }
-          fi
-          signed=false; method="none"; detail="unsigned — owner credentials not configured"
-          case "$RUNNER_OS" in
-            macOS)
-              app="$(find "target/$TARGET/release/bundle/macos" -maxdepth 1 -name "*.app" | head -1)"
-              info="$(codesign -dv --verbose=2 "$app" 2>&1 || true)"
-              if codesign --verify --deep --strict "$app" 2>/dev/null && ! grep -q "Signature=adhoc" <<<"$info" && grep -q "^TeamIdentifier=[A-Z0-9]" <<<"$info"; then
-                signed=true; method="Developer ID codesign"
-                detail="$(grep -E '^(Authority|TeamIdentifier)=' <<<"$info" | head -2 | tr '\n' ' ')"
-                dmg="$(find "$out" -maxdepth 1 -name "*.dmg" | head -1)"
-                if xcrun stapler validate "$dmg" >/dev/null 2>&1 || spctl -a -t exec -vv "$app" 2>&1 | grep -q "Notarized Developer ID"; then
-                  method="$method + notarized"
-                else
-                  method="$method (not notarized)"
-                fi
-              elif grep -q "Signature=adhoc" <<<"$info"; then
-                detail="unsigned — owner credentials not configured (ad-hoc signature only, not a Developer ID)"
-              fi ;;
-            Windows)
-              status="$(pwsh -NoProfile -Command "\$s = Get-ChildItem '$out' -Include *.msi,*-setup.exe -Recurse | ForEach-Object { (Get-AuthenticodeSignature \$_.FullName).Status }; if (\$s -and -not (\$s | Where-Object { \$_ -ne 'Valid' })) { 'Valid' } else { (\$s -join ',') }")"
-              if [ "$status" = "Valid" ]; then signed=true; method="Authenticode"; detail="all installers: Valid"; fi ;;
-            Linux)
-              detail="unsigned — owner credentials not configured (no platform code signing for .deb/.rpm/.AppImage; verify with SHA256SUMS)" ;;
-          esac
-          echo "signed=$signed method=$method detail=$detail"
-          # shellcheck disable=SC2016 # JavaScript source, not shell
-          node -e '
-            const [target, os, arch, runner, signed, method, detail, updater, pubkey] = process.argv.slice(1);
-            const { execSync } = require("node:child_process");
-            const v = (c) => { try { return execSync(c, { encoding: "utf8" }).trim(); } catch { return null; } };
-            const info = {
-              target, os, arch, runner,
-              toolchain: { rustc: v("rustc -V"), cargo: v("cargo -V"), node: process.version, tauri_cli: v("node apps/desktop/node_modules/@tauri-apps/cli/tauri.js -V") },
-              signing: { signed: signed === "true", method, detail },
-              // Built with the owner updater key: the public key compiled into the
-              // app (found in the binary above), which the publish job verifies
-              // every signature against.
-              updater: updater === "true" ? { configured: true, pubkey, embedded: true } : { configured: false },
-            };
-            require("node:fs").writeFileSync(`dist/${target}/build-info.json`, JSON.stringify(info, null, 2) + "\n");
-          ' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "$RUNNER_LABEL" "$signed" "$method" "$detail" "$UPDATER" "$UPDATER_PUBKEY"
+          ROUTE: ${{ steps.route.outputs.route }}
+        run: bash scripts/release/verify-signing.sh
 
       - name: CycloneDX SBOMs (Rust, per target)
         shell: bash
+        env:
+          SPLIT: ${{ matrix.split }}
         run: |
           cargo cyclonedx -f json --spec-version 1.5 --target "$TARGET" -q
-          cp apps/desktop/src-tauri/anvil-desktop.cdx.json "dist/$TARGET/anvil-desktop-$VERSION-$TARGET.cdx.json"
-          cp crates/anvil-cli/anvil-cli.cdx.json "dist/$TARGET/anvil-cli-$VERSION-$TARGET.cdx.json"
-          if grep -q "tauri-plugin-wdio-webdriver" "dist/$TARGET/anvil-desktop-$VERSION-$TARGET.cdx.json"; then
+          out="dist/$TARGET"; [ "$SPLIT" = "true" ] && out="compiled/$TARGET/sbom"
+          mkdir -p "$out"
+          cp apps/desktop/src-tauri/anvil-desktop.cdx.json "$out/anvil-desktop-$VERSION-$TARGET.cdx.json"
+          cp crates/anvil-cli/anvil-cli.cdx.json "$out/anvil-cli-$VERSION-$TARGET.cdx.json"
+          if grep -q "tauri-plugin-wdio-webdriver" "$out/anvil-desktop-$VERSION-$TARGET.cdx.json"; then
             echo "::error::desktop SBOM lists the test-only WebDriver plugin"; exit 1
           fi
 
+      - name: Stage the compiled Windows binaries for bundle-windows
+        id: stage
+        if: ${{ matrix.split }}
+        shell: bash
+        run: |
+          mkdir -p "compiled/$TARGET/bin"
+          cp "target/$TARGET/release/anvil-desktop.exe" "target/$TARGET/release/anvil.exe" "compiled/$TARGET/bin/"
+          ls -la "compiled/$TARGET/bin" "compiled/$TARGET/sbom"
+          sums="$(cd "compiled/$TARGET/bin" && sha256sum anvil-desktop.exe anvil.exe | tr -d '*' | awk '{printf "%s:%s ", $2, $1}')"
+          echo "Recorded digests: $sums"
+          { echo "sha256=${sums% }"; echo "rustc=$(rustc -V)"; echo "cargo=$(cargo -V)"; } >> "$GITHUB_OUTPUT"
+
+      - name: Upload compiled Windows binaries
+        if: ${{ matrix.split }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Outside the release-* pattern the publish job downloads.
+          name: compiled-${{ matrix.target }}
+          path: compiled/${{ matrix.target }}/
+          if-no-files-found: error
+          # bundle-windows waits for a second `release` approval, which GitHub
+          # allows for up to 30 days; the artifact must outlive that wait.
+          retention-days: 30
+
       - name: Upload build
+        if: ${{ !matrix.split }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.target }}
@@ -485,9 +450,376 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # The Windows installers are bundled and signed here, from the binaries the
+  # build job compiled. This is the only job with `id-token: write`: Azure
+  # Artifact Signing's OIDC login trusts this repository's `release`
+  # environment subject, and no other job in that environment can request a
+  # token. It never executes anything the build produced: the binaries are
+  # only checked against the build job's recorded digests, patched and
+  # packaged by the Tauri bundler and passed to SignTool. It installs no Rust
+  # build cache and runs no compiler, dependency build script or npm
+  # lifecycle script (`npm ci --ignore-scripts`; `tauri bundle` reads
+  # `cargo metadata --no-deps` only). The release check, whose runtime probe
+  # launches the app, runs afterwards in check-windows, which has no OIDC
+  # permission. Both run for dry runs too, unsigned.
+  bundle-windows:
+    name: Bundle and sign · x86_64-pc-windows-msvc
+    needs: [preflight, build]
+    environment: ${{ needs.preflight.outputs.tag != '' && 'release' || '' }}
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      VERSION: ${{ needs.preflight.outputs.version }}
+      SOURCE_DATE_EPOCH: ${{ needs.preflight.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - name: Checked out the preflight commit
+        shell: bash
+        env:
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+        run: '[ "$(git rev-parse HEAD)" = "$COMMIT" ] || { echo "::error::HEAD $(git rev-parse HEAD) is not the preflight commit $COMMIT"; exit 1; }'
+      - name: Rust toolchain (cargo metadata only; nothing is compiled here)
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+          cargo -V
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.3
+      - name: npm ci (Tauri CLI; no install scripts)
+        shell: bash
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        id: compiled
+        continue-on-error: true
+        with:
+          name: compiled-x86_64-pc-windows-msvc
+          path: compiled/
+      - name: The compiled binaries are still available
+        if: steps.compiled.outcome != 'success'
+        shell: bash
+        run: |
+          echo "::error::the compiled-x86_64-pc-windows-msvc artifact could not be downloaded (it is kept 30 days; an approval that waited longer, or a deleted artifact, leaves nothing to sign). Re-run the whole workflow (Re-run all jobs), not only the failed jobs: the Windows build job must compile again."
+          exit 1
+      - name: Binaries match the build job's recorded digests
+        shell: bash
+        env:
+          RECORDED: ${{ needs.build.outputs.windows_sha256 }}
+        run: |
+          [ -n "$RECORDED" ] || { echo "::error::the build job recorded no Windows binary digests"; exit 1; }
+          for entry in $RECORDED; do
+            name="${entry%%:*}"; want="${entry#*:}"
+            got="$(sha256sum "compiled/bin/$name" | awk '{print $1}')"
+            [ "$got" = "$want" ] || { echo "::error::compiled/bin/$name has SHA-256 $got, not the $want the build job recorded"; exit 1; }
+            echo "ok: $name $got"
+          done
+          files=(compiled/bin/*)
+          [ "${#files[@]}" -eq 2 ] || { echo "::error::compiled/bin holds ${#files[@]} files, not the two binaries: ${files[*]}"; exit 1; }
+      - name: Place the compiled binaries where tauri bundle expects them
+        shell: bash
+        run: |
+          mkdir -p "target/$TARGET/release"
+          cp compiled/bin/anvil-desktop.exe compiled/bin/anvil.exe "target/$TARGET/release/"
+          ls -la "target/$TARGET/release"
+
+      - name: Updater config (tagged release with the owner's updater key only)
+        id: updater
+        shell: bash
+        env:
+          ANVIL_UPDATER_PUBKEY: ${{ vars.ANVIL_UPDATER_PUBKEY }}
+          HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: bash scripts/release/updater-config.sh
+
+      - name: Signing route (tagged release only; reads whether secrets exist, never their values)
+        id: route
+        shell: bash
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          HAS_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+          HAS_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
+          HAS_APPLE_ID: ${{ secrets.APPLE_ID != '' }}
+          HAS_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD != '' }}
+          HAS_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID != '' }}
+          HAS_APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER != '' }}
+          HAS_APPLE_API_KEY: ${{ secrets.APPLE_API_KEY != '' }}
+          HAS_APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+          HAS_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+          HAS_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+          HAS_AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
+          HAS_AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID != '' }}
+          HAS_AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID != '' }}
+          HAS_AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID != '' }}
+          HAS_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT != '' }}
+          HAS_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT != '' }}
+          HAS_ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE != '' }}
+          HAS_ARTIFACT_SIGNING_PROFILE_EKU: ${{ vars.ARTIFACT_SIGNING_PROFILE_EKU != '' }}
+        run: bash scripts/release/signing-route.sh
+
+      - name: Import Windows signing certificate (.pfx route, tagged release only)
+        id: wincert
+        if: steps.route.outputs.windows == 'pfx'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ steps.route.outputs.windows == 'pfx' && secrets.WINDOWS_CERTIFICATE || '' }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ steps.route.outputs.windows == 'pfx' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pfx = Join-Path $env:RUNNER_TEMP "anvil-signing.pfx"
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            # A PFX with a chain imports several certificates: record them all for removal first.
+            $imported = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw)
+            "thumbprints=$(($imported | ForEach-Object Thumbprint) -join ' ')" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+          $cert = $imported | Where-Object HasPrivateKey | Select-Object -First 1
+          if (-not $cert) { throw "the Windows signing PFX holds no certificate with a private key" }
+          "signer=$($cert.Thumbprint)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          $cfg = @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" } } } | ConvertTo-Json -Compress -Depth 5
+          "config=$cfg" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
+      # Azure Artifact Signing (formerly Trusted Signing): SignTool with
+      # Microsoft's Artifact Signing dlib, set as Tauri's
+      # bundle.windows.signCommand, so Tauri signs the app binary, the WiX and
+      # NSIS helpers, the uninstaller and both installers as it bundles them.
+      # Microsoft's setup: https://learn.microsoft.com/azure/artifact-signing/how-to-signing-integrations
+      - name: Artifact Signing sign command (tagged release only)
+        id: winats
+        if: startsWith(steps.route.outputs.windows, 'artifact-signing')
+        shell: pwsh
+        env:
+          ROUTE: ${{ steps.route.outputs.windows }}
+          ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          CERTIFICATE_PROFILE: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          # Microsoft.ArtifactSigning.Client on nuget.org: version and the
+          # registry's own SHA-512 package hash (catalog `packageHash`).
+          DLIB_VERSION: "1.0.151"
+          DLIB_SHA512: "BvPApD/Bxbzj2uf8qBYJ0wPoZYvAySHfrsIMZ2JkMQXy7NdTbQ81Gs71A0n/tOYOIWk3xpKY3YVZ1VtH0jcZhQ=="
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Only an Artifact Signing regional endpoint, and names as Azure's
+          # Microsoft.CodeSigning resource specification allows them
+          # (account 3-24, certificate profile 5-100 characters).
+          if ($env:ENDPOINT -notmatch '^https://[a-z0-9]+\.codesigning\.azure\.net/?$') { throw "ARTIFACT_SIGNING_ENDPOINT must be a regional https://<region>.codesigning.azure.net endpoint" }
+          if ($env:ACCOUNT -cnotmatch '^(?=.{3,24}$)[^0-9][A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$') { throw "ARTIFACT_SIGNING_ACCOUNT is not an Artifact Signing account name" }
+          if ($env:CERTIFICATE_PROFILE -cnotmatch '^(?=.{5,100}$)[^0-9][A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$') { throw "ARTIFACT_SIGNING_CERTIFICATE_PROFILE is not a certificate profile name" }
+
+          # SignTool from the newest installed Windows SDK; the dlib needs
+          # 10.0.22621 or later (Microsoft: the 20348 SDK is not supported).
+          $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+          $signtool = Get-ChildItem -Path $kits -Directory |
+            Where-Object { $_.Name -match '^10\.0\.(\d+)\.\d+$' -and [int]$Matches[1] -ge 22621 -and (Test-Path (Join-Path $_.FullName "x64\signtool.exe")) } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 |
+            ForEach-Object { Join-Path $_.FullName "x64\signtool.exe" }
+          if (-not $signtool) { throw "no x64 signtool.exe from Windows SDK 10.0.22621 or later under $kits" }
+          Write-Host "SignTool: $signtool"
+
+          $dir = Join-Path $env:RUNNER_TEMP "artifact-signing"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $pkg = Join-Path $dir "client.zip"
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/$($env:DLIB_VERSION)/microsoft.artifactsigning.client.$($env:DLIB_VERSION).nupkg"
+          Invoke-WebRequest -Uri $url -OutFile $pkg -MaximumRetryCount 3 -RetryIntervalSec 5
+          $sha = [Convert]::ToBase64String([Security.Cryptography.SHA512]::Create().ComputeHash([IO.File]::ReadAllBytes($pkg)))
+          if ($sha -ne $env:DLIB_SHA512) { throw "Microsoft.ArtifactSigning.Client $($env:DLIB_VERSION) does not match its pinned SHA-512" }
+          Expand-Archive -Path $pkg -DestinationPath (Join-Path $dir "client") -Force
+          $dlib = Join-Path $dir "client\bin\x64\Azure.CodeSigning.Dlib.dll"
+          $sig = Get-AuthenticodeSignature -LiteralPath $dlib
+          if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw "Azure.CodeSigning.Dlib.dll is not validly signed by Microsoft ($($sig.Status))" }
+
+          # DefaultAzureCredential, limited to the one credential this route
+          # uses: the Azure CLI session from azure/login (OIDC), or
+          # AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_CLIENT_SECRET in the
+          # bundle step's environment (EnvironmentCredential).
+          $exclude = @("ManagedIdentityCredential", "WorkloadIdentityCredential", "SharedTokenCacheCredential", "VisualStudioCredential", "VisualStudioCodeCredential", "AzurePowerShellCredential", "AzureDeveloperCliCredential", "InteractiveBrowserCredential")
+          if ($env:ROUTE -eq "artifact-signing-secret") { $exclude += "AzureCliCredential" }
+          $metadata = Join-Path $dir "metadata.json"
+          @{ Endpoint = $env:ENDPOINT; CodeSigningAccountName = $env:ACCOUNT; CertificateProfileName = $env:CERTIFICATE_PROFILE; CorrelationId = "ferrum-anvil-$($env:GITHUB_RUN_ID)-$($env:TARGET)"; ExcludeCredentials = $exclude } |
+            ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8 -LiteralPath $metadata
+
+          # Tauri replaces "%1" with each file it signs (object notation keeps
+          # the spaces in the SignTool path and the description).
+          $cfg = Join-Path $env:RUNNER_TEMP "anvil-artifact-signing.conf.json"
+          @{ bundle = @{ windows = @{ signCommand = @{ cmd = $signtool; args = @("sign", "/v", "/fd", "SHA256", "/tr", "http://timestamp.acs.microsoft.com", "/td", "SHA256", "/d", "Ferrum Anvil", "/dlib", $dlib, "/dmdf", $metadata, "%1") } } } } |
+            ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 -LiteralPath $cfg
+          "config=$cfg" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
+      - name: OIDC subject this job presents (claims only, never the token)
+        if: steps.route.outputs.windows == 'artifact-signing-oidc'
+        shell: bash
+        run: |
+          # The Entra ID federated credential must match `sub` exactly.
+          resp="$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange")"
+          RESP="$resp" node -e '
+            const t = JSON.parse(process.env.RESP).value;
+            const p = JSON.parse(Buffer.from(t.split(".")[1], "base64url").toString("utf8"));
+            console.log(JSON.stringify({ sub: p.sub, aud: p.aud, iss: p.iss, environment: p.environment, job_workflow_ref: p.job_workflow_ref }, null, 2));
+          '
+
+      - name: Azure login for Artifact Signing (OIDC route, tagged release only)
+        if: steps.route.outputs.windows == 'artifact-signing-oidc'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: ${{ vars.AZURE_SUBSCRIPTION_ID == '' }}
+
+      # Right after the login, while the GitHub token azure/login exchanged is
+      # still fresh: fetch (and cache in the Azure CLI) the Artifact Signing
+      # access token SignTool's dlib will ask the CLI for, so a slow bundling
+      # step cannot outlive the login. Only its expiry is printed.
+      - name: Artifact Signing access token (OIDC route)
+        if: steps.route.outputs.windows == 'artifact-signing-oidc'
+        shell: bash
+        run: |
+          expires="$(az account get-access-token --scope https://codesigning.azure.net/.default --query expiresOn -o tsv)"
+          echo "Artifact Signing access token cached; expires $expires"
+
+      - name: Bundle and sign (MSI and NSIS)
+        shell: bash
+        working-directory: apps/desktop
+        env:
+          # Artifact Signing with a client secret (EnvironmentCredential) only.
+          AZURE_TENANT_ID: ${{ steps.route.outputs.windows == 'artifact-signing-secret' && vars.AZURE_TENANT_ID || '' }}
+          AZURE_CLIENT_ID: ${{ steps.route.outputs.windows == 'artifact-signing-secret' && vars.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ steps.route.outputs.windows == 'artifact-signing-secret' && secrets.AZURE_CLIENT_SECRET || '' }}
+          WIN_SIGN_CONFIG: ${{ steps.wincert.outputs.config || steps.winats.outputs.config }}
+          UPDATER_CONFIG: ${{ steps.updater.outputs.config }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.updater.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ steps.updater.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: |
+          for v in AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            [ -n "${!v:-}" ] || unset "$v"
+          done
+          # The NSIS template (src-tauri/windows/installer.nsi, set in
+          # tauri.conf.json) stops bundling if signing the uninstaller fails.
+          args=(bundle --ci --target "$TARGET" --bundles "msi,nsis")
+          if [ -n "${WIN_SIGN_CONFIG:-}" ]; then args+=(--config "$WIN_SIGN_CONFIG"); fi
+          if [ -n "${UPDATER_CONFIG:-}" ]; then args+=(--config "$UPDATER_CONFIG"); fi
+          npx tauri "${args[@]}"
+
+      - name: End the Azure session
+        if: always() && steps.route.outputs.windows == 'artifact-signing-oidc'
+        shell: bash
+        run: az logout || true; az account clear || true
+
+      - name: Remove Windows signing certificates
+        if: always() && steps.wincert.outputs.thumbprints != ''
+        shell: pwsh
+        env:
+          THUMBPRINTS: ${{ steps.wincert.outputs.thumbprints }}
+        run: |
+          foreach ($t in $env:THUMBPRINTS -split ' ' | Where-Object { $_ }) {
+            $c = Get-Item -Path "Cert:\CurrentUser\My\$t" -ErrorAction SilentlyContinue
+            if ($c -and $c.HasPrivateKey) { Remove-Item -Path $c.PSPath -DeleteKey } elseif ($c) { Remove-Item -Path $c.PSPath }
+          }
+
+      - name: Collect artifacts
+        id: collect
+        shell: bash
+        run: bash scripts/release/collect.sh
+
+      - name: Verify signatures (records signed only if verified; fails if configured signing did not verify)
+        shell: bash
+        env:
+          RUNNER_LABEL: windows-2025
+          UPDATER: ${{ steps.updater.outputs.updater }}
+          UPDATER_PUBKEY: ${{ steps.updater.outputs.pubkey }}
+          APP: ${{ steps.collect.outputs.app }}
+          ROUTE: ${{ steps.route.outputs.route }}
+          PFX_THUMBPRINT: ${{ steps.wincert.outputs.signer }}
+          PROFILE_EKU: ${{ vars.ARTIFACT_SIGNING_PROFILE_EKU }}
+          # The toolchain of the job that compiled the binaries, not this one.
+          BUILD_RUSTC: ${{ needs.build.outputs.windows_rustc }}
+          BUILD_CARGO: ${{ needs.build.outputs.windows_cargo }}
+        run: bash scripts/release/verify-signing.sh
+
+      - name: Upload bundled installers for the release check
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Outside the release-* pattern the publish job downloads: only
+          # check-windows publishes the Windows release artifact.
+          name: bundled-x86_64-pc-windows-msvc
+          path: dist/x86_64-pc-windows-msvc/
+          if-no-files-found: error
+          retention-days: 30
+
+  # The release check of the Windows installers, CLI archive and app binary,
+  # including the runtime probe that launches the app. It executes build
+  # output, so it runs in its own job with no OIDC permission, no environment
+  # and no credential, and only it uploads release-x86_64-pc-windows-msvc.
+  check-windows:
+    name: Release check · x86_64-pc-windows-msvc
+    needs: [preflight, build, bundle-windows]
+    permissions:
+      contents: read
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - name: Checked out the preflight commit
+        shell: bash
+        env:
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+        run: '[ "$(git rev-parse HEAD)" = "$COMMIT" ] || { echo "::error::HEAD $(git rev-parse HEAD) is not the preflight commit $COMMIT"; exit 1; }'
+      - name: Rust toolchain (the checker's cargo tree graph check)
+        shell: bash
+        run: |
+          rustup toolchain install
+          cargo -V
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bundled-x86_64-pc-windows-msvc
+          path: dist/x86_64-pc-windows-msvc/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: compiled-x86_64-pc-windows-msvc
+          path: compiled/
+      - name: Place the compiled app binary
+        shell: bash
+        run: |
+          mkdir -p "target/$TARGET/release"
+          cp compiled/bin/anvil-desktop.exe "target/$TARGET/release/"
+      - name: Release check (no WebDriver server, no test hooks)
+        shell: bash
+        env:
+          APP: target/x86_64-pc-windows-msvc/release/anvil-desktop.exe
+          PROBE: "true"
+        run: bash scripts/release/check-artifacts.sh
+      - name: Add the SBOMs from the build job
+        shell: bash
+        run: cp compiled/sbom/*.cdx.json "dist/$TARGET/" && ls -la "dist/$TARGET"
+      - name: Upload build
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-x86_64-pc-windows-msvc
+          path: dist/x86_64-pc-windows-msvc/
+          if-no-files-found: error
+          retention-days: 30
+
   publish:
     name: Assemble release evidence
-    needs: [preflight, build]
+    needs: [preflight, build, check-windows]
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -621,7 +953,7 @@ jobs:
           # consistency check: SHA256SUMS does not cover that file).
           first="$(head -n 1 "$notes")"
           case "$(jq -r '.signed | if type == "boolean" then tostring else "invalid" end' upload/release-evidence.json)" in
-            true) [[ "$first" == '**Signing:** the installers are code-signed '* ]] ;;
+            true) [[ "$first" == '**Signing:** '* ]] ;;
             false) [ "$first" = '> [!WARNING]' ] && [[ "$(sed -n 2p "$notes")" == '> **Unsigned installers.** '* ]] ;;
             *) false ;;
           esac || { echo "::error::the release notes' signing status does not match release-evidence.json"; exit 1; }
