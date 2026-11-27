@@ -166,7 +166,7 @@ impl App {
             notes_total: found.notes_total,
             pages,
             stopped,
-            execution_id: first.unwrap_or_else(Id::new),
+            execution_id: first.unwrap_or_default(),
         })
     }
 }
