@@ -121,17 +121,72 @@ jobs:
             const fs = require("node:fs");
             const shipped = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8")).plugins.updater;
             if (shipped.requireSignedVersion !== true) throw new Error("the shipped updater config must require a signed version");
-            const updater = { pubkey: process.env.PUBKEY, endpoints: [`http://127.0.0.1:${process.env.UPDATE_PORT}/latest.json`], dangerousInsecureTransportProtocol: true };
+            // HTTPS, as a real endpoint: the test CA is added to the system trust store below.
+            const updater = { pubkey: process.env.PUBKEY, endpoints: [`https://127.0.0.1:${process.env.UPDATE_PORT}/latest.json`] };
             const base = { plugins: { updater } };
             const update = { version: process.env.OFFERED, bundle: { createUpdaterArtifacts: true }, plugins: { updater } };
             fs.writeFileSync(`${process.env.WORK}/base.json`, JSON.stringify(base));
             fs.writeFileSync(`${process.env.WORK}/update.json`, JSON.stringify(update));
           '
+          # The endpoint's TLS certificate (127.0.0.1) from a test CA the next
+          # step adds to the system trust store, and one from a CA nobody trusts.
+          mkdir -p "$work/tls"
+          # Config files, not -subj/-addext: the same commands work with OpenSSL,
+          # LibreSSL (macOS) and Git Bash (no path conversion of "/CN=").
+          leaf_ext="$work/tls/leaf.ext"
+          printf 'subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nauthorityKeyIdentifier=keyid\n' > "$leaf_ext"
+          printf '[req]\nprompt=no\ndistinguished_name=dn\n[dn]\nCN=127.0.0.1\n' > "$work/tls/leaf.cnf"
+          for ca in trusted untrusted; do
+            printf '[req]\nprompt=no\ndistinguished_name=dn\n[dn]\nCN=Anvil REL-003 %s test CA\n[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n' "$ca" > "$work/tls/$ca-ca.cnf"
+            openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout "$work/tls/$ca-ca.key" -out "$work/tls/$ca-ca.pem" -config "$work/tls/$ca-ca.cnf" -extensions v3_ca 2> /dev/null
+            openssl req -new -newkey rsa:2048 -nodes -keyout "$work/tls/$ca-leaf.key" -out "$work/tls/$ca-leaf.csr" -config "$work/tls/leaf.cnf" 2> /dev/null
+            openssl x509 -req -in "$work/tls/$ca-leaf.csr" -CA "$work/tls/$ca-ca.pem" -CAkey "$work/tls/$ca-ca.key" -CAcreateserial -days 30 \
+              -extfile "$leaf_ext" -out "$work/tls/$ca-leaf.pem" 2> /dev/null
+            openssl verify -CAfile "$work/tls/$ca-ca.pem" "$work/tls/$ca-leaf.pem"
+          done
+          cp "$work/tls/trusted-leaf.pem" "$work/fixtures/tls-cert.pem"
+          cp "$work/tls/trusted-leaf.key" "$work/fixtures/tls-key.pem"
+          cp "$work/tls/untrusted-leaf.pem" "$work/fixtures/untrusted-cert.pem"
+          cp "$work/tls/untrusted-leaf.key" "$work/fixtures/untrusted-key.pem"
           {
             echo "REL003=$work"
             echo "REL003_KEY_PASSWORD=$pw"
             echo "ANVIL_E2E_PASSPHRASE=$pass"
           } >> "$GITHUB_ENV"
+
+      - name: Trust the test CA (system trust store)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ca="$REL003/tls/trusted-ca.pem"
+          case "$RUNNER_OS" in
+            Linux) sudo cp "$ca" /usr/local/share/ca-certificates/anvil-rel003-test-ca.crt && sudo update-ca-certificates ;;
+            macOS) sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$ca" ;;
+            Windows) certutil -addstore -f Root "$(cygpath -w "$ca")" ;;
+          esac
+
+      # The newest published release's latest.json: its shape is checked (the
+      # platform keys Anvil publishes, asset URLs of that tag, signatures by the
+      # owner's key recording its version), and every manifest the specs serve
+      # copies it.
+      - name: Published latest.json
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_PUBKEY: ${{ vars.ANVIL_UPDATER_PUBKEY }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir "$REL003/published" --clobber
+          cp "$REL003/published/latest.json" "$REL003/fixtures/published-latest.json"
+          TAG="$tag" node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { checkPublishedManifest } from "./scripts/updater-manifest.mjs";
+            const manifest = JSON.parse(readFileSync(`${process.env.REL003}/fixtures/published-latest.json`, "utf8"));
+            const tag = process.env.TAG;
+            const keys = checkPublishedManifest(manifest, { repo: process.env.GITHUB_REPOSITORY, tag, version: tag.replace(/^anvil-v/, ""), pubkey: process.env.OWNER_PUBKEY.trim() });
+            console.log(`${tag}: latest.json has ${keys.join(", ")}, each signed by the owner key for its version`);
+          '
 
       - name: Build the installed bundle (shipped version, e2e feature, test key)
         shell: bash
