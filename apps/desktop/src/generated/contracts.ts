@@ -603,12 +603,7 @@ export type EarlyDataNotUsed =
  * via the `definition` "BodyCompleteness".
  */
 export type BodyCompleteness =
-  | "complete"
-  | "incomplete"
-  | "canceled"
-  | "stopped_at_local_limit"
-  | "stopped_after_answer"
-  | "no_body";
+  "complete" | "incomplete" | "canceled" | "stopped_at_local_limit" | "stopped_after_answer" | "no_body";
 /**
  * Outcome of removing the response's content-coding for display,
  * assertions and extraction. Independent of the body completeness, which
