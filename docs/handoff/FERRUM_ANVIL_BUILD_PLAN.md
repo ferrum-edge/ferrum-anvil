@@ -1,4 +1,7 @@
 # Ferrum Anvil
+
+> **Historical:** the September 2026 implementation plan, kept as written. It is not a description of current Anvil; see the [README](../../README.md) and [docs](../).
+
 ## Put your APIs to the test
 
 **Product specification, implementation handoff, diagnostic contract, verification plan, and website rollout**  

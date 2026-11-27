@@ -216,3 +216,42 @@ describe("storage", () => {
     expect(screen.getByText(/1 stored revision\(s\) do not decode/)).toBeTruthy();
   });
 });
+
+describe("sign-in providers", () => {
+  const unavailable = (id: string, display_name: string) => ({
+    id,
+    display_name,
+    availability: { status: "unavailable", reason: "requires registered OAuth client id / redirect URI / broker (owner action)" },
+    native_flow: `${display_name} flow`,
+    owner_actions: [`Register a ${display_name} app (owner step).`],
+    needs_broker: true,
+    test_only: false,
+  });
+
+  it("shows no providers section when the build has no available provider", async () => {
+    backend({ login_providers: () => [unavailable("google", "Google"), unavailable("github", "GitHub"), unavailable("facebook", "Facebook")] });
+    render(<SettingsDialog onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(await screen.findByRole("heading", { name: "Privacy" })).toBeTruthy();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("login_providers", undefined));
+    // Let the reply render before checking that nothing did.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText("Sign-in providers (optional, identity only)")).toBeNull();
+    for (const text of ["Google", "GitHub", "Facebook", "unavailable", /owner step/]) expect(screen.queryByText(text)).toBeNull();
+  });
+
+  it("lists only the providers the build can use, without owner setup steps", async () => {
+    backend({
+      login_providers: () => [
+        unavailable("google", "Google"),
+        { id: "mock", display_name: "Mock", availability: { status: "available" }, native_flow: "Loopback PKCE", owner_actions: [], needs_broker: false, test_only: true },
+      ],
+    });
+    render(<SettingsDialog onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(await screen.findByText("Sign-in providers (optional, identity only)")).toBeTruthy();
+    expect(screen.getByText("Mock")).toBeTruthy();
+    expect(screen.getByText("available (test build)")).toBeTruthy();
+    expect(screen.getByText("Loopback PKCE")).toBeTruthy();
+    expect(screen.queryByText("Google")).toBeNull();
+    expect(screen.queryByText(/owner step/)).toBeNull();
+  });
+});

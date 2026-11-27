@@ -26,6 +26,15 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 export const UNSIGNED = "unsigned — owner credentials not configured";
 export const SIGNED = "signed and verified on the build runner (see targets[].signing)";
+export const PARTIAL = "partially signed — see platform_signing and targets[].signing";
+// Per-platform signing status in release-evidence.json `platform_signing`.
+// Linux packages have no platform code signing, so Linux is "not applicable".
+export const PLATFORM_STATUS = ["signed", "unsigned", "partial", "not applicable"];
+// release-evidence.json format versions this script reads (release-evidence.mjs writes the last).
+export const EVIDENCE_VERSIONS = [1, 2];
+const PLATFORM_NAMES = { macos: "macOS", windows: "Windows", linux: "Linux" };
+const PLATFORM_OF_OS = { macOS: "macos", Windows: "windows", Linux: "linux" };
+const UNSIGNED_EFFECT = { macos: "macOS Gatekeeper will warn", windows: "Windows SmartScreen will warn" };
 // Text that marks a draft placeholder body, as a case-insensitive POSIX ERE.
 // None of it may reach a release body. This is the only definition: the
 // release job (DRAFT_TEXT in release.yml) and the owner checklist in
@@ -129,17 +138,63 @@ export function checkEvidence(evidence, version) {
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
     throw new Error("release evidence must be a JSON object");
   }
-  if (evidence.format !== "anvil-release-evidence" || evidence.version !== 1) {
+  // Version 2 adds `platform_signing` and `targets[].signing_applicable`;
+  // version 1 (releases up to 0.1.9) has neither and is still read, so the
+  // notes of a published release can be regenerated from its evidence.
+  if (evidence.format !== "anvil-release-evidence" || !EVIDENCE_VERSIONS.includes(evidence.version)) {
     throw new Error("unsupported release evidence format or version");
   }
   if (evidence.release?.version !== version) {
     throw new Error(`release evidence is for version ${JSON.stringify(evidence.release?.version)}, not ${version}`);
   }
-  if (![SIGNED, UNSIGNED].includes(evidence.signing) || typeof evidence.signed !== "boolean") {
+  if (![SIGNED, UNSIGNED, PARTIAL].includes(evidence.signing) || typeof evidence.signed !== "boolean") {
     throw new Error("release evidence signing has an invalid value");
   }
   if (evidence.signed !== (evidence.signing === SIGNED)) {
     throw new Error("release evidence signed and signing disagree");
+  }
+  const platforms = evidence.platform_signing;
+  if (evidence.version === 1 && platforms === undefined) {
+    if (evidence.signing === PARTIAL) throw new Error("release evidence partial signing needs platform_signing");
+  } else if (
+    !platforms ||
+    typeof platforms !== "object" ||
+    Array.isArray(platforms) ||
+    Object.keys(platforms).length === 0 ||
+    Object.entries(platforms).some(([k, v]) => !Object.hasOwn(PLATFORM_NAMES, k) || !PLATFORM_STATUS.includes(v))
+  ) {
+    throw new Error("release evidence platform_signing has an invalid shape");
+  }
+  // The platform statuses must say what `signing` says.
+  const statuses = platforms === undefined ? null : Object.values(platforms).filter((v) => v !== "not applicable");
+  const expected = statuses === null ? evidence.signing : statuses.length > 0 && statuses.every((v) => v === "signed") ? SIGNED : statuses.some((v) => v === "signed" || v === "partial") ? PARTIAL : UNSIGNED;
+  if (evidence.signing !== expected) {
+    throw new Error("release evidence signing and platform_signing disagree");
+  }
+  // Version 2: the summary must be the one its own targets give, and only
+  // Linux targets may have no platform signing.
+  if (evidence.version >= 2) {
+    const targets = evidence.targets;
+    if (
+      !Array.isArray(targets) ||
+      targets.length === 0 ||
+      targets.some(
+        (t) =>
+          !t ||
+          typeof t !== "object" ||
+          !Object.hasOwn(PLATFORM_OF_OS, t.os) ||
+          typeof t.signed !== "boolean" ||
+          t.signing_applicable !== (t.os !== "Linux") ||
+          (t.signed && !t.signing_applicable),
+      )
+    ) {
+      throw new Error("release evidence targets have an invalid signing record");
+    }
+    const summary = signingSummary(targets);
+    const same = (a, b) => JSON.stringify(Object.entries(a).sort()) === JSON.stringify(Object.entries(b).sort());
+    if (summary.signed !== evidence.signed || summary.signing !== evidence.signing || !same(summary.platform_signing, platforms)) {
+      throw new Error("release evidence platform_signing disagrees with its targets");
+    }
   }
   const updater = evidence.updater;
   if (!updater || typeof updater !== "object" || Array.isArray(updater)) {
@@ -171,6 +226,29 @@ export function checkEvidence(evidence, version) {
   return { repository, commit, runId, runUrl, server: runUrl.slice(0, -`/${repository}/actions/runs/${runId}`.length) };
 }
 
+// The signing summary of a set of build targets (release-evidence.json
+// targets: `os`, `signed`, `signing_applicable`): `signed` is true only when
+// every target that has platform code signing (macOS, Windows) is signed and
+// verified, and at least one exists; Linux never counts as signed or unsigned.
+export function signingSummary(targets) {
+  const groups = {};
+  for (const t of targets) {
+    const platform = PLATFORM_OF_OS[t.os];
+    if (!platform) throw new Error(`unknown build OS ${JSON.stringify(t.os)}`);
+    (groups[platform] ??= []).push(t);
+  }
+  const platform_signing = {};
+  for (const [platform, ts] of Object.entries(groups)) {
+    const applicable = ts.filter((t) => t.signing_applicable);
+    platform_signing[platform] =
+      applicable.length === 0 ? "not applicable" : applicable.every((t) => t.signed) ? "signed" : applicable.some((t) => t.signed) ? "partial" : "unsigned";
+  }
+  const applicable = targets.filter((t) => t.signing_applicable);
+  const signed = applicable.length > 0 && applicable.every((t) => t.signed);
+  const signing = signed ? SIGNED : targets.some((t) => t.signed) ? PARTIAL : UNSIGNED;
+  return { signed, signing, platform_signing };
+}
+
 export function assertNoDraftText(body) {
   const m = DRAFT_MARKER.exec(body);
   if (m) throw new Error(`release notes contain draft-only text (${JSON.stringify(m[0])})`);
@@ -189,12 +267,32 @@ export function releaseNotes({ changelog, version, tag, evidence }) {
     : "In-app updates are not signed for this release: the app links to this release page instead.";
 
   const out = [];
-  if (evidence.signed) {
+  // Version 1 evidence (no platform_signing) keeps the wording those
+  // releases were published with.
+  const platforms = evidence.platform_signing ?? {};
+  const legacy = evidence.platform_signing === undefined;
+  const named = (status) => Object.keys(PLATFORM_NAMES).filter((p) => platforms[p] === status);
+  const list = (ps) => ps.map((p) => PLATFORM_NAMES[p]).join(" and ");
+  const linux = platforms.linux === "not applicable" ? " Linux packages (`.deb`, `.rpm`, AppImage) have no platform code signing." : "";
+  if (evidence.signed && legacy) {
     out.push(`**Signing:** the installers are code-signed and verified on the build runner. Verify downloads with \`SHA256SUMS\`. ${updater}`, "");
-  } else {
+  } else if (evidence.signed) {
+    out.push(`**Signing:** the ${list(named("signed"))} installers are code-signed and verified on the build runner.${linux} Verify downloads with \`SHA256SUMS\`. ${updater}`, "");
+  } else if (evidence.signing === UNSIGNED) {
     out.push(
       "> [!WARNING]",
       `> **Unsigned installers.** The installers are not code-signed yet (no Apple Developer ID or Windows certificate): macOS Gatekeeper and Windows SmartScreen will warn. Verify downloads with \`SHA256SUMS\` before running them. ${updater}`,
+      "",
+    );
+  } else {
+    // Some platforms signed, some not: say which, per platform.
+    const signedPart = named("signed").length ? ` Code-signed and verified on the build runner: ${list(named("signed"))}.` : "";
+    const partialPart = named("partial").length ? ` Only some ${list(named("partial"))} installers are code-signed (see \`release-evidence.json\`).` : "";
+    const unsigned = named("unsigned");
+    const unsignedPart = unsigned.length ? ` Not code-signed: ${list(unsigned)} (${unsigned.map((p) => UNSIGNED_EFFECT[p]).join("; ")}).` : "";
+    out.push(
+      "> [!WARNING]",
+      `> **Unsigned installers.** Not every installer is code-signed.${signedPart}${partialPart}${unsignedPart}${linux} Verify downloads with \`SHA256SUMS\` before running them. ${updater}`,
       "",
     );
   }

@@ -19,10 +19,12 @@ A local-first API client for desktop and the command line. Send requests,
 run tests and load tests, and get failure explanations based on what actually
 happened on the wire. No account, works offline.
 
-> **Preview:** installers are published on the
-> [Releases](https://github.com/ferrum-edge/ferrum-anvil/releases) page but are
-> not code-signed yet, so macOS Gatekeeper and Windows SmartScreen warn (check
-> downloads against `SHA256SUMS`). You can also build from source (see
+> **Code signing:** installers are published on the
+> [Releases](https://github.com/ferrum-edge/ferrum-anvil/releases) page. The
+> 0.1.x installers are not code-signed, so macOS Gatekeeper and Windows
+> SmartScreen warn (check downloads against `SHA256SUMS`). Each release's
+> notes and `release-evidence.json` state per platform whether its installers
+> are signed. You can also build from source (see
 > [docs/release.md](docs/release.md)).
 
 ## Features

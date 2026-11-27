@@ -45,25 +45,56 @@ The hosted AppImage checker regression suite also runs with distribution-provide
 `gcc`, `python3` and `mksquashfs`, and the checksum-pinned upstream `unsquashfs`
 described below, before any release build.
 
-**Build** (one job per target):
+**Build** (one job per target), **bundle-windows** and **check-windows**:
 
 | Target | Runner | Bundles |
 | --- | --- | --- |
 | `aarch64-apple-darwin` | macOS 15 | `.app` → `.dmg` |
 | `x86_64-apple-darwin` | macOS 15 (cross-compiled) | `.app` → `.dmg` |
 | `x86_64-unknown-linux-gnu` | Ubuntu 26.04 (modern Linux baseline) | `.deb`, `.rpm`, `.AppImage` |
-| `x86_64-pc-windows-msvc` | Windows 2025 | `.msi`, NSIS `-setup.exe` |
+| `x86_64-pc-windows-msvc` | Windows 2025: compiled by the build job, bundled and signed by `bundle-windows`, checked by `check-windows` | `.msi`, NSIS `-setup.exe` |
 
-Each build job:
+Windows takes three jobs, so that the job able to sign never runs anything the
+build produced:
+
+- The Windows **build** job compiles the app and the CLI and makes the SBOMs.
+  It records the two binaries' SHA-256 digests and its `rustc -V` / `cargo -V`
+  as job outputs, and uploads the binaries and SBOMs as the
+  `compiled-x86_64-pc-windows-msvc` artifact (kept 30 days, the longest
+  GitHub lets a deployment wait for approval).
+- **bundle-windows** (Windows 2025, the `release` environment for a tag) is
+  the only job with `id-token: write`, which Azure Artifact Signing's OIDC
+  route needs. It checks out the same commit and installs only the toolchain
+  (for `cargo metadata --no-deps`) and the Tauri CLI (`npm ci
+  --ignore-scripts`: no npm lifecycle script; no Rust build cache, no
+  compiler, no dependency build script). It requires the downloaded binaries
+  to match the build job's recorded digests, places them in `target/`, and
+  runs step 1 (bundling and signing: the binaries are only patched, packaged
+  and passed to SignTool, never executed) and step 4 (signature
+  verification; `build-info.json` records the build job's toolchain). It
+  uploads the result as `bundled-x86_64-pc-windows-msvc`. If the compiled
+  artifact is gone (an approval that waited over 30 days, or a deletion), it
+  fails and says to re-run all jobs, not only the failed ones.
+- **check-windows** (no environment, no credential, no OIDC permission) runs
+  step 3, the release check whose runtime probe launches the app, on the
+  bundled installers and the compiled binary, adds the SBOMs and uploads
+  `release-x86_64-pc-windows-msvc`, the only Windows artifact publish reads.
+
+All three run for dry runs too, unsigned.
+
+Each build job (bundle-windows and check-windows for Windows):
 
 1. `tauri build --ci --target <t> --no-bundle` — release profile, **default
-   features only**, with no signing credentials in its environment and no
-   Windows certificate imported yet. The `e2e` feature (embedded WebDriver +
-   environment-driven unlock) is never passed. Then, for a tagged release, the
-   Windows certificate is imported and `tauri bundle --ci --target <t>
-   --bundles <b>` runs as the only step that receives the Apple, Windows and
-   updater signing credentials; the certificate is removed afterwards. This is
-   defense in depth, not isolation: both steps share the runner, and bundling
+   features only**, with no signing credentials in its environment. The `e2e`
+   feature (embedded WebDriver + environment-driven unlock) is never passed.
+   Then `tauri bundle --ci --target <t> --bundles <b>` runs as the only step
+   that receives signing credentials, and only those of its platform's
+   selected [signing route](#signing-and-what-unsigned-means): each Apple
+   secret is mapped into the macOS bundle step only for the route that uses
+   it (never into a Linux or Windows step), and the Windows credentials exist
+   only in bundle-windows (a `.pfx` imported and removed afterwards, or the
+   Artifact Signing sign command written and, for OIDC, the Azure login made
+   and ended). This is defense in depth, not isolation: both steps share the runner, and bundling
    itself runs third-party tools (the AppImage bundler downloads unpinned
    `linuxdeploy` plugins and its `AppRun` while the key is present). Signing
    the updater artifacts in a separate job with `tauri signer sign` would be
@@ -85,19 +116,19 @@ Each build job:
    own offset reader and trusted `unsquashfs` >= 4.5.1; the image is never
    run) and fails if it contains `libwayland-client`. A Tauri CLI that pins
    another `linuxdeploy` needs the cached file name and hash updated with it.
-2. `cargo build --release -p anvil-cli --target <t>`, packaged as
+2. `cargo build --release -p anvil-cli --target <t>` (build job), packaged as
    `anvil-cli-<version>-<t>.tar.gz` (`.zip` on Windows) with `LICENSE`,
    `LICENSE-COMMERCIAL.md` and `THIRD_PARTY_LICENSES.md`. The standalone
    `anvil-load-worker` binary is not packaged: the desktop app and the CLI run
    load workers by re-launching themselves.
-3. `scripts/release-check.sh` over every installer, the macOS updater archive
+3. `scripts/release-check.sh` (check-windows for Windows) over every installer, the macOS updater archive
    (if any), the CLI archive and the raw app binary, with the runtime probe on native targets (Linux under Xvfb). Any
    failure stops the release.
 4. Signature verification (see [Signing](#signing-and-what-unsigned-means)) and
    `build-info.json` (target, OS/arch, runner, `rustc`/`cargo`/Node/Tauri CLI
    versions, signing status).
 5. CycloneDX 1.5 SBOMs for `anvil-desktop` and `anvil-cli` for that target
-   (`cargo cyclonedx`); the job fails if the desktop SBOM lists the WebDriver plugin.
+   (`cargo cyclonedx`, build job); the job fails if the desktop SBOM lists the WebDriver plugin.
 
 **Publish** (Ubuntu): an npm SBOM of the UI's production dependencies
 (`@cyclonedx/cyclonedx-npm`), `license-report.json`, the list of GitHub Actions
@@ -125,8 +156,10 @@ a second draft for the same tag, and `gh release view` may then show either.
 from the version's `CHANGELOG.md` section and `release-evidence.json` (read as
 JSON data and validated first):
 
-- the **Unsigned installers** warning (or a signing line when every target is
-  signed), with whether in-app updates are signed and the minisign key id;
+- the **Unsigned installers** warning (naming which platforms are signed when
+  only some are), or a **Signing:** line when every macOS and Windows target
+  is signed (see [Signing](#signing-and-what-unsigned-means)), with whether
+  in-app updates are signed and the minisign key id;
 - the section's summary paragraphs (hard-wrapped lines are joined; list items
   stay one per line);
 - a **Security** line when the section has a Security heading;
@@ -150,8 +183,10 @@ owner may add highlights to the body before publishing; keep the generated parts
 - product, version, tag, publication state (`draft` or `dry run — not published`);
 - repository, **source commit**, workflow run id/URL/attempt;
 - per target: OS, architecture, runner, toolchain versions, `signed`,
-  `signing`, the release-check result and report, and every artifact with its
-  file name, kind, size and SHA-256;
+  `signing_applicable`, `signing`, `signing_detail`, the release-check result
+  and report, and every artifact with its file name, kind, size and SHA-256;
+- `signed`, `signing` and `platform_signing`, the per-platform summary (see
+  [Signing](#signing-and-what-unsigned-means));
 - shared artifacts (npm SBOM, license report, `latest.json`) and the
   `SHA256SUMS` file;
 - updater: `signed`, `manifest`, minisign `key_id`, the `latest.json`
@@ -317,23 +352,133 @@ fails. These fixture builds and script tests run on hosted CI.
 
 ## Signing and what "unsigned" means
 
-Code signing needs the owner's certificates, which are **not** in the
-repository. The workflow signs only a tagged release, and only when the
-corresponding secrets exist; a dry run is always unsigned. Store these secrets
-in the protected `release` environment (see [In-app updates](#in-app-updates)):
+Code signing needs the owner's certificates and accounts, which are **not**
+in the repository. The workflow signs only a tagged release, in the protected
+`release` environment; a dry run is always unsigned and never reads a signing
+credential. The **Signing route** step (`scripts/release/signing-route.sh`, in
+every build job and in bundle-windows) picks one route per platform from which
+secrets and variables exist. It reads only whether each one is set
+(`secrets.NAME != ''`), never its value:
 
-| Platform | Secrets | Effect |
+| Platform | Route (first match wins) | Needs |
 | --- | --- | --- |
-| macOS | `APPLE_CERTIFICATE` (base64 .p12), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`; for notarization also `APPLE_ID`, `APPLE_PASSWORD` (app-specific), `APPLE_TEAM_ID` | Tauri signs the `.app`/`.dmg` with the Developer ID and notarizes |
-| Windows | `WINDOWS_CERTIFICATE` (base64 .pfx), `WINDOWS_CERTIFICATE_PASSWORD` | the certificate is imported and Tauri signs the MSI/NSIS installers (SHA-256, timestamped) |
-| Linux | — | no platform code signing; integrity is via `SHA256SUMS` |
+| macOS | Developer ID + notarization with an **App Store Connect API key** (recommended) | secrets `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_ISSUER`, `APPLE_API_KEY`, `APPLE_API_KEY_P8` |
+| macOS | Developer ID + notarization with an **Apple ID** app-specific password | secrets `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` |
+| macOS | none: unsigned (ad-hoc signature only) | nothing set |
+| Windows | **Azure Artifact Signing** (formerly Trusted Signing), OIDC (recommended) | variables `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_CERTIFICATE_PROFILE`; optional `AZURE_SUBSCRIPTION_ID` and `ARTIFACT_SIGNING_PROFILE_EKU` |
+| Windows | Azure Artifact Signing with a client secret | the same variables plus secret `AZURE_CLIENT_SECRET` |
+| Windows | exportable `.pfx` (certificates issued before June 2023 only) | secrets `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` |
+| Windows | none: unsigned | nothing set |
+| Linux | none: no platform code signing for `.deb`, `.rpm` or AppImage; integrity is via `SHA256SUMS` | — |
 
-A target is recorded as signed **only after the signature is verified on the
-runner** (`codesign --verify --deep --strict` with a Team ID and no ad-hoc
-signature, plus `stapler`/`spctl` for notarization on macOS;
-`Get-AuthenticodeSignature` = `Valid` for every Windows installer). Otherwise
-the evidence says `"signed": false` and
-`"signing": "unsigned — owner credentials not configured"`.
+`APPLE_SIGNING_IDENTITY` is optional with either macOS route (Tauri reads the
+identity from the certificate; when it is set, the certificate must match it).
+`APPLE_TEAM_ID` is optional with the API key. With both macOS notarization
+routes complete, the API key is used and the Apple ID is not mapped into the
+step at all (Tauri's bundler would otherwise prefer the Apple ID); with both
+Windows routes complete, Artifact Signing is used. Both Windows sets are
+checked for completeness first, so a half-set `.pfx` fails even when Artifact
+Signing is complete. The Artifact Signing account and certificate profile
+names must match Azure's `Microsoft.CodeSigning` resource rules (account 3 to
+24 characters, profile 5 to 100: letters, digits and single hyphens, not
+starting with a digit).
+
+How each route signs:
+
+- **macOS**: `tauri bundle` imports the `.p12` into a temporary keychain, signs
+  the `.app` with the hardened runtime, notarizes it with `notarytool` and
+  staples the ticket, then builds the DMG from it and signs the DMG. It does
+  not notarize the DMG, so the bundle step then submits each DMG with
+  `xcrun notarytool submit --wait` (`scripts/release/macos-notarize-dmg.sh`),
+  requires the status `Accepted` and staples the ticket to the DMG. For the
+  API-key route the bundle step writes `APPLE_API_KEY_P8` to
+  `AuthKey_<APPLE_API_KEY>.p8` in a private runner directory, points Tauri's
+  `APPLE_API_KEY_PATH` (and notarytool's `--key`) at it and deletes it when
+  the step ends.
+- **Windows, Artifact Signing** (bundle-windows): Tauri's
+  `bundle.windows.signCommand` runs SignTool (x64, from the newest Windows SDK
+  on the runner, 10.0.22621 or later) with Microsoft's Artifact Signing dlib
+  (`Microsoft.ArtifactSigning.Client` 1.0.151 from nuget.org, checked against
+  its pinned SHA-512 and its Microsoft Authenticode signature) on every file
+  Tauri signs: the app binary, the WiX and NSIS helpers, the uninstaller and
+  both installers, timestamped by `http://timestamp.acs.microsoft.com`. The
+  dlib authenticates with `DefaultAzureCredential` limited to the route's one
+  credential: the Azure CLI session `azure/login` creates from the job's OIDC
+  token (logged out again after bundling), or `EnvironmentCredential`
+  (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`, given to the
+  bundle step only). Artifact Signing certificates are valid for three days
+  and renewed daily, so the timestamp is what keeps the signature valid.
+  The dlib and its `metadata.json` are prepared before the login. Before
+  logging in, the job prints its OIDC token's `sub`, `aud`, `iss` and
+  `environment` claims (never the token), so a subject mismatch is visible in
+  the log. Right after the login it fetches the Artifact Signing access token
+  (`az account get-access-token --scope https://codesigning.azure.net/.default`,
+  printing only its expiry), so the Azure CLI has it cached before bundling
+  starts and a slow bundling step cannot outlive the short-lived GitHub token
+  the login exchanged.
+- **Windows, `.pfx`** (bundle-windows): the certificate is imported into the
+  runner's user store, Tauri signs with SignTool by thumbprint (SHA-256,
+  DigiCert timestamp), and the certificate and its key are removed afterwards.
+- **NSIS uninstaller**: Tauri signs the uninstaller through NSIS's
+  `!uninstfinalize` hook, whose exit code its stock template ignores. Anvil's
+  template, `apps/desktop/src-tauri/windows/installer.nsi` (set as
+  `bundle.windows.nsis.template` in `tauri.conf.json`), is Tauri CLI 2.12.6's
+  own with one change, `!uninstfinalize '${UNINSTALLERSIGNCOMMAND}' = 0`, so a
+  failed uninstaller signature stops the build instead of shipping inside a
+  signed installer. A test (`scripts/tests/release-notes.test.mjs`) checks
+  that it is upstream's file apart from that line and fails when
+  `@tauri-apps/cli` moves, so the template is refreshed with each CLI update.
+
+**Failure rules.** A half-configured route (for example `APPLE_API_KEY`
+without `APPLE_API_KEY_P8`, a certificate without notarization credentials,
+`AZURE_CLIENT_ID` without the Artifact Signing names, or
+`WINDOWS_CERTIFICATE` without its password) fails every build job before
+anything is built, naming the missing secrets or variables (never their
+values). A configured route whose result does not verify fails its job, so no
+draft release is created: a signing, notarization or uninstaller-signing
+error in `tauri bundle`, a DMG notarization that is not `Accepted`, an
+installer that is not `Valid` from the configured identity, or a macOS app or
+DMG that is not both signed and stapled. A release never falls back to
+unsigned once credentials are configured for that platform; it ships unsigned
+only for a platform with nothing configured.
+
+A target is recorded as signed **only after its signatures are verified on
+the runner** (`scripts/release/verify-signing.sh`):
+
+- macOS: the `.app` passes `codesign --verify --deep --strict` with a Team ID
+  and no ad-hoc signature, every DMG passes `codesign --verify --strict` with
+  the same Team ID, and `xcrun stapler validate` finds a ticket on the `.app`
+  and on every DMG. (`spctl`'s reading is recorded as detail only.)
+- Windows (`scripts/release/authenticode-status.ps1`): every MSI and NSIS
+  installer is `Get-AuthenticodeSignature` `Valid` from the route's identity.
+  For Artifact Signing that is the certificate profile, not a leaf
+  certificate, which is renewed daily: every signer certificate must carry the
+  code-signing EKU, the Artifact Signing Public Trust EKU
+  `1.3.6.1.4.1.311.97.1.0` and one and the same profile EKU
+  (`1.3.6.1.4.1.311.97.<profile>`), and, with the variable
+  `ARTIFACT_SIGNING_PROFILE_EKU`, exactly that one. For a `.pfx` it is the
+  imported certificate's thumbprint.
+
+`build-info.json` records the route, method (for example `Developer ID
+codesign (app and DMG) + notarized (app and DMG stapled) (App Store Connect
+API key)` or `Authenticode (Azure Artifact Signing)`) and detail (the
+signer, Team ID or profile EKU). Otherwise the evidence says
+`"signed": false` and `"signing": "unsigned — owner credentials not configured"`.
+
+`release-evidence.json` (format version 2) then records, per target,
+`signed`, `signing_applicable` (false for Linux) and `signing`, and per
+platform `platform_signing` (`signed`, `unsigned`, `partial` or `not
+applicable`). The top-level `signed` is `true` only when every macOS and
+Windows target is signed; Linux neither counts for nor against it. The
+top-level `signing` is the signed text, the unsigned text above, or
+`partially signed — see platform_signing and targets[].signing`. The release
+notes start with a **Signing:** line when every macOS and Windows target is
+signed (saying that Linux packages have no platform code signing), the
+existing **Unsigned installers** warning when none is, and, for a mix, an
+**Unsigned installers** warning that names which platforms are signed and
+which are not. `scripts/release-notes.mjs` still reads format version 1 (the
+evidence of releases up to 0.1.9, without `platform_signing`) and renders it
+with the wording those releases were published with.
 
 Unsigned means the files are exactly what CI built from the recorded commit
 (check `SHA256SUMS` and `release-evidence.json`), but the operating system
@@ -344,6 +489,154 @@ warns. Do not publish unsigned installers as a production download, and never
 describe them as signed. No step in this repository creates, simulates or
 claims a signature it did not verify.
 
+Primary sources for these names (checked 2026-11-27): Tauri CLI 2.12.6's
+`crates/tauri-bundler/src/bundle/macos/sign.rs`, `.../macos/dmg/mod.rs`
+(the DMG is signed, not notarized) and `crates/tauri-cli/ENVIRONMENT_VARIABLES.md`
+(`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+`APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_API_KEY`,
+`APPLE_API_ISSUER`, `APPLE_API_KEY_PATH`), `crates/tauri-utils/src/config.rs`
+and `crates/tauri-bundler/src/bundle/windows/sign.rs` (`signCommand` as
+`{ "cmd", "args" }` with `%1`), `.../windows/nsis/installer.nsi` and NSIS 3.13's
+`Source/scriptpp.cpp` (`!uninstfinalize` ignores the exit code without a
+comparison); Microsoft's
+[Artifact Signing integrations](https://learn.microsoft.com/azure/artifact-signing/how-to-signing-integrations),
+[quickstart](https://learn.microsoft.com/azure/artifact-signing/quickstart)
+and [certificate management](https://learn.microsoft.com/azure/artifact-signing/concept-certificate-management)
+(the `metadata.json` fields, `ExcludeCredentials`, regional endpoints, the
+timestamp URL, the roles, daily renewal and the profile EKU); Azure's
+`Microsoft.CodeSigning` resource specification (name rules); and GitHub's
+[OIDC reference](https://docs.github.com/en/actions/reference/security/oidc)
+(immutable subject claims).
+
+### Owner checklist: turning signing on
+
+Signing needs purchases and identity checks only the owner can make; the
+workflow needs nothing else. Store every value below in the protected
+`release` environment (Settings → Environments → `release`), never as a
+repository secret or variable, from your own terminal so it never passes
+through chat or logs. `gh secret set NAME --env release -R ferrum-edge/ferrum-anvil`
+with no value prompts for it with hidden input; `gh variable set NAME --env release -R ferrum-edge/ferrum-anvil --body VALUE`
+sets a variable.
+
+**macOS (Apple Developer ID and notarization)**
+
+- [ ] Enrol in the Apple Developer Program as an organisation (annual fee; a
+      D-U-N-S number is required). The Account Holder does the next steps.
+- [ ] Create a **Developer ID Application** certificate (Keychain Access →
+      Certificate Assistant → Request a Certificate from a Certificate
+      Authority; developer.apple.com → Certificates → **+** → Developer ID
+      Application; upload the CSR, install the `.cer`) and export
+      "Developer ID Application: <Org> (<TEAMID>)" **with its private key** as a
+      password-protected `.p12`.
+- [ ] Create an **App Store Connect API key** (App Store Connect → Users and
+      Access → Integrations → App Store Connect API → Team Keys, role
+      Developer). Download the `.p8` (only once) and note its Key ID and the
+      Issuer ID.
+- [ ] Secrets:
+
+  | Name | Value |
+  | --- | --- |
+  | `APPLE_CERTIFICATE` | `base64 -i DeveloperID.p12` output |
+  | `APPLE_CERTIFICATE_PASSWORD` | the `.p12` password |
+  | `APPLE_API_ISSUER` | the Issuer ID (a UUID) |
+  | `APPLE_API_KEY` | the Key ID (letters and digits) |
+  | `APPLE_API_KEY_P8` | the whole `AuthKey_<Key ID>.p8` file, for example `gh secret set APPLE_API_KEY_P8 --env release -R ferrum-edge/ferrum-anvil < AuthKey_XXXXXXXXXX.p8` |
+  | `APPLE_SIGNING_IDENTITY` (optional) | `Developer ID Application: <Org> (<TEAMID>)` |
+  | `APPLE_TEAM_ID` (optional with the API key) | the 10-character Team ID |
+
+  Instead of the three `APPLE_API_*` secrets you may use `APPLE_ID`,
+  `APPLE_PASSWORD` (an app-specific password from appleid.apple.com) and
+  `APPLE_TEAM_ID`.
+
+**Windows (Azure Artifact Signing)**
+
+Publicly trusted code-signing keys must live in hardware since June 2023, so
+certificate authorities no longer issue exportable `.pfx` files; the `.pfx`
+route is only for an older certificate you already have.
+
+- [ ] An Azure subscription. Register the `Microsoft.CodeSigning` resource
+      provider (`az provider register --namespace Microsoft.CodeSigning`).
+- [ ] Create an **Artifact Signing account** (Basic SKU is enough) in a
+      region, and note its endpoint, for example `https://eus.codesigning.azure.net`
+      for East US (the endpoint must be the account's region).
+- [ ] Complete **organization identity validation** for Public Trust in the
+      Azure portal (it needs the Artifact Signing Identity Verifier role;
+      Microsoft lists which countries qualify), then create a **Public Trust
+      certificate profile**.
+- [ ] Create an Entra ID **app registration**, and assign it the
+      **Artifact Signing Certificate Profile Signer** role on the certificate
+      profile (or the account).
+- [ ] On the app registration add a **federated credential** with the
+      **exact** subject of the `bundle-windows` job, the only job in this
+      repository that can request an OIDC token. This repository was created
+      after GitHub's July 15, 2026 switch to immutable subject claims, so the
+      subject carries the owner and repository IDs, not just their names:
+
+  ```text
+  Issuer:    https://token.actions.githubusercontent.com
+  Subject:   repo:ferrum-edge@273604640/ferrum-anvil@1387008140:environment:release
+  Audience:  api://AzureADTokenExchange
+  ```
+
+  Choose the **Other issuer** scenario (or edit the subject) if the
+  portal's GitHub Actions template fills in the older
+  `repo:ferrum-edge/ferrum-anvil:environment:release`, which never
+  matches; Entra requires an exact match. To confirm the prefix, run
+  `gh api repos/ferrum-edge/ferrum-anvil/actions/oidc/customization/sub`
+  (on 2026-11-27 it returned `"use_immutable_subject": true` and
+  `"sub_claim_prefix": "repo:ferrum-edge@273604640/ferrum-anvil@1387008140"`);
+  the job's own subject is printed by its **OIDC subject this job
+  presents** step (claims only, never the token) on the first tagged run,
+  before it logs in. If the repository's OIDC subject template is ever
+  customized, use the subject that step prints. No secret is stored.
+  (Alternatively create a client secret and store it as the secret
+  `AZURE_CLIENT_SECRET`; the workflow then uses it instead of OIDC.)
+- [ ] Variables in the `release` environment:
+
+  | Name | Value |
+  | --- | --- |
+  | `AZURE_TENANT_ID` | Directory (tenant) ID |
+  | `AZURE_CLIENT_ID` | the app registration's Application (client) ID |
+  | `AZURE_SUBSCRIPTION_ID` (optional) | the subscription; without it the login uses `allow-no-subscriptions` |
+  | `ARTIFACT_SIGNING_ENDPOINT` | the account's regional endpoint |
+  | `ARTIFACT_SIGNING_ACCOUNT` | the Artifact Signing account name |
+  | `ARTIFACT_SIGNING_CERTIFICATE_PROFILE` | the certificate profile name |
+  | `ARTIFACT_SIGNING_PROFILE_EKU` (optional, recommended after the first signed run) | the profile's durable EKU, `1.3.6.1.4.1.311.97.…`, shown in the Windows target's `signing_detail`; with it set, a signature from any other profile fails the release |
+
+**Verifying**
+
+- [ ] **Dry run** (anyone with write access, any branch; publishes nothing):
+      `gh workflow run release.yml -R ferrum-edge/ferrum-anvil --ref <branch> -f dry_run=true`.
+      It builds and checks every target unsigned and uploads the
+      `release-evidence-<version>` and `notes-<version>` artifacts to the run.
+      Confirm every build job, `bundle-windows` and `check-windows` passed, `problems` is empty,
+      `release-evidence.json` has `"version": 2` and `platform_signing`
+      is `{"macos": "unsigned", "windows": "unsigned", "linux": "not applicable"}`
+      and the notes start with the **Unsigned installers** warning. A dry run
+      never reads the `release` environment, so it cannot test the
+      credentials themselves.
+- [ ] **First signed release**: push the `anvil-vX.Y.Z` tag as in
+      [Cutting a release](#cutting-a-release). The run asks for approval of
+      the `release` environment twice: once for the four build jobs, and
+      again, after the Windows build, for `bundle-windows` (approve it within
+      30 days, while the compiled Windows artifact is kept; `check-windows`
+      needs no approval). Each **Signing
+      route** step logs the route chosen per platform within minutes; a
+      missing or half-set value fails it there. `bundle-windows` prints its
+      OIDC subject before logging in to Azure; if the login fails, compare it
+      with the federated credential. The result is always a draft, never
+      published: check that `release-evidence.json` has `"signed": true`,
+      `platform_signing` `signed` for macOS and Windows, the macOS targets'
+      `signing` containing `+ notarized (app and DMG stapled)` and the
+      Windows target's `Authenticode (...)` with the profile EKU in its
+      `signing_detail` (store it as `ARTIFACT_SIGNING_PROFILE_EKU`), and that
+      the notes start with **Signing:**. If
+      the run fails on signing, fix the values and re-run the failed jobs
+      (or run the workflow from the tag with `dry_run: false`); the tag
+      itself never needs to change.
+- [ ] Then the clean-install checks in the
+      [owner checklist](#owner-checklist-before-publishing-a-draft).
+
 ## In-app updates
 
 **Detection** is opt-in in Settings (off by default). When on, the app asks
@@ -351,8 +644,14 @@ claims a signature it did not verify.
 contacts nothing else. It works for every published release, signed or not.
 
 **In-app install** (`tauri-plugin-updater`) needs the owner's updater key,
-which is **not** in the repository. Without it the app has no public key
-compiled in and the Upgrade button opens the GitHub release page instead.
+which is **not** in the repository. It is configured: the `release`
+environment holds the private key and the repository has
+`ANVIL_UPDATER_PUBKEY`, and every published release from `anvil-v0.1.0` to
+`anvil-v0.1.9` ships `latest.json` with minisign signatures (0.1.9's
+`release-evidence.json`: `updater.signed: true`, key id `BFE08514FEC0E65A`,
+all seven platform keys). A build without the key (a dry run, or a source
+build) has no public key compiled in, and its Upgrade button opens the GitHub
+release page instead.
 
 | Setting | Kind | Value |
 | --- | --- | --- |
@@ -360,20 +659,21 @@ compiled in and the Upgrade button opens the GitHub release page instead.
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret of the `release` environment | its password (optional; set one) |
 | `ANVIL_UPDATER_PUBKEY` | repository variable | the `.pub` file contents (base64) |
 
-**Protecting the key.** The build job of a tagged release runs in the GitHub
-environment `release`; a dry run runs in none, and the workflow also withholds
+**Protecting the key.** The build jobs and `bundle-windows` of a tagged
+release run in the GitHub environment `release`; a dry run runs in none, and the workflow also withholds
 the key (and the Apple and Windows credentials) from any dry run or run without
-a tag.
-The owner must:
+a tag. This protection is in place (rechecked in ferrum-edge/ferrum-anvil#2 on
+2026-10-04; the environment's required reviewers and deployment rule were
+read again on 2026-11-27):
 
-- create the `release` environment with required reviewers and a deployment
-  rule of **Ref type: Tag**, pattern `anvil-v*`, and store the two updater
-  secrets there, together with the Apple and Windows signing secrets (not as
-  repository secrets);
-- add a tag ruleset for `refs/tags/anvil-v*` that restricts who can create,
-  update or delete those tags, and a branch ruleset that blocks creating
-  branches named `anvil-v*`;
-- do both before pushing the first `anvil-v*` tag.
+- the `release` environment has required reviewers and a deployment rule of
+  **Ref type: Tag**, pattern `anvil-v*`, and holds the two updater secrets;
+  the platform signing secrets and variables go there too (see the
+  [owner checklist](#owner-checklist-turning-signing-on)), never as
+  repository secrets;
+- a tag ruleset for `refs/tags/anvil-v*` restricts who can create, update or
+  delete those tags, and a branch ruleset blocks creating branches named
+  `anvil-v*`.
 
 Only a tagged release with both the private key and `ANVIL_UPDATER_PUBKEY`
 passes `bundle.createUpdaterArtifacts: true` and `plugins.updater.pubkey` as an
@@ -382,7 +682,7 @@ the bundle step); one without the other logs a warning and builds exactly as
 without a key. As defense in depth, the private key is in the environment of
 `tauri bundle` only, not of the compile step (build scripts, proc macros,
 `beforeBuildCommand`); both share the runner, so this narrows exposure rather
-than isolating the key. The build job checks that the public key is in the
+than isolating the key. The job that bundles each target checks that the public key is in the
 built app binary and `build-info.json` records it (`updater.embedded`). Tauri then signs
 (minisign), recording the version in each signature's trusted comment:
 
@@ -650,13 +950,15 @@ What it does **not** cover:
 
 ## Owner checklist before publishing a draft
 
-- [ ] Preflight, every build job and publish succeeded; `release-evidence.json`
+- [ ] Preflight, every build job, `bundle-windows`, `check-windows` and publish succeeded; `release-evidence.json`
       has an empty `problems` list and every target's `release_check.result` is `pass`.
 - [ ] The CI, Desktop E2E and Lab runs listed under `tests.runs` for the commit
       concluded `success` on all platforms.
-- [ ] `signed` is `true` for every desktop target you intend to offer — or the
-      release is explicitly labelled unsigned/preview and not offered as a
-      production download.
+- [ ] `release-evidence.json` `signed` is `true` (every macOS and Windows
+      target signed and verified; `platform_signing` shows `signed` for both
+      and `not applicable` for Linux, whose packages have no platform code
+      signing) — or the release is explicitly labelled unsigned and its
+      unsigned installers are not offered as a production download.
 - [ ] In-app updates: with the updater key configured (secrets
       `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in the
       protected `release` environment, variable `ANVIL_UPDATER_PUBKEY`, and
@@ -716,17 +1018,16 @@ What it does **not** cover:
 
 ## Open items
 
-- **Signing credentials** (owner): Apple Developer ID + notarization and a
-  Windows code-signing certificate. Until then every build is unsigned. Steps,
-  secret names and the recommended workflow changes: ferrum-edge/ferrum-anvil#2.
-- **Updater key** (owner): `npx tauri signer generate` offline, the secrets in
-  the protected `release` environment (required reviewers, `anvil-v*`
-  deployment rule) plus an `anvil-v*` tag ruleset, as described in
-  [In-app updates](#in-app-updates). Until then the app links to the release
-  page.
-- **Sign-in providers:** not planned for now (ferrum-edge/ferrum-anvil#3 was
-  closed on 2026-11-09); Google, GitHub and Facebook stay unavailable in the
-  app.
+- **Signing credentials** (owner): an Apple Developer ID with notarization
+  credentials and an Azure Artifact Signing account. The workflow supports
+  every route already; buying or enrolling and storing the values is the only
+  remaining step ([owner checklist](#owner-checklist-turning-signing-on),
+  ferrum-edge/ferrum-anvil#2). Until then every installer is unsigned.
+- **Sign-in providers:** not part of Anvil 1.0 (ferrum-edge/ferrum-anvil#3 was
+  closed as not planned on 2026-11-09). Google, GitHub and Facebook are not
+  offered: the Settings dialog shows no sign-in provider section unless a
+  build has an available provider, and release builds have none
+  (see [docs/identity.md](identity.md)).
 - **Packaged-app smoke tests:** install, launch, example import and a local
   call through the release CLI are automated for the published unsigned
   packages ([release smoke](#clean-install-smoke-rel-001)). On `anvil-v0.1.9`
@@ -786,4 +1087,4 @@ Earlier runs on the same PR:
 
 Not run locally: Windows and Linux builds and tests (they run in CI; see the
 PR checks), the x86_64 macOS cross build, `.msi`/NSIS/`.rpm`/`.AppImage`
-unpacking, and the signing branches (no credentials).
+unpacking, and the platform signing branches (no credentials).

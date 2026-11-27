@@ -263,7 +263,8 @@ pub(crate) fn hint(dir: &Path) -> Result<Option<IdentityHint>> {
 
 /// Application-login providers known to this build and their availability
 /// (Google, GitHub and Facebook are unavailable until the owner registers
-/// them; see docs/identity.md).
+/// them; see docs/identity.md). The desktop Settings dialog shows only the
+/// available ones, and no provider section when there are none.
 pub fn login_providers() -> Vec<ProviderInfo> {
     anvil_identity::builtin_providers().iter().map(|p| p.info()).collect()
 }

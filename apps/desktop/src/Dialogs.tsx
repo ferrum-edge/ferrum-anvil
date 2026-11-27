@@ -1596,7 +1596,7 @@ export function SettingsDialog(props: { onClose: () => void; onSaved: (s: AppSet
       </section>
       <StorageSection />
       <section className="settings-section">
-        <h3>Privacy and sign-in</h3>
+        <h3>Privacy</h3>
         <label className="lbl">
           Extra names to always redact (comma-separated headers, params, fields)
           <ListText<string>
@@ -1842,12 +1842,17 @@ function ChangePassphrase() {
   );
 }
 
+// Sign-in providers this build can actually use. A provider the build only
+// knows about (Google, GitHub and Facebook report "unavailable" until they are
+// registered and implemented; see docs/identity.md) is never shown, nor its
+// owner setup steps: with none available the section is not rendered at all.
 function Providers() {
   const [list, setList] = useState<ProviderInfo[] | null>(null);
   useEffect(() => {
     api.loginProviders().then(setList).catch(() => setList([]));
   }, []);
-  if (!list) return null;
+  const available = (list ?? []).filter((p) => p.availability.status === "available");
+  if (available.length === 0) return null;
   return (
     <details>
       <summary>Sign-in providers (optional, identity only)</summary>
@@ -1856,21 +1861,13 @@ function Providers() {
       </p>
       <table className="grid">
         <tbody>
-          {list.map((p) => (
+          {available.map((p) => (
             <tr key={p.id}>
               <td>{p.display_name}</td>
               <td>
-                {p.availability.status === "available" ? (
-                  <span className="badge ok">available{p.test_only ? " (test build)" : ""}</span>
-                ) : (
-                  <span className="badge warn" title={p.availability.reason}>
-                    unavailable
-                  </span>
-                )}
+                <span className="badge ok">available{p.test_only ? " (test build)" : ""}</span>
               </td>
-              <td className="faint small-text">
-                {p.availability.status === "unavailable" ? p.owner_actions.join("; ") : p.native_flow}
-              </td>
+              <td className="faint small-text">{p.native_flow}</td>
             </tr>
           ))}
         </tbody>
