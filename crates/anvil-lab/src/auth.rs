@@ -497,8 +497,8 @@ fn e21_query_alias(env: &Env) -> Fut<'_> {
         let before = env.fx.echo.log.count_requests();
         let o = go(env, &ctx(env, "GET", "/auth/e21-jwt-query/echo?carrier=x;token=abc", AuthConfig::None)).await;
         signal(&mut c, &o, 401, "Ambiguous token query parameter");
-        let challenge = o.record.response.as_ref().map(|r| r.header_values("www-authenticate").join(", ")).unwrap_or_default();
-        c.add(CheckKind::GroundTruth, "Bearer invalid_request challenge", challenge.contains("invalid_request"), challenge);
+        // The record redacts WWW-Authenticate; read the gateway's own header.
+        challenge_is(&mut c, raw_challenge("/auth/e21-jwt-query/echo?carrier=x;token=abc", &[]).await, "error=\"invalid_request\"");
         backend_untouched(&mut c, env, before);
         gateway_outcome(&mut c, env, &o);
         if env.trusted {

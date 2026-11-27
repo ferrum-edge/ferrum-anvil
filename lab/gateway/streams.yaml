@@ -227,7 +227,9 @@ proxies:
   # ---- Ferrum Edge v0.9.21 refusals (EXT-E21-*, docs/lab/streams-cpdp.md) -------------------
   # EXT-E21-GRPCWEB-ASSERT: an OPA decision header makes this a route with gateway-asserted
   # request headers and no grpc_web translator, so v0.9.21 refuses a gRPC-Web call before any
-  # before_proxy hook (#7064). OPA is never asked: 19409 is unbound.
+  # before_proxy hook (#7064). OPA runs first (authorize phase): it fails open, as 19409 is
+  # unbound. Failing closed, its own 503 (framed grpc-status 14) would answer instead, as Lab
+  # run 46067252897 showed.
   - id: e21-grpcweb-assert
     listen_path: /e21-grpcweb-assert
     backend_scheme: http
@@ -317,6 +319,8 @@ plugin_configs:
     config:
       opa_host: "http://127.0.0.1:19409"
       policy_path: anvil/lab/allow
+      fail_open: true
+      timeout_ms: 500
       decision_request_headers: [x-lab-decision]
 
   - id: e21-opa-relabel
