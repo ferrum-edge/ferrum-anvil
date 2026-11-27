@@ -470,7 +470,10 @@ failure-matrix seeds only, so it stays empty for these outcomes. Evidence: hoste
 Ubuntu 26.04 **578 passed / 0 failed / 21 skipped**, macOS 15 **582 / 0 / 19** (24 more passes than
 run 45974458935: each of the twelve scenarios then passes trusted and untrusted). After review, the
 gRPC-Web legs of the admission and breaker scenarios, the jwks_auth and oauth2_introspection
-query-token routes, and stricter body and source checks were added: run RUN_REVIEW (below).
+query-token routes, and stricter body and source checks were added: all-profile run
+[46076435648](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/46076435648) (pull_request, head
+`c6b6d4b6`), Ubuntu 26.04 **582 passed / 0 failed / 21 skipped** (four more passes: the two new
+query-token scenarios, trusted and untrusted).
 
 | Outcome or signal | Scenario | What the real gateway sent |
 |---|---|---|
