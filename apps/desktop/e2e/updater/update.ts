@@ -1,21 +1,26 @@
 // REL-003 built-bundle updater E2E: shared fixture code for the three specs in
 // this folder. They run only through .github/workflows/updater-e2e.yml (not
-// `npm run e2e`), against a bundled app (AppImage on Linux, .app on macOS)
-// built with the test-only `e2e` feature, a test minisign key and the
-// manifest endpoint http://127.0.0.1:$ANVIL_E2E_UPDATE_PORT/latest.json.
+// `npm run e2e`), against a bundled app (AppImage on Linux, .app on macOS, the
+// NSIS or MSI install on Windows) built with the test-only `e2e` feature, a
+// test minisign key and the manifest endpoint
+// http://127.0.0.1:$ANVIL_E2E_UPDATE_PORT/latest.json.
 //
 // Environment (set by the workflow):
-//   ANVIL_E2E_UPDATE_INSTALLED  what the updater replaces: the AppImage file or the .app folder
+//   ANVIL_E2E_UPDATE_INSTALLED  what the updater replaces: the AppImage file, the .app folder,
+//                               or on Windows the install folder
+//   ANVIL_E2E_UPDATE_BUNDLE     Windows: nsis or msi, the install under test (its latest.json key)
+//   ANVIL_E2E_APP               the installed app's executable
 //   ANVIL_E2E_UPDATE_FIXTURES   folder with update.bin (the signed updater artifact of the
 //                               0.2.0 build), update.sig (its signature from `tauri build`),
 //                               wrong-key.sig (`tauri signer sign` with another key) and, on
 //                               macOS, expected.app (the 0.2.0 bundle)
 //   ANVIL_E2E_UPDATE_PORT       the port compiled into the endpoint
 //   ANVIL_DATA_DIR              the profile store, kept across the three runs
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import { invoke } from "../helpers";
 
 export function required(name: string): string {
@@ -84,6 +89,7 @@ export function snapshot(root: string, keep: (rel: string) => boolean = () => tr
 /** Manifest keys as scripts/updater-manifest.mjs writes them for this platform. */
 function platformKeys(): string[] {
   const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  if (process.platform === "win32") return [`windows-${arch}-${required("ANVIL_E2E_UPDATE_BUNDLE")}`];
   return process.platform === "darwin" ? [`darwin-${arch}-app`, `darwin-${arch}`] : [`linux-${arch}-appimage`];
 }
 
@@ -152,4 +158,48 @@ export async function startUpdateServer(): Promise<UpdateServer> {
         server.close(() => ok());
       }),
   };
+}
+
+// ------------------------------------------------------------ Windows
+const powershell = (script: string): string => execFileSync("powershell", ["-NoProfile", "-Command", script], { encoding: "utf8" }).trim();
+const psQuote = (s: string): string => `'${s.replaceAll("'", "''")}'`;
+
+/** Windows: the ProductVersion of the installed executable (what the installer wrote). */
+export function installedExeVersion(): string {
+  return powershell(`(Get-Item -LiteralPath ${psQuote(required("ANVIL_E2E_APP"))}).VersionInfo.ProductVersion`);
+}
+
+/** Windows: process ids of the installed executable that are running. */
+export function runningInstalledApps(): number[] {
+  const name = basename(required("ANVIL_E2E_APP"), ".exe");
+  const out = powershell(`@(Get-Process -Name ${psQuote(name)} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id) -join ','`);
+  return out ? out.split(",").map(Number) : [];
+}
+
+/** Windows: process ids of a running update installer (NSIS setup or msiexec). */
+export function runningInstallers(): number[] {
+  const out = powershell(
+    "@(Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*-setup.exe' -or ($_.Name -eq 'msiexec.exe' -and $_.CommandLine -match '/i ') } | Select-Object -ExpandProperty ProcessId) -join ','",
+  );
+  return out ? out.split(",").map(Number) : [];
+}
+
+/** Windows: end every running instance of the installed executable (and its WebView2 children). */
+export function stopInstalledApps(): void {
+  for (const pid of runningInstalledApps()) {
+    try {
+      execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
+    } catch {
+      // already gone
+    }
+  }
+}
+
+export async function until(what: string, check: () => boolean, timeoutMs: number): Promise<void> {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    if (check()) return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(`timed out after ${timeoutMs / 1000} s waiting for ${what}`);
 }
