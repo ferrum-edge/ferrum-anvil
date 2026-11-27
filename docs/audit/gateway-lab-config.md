@@ -26,11 +26,14 @@ v0.9.12 to v0.9.14 change no config struct or plugin key. v0.9.15 was the defaul
 [hosted Anvil qualification](gateway-0.9.15-delta.md#qualification-status) recorded;
 it adds no config struct field, removes the `ldap_auth` `consumer_mapping` key and adds plugin
 keys the lab does not use. Its Layer-4 authorization of mesh CONNECT relays made the sidecar
-MeshPolicy name its own denied identity (MESH-007). The current v0.9.20 default is audited in
+MeshPolicy name its own denied identity (MESH-007). The previous v0.9.20 default is audited in
 [`gateway-0.9.20-delta.md`](gateway-0.9.20-delta.md), [hosted Anvil qualification](gateway-0.9.20-delta.md#qualification-status) recorded; no lab
 profile key, value or `FERRUM_*` setting is refused, renamed or reinterpreted, and keys added
 after v0.9.15 are not used by the profiles yet (v0.9.5 to v0.9.15 were retired, so such keys may
-be added once checked at v0.9.20). Its refusal of a bare
+be added once checked at v0.9.20). The current v0.9.21 default is audited in
+[`gateway-0.9.21-delta.md`](gateway-0.9.21-delta.md): it refuses two inputs the profiles carried
+(scope-less native PeerAuthentication and `mcp_gateway` `discovery.hide_denied_items`), both fixed
+with the adoption, and the lint no longer accepts `pool_max_requests_per_connection`. v0.9.20's refusal of a bare
 CONNECT to a sidecar HTTP port (v0.9.17) made MESH-008 relay to a workload-only `tcp` port 17808.
 The historical observations and original profile assertions below remain unchanged. The lab
 runs as described in [`../lab/README.md`](../lab/README.md).

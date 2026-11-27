@@ -1,15 +1,16 @@
-# Source-audited default for the Anvil failure lab; hosted Anvil qualification recorded
-# in docs/audit/gateway-0.9.20-delta.md.
-# Published Edge v0.9.20, release 432463173, immutable source below.
+# Source-audited default for the Anvil failure lab; its hosted Anvil qualification
+# status is recorded in docs/audit/gateway-0.9.21-delta.md.
+# Published Edge v0.9.21, release 454250773 (published 2026-11-22), immutable source below.
 # Asset names and SHA-256 are the GitHub API asset digests of the published
-# release, matching its .sha256 sidecars (verified 2026-11-03).
-# https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.20
+# release, matching its .sha256 sidecars (verified 2026-11-27).
+# https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.21
 # This release-specific copy and RELEASE.lock have identical pins.
-# It is the only supported release; v0.9.5 to v0.9.15 were retired.
-release v0.9.20
-source_sha e4a606a00352674daaef08636e3e359e6c48ba18
-ferrum-edge-macos-aarch64 c36b586507bd1ed072fbd9f3e2222ef07b2427f460a2ed923f21dbb973eb7061
-ferrum-edge-linux-aarch64 7cb5a849fabd6d02ea83af965ac9249de35cc718400625ae528a95c9276cee2f
-ferrum-edge-linux-x86_64 9d357a41ae61cf85d697f01c84beff15f2b8af8bcfd70dd1c50f32397fee66ac
-ferrum-edge-macos-x86_64 6e5950a31a54552389b25559024f5fa2fe3c4b4fb59803c4f3df3983bc087371
-ferrum-edge-windows-x86_64.exe 6cd00219e86b4f6429437c5d09513284b64532e1c660287044fc44e326a839f1
+# It is the only supported release; v0.9.20 was retired when v0.9.21 was adopted
+# (v0.9.5 to v0.9.15 earlier, with the vendored dimpl patch).
+release v0.9.21
+source_sha f9915358c8032214f4034a17c28cdf72d14006c3
+ferrum-edge-macos-aarch64 0aa4b6a5693a13ccf922d3c2ba54973770dc3db0557ced9cc966261fff81e19c
+ferrum-edge-linux-aarch64 30cd924bf51e45e94fed952cbcdcc57bab5e89884e1cc4caca34274488bdab1e
+ferrum-edge-linux-x86_64 06fc247a35c49c5be160e947fd8284be4c5f594d331fce71cba1b87b87acce00
+ferrum-edge-macos-x86_64 82828eea71d1b288ea3bc565afe012ad3a899f3f82c3770548f8988e827b2b63
+ferrum-edge-windows-x86_64.exe af86e7c0bb971284bb986d840ac0beea04716886c978c71aab61d6a9ff1f967e

@@ -20,10 +20,10 @@ use std::sync::OnceLock;
 
 /// The source-audited release new profiles default to. The audit and its
 /// qualification status (the hosted all-profile Lab run, also recorded in the
-/// catalog's `qualification`) are in `docs/audit/gateway-0.9.20-delta.md`.
-pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.20";
+/// catalog's `qualification`) are in `docs/audit/gateway-0.9.21-delta.md`.
+pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.21";
 
-const EDGE_0_9_20: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json");
+const EDGE_0_9_21: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.21/outcomes.json");
 
 /// Every embedded catalog, oldest release first: (compatibility id, outcomes.json).
 const EMBEDDED: &[(&str, &str)] = &[
@@ -35,7 +35,8 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("ferrum-edge-0.9.11", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.11/outcomes.json")),
     ("ferrum-edge-0.9.14", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.14/outcomes.json")),
     ("ferrum-edge-0.9.15", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.15/outcomes.json")),
-    ("ferrum-edge-0.9.20", EDGE_0_9_20),
+    ("ferrum-edge-0.9.20", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json")),
+    ("ferrum-edge-0.9.21", EDGE_0_9_21),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +52,10 @@ struct RawCatalog {
     gateway: serde_json::Value,
     #[serde(default)]
     marker_semantics: RawMarkerSemantics,
+    /// The release relays a backend's own 3xx-5xx answer to a WebSocket
+    /// upgrade instead of replacing it (Ferrum Edge v0.9.21, #7414).
+    #[serde(default)]
+    websocket_backend_refusals_relayed: bool,
 }
 
 /// Release-specific sentences a catalog adds to the release-neutral wording
@@ -124,6 +129,12 @@ pub struct Outcome {
     /// trailers after no message, or a gRPC-Web trailer frame alone. Such an
     /// outcome has no body to compare ([`grpc_status_only`]).
     pub grpc_status_only: bool,
+    /// The `grpc-message` values (percent-decoded) the outcome's gRPC
+    /// rendering carries (`public_signal.grpc_message`, alternatives split on
+    /// ` | `). A gRPC response with the outcome's grpc-status and one of these
+    /// messages matches it exactly; the message is gateway-authored text, as
+    /// weak as a body.
+    pub grpc_messages: Vec<String>,
     pub evidence_visibility: String,
     pub shared_signal_with: Vec<String>,
     pub minimum_truthful_diagnosis: String,
@@ -202,6 +213,10 @@ pub struct FerrumCatalog {
     pub token_notes: HashMap<String, ReleaseNotes>,
     /// Release-specific notes for a 5xx that carries no marker.
     pub absent_notes: ReleaseNotes,
+    /// The release relays a backend's own 3xx-5xx answer to a WebSocket
+    /// upgrade unchanged and without `X-Gateway-Error` (Ferrum Edge v0.9.21,
+    /// #7414), so a tokenless handshake refusal may be the backend's.
+    pub relays_websocket_refusals: bool,
 }
 
 fn strings(v: &serde_json::Value) -> Vec<String> {
@@ -372,6 +387,11 @@ pub fn load(raw: &str) -> Result<FerrumCatalog, serde_json::Error> {
                 body_passthrough,
                 grpc_status,
                 grpc_status_only,
+                grpc_messages: strings(sig.get("grpc_message").unwrap_or(&serde_json::Value::Null))
+                    .iter()
+                    .flat_map(|m| m.split(" | ").map(|x| x.trim().to_string()).collect::<Vec<_>>())
+                    .filter(|m| !m.is_empty())
+                    .collect(),
                 evidence_visibility: o.evidence_visibility.clone(),
                 shared_signal_with: o.shared_signal_with.clone(),
                 minimum_truthful_diagnosis: o.minimum_truthful_diagnosis.clone(),
@@ -396,6 +416,7 @@ pub fn load(raw: &str) -> Result<FerrumCatalog, serde_json::Error> {
         marker_spoofable,
         token_notes: rc.marker_semantics.tokens,
         absent_notes: rc.marker_semantics.absent,
+        relays_websocket_refusals: rc.websocket_backend_refusals_relayed,
     })
 }
 
@@ -409,6 +430,8 @@ pub struct Signal<'a> {
     /// The gRPC call ended with its status and no message before it
     /// (`Ctx::grpc_status_without_message`).
     pub grpc_no_message: bool,
+    /// The call's percent-decoded `grpc-message`, if any.
+    pub grpc_message: Option<&'a str>,
 }
 
 /// A JSON-RPC error response (MCP, A2A) as the client observed it.
@@ -487,6 +510,12 @@ impl FerrumCatalog {
                 out.push((o, MatchStrength::Exact));
             } else if o.body_patterns.is_empty() && o.body_passthrough {
                 out.push((o, MatchStrength::PassThrough));
+            } else if !o.grpc_messages.is_empty()
+                && s.grpc_status.is_some()
+                && s.grpc_status == o.grpc_status
+                && s.grpc_message.is_some_and(|m| o.grpc_messages.iter().any(|x| x == m.trim()))
+            {
+                out.push((o, MatchStrength::Exact));
             } else if o.grpc_status_only && s.grpc_no_message && s.grpc_status.is_some() && s.grpc_status == o.grpc_status {
                 out.push((o, MatchStrength::GrpcStatusOnly));
             }
@@ -562,6 +591,7 @@ mod tests {
                 "ferrum-edge-0.9.14",
                 "ferrum-edge-0.9.15",
                 "ferrum-edge-0.9.20",
+                "ferrum-edge-0.9.21",
             ]
         );
         for id in ids {
@@ -580,11 +610,11 @@ mod tests {
             assert!(c.outcomes.iter().all(|o| seen.insert(o.id.as_str())), "{id}: duplicate outcome ids");
         }
         assert_eq!(default_catalog().compatibility_id, DEFAULT_COMPATIBILITY_ID);
-        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.20");
+        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.21");
     }
 
     /// `request_timeout` joined the closed vocabulary in 0.9.8 (0.9.9,
-    /// 0.9.10, 0.9.11, 0.9.14, 0.9.15 and 0.9.20 keep it); the older catalogs do not
+    /// 0.9.10, 0.9.11, 0.9.14, 0.9.15, 0.9.20 and 0.9.21 keep it); the older catalogs do not
     /// know it, so it is not part of the shared vocabulary.
     #[test]
     fn request_timeout_is_a_token_of_the_0_9_8_and_later_catalogs_only() {
@@ -611,6 +641,7 @@ mod tests {
             body: &bf,
             grpc_status: None,
             grpc_no_message: false,
+            grpc_message: None,
         };
         let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
         assert_eq!(ids(catalog_for("ferrum-edge-0.9.9").unwrap()), ["gateway.routing.path_parameter_refused"]);
@@ -623,17 +654,32 @@ mod tests {
 
     /// The `ai_prompt_shield` MCP refusals new in 0.9.10 (a non-UTF-8 request
     /// charset, an unparseable body that may carry a tool call) match from
-    /// their public body from 0.9.10 onward, including 0.9.11, 0.9.14, 0.9.15
-    /// and 0.9.20. The content-encoding message existed at 0.9.9 and matches
-    /// all six.
+    /// their public body from 0.9.10 onward, including 0.9.11, 0.9.14, 0.9.15,
+    /// 0.9.20 and 0.9.21. The content-encoding message existed at 0.9.9 and
+    /// matches all seven.
     #[test]
     fn outcomes_new_in_0_9_10_match_only_their_own_catalog() {
         for reason in ["unsupported_charset", "jsonrpc_request_unparseable"] {
             let text = format!(r#"{{"error":"MCP request body could not be inspected","message":"{reason}"}}"#);
             let bf = body_facts(Some("application/json"), text.as_bytes());
-            let signal = Signal { status: 400, token: None, body_text: &text, body: &bf, grpc_status: None, grpc_no_message: false };
+            let signal = Signal {
+                status: 400,
+                token: None,
+                body_text: &text,
+                body: &bf,
+                grpc_status: None,
+                grpc_no_message: false,
+                grpc_message: None,
+            };
             let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
-            for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20"] {
+            for id in [
+                "ferrum-edge-0.9.10",
+                "ferrum-edge-0.9.11",
+                "ferrum-edge-0.9.14",
+                "ferrum-edge-0.9.15",
+                "ferrum-edge-0.9.20",
+                "ferrum-edge-0.9.21",
+            ] {
                 let catalog = catalog_for(id).unwrap();
                 let expected = ["plugin.ai_prompt_shield.mcp_body_uninspectable"];
                 assert_eq!(ids(catalog), expected, "{id}: {reason}");
@@ -643,9 +689,17 @@ mod tests {
 
         let text = r#"{"error":"MCP request body could not be inspected","message":"unsupported_content_encoding"}"#;
         let bf = body_facts(Some("application/json"), text.as_bytes());
-        let signal = Signal { status: 400, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
+        let signal =
+            Signal { status: 400, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false, grpc_message: None };
         let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
-        for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20"] {
+        for id in [
+            "ferrum-edge-0.9.10",
+            "ferrum-edge-0.9.11",
+            "ferrum-edge-0.9.14",
+            "ferrum-edge-0.9.15",
+            "ferrum-edge-0.9.20",
+            "ferrum-edge-0.9.21",
+        ] {
             let expected = ["plugin.ai_prompt_shield.mcp_body_uninspectable"];
             assert_eq!(ids(catalog_for(id).unwrap()), expected);
         }
@@ -655,14 +709,21 @@ mod tests {
 
     /// 0.9.14 answers a buffered-collector read error with the eager
     /// collector's body, so that body is ambiguous between the two collectors
-    /// from 0.9.14 (0.9.15 and 0.9.20 keep it) and the old body matches only the earlier
+    /// from 0.9.14 (0.9.15, 0.9.20 and 0.9.21 keep it) and the old body matches only the earlier
     /// catalogs.
     #[test]
     fn buffered_read_error_body_changed_in_0_9_14() {
         let ids = |id: &str, text: &str| {
             let bf = body_facts(None, text.as_bytes());
-            let signal =
-                Signal { status: 502, token: Some("backend_error"), body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
+            let signal = Signal {
+                status: 502,
+                token: Some("backend_error"),
+                body_text: text,
+                body: &bf,
+                grpc_status: None,
+                grpc_no_message: false,
+                grpc_message: None,
+            };
             let mut ids: Vec<String> = catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
             ids.sort();
             ids
@@ -670,7 +731,7 @@ mod tests {
         let current = r#"{"error":"Backend response body read failed"}"#;
         let old = r#"{"error":"Backend response read error"}"#;
         let both = ["upstream.body_read_failed.buffered_collector", "upstream.body_read_failed.eager_buffer"];
-        for id in ["ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20"] {
+        for id in ["ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20", "ferrum-edge-0.9.21"] {
             assert_eq!(ids(id, current), both, "{id}");
             assert!(ids(id, old).is_empty(), "{id}");
         }
@@ -695,7 +756,8 @@ mod tests {
         ];
         for (status, text, expected) in cases {
             let bf = body_facts(Some("application/json"), text.as_bytes());
-            let signal = Signal { status, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
+            let signal =
+                Signal { status, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false, grpc_message: None };
             let ids = |id: &str| catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
             assert_eq!(ids("ferrum-edge-0.9.15"), [expected], "{text}");
             assert!(ids("ferrum-edge-0.9.14").is_empty(), "{text}");
@@ -711,11 +773,13 @@ mod tests {
     fn oidc_state_cache_full_is_absent_from_0_9_15_only() {
         let text = r#"{"error":"OIDC state cache full"}"#;
         let bf = body_facts(Some("application/json"), text.as_bytes());
-        let signal = Signal { status: 503, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
+        let signal =
+            Signal { status: 503, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false, grpc_message: None };
         let ids = |id: &str| catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
         assert_eq!(ids("ferrum-edge-0.9.14"), ["plugin.oidc_relying_party.challenge_browser_state_cache_full"]);
         assert!(ids("ferrum-edge-0.9.15").is_empty());
         assert_eq!(ids("ferrum-edge-0.9.20"), ["plugin.oidc_relying_party.challenge_browser_state_cache_full"]);
+        assert_eq!(ids("ferrum-edge-0.9.21"), ["plugin.oidc_relying_party.challenge_browser_state_cache_full"]);
     }
 
     /// Refusals new between 0.9.15 and 0.9.20 (the proxy hop limit and its
@@ -733,7 +797,8 @@ mod tests {
         ];
         for (status, token, text, expected) in cases {
             let bf = body_facts(Some("application/json"), text.as_bytes());
-            let signal = Signal { status, token, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
+            let signal =
+                Signal { status, token, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false, grpc_message: None };
             let ids = |id: &str| catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
             assert_eq!(ids("ferrum-edge-0.9.20"), [expected], "{text}");
             assert!(ids("ferrum-edge-0.9.15").is_empty(), "{text}");
@@ -747,7 +812,15 @@ mod tests {
         let text = r#"{"error":"Backend WebSocket connection failed"}"#;
         let bf = body_facts(Some("application/json"), text.as_bytes());
         for token in ["connection_failure", "backend_error"] {
-            let signal = Signal { status: 502, token: Some(token), body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
+            let signal = Signal {
+                status: 502,
+                token: Some(token),
+                body_text: text,
+                body: &bf,
+                grpc_status: None,
+                grpc_no_message: false,
+                grpc_message: None,
+            };
             let ids: Vec<String> =
                 catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
             assert_eq!(ids, ["protocol.ws.backend_connect_failed"], "{token}");
@@ -807,7 +880,15 @@ mod tests {
         }
         for (status, text, expected) in &variants {
             let bf = body_facts(Some("application/json"), text.as_bytes());
-            let signal = Signal { status: *status, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
+            let signal = Signal {
+                status: *status,
+                token: None,
+                body_text: text,
+                body: &bf,
+                grpc_status: None,
+                grpc_no_message: false,
+                grpc_message: None,
+            };
             let ids: Vec<String> =
                 catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
             assert_eq!(ids, [*expected], "{status} {text}");
@@ -851,7 +932,8 @@ mod tests {
             (Some("backend_error"), request, &[][..]),
         ] {
             let bf = body_facts(Some("application/json"), text.as_bytes());
-            let signal = Signal { status: 503, token, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
+            let signal =
+                Signal { status: 503, token, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false, grpc_message: None };
             let ids: Vec<String> =
                 catalog_for("ferrum-edge-0.9.20").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
             assert_eq!(ids, expected, "{token:?} {text}");
@@ -884,6 +966,184 @@ mod tests {
         }
     }
 
+    /// Refusals new between 0.9.20 and 0.9.21 (the token plugins' ambiguous
+    /// query alias, the transformers' duplicate-member screen, untranslated
+    /// gRPC-Web on a route with gateway-asserted headers, and the repeated
+    /// Content-Type guard) match from their public signal in the 0.9.21
+    /// catalog only; the removed hmac_auth v1 nonce refusal matches only
+    /// 0.9.20.
+    #[test]
+    fn outcomes_new_in_0_9_21_match_only_their_own_catalog() {
+        let ids_for = |id: &str, status: u16, token: Option<&'static str>, text: &str| {
+            let bf = body_facts(Some("application/json"), text.as_bytes());
+            let signal =
+                Signal { status, token, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false, grpc_message: None };
+            let mut ids: Vec<String> = catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
+            ids.sort();
+            ids
+        };
+        let ambiguous = r#"{"error":"Ambiguous token query parameter"}"#;
+        assert_eq!(
+            ids_for("ferrum-edge-0.9.21", 401, None, ambiguous),
+            [
+                "plugin.jwks_auth.ambiguous_query_token",
+                "plugin.jwt_auth.ambiguous_query_token",
+                "plugin.oauth2_introspection.ambiguous_query_token"
+            ]
+        );
+        assert!(ids_for("ferrum-edge-0.9.20", 401, None, ambiguous).is_empty());
+        let cases = [
+            (
+                400,
+                None,
+                r#"{"error":"Request body contains duplicate JSON object member names or a JSON document the gateway could not evaluate"}"#,
+                "plugin.request_transformer.ambiguous_json_body",
+            ),
+            (
+                502,
+                Some("backend_error"),
+                r#"{"error":"Backend response body contains duplicate JSON object member names or a JSON document the gateway could not evaluate"}"#,
+                "plugin.response_transformer.ambiguous_json_body",
+            ),
+            (
+                415,
+                None,
+                r#"{"error":"gRPC-Web must be translated on a route with gateway-asserted headers"}"#,
+                "gateway.routing.grpc_web_relabelled_on_assertion_route",
+            ),
+            (
+                400,
+                None,
+                r#"{"error":"Request body could not be inspected","message":"Request blocked because the JSON request body has duplicate member names."}"#,
+                "plugin.ai_prompt_shield.uninspectable",
+            ),
+        ];
+        for (status, token, text, expected) in cases {
+            assert_eq!(ids_for("ferrum-edge-0.9.21", status, token, text), [expected], "{text}");
+            assert!(ids_for("ferrum-edge-0.9.20", status, token, text).is_empty(), "{text}");
+        }
+        // The repeated Content-Type refusals join the protocol header guard,
+        // which 0.9.20 already had for its other bodies.
+        for text in [
+            r#"{"error":"Request contains multiple Content-Type headers"}"#,
+            r#"{"error":"Content-Type header contains more than one media type"}"#,
+        ] {
+            assert_eq!(ids_for("ferrum-edge-0.9.21", 400, None, text), ["frontend_parse.protocol_header_violation"], "{text}");
+            assert!(ids_for("ferrum-edge-0.9.20", 400, None, text).is_empty(), "{text}");
+        }
+        // hmac_auth's v1 signing profile is gone (#7114), and its nonce refusal with it.
+        let v1 = r#"{"error":"HMAC authorization nonce is not accepted by this signing profile"}"#;
+        assert_eq!(ids_for("ferrum-edge-0.9.20", 401, None, v1), ["plugin.hmac_auth.nonce_not_accepted_v1"]);
+        assert!(ids_for("ferrum-edge-0.9.21", 401, None, v1).is_empty());
+        // A backend refusal of a WebSocket upgrade is relayed from 0.9.21
+        // (#7414), but the gateway 502 remains for answers it cannot relay,
+        // with either token.
+        let ws = r#"{"error":"Backend WebSocket connection failed"}"#;
+        for token in ["connection_failure", "backend_error"] {
+            assert_eq!(ids_for("ferrum-edge-0.9.21", 502, Some(token), ws), ["protocol.ws.backend_connect_failed"], "{token}");
+        }
+        // The OpenAPI bridge refusal outside the route (#7410) is its own exact JSON-RPC outcome.
+        let bridge = JsonRpcSignal {
+            status: 200,
+            token: None,
+            code: -32603,
+            message: "OpenAPI bridge operation path is outside this proxy's route",
+            gateway: None,
+        };
+        let m = catalog_for("ferrum-edge-0.9.21").unwrap().match_jsonrpc_error(&bridge);
+        assert_eq!(m.exact.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), ["plugin.mcp_gateway.openapi_bridge_outside_route"]);
+        assert!(catalog_for("ferrum-edge-0.9.20").unwrap().match_jsonrpc_error(&bridge).exact.is_empty());
+    }
+
+    /// v0.9.21 renders gateway refusals of gRPC-Web calls as an HTTP 200
+    /// trailer frame (#7064, #7155): each matches its own outcome exactly by
+    /// grpc-status and grpc-message, never by the HTTP status the transaction
+    /// log keeps, and a different message with the same grpc-status is only a
+    /// status candidate.
+    #[test]
+    fn framed_grpc_refusals_match_by_status_and_message() {
+        let bf = body_facts(Some("application/grpc-web+proto"), b"");
+        let ids = |id: &str, token: Option<&'static str>, grpc_status: i32, message: Option<&'static str>| {
+            let signal = Signal {
+                status: 200,
+                token,
+                body_text: "",
+                body: &bf,
+                grpc_status: Some(grpc_status),
+                grpc_no_message: true,
+                grpc_message: message,
+            };
+            let mut ids: Vec<(String, MatchStrength)> =
+                catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, m)| (o.id.clone(), m)).collect();
+            ids.sort_by(|a, b| a.0.cmp(&b.0));
+            ids
+        };
+        let exact = |v: Vec<(String, MatchStrength)>| -> Vec<String> {
+            v.into_iter().filter(|(_, m)| *m == MatchStrength::Exact).map(|(id, _)| id).collect()
+        };
+        for (token, code, message, expected) in [
+            (
+                None,
+                13,
+                "gRPC-Web must be translated on a route with gateway-asserted headers",
+                "gateway.routing.grpc_web_untranslated_on_assertion_route",
+            ),
+            (None, 7, "Request protocol not permitted on this route", "gateway.routing.protocol_not_permitted.grpc"),
+            (
+                Some("circuit_breaker_open"),
+                14,
+                "Service temporarily unavailable (circuit breaker open)",
+                "gateway.admission.circuit_open.grpc",
+            ),
+        ] {
+            assert_eq!(exact(ids("ferrum-edge-0.9.21", token, code, Some(message))), [expected], "{message}");
+            assert!(exact(ids("ferrum-edge-0.9.20", token, code, Some(message))).is_empty(), "{message}");
+        }
+        // Another service's INTERNAL with its own message is not the assertion refusal.
+        let other = ids("ferrum-edge-0.9.21", None, 13, Some("database unavailable"));
+        assert!(exact(other.clone()).is_empty(), "{other:?}");
+        assert!(
+            other
+                .iter()
+                .any(|(id, m)| id == "gateway.routing.grpc_web_untranslated_on_assertion_route" && *m == MatchStrength::GrpcStatusOnly),
+            "{other:?}"
+        );
+        // The breaker rendering needs its token, as the HTTP form does.
+        assert!(exact(ids("ferrum-edge-0.9.21", None, 14, Some("Service temporarily unavailable (circuit breaker open)"))).is_empty());
+    }
+
+    /// body_validator's v0.9.21 response details are fixed texts; the 502
+    /// matches whatever the detail and in either key order (GHSA-84xq-rr63-39pw).
+    #[test]
+    fn body_validator_response_502_matches_its_fixed_details() {
+        for text in [
+            r#"{"error":"Response body validation failed","details":"Response body is missing a required field"}"#,
+            r#"{"details":"Response body is not valid JSON","error":"Response body validation failed"}"#,
+        ] {
+            let bf = body_facts(Some("application/json"), text.as_bytes());
+            let signal = Signal {
+                status: 502,
+                token: Some("backend_error"),
+                body_text: text,
+                body: &bf,
+                grpc_status: None,
+                grpc_no_message: false,
+                grpc_message: None,
+            };
+            let ids: Vec<String> =
+                catalog_for("ferrum-edge-0.9.21").unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
+            assert_eq!(ids, ["plugin.body_validator.response_validation_failed"], "{text}");
+        }
+    }
+
+    /// Only the 0.9.21 catalog records that the release relays a backend's
+    /// own WebSocket upgrade refusal (#7414).
+    #[test]
+    fn websocket_refusal_relay_is_a_0_9_21_fact() {
+        assert!(catalog_for("ferrum-edge-0.9.21").unwrap().relays_websocket_refusals);
+        assert!(!catalog_for("ferrum-edge-0.9.20").unwrap().relays_websocket_refusals);
+    }
+
     #[test]
     fn unknown_compatibility_ids_get_no_catalog_and_only_the_shared_vocabulary() {
         for id in ["ferrum-edge-0.9.6", "ferrum-edge-1.0.0", "", "FERRUM-EDGE-0.9.7"] {
@@ -907,6 +1167,7 @@ mod tests {
                 body: &bf,
                 grpc_status: None,
                 grpc_no_message: false,
+                grpc_message: None,
             });
             assert!(
                 m.len() > 3,
@@ -1013,6 +1274,7 @@ mod tests {
             body: &bf,
             grpc_status: Some(grpc_status),
             grpc_no_message,
+            grpc_message: None,
         };
         let ids = |m: Vec<(&Outcome, MatchStrength)>| {
             assert!(
@@ -1048,6 +1310,7 @@ mod tests {
                 body: &bf,
                 grpc_status: None,
                 grpc_no_message: false,
+                grpc_message: None,
             });
             assert!(
                 m.iter().any(|(o, _)| o.id == "size.query_param_count_exceeded"),

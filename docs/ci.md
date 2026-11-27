@@ -45,7 +45,8 @@ failure shown to be unrelated to the change, and open an issue for a scenario
 that fails that way more than once. The DTLS 1.3 mutual-TLS handshake
 behind that failure is also a required Rust test
 (`crates/anvil-transport/tests/dtls_edge_interop.rs`), against a listener that sends the
-CertificateRequest v0.9.20 sends.
+CertificateRequest the default pin sends (no `certificate_authorities` extension, as on every
+release from v0.9.20).
 
 The existing macOS Rust job also compiles the standalone Swift branding helper
 with `swift build --package-path apps/desktop/scripts`. Its small SwiftPM
@@ -160,8 +161,8 @@ python3 -I scripts/matrix-coverage.py
 ruby lab/gateway/lint-profiles.rb
 lab/scripts/fetch-gateway.sh             # needs an authenticated `gh`; verifies RELEASE.lock
 ulimit -n 4096; cargo run -p anvil-lab -- run core --untrusted-pass
-lab/scripts/fetch-gateway.sh v0.9.20     # a release by tag (lab/gateway/releases/v0.9.20.lock)
-cargo run -p anvil-lab -- --release v0.9.20 run core --untrusted-pass
+lab/scripts/fetch-gateway.sh v0.9.21     # a release by tag (lab/gateway/releases/v0.9.21.lock)
+cargo run -p anvil-lab -- --release v0.9.21 run core --untrusted-pass
 
 # Native E2E
 (cd apps/desktop && npm run e2e:build && npm run e2e)

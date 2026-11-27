@@ -58,7 +58,8 @@ jobs:
         os: [ubuntu-26.04, macos-15]
         # "" = the default pin (RELEASE.lock). It is the only supported release
         # (lab/gateway/releases/), so nightly runs it alone; v0.9.5 to v0.9.15
-        # were retired with the vendored dimpl patch (docs/lab/README.md).
+        # were retired with the vendored dimpl patch, and v0.9.20 when v0.9.21
+        # was adopted (docs/lab/README.md).
         release: ${{ fromJSON(format('["{0}"]', inputs.release || '')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60

@@ -467,12 +467,13 @@ mod tests {
     /// Every supported release has a well-formed lock and an embedded
     /// diagnostics catalog, so the lab's trusted profile never falls back.
     /// v0.9.5 to v0.9.15 were retired (their DTLS 1.3 listeners send the
-    /// empty `certificate_authorities` list Anvil's dimpl refuses); their
-    /// catalogs stay embedded, but the lab no longer runs them.
+    /// empty `certificate_authorities` list Anvil's dimpl refuses), and
+    /// v0.9.20 when v0.9.21 was adopted; their catalogs stay embedded, but
+    /// the lab no longer runs them.
     #[test]
     fn every_supported_release_has_a_lock_and_a_catalog() {
         let releases = available_releases();
-        let expected = ["v0.9.20"];
+        let expected = ["v0.9.21"];
         assert_eq!(releases, expected);
         for r in releases {
             let l = lock_at(&format!("{RELEASES_DIR}/{r}.lock"));
@@ -552,7 +553,8 @@ mod tests {
         assert!(release_order("v0.9.14") > release_order("v0.9.11"));
         assert!(release_order("v0.9.15") > release_order("v0.9.14"));
         assert!(release_order("v0.9.20") > release_order("v0.9.15"));
-        assert!(release_order("v1.0.0") > release_order("v0.9.20"));
+        assert!(release_order("v0.9.21") > release_order("v0.9.20"));
+        assert!(release_order("v1.0.0") > release_order("v0.9.21"));
         assert_eq!(release_order(" v0.9.8"), release_order("0.9.8"));
         // Lock files sort as text ("v0.9.10" before "v0.9.5"); the list is in release order.
         let releases = available_releases();

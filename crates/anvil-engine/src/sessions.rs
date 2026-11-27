@@ -24,6 +24,7 @@ use anvil_domain::Timestamp;
 use anvil_domain::diagnostics::{Confidence, EvidenceSource, Owner, Remediation, Severity, SourceScope};
 use anvil_domain::events::SessionCommand;
 use anvil_domain::execution::*;
+use anvil_domain::integration::DiagnosticDetailAccess;
 use anvil_domain::outcome::{GrpcStatusSource, ProtocolStatus};
 use anvil_domain::request::*;
 use anvil_domain::settings::{EffectiveSettings, HttpVersionPolicy};
@@ -80,6 +81,9 @@ struct SessionPrep {
     lint_bypassed: Option<String>,
     trust: FerrumTrust,
     require_verified_tls: bool,
+    /// The diagnostic-reference lookup of the gateway profile the session's
+    /// HTTP peer matches (G01), if one is configured.
+    detail_access: Option<DiagnosticDetailAccess>,
     redactor: Redactor,
     extra_findings: Vec<Draft>,
     /// Where the handshake responses' cookies are kept (WebSocket, SSE and
@@ -500,6 +504,8 @@ struct Base {
     prep: Prepared,
     redactor: Redactor,
     inferred: Vec<String>,
+    /// [`SessionPrep::detail_access`]: follows the HTTP peer trust is taken from.
+    detail_access: Option<DiagnosticDetailAccess>,
 }
 
 fn base(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext, r: &Resolver, schemes: &[&str]) -> Result<Base, TransportFailure> {
@@ -510,7 +516,8 @@ fn base(engine: &Engine, epoch: SensitiveEpoch, ctx: &ExecutionContext, r: &Reso
         // The opt-in covers HTTP requests only; say so instead of ignoring it.
         inferred.push(EARLY_DATA_NOTE.into());
     }
-    Ok(Base { prep, redactor, inferred })
+    let detail_access = http_exec::detail_access_for(ctx, &prep.http.target).cloned();
+    Ok(Base { prep, redactor, inferred, detail_access })
 }
 
 fn finish_prep(
@@ -522,7 +529,7 @@ fn finish_prep(
     body: Bytes,
     auth_facts: Vec<(String, String)>,
 ) -> SessionPrep {
-    let Base { prep, redactor, inferred } = b;
+    let Base { prep, redactor, inferred, detail_access } = b;
     SessionPrep {
         plan,
         method,
@@ -538,6 +545,7 @@ fn finish_prep(
         lint_bypassed: prep.http.lint_bypassed.clone(),
         trust: prep.trust.clone(),
         require_verified_tls: prep.require_verified_tls,
+        detail_access,
         settings: prep.settings,
         inferred,
         redactor,
@@ -1666,6 +1674,7 @@ async fn prepare_masque(
     let (trust, require_verified_tls) = http_exec::trust_for(ctx, &proxy_target);
     b.prep.trust = trust;
     b.prep.require_verified_tls = require_verified_tls;
+    b.detail_access = http_exec::detail_access_for(ctx, &proxy_target).cloned();
     // The request's own headers and a User-Agent; none of the HTTP body defaults.
     let headers: Vec<(String, String)> = b
         .prep
@@ -1909,6 +1918,9 @@ async fn run_plan(plan: &Plan, events: &EventCtx, cancel: &CancellationToken, co
     }
 }
 
+/// `lookup` is the engine and epoch a diagnostic-reference lookup (G01) runs
+/// with: an automation execution has them; an interactive session's task
+/// does not (it outlives the engine borrow), so it looks nothing up.
 #[allow(clippy::too_many_arguments)]
 async fn run_prepared(
     prep: SessionPrep,
@@ -1919,6 +1931,7 @@ async fn run_prepared(
     cancel: CancellationToken,
     commands: Option<CommandRx>,
     workload: Option<WorkloadApiEvidence>,
+    lookup: Option<(&Engine, SensitiveEpoch)>,
 ) -> ExecutionOutput {
     let out = run_plan(&prep.plan, &events, &cancel, commands).await;
     let SessionPrep { method, url, headers, body, content_type, auth_label, auth_facts, settings, tls_profile, proxy, .. } = prep;
@@ -1965,6 +1978,18 @@ async fn run_prepared(
             trust = FerrumTrust::NotConfigured;
         }
     }
+    // G01: the gateway's own record of the final response (a gRPC or
+    // gRPC-Web call's HTTP head, a WebSocket handshake refusal), exactly as
+    // for an HTTP request: only for a trusted gateway profile that configures
+    // a lookup, only for a well-formed reference on that response, and never
+    // after a cancellation.
+    let gateway_detail = match (&trust, lookup, prep.detail_access.as_ref(), last.response.as_ref()) {
+        (FerrumTrust::Trusted { .. }, Some((engine, epoch)), Some(access), Some(response)) if !cancel.is_cancelled() => {
+            let lookup = crate::gateway_detail::Lookup { engine, epoch, ctx, settings: &settings, resolver };
+            Some(lookup.run(access, response, &last.observation, &mut redactor, &cancel).await)
+        }
+        _ => None,
+    };
     let mut inferred = prep.inferred;
     if let Some(signed) = &prep.signed_secrets {
         for note in &signed.lock().notes {
@@ -2014,7 +2039,7 @@ async fn run_prepared(
         protocol_status_override: Some(out.status),
         workload_api: workload,
         body_view: None,
-        gateway_detail: None,
+        gateway_detail,
     };
     let mut output = record::assemble(assembly);
     output.session_facts = Some(out.facts);
@@ -2050,7 +2075,7 @@ pub(crate) async fn execute(engine: &Engine, ctx: &ExecutionContext, events: Eve
         }
     };
     match prepared {
-        Ok(prep) => run_prepared(prep, ctx, &resolver, started_at, events, cancel, None, workload).await,
+        Ok(prep) => run_prepared(prep, ctx, &resolver, started_at, events, cancel, None, workload, Some((engine, epoch))).await,
         Err(f) => record::local_failure_with(ctx, &resolver, started_at, f, workload),
     }
 }
@@ -2235,7 +2260,9 @@ impl Engine {
                 let (tx, rx) = mpsc::channel(COMMAND_QUEUE);
                 let c2 = cancel.clone();
                 let task =
-                    tokio::spawn(async move { run_prepared(prep, &ctx, &resolver, started_at, events, c2, Some(rx), workload).await });
+                    tokio::spawn(
+                        async move { run_prepared(prep, &ctx, &resolver, started_at, events, c2, Some(rx), workload, None).await },
+                    );
                 SessionHandle::new(execution_id, protocol, Some(tx), cancel, task, fallback)
             }
             Err(f) => {

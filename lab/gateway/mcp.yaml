@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "mcp" (ferrum-edge v0.9.20, file mode)
+# Ferrum Anvil failure lab - profile "mcp" (ferrum-edge v0.9.21, file mode)
 #
 # Scenarios: crates/anvil-lab/src/mcp.rs, docs/lab/mcp.md.
 # Settings:  mcp.conf (proxy HTTP 127.0.0.1:17180, admin 127.0.0.1:17190).
@@ -10,14 +10,11 @@
 # by public name): echo, add and fail are allowed; delete_all is denied; internal_audit is
 # hide_from_discovery; session and new_tool are not configured, so default_action (deny) and
 # discovery.on_new_tool (hide_until_configured, the default) hide them. Denied tools stay listed
-# (policy.hide_denied_tools and discovery.hide_denied_items off), so tools/list tells a denial from
-# a hidden tool. validation.validate_tool_arguments (on by default) checks tools/call arguments
+# (policy.hide_denied_tools off), so tools/list tells a denial from a hidden tool. validation.validate_tool_arguments (on by default) checks tools/call arguments
 # against the listed inputSchema before forwarding.
 #
-# discovery.hide_denied_items is v0.9.20-only: there it defaults to true and hides denied tools on
-# its own, so it must be set false here. Ferrum Edge after v0.9.20 removes it (#7136; an unknown key
-# fails config load) and policy.hide_denied_tools alone decides. Delete the discovery block when the
-# lab moves past v0.9.20; lint-profiles.rb refuses the key once RELEASE.lock names another release.
+# v0.9.21 removed discovery.hide_denied_items (#7136; an unknown key fails config load), which v0.9.20
+# needed set false here; policy.hide_denied_tools alone decides now.
 version: "1"
 
 resource_counts:
@@ -62,8 +59,6 @@ plugin_configs:
           fx.fail: { action: allow }
           fx.delete_all: { action: deny }
           fx.internal_audit: { action: hide_from_discovery }
-      discovery:
-        hide_denied_items: false
       validation:
         validate_tool_arguments: true
 

@@ -22,6 +22,10 @@
 //!   trailer frame with `grpc-status: 2` (invalid framing);
 //! * `http-trailers` — messages, then the status in HTTP trailers (only
 //!   HTTP/2 and HTTP/3 can carry them to a client that did not send `TE`).
+//!
+//! Over HTTP/1.1 and HTTP/2, an `x-fixture-response-header: <name>: <value>`
+//! request header adds that header to the response (for example a gateway's
+//! `X-Ferrum-Diagnostic-Ref`, standing in for a gateway's refusal).
 
 use crate::grpc::{ABORT_WITHOUT_STATUS, EchoReply, EchoRequest, H3Stream, frame};
 use crate::http::FxBody;
@@ -200,6 +204,9 @@ pub async fn handle(req: Request<Incoming>, log: GroundTruthLog) -> Response<FxB
         if !msg.is_empty() {
             b = b.header("grpc-message", msg.as_str());
         }
+    }
+    if let Some((name, value)) = headers.get("x-fixture-response-header").and_then(|v| v.to_str().ok()).and_then(|v| v.split_once(':')) {
+        b = b.header(name.trim(), value.trim());
     }
     log.push(GroundTruth::ResponseStarted { status: 200 });
     let (mut tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(16);

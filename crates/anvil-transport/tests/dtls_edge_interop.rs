@@ -1,6 +1,6 @@
 //! Anvil's DTLS client against a DTLS 1.3 listener that requires client
 //! certificates and sends the CertificateRequest the supported Ferrum Edge
-//! release (v0.9.20) sends: `signature_algorithms` only, with no
+//! release (v0.9.21, unchanged from v0.9.20) sends: `signature_algorithms` only, with no
 //! `certificate_authorities` extension (ferrum-edge/ferrum-edge#7001
 //! backports dimpl #153 to Edge's dimpl 0.6.1). The server here is the
 //! workspace dimpl, which has omitted the extension since 0.7.0 (#153).

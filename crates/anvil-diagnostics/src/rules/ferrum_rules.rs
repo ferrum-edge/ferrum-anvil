@@ -376,9 +376,9 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     let Basis::Catalog(cat) = basis else { return };
     let release = cat.release_label();
     let body_text = String::from_utf8_lossy(ctx.input.body);
-    let grpc_status = match ctx.input.protocol_status {
-        anvil_domain::outcome::ProtocolStatus::Grpc { grpc_status, .. } => *grpc_status,
-        _ => None,
+    let (grpc_status, grpc_message) = match ctx.input.protocol_status {
+        anvil_domain::outcome::ProtocolStatus::Grpc { grpc_status, grpc_message, .. } => (*grpc_status, grpc_message.as_deref()),
+        _ => (None, None),
     };
     let matches = cat.match_signal(&Signal {
         status: r.status,
@@ -387,6 +387,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         body: ctx.body,
         grpc_status,
         grpc_no_message: ctx.grpc_status_without_message(),
+        grpc_message,
     });
     let exact: Vec<_> = matches.iter().filter(|(_, s)| *s == MatchStrength::Exact).map(|(o, _)| *o).collect();
     let passthrough: Vec<_> = matches.iter().filter(|(_, s)| *s == MatchStrength::PassThrough).map(|(o, _)| *o).collect();
@@ -430,6 +431,18 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         }
         None => exact,
     };
+    // Ferrum Edge v0.9.21 relays a backend's own 3xx-5xx answer to a
+    // WebSocket upgrade unchanged and without X-Gateway-Error (#7414), so a
+    // tokenless handshake refusal through such a release can be the backend's
+    // own answer, whatever its body: the gateway's tokenless WebSocket
+    // refusals have no header that sets them apart. Only the gateway's own
+    // record of this response (a bound diagnostic reference that names a
+    // rejection) settles that the gateway refused it.
+    let relayed_ws_refusal = matches!(ctx.input.protocol, anvil_domain::request::Protocol::WebSocket)
+        && cat.relays_websocket_refusals
+        && token.is_none()
+        && (300..=599).contains(&r.status)
+        && !gateway_record_shows_rejection(ctx);
     // A JSON-RPC error (MCP, A2A): the gateway's bodies echo the request's
     // id, which no fixed body pattern matches; its code and message do.
     if exact.is_empty()
@@ -450,24 +463,22 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     }
     if exact.len() == 1 && exact[0].shared_signal_with.is_empty() {
         let o = exact[0];
-        let mut d = Draft::new(
-            "ferrum.outcome",
-            "ferrum.catalog",
-            body_ceiling,
-            scope_for_family(&o.family),
-            owner_from(&o.owner),
-            Severity::Error,
-        )
-        .ev_at(E::HttpStatus, "status", r.status.to_string(), idx)
-        .ev_at(E::BodyContent, "body.signature", ctx.excerpt(&body_text, 160), idx)
-        .ev(E::Configuration, "catalog.outcome", o.id.clone())
-        .ev(E::Configuration, "catalog.compatibility_id", cat.compatibility_id.clone())
-        .var("outcome", o.id.clone())
-        .var("release", release.clone());
+        let (confidence, owner) =
+            if relayed_ws_refusal { (Confidence::Unknown, Owner::Unknown) } else { (body_ceiling, owner_from(&o.owner)) };
+        let mut d = Draft::new("ferrum.outcome", "ferrum.catalog", confidence, scope_for_family(&o.family), owner, Severity::Error)
+            .ev_at(E::HttpStatus, "status", r.status.to_string(), idx)
+            .ev_at(E::BodyContent, "body.signature", ctx.excerpt(&body_text, 160), idx)
+            .ev(E::Configuration, "catalog.outcome", o.id.clone())
+            .ev(E::Configuration, "catalog.compatibility_id", cat.compatibility_id.clone())
+            .var("outcome", o.id.clone())
+            .var("release", release.clone());
         d.catalog_text = Some((catalog_title(&o.id), o.minimum_truthful_diagnosis.clone()));
         d.extra_does_not_prove.extend(o.must_not_claim.iter().cloned());
         d.extra_does_not_prove.push("That the gateway (rather than a backend returning identical bytes) authored this body.".into());
         d.extra_remediation.extend(o.remediation.iter().map(|t| Remediation { text: t.clone(), owner: owner_from(&o.owner) }));
+        if relayed_ws_refusal {
+            d = relayed_ws_refusal_caveat(d, &release);
+        }
         out.push(d);
     } else if !exact.is_empty() {
         let mut ids: Vec<String> = exact.iter().map(|o| o.id.clone()).collect();
@@ -501,6 +512,9 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         if let Some(first) = exact.first() {
             d = d.var("common", first.minimum_truthful_diagnosis.clone());
         }
+        if relayed_ws_refusal {
+            d = relayed_ws_refusal_caveat(d, &release);
+        }
         out.push(d);
     } else if let Some(o) = passthrough.first() {
         let mut d = Draft::new(
@@ -523,6 +537,32 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
         }
         out.push(d);
     }
+}
+
+/// Whether the gateway's own record of this response, looked up through a
+/// bound diagnostic reference, names a rejection: the gateway, not a backend
+/// it relayed, refused the request.
+fn gateway_record_shows_rejection(ctx: &Ctx<'_>) -> bool {
+    use crate::gateway_detail::{GatewayDetail, LookupOutcome};
+    match ctx.input.gateway_detail {
+        Some(GatewayDetail::Looked { outcome: LookupOutcome::Resolved(view), .. }) => {
+            view.detail.as_ref().is_some_and(|d| d.rejection.is_some() || d.rejection_phase.is_some())
+        }
+        _ => false,
+    }
+}
+
+/// The relayed-backend alternative for a tokenless WebSocket handshake
+/// refusal on a release that relays the backend's own refusal (#7414).
+fn relayed_ws_refusal_caveat(mut d: Draft, release: &str) -> Draft {
+    d.extra_alternatives.push(format!(
+        "The backend answered the WebSocket upgrade with this status and body itself, and {release} relayed its answer unchanged (a relayed refusal carries no X-Gateway-Error)."
+    ));
+    d.extra_does_not_prove.push(
+        "That the gateway, rather than the backend whose refusal it relays, refused the upgrade: no response header tells the two apart; a bound diagnostic reference naming the gateway's rejection would."
+            .into(),
+    );
+    d
 }
 
 /// Findings for a JSON-RPC error matched against the catalog's JSON-RPC
@@ -1167,7 +1207,8 @@ mod tests {
                 && !text.contains("0.9.11")
                 && !text.contains("0.9.14")
                 && !text.contains("0.9.15")
-                && !text.contains("0.9.20"),
+                && !text.contains("0.9.20")
+                && !text.contains("0.9.21"),
             "no release-specific claim for an unaudited release: {text}"
         );
         // A token outside the shared vocabulary stays unknown.
@@ -1212,6 +1253,7 @@ mod tests {
             ("ferrum-edge-0.9.14", "Ferrum Edge 0.9.14"),
             ("ferrum-edge-0.9.15", "Ferrum Edge 0.9.15"),
             ("ferrum-edge-0.9.20", "Ferrum Edge 0.9.20"),
+            ("ferrum-edge-0.9.21", "Ferrum Edge 0.9.21"),
         ] {
             let r = response(504, "application/json", &[("x-gateway-error", "request_timeout")]);
             let f = diagnose_as(Protocol::Http, &r, body, compat);
@@ -1338,6 +1380,7 @@ mod tests {
             "ferrum-edge-0.9.14",
             "ferrum-edge-0.9.15",
             "ferrum-edge-0.9.20",
+            "ferrum-edge-0.9.21",
         ];
         for id in supported {
             assert_eq!(crate::catalog_version_for(&t(id)), format!("findings:{v} ferrum:{id}"));
@@ -1392,5 +1435,79 @@ mod tests {
             "the backend form (backend_error) is not a candidate"
         );
         assert!(!codes(&f).contains(&"ferrum.outcome"), "{:?}", codes(&f));
+    }
+
+    /// v0.9.21 relays a backend's own WebSocket upgrade refusal unchanged and
+    /// without X-Gateway-Error (#7414): a tokenless handshake refusal that
+    /// matches a gateway outcome keeps the relayed-backend alternative and no
+    /// owner, while v0.9.20 (which replaced backend refusals with its 502)
+    /// keeps the gateway attribution, and so does a bound diagnostic reference
+    /// whose record names the gateway's rejection.
+    #[test]
+    fn a_tokenless_websocket_refusal_on_a_relaying_release_may_be_the_backends() {
+        let body = br#"{"error":"Backend connection limit exceeded"}"#;
+        let r = response(503, "application/json", &[]);
+        let relayed = |f: &[DiagnosticFinding]| {
+            let o = find(f, "ferrum.outcome").unwrap_or_else(|| panic!("no outcome: {:?}", codes(f)));
+            assert!(
+                o.evidence.iter().any(|e| e.key == "catalog.outcome" && e.value == "protocol.ws.backend_connection_limit"),
+                "{:?}",
+                o.evidence
+            );
+            (o.confidence, o.owner, o.alternatives.iter().any(|a| a.contains("relayed its answer unchanged")))
+        };
+        let f = diagnose_as(Protocol::WebSocket, &r, body, "ferrum-edge-0.9.21");
+        let (confidence, owner, alternative) = relayed(&f);
+        assert_eq!((confidence, owner, alternative), (Confidence::Unknown, Owner::Unknown, true));
+        let o = find(&f, "ferrum.outcome").unwrap();
+        assert!(o.does_not_prove.iter().any(|d| d.contains("rather than the backend whose refusal it relays")), "{:?}", o.does_not_prove);
+
+        let f = diagnose_as(Protocol::WebSocket, &r, body, "ferrum-edge-0.9.20");
+        let (confidence, owner, alternative) = relayed(&f);
+        assert_eq!(confidence, Confidence::Likely);
+        assert_ne!(owner, Owner::Unknown);
+        assert!(!alternative);
+
+        // The same signal over plain HTTP is not a relayed upgrade refusal.
+        let f = diagnose_as(Protocol::Http, &r, body, "ferrum-edge-0.9.21");
+        let plain = find(&f, "ferrum.outcome");
+        assert!(plain.is_none_or(|o| o.alternatives.iter().all(|a| !a.contains("relayed its answer unchanged"))), "{plain:?}");
+
+        // A bound reference whose record names the gateway's rejection settles the author.
+        let record = br#"{"schema_version":"ferrum.diagnostic_ref.v1","ref":"fd1_3f9c2a7e5b1d4c8a9e0f6b2d7c4a1e5f","namespace":"ferrum","created_at":"2026-11-27T10:00:00Z","expires_at":"2099-01-01T00:00:00Z","protocol":"http1","status":503,"gateway_error":null,"detail_available":true,"detail":{"error_class":null,"body_error_class":null,"rejection_phase":null,"route_timeout_phase":null,"backend_dispatch":"not_dispatched","proxy_id":"ws","backend_target":null,"duration_bucket":"lt_10ms","rejection":{"source":"gateway","phase":"backend_admission"}}}"#;
+        let view = crate::gateway_detail::parse_view(record).expect("a valid record");
+        let detail = crate::gateway_detail::GatewayDetail::Looked {
+            reference: view.reference.clone(),
+            endpoint: "http://127.0.0.1:18090".into(),
+            channel_authenticated: true,
+            outcome: crate::gateway_detail::LookupOutcome::Resolved(Box::new(view)),
+        };
+        let trust = FerrumTrust::Trusted {
+            profile_name: "lab".into(),
+            compatibility_id: "ferrum-edge-0.9.21".into(),
+            channel_authenticated: false,
+        };
+        let ps = ProtocolStatus::Http { status: r.status, reason: None };
+        let f = crate::diagnose(&DiagnosticInput {
+            protocol: Protocol::WebSocket,
+            method: "GET",
+            preparation_failure: None,
+            attempts: &[],
+            response: Some(&r),
+            body,
+            stream: None,
+            protocol_status: &ps,
+            trust: &trust,
+            tls_verification_enabled: true,
+            credentials_stripped_on_redirect: false,
+            protocol_fallback_from: None,
+            workload: None,
+            gateway_detail: Some(&detail),
+            redact: None,
+        })
+        .findings;
+        let (confidence, _, alternative) = relayed(&f);
+        assert_eq!(confidence, Confidence::Likely);
+        assert!(!alternative);
     }
 }

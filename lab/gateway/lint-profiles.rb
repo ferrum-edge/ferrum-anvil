@@ -2,9 +2,10 @@
 # frozen_string_literal: true
 #
 # Structural lint for the Ferrum Anvil gateway lab profiles (the supported ferrum-edge release,
-# v0.9.20). v0.9.5 to v0.9.15 are no longer supported; the lists below are still the ones every
-# release from v0.9.5 accepts, which v0.9.20 accepts too. A key that only a newer release accepts
-# (the "older releases reject" notes below) may be added once it is checked at v0.9.20.
+# v0.9.21). v0.9.5 to v0.9.15 and v0.9.20 are no longer supported; the lists below are the ones every
+# release from v0.9.5 accepts, minus the keys v0.9.21 removed (see the v0.9.21 note below). A key that
+# only a newer release accepts (the "older releases reject" notes below) may be added once it is
+# checked at v0.9.21.
 #
 # Why this exists: `ferrum-edge validate` rejects unknown keys on GatewayConfig, Proxy,
 # Consumer, PluginConfig and Upstream (serde deny_unknown_fields), and every plugin used here
@@ -45,14 +46,14 @@
 # stdout_logging config now fails startup (#6863); the lab's profiles satisfy both. See
 # docs/audit/gateway-0.9.20-delta.md.
 #
-# Ferrum Edge after v0.9.20 (main, #7114 and #7136) refuses keys v0.9.20 still accepts:
-# hmac_auth allow_unsafe_replayable_v1, ip_restriction mode, jwks_auth providers[].audience,
-# response_caching cache_key_include_query / cache_key_include_consumer and mcp_gateway
-# discovery.hide_denied_items, among others. They are left out of the lists below, so profiles
-# keep loading on the next release. The one exception is discovery.hide_denied_items: at v0.9.20 it
-# defaults to true and hides denied tools on its own, so the mcp profile must set it false there;
-# it is allowed only while the lab runs v0.9.20 (LAB_RELEASE), and fails this lint once the pin
-# moves, together with the profile that still sets it.
+# v0.9.21 (#7114, #7136, #7152, #7218) refuses keys v0.9.20 still accepted: hmac_auth
+# allow_unsafe_replayable_v1 (and signing_profile ferrum-hmac-v1), ip_restriction mode, jwks_auth
+# providers[].audience, response_caching cache_key_include_query / cache_key_include_consumer,
+# mcp_gateway discovery.hide_denied_items, tcp_connection_throttle cleanup_interval_seconds and the
+# proxy field pool_max_requests_per_connection, among others. None of them is in the lists below.
+# The mcp profile no longer sets discovery.hide_denied_items (policy.hide_denied_tools alone decides
+# at v0.9.21). v0.9.21 also requires `scope` on every native PeerAuthentication (#7243); the mesh
+# JSON documents (not linted here) carry it. See docs/audit/gateway-0.9.21-delta.md.
 #
 # Usage: ruby lab/gateway/lint-profiles.rb [profile.yaml ...]   (default: all *.yaml here)
 # Exit status 1 on any finding. `{{TOKEN}}` placeholders are tolerated.
@@ -67,8 +68,6 @@ def lab_release
   r.start_with?('v') ? r : "v#{r}"
 end
 LAB_RELEASE = lab_release.freeze
-# Keys only v0.9.20 needs; Ferrum Edge after it refuses them (see the header).
-V0_9_20_ONLY_MCP_DISCOVERY = LAB_RELEASE == 'v0.9.20' ? %w[hide_denied_items] : []
 
 GATEWAY = %w[version resource_counts proxies consumers plugin_configs upstreams loaded_at known_namespaces
              frontend_tls_cert_path frontend_tls_key_path frontend_tls_source_namespace
@@ -81,7 +80,7 @@ PROXY = %w[labels id name namespace hosts listen_path backend_scheme backend_hos
            pool_tcp_keepalive_seconds pool_http2_keep_alive_interval_seconds pool_http2_keep_alive_timeout_seconds
            pool_http2_initial_stream_window_size pool_http2_initial_connection_window_size
            pool_http2_adaptive_window pool_http2_max_frame_size pool_http2_max_concurrent_streams
-           pool_http3_connections_per_backend pool_max_requests_per_connection upstream_id upstream_subset
+           pool_http3_connections_per_backend upstream_id upstream_subset
            api_spec_id circuit_breaker retry response_body_mode listen_port frontend_tls passthrough
            udp_idle_timeout_seconds udp_max_response_amplification_factor tcp_idle_timeout_seconds
            stream_proxy_protocol backend_proxy_protocol stream_match websocket_idle_timeout_seconds
@@ -231,7 +230,7 @@ NESTED = {
   # mcp_gateway.rs:111-170 (MCP_ENDPOINT_KEYS ... MCP_OBSERVABILITY_KEYS); `servers` is keyed by server id.
   %w[mcp_gateway endpoint] => %w[path protocol_versions],
   %w[mcp_gateway discovery] => %w[aggregate_prompts aggregate_resources aggregate_tools cache_ttl_seconds
-                                  namespace_separator on_new_tool on_schema_change] + V0_9_20_ONLY_MCP_DISCOVERY,
+                                  namespace_separator on_new_tool on_schema_change],
   %w[mcp_gateway sessions] => %w[downstream_session_header initialize_upstreams max_sessions session_ttl_seconds
                                  sse_keepalive_seconds sse_listener_max_lifetime_seconds sse_max_event_bytes
                                  sse_max_last_event_id_bytes sse_max_replay_events sse_max_retained_bytes
@@ -389,12 +388,12 @@ rescue Psych::Exception => e
   err(file, "YAML error: #{e.message}")
 end
 
-# Self-check, every run: keys Ferrum Edge refuses after v0.9.20 are reported (and
-# discovery.hide_denied_items once the lab no longer runs v0.9.20).
+# Self-check, every run: keys v0.9.21 refuses (and v0.9.20 still accepted) are reported.
 RETIRED = <<~YAML
   version: "1"
   proxies:
     - { id: p, listen_path: /p, backend_scheme: http, backend_host: 127.0.0.1, backend_port: 1,
+        pool_max_requests_per_connection: 1,
         plugins: [{ plugin_config_id: h }, { plugin_config_id: i }, { plugin_config_id: j }, { plugin_config_id: m }] }
   plugin_configs:
     - { id: h, plugin_name: hmac_auth, scope: proxy, proxy_id: p, config: { allow_unsafe_replayable_v1: true } }
@@ -403,8 +402,8 @@ RETIRED = <<~YAML
     - { id: m, plugin_name: mcp_gateway, scope: proxy, proxy_id: p, config: { discovery: { hide_denied_items: false } } }
 YAML
 lint('self-check', RETIRED)
-expected = ["unknown key 'allow_unsafe_replayable_v1'", "unknown key 'mode'", "unknown key 'audience'"]
-expected << "unknown key 'hide_denied_items'" unless LAB_RELEASE == 'v0.9.20'
+expected = ["unknown key 'allow_unsafe_replayable_v1'", "unknown key 'mode'", "unknown key 'audience'",
+            "unknown key 'hide_denied_items'", "unknown key 'pool_max_requests_per_connection'"]
 missed = expected.reject { |e| $errors.any? { |x| x.include?(e) } }
 extra = $errors.reject { |x| expected.any? { |e| x.include?(e) } }
 abort("self-check: retired keys not reported: #{missed.join(', ')}") unless missed.empty?

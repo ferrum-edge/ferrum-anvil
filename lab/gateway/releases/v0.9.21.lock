@@ -1,0 +1,16 @@
+# Source-audited default for the Anvil failure lab; its hosted Anvil qualification
+# status is recorded in docs/audit/gateway-0.9.21-delta.md.
+# Published Edge v0.9.21, release 454250773 (published 2026-11-22), immutable source below.
+# Asset names and SHA-256 are the GitHub API asset digests of the published
+# release, matching its .sha256 sidecars (verified 2026-11-27).
+# https://github.com/ferrum-edge/ferrum-edge/releases/tag/v0.9.21
+# This release-specific copy and RELEASE.lock have identical pins.
+# It is the only supported release; v0.9.20 was retired when v0.9.21 was adopted
+# (v0.9.5 to v0.9.15 earlier, with the vendored dimpl patch).
+release v0.9.21
+source_sha f9915358c8032214f4034a17c28cdf72d14006c3
+ferrum-edge-macos-aarch64 0aa4b6a5693a13ccf922d3c2ba54973770dc3db0557ced9cc966261fff81e19c
+ferrum-edge-linux-aarch64 30cd924bf51e45e94fed952cbcdcc57bab5e89884e1cc4caca34274488bdab1e
+ferrum-edge-linux-x86_64 06fc247a35c49c5be160e947fd8284be4c5f594d331fce71cba1b87b87acce00
+ferrum-edge-macos-x86_64 82828eea71d1b288ea3bc565afe012ad3a899f3f82c3770548f8988e827b2b63
+ferrum-edge-windows-x86_64.exe af86e7c0bb971284bb986d840ac0beea04716886c978c71aab61d6a9ff1f967e
