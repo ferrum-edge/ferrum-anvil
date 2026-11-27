@@ -1132,12 +1132,19 @@ type Live = { runKey: string; planName: string; progress: LoadProgress | null; t
 /** The Apache JMeter release exported plans target (`anvil_jmeter::JMETER_VERSION`). */
 const JMETER_VERSION = "5.6.3";
 
-/** The command that runs an exported plan, as the CLI prints it. */
-function jmeterCommand(o: JmxExportOutcome): string {
+/** `s` in double quotes, as sh, cmd and PowerShell read it. */
+const quoted = (s: string) => `"${s.replace(/["\\$`]/g, "\\$&")}"`;
+
+/**
+ * The command that runs an exported plan, from the folder the plan was saved in.
+ * The renderer never learns where the files were saved, so the secrets file
+ * (which can be in another folder) is named by a placeholder for its full path.
+ */
+export function jmeterCommand(o: JmxExportOutcome): string {
   const r = o.report;
-  let cmd = `jmeter -n -t ${o.written[0] ?? "plan.jmx"} -l results.jtl`;
-  if (r?.secrets_written && o.written.length > 1) cmd += ` -q ${o.written[o.written.length - 1]}`;
-  for (const [k, v] of r?.jmeter_properties ?? []) cmd += ` -J${k}=${v}`;
+  let cmd = `jmeter -n -t ${quoted(o.written[0] ?? "plan.jmx")} -l results.jtl`;
+  if (r?.secrets_written && o.written.length > 1) cmd += ` -q ${quoted(`<full path of ${o.written[o.written.length - 1]}>`)}`;
+  for (const [k, v] of r?.jmeter_properties ?? []) cmd += ` ${quoted(`-J${k}=${v}`)}`;
   return cmd;
 }
 
@@ -1148,6 +1155,7 @@ function jmeterCommand(o: JmxExportOutcome): string {
  */
 export function JmeterExportDialog(props: { planName: string; save: () => Promise<LoadPlan | null>; onClose: () => void }) {
   const [secrets, setSecrets] = useState(false);
+  const [replaceDataset, setReplaceDataset] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<JmxExportOutcome | null>(null);
@@ -1165,7 +1173,7 @@ export function JmeterExportDialog(props: { planName: string; save: () => Promis
         secretsFile = await api.chooseFile("jmeter_secrets_export", { file_name: `${base}.secrets.properties` });
         if (!secretsFile) return;
       }
-      setOutcome(await api.exportJmx(saved.id, file.token, secretsFile?.token ?? null));
+      setOutcome(await api.exportJmx(saved.id, file.token, secretsFile?.token ?? null, replaceDataset));
     } catch (e) {
       setErr(String((e as Error).message));
     } finally {
@@ -1202,8 +1210,13 @@ export function JmeterExportDialog(props: { planName: string; save: () => Promis
             <input type="checkbox" checked={secrets} onChange={(e) => setSecrets(e.target.checked)} />
             <span>
               Also write the plan&apos;s secrets to a separate properties file that only you can read, for <code>jmeter -q</code>. Without it the test plan
-              names the properties and stops before any traffic until they are set.
+              names the properties and stops before any traffic until they are set. Not available on Windows, where a new file inherits its folder&apos;s
+              access.
             </span>
+          </label>
+          <label className="check top">
+            <input type="checkbox" checked={replaceDataset} onChange={(e) => setReplaceDataset(e.target.checked)} />
+            <span>Replace the dataset file beside the test plan (&lt;name&gt;.dataset.csv) if one already exists.</span>
           </label>
         </>
       )}
@@ -1229,7 +1242,8 @@ export function JmeterExportDialog(props: { planName: string; save: () => Promis
         <div data-testid="jmx-exported">
           <p>Exported to {outcome.written.join(", ")}.</p>
           <p>
-            Run: <code>{jmeterCommand(outcome)}</code>, then import <code>results.jtl</code> with Import under Reports.
+            Run, in the folder you saved {outcome.written[0]} in: <code data-testid="jmx-command">{jmeterCommand(outcome)}</code>. Then import{" "}
+            <code>results.jtl</code> with Import under Reports.
           </p>
           {report.secret_properties.length > 0 && (
             <div className={report.secrets_written ? "faint" : "warn-box"}>

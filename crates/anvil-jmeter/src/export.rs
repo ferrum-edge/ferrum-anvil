@@ -1007,6 +1007,7 @@ fn credential_field(
     resolver: &Resolver,
     request: &str,
     kind: &str,
+    index: usize,
     name: &str,
     masked_value: &str,
     original_value: &str,
@@ -1020,7 +1021,11 @@ fn credential_field(
     match needs_property(&t.markers, &out) {
         Ok(false) => Ok(None),
         Ok(true) => {
-            let key = format!("field:{}:{kind}:{resolved_name}", ctx.request_id.map(|i| i.to_string()).unwrap_or_else(|| pos.to_string()));
+            // The field's position too: two fields of one name hold two values.
+            let key = format!(
+                "field:{}:{kind}:{index}:{resolved_name}",
+                ctx.request_id.map(|i| i.to_string()).unwrap_or_else(|| pos.to_string())
+            );
             let idx = t.secrets.add(
                 key,
                 format!("{kind}.{}.{}", slug(request), slug(&resolved_name)),
@@ -1109,21 +1114,21 @@ fn translate_step(
     let mut spec = ctx.spec.clone();
     spec.method = mask_helpers(&spec.method, &mut t.markers);
     spec.url = mask_helpers(&spec.url, &mut t.markers);
-    for p in spec.params.iter_mut().filter(|p| p.enabled) {
+    for (i, p) in spec.params.iter_mut().enumerate().filter(|(_, p)| p.enabled) {
         let original = p.value.clone();
         p.name = mask_helpers(&p.name, &mut t.markers);
         p.value = mask_helpers(&p.value, &mut t.markers);
-        match credential_field(t, pos, ctx, &resolver, name, "query", &p.name, &p.value, &original, p.sensitive) {
+        match credential_field(t, pos, ctx, &resolver, name, "query", i, &p.name, &p.value, &original, p.sensitive) {
             Ok(Some(m)) => p.value = m,
             Ok(None) => {}
             Err(r) => rs.push(r),
         }
     }
-    for h in spec.headers.iter_mut().filter(|h| h.enabled) {
+    for (i, h) in spec.headers.iter_mut().enumerate().filter(|(_, h)| h.enabled) {
         let original = h.value.clone();
         h.name = mask_helpers(&h.name, &mut t.markers);
         h.value = mask_helpers(&h.value, &mut t.markers);
-        match credential_field(t, pos, ctx, &resolver, name, "header", &h.name, &h.value, &original, h.sensitive) {
+        match credential_field(t, pos, ctx, &resolver, name, "header", i, &h.name, &h.value, &original, h.sensitive) {
             Ok(Some(m)) => h.value = m,
             Ok(None) => {}
             Err(r) => rs.push(r),
@@ -1132,11 +1137,11 @@ fn translate_step(
     match &mut spec.body {
         Body::Raw { text, .. } | Body::Json { text } | Body::Xml { text } => *text = mask_helpers(text, &mut t.markers),
         Body::FormUrlEncoded { fields } => {
-            for f in fields.iter_mut().filter(|f| f.enabled) {
+            for (i, f) in fields.iter_mut().enumerate().filter(|(_, f)| f.enabled) {
                 let original = f.value.clone();
                 f.name = mask_helpers(&f.name, &mut t.markers);
                 f.value = mask_helpers(&f.value, &mut t.markers);
-                match credential_field(t, pos, ctx, &resolver, name, "form", &f.name, &f.value, &original, f.sensitive) {
+                match credential_field(t, pos, ctx, &resolver, name, "form", i, &f.name, &f.value, &original, f.sensitive) {
                     Ok(Some(m)) => f.value = m,
                     Ok(None) => {}
                     Err(r) => rs.push(r),
@@ -1168,8 +1173,17 @@ fn translate_step(
     }
 
     // ---- TLS (LOAD-012) ----
+    let profile = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
+    // Whether an https connection would behave as in Anvil: verification
+    // off (JMeter never verifies), nothing JMeter cannot set, HTTP/1.1.
+    let https_like_jmeter = profile.is_some_and(|p| {
+        !p.verify
+            && p.client_identity.is_none()
+            && p.min_version != TlsMinVersion::Tls13
+            && p.server_name_override.is_none()
+            && p.server_spiffe.is_none()
+    }) && settings.http_version == HttpVersionPolicy::Http1Only;
     if target.scheme == "https" {
-        let profile = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
         match profile {
             Some(p) if !p.verify => {
                 if p.client_identity.is_some() {
@@ -1232,15 +1246,23 @@ fn translate_step(
             }
         }
     };
-    if let Some(msg) = &prepared.lint_bypassed {
-        let marked = body.as_ref().is_some_and(|b| b.0.iter().any(|(s, _)| t.markers.has_marks(s)));
-        match (ctx.spec.lint_policy, marked) {
-            (LintSendPolicy::Block, false) => rs.push(reason(
+    let marked_body = body.as_ref().is_some_and(|b| b.0.iter().any(|(s, _)| t.markers.has_marks(s)));
+    let linted = matches!(ctx.spec.body, Body::Json { .. } | Body::Xml { .. }) && ctx.spec.lint_policy != LintSendPolicy::Off;
+    if linted && ctx.spec.lint_policy == LintSendPolicy::Block && marked_body {
+        // Anvil lints the body after each iteration's values are filled in
+        // and does not send it when that fails; JMeter cannot lint.
+        rs.push(reason(
+            rq,
+            "lint",
+            "the JSON or XML body takes per-iteration values or secrets, and the request's lint policy blocks a body that fails lint: Anvil checks every iteration's body and does not send an invalid one, JMeter would send it. Set the request's lint policy to warn or off to export it",
+        ));
+    } else if let Some(msg) = &prepared.lint_bypassed {
+        if ctx.spec.lint_policy == LintSendPolicy::Block {
+            rs.push(reason(
                 rq,
                 "lint",
                 format!("the body fails Anvil's lint ({msg}) and the request's lint policy blocks it, so Anvil never sends it"),
-            )),
-            _ => t.note("Anvil lints JSON and XML bodies after per-iteration values are filled in (and blocks or warns as each request says); JMeter sends the body as it is."),
+            ));
         }
     }
 
@@ -1255,6 +1277,25 @@ fn translate_step(
         path.push(format!("?{}", &target.query[..split]), false);
         path.push(&target.query[split..], true);
     }
+    // Credentials written into the URL's own query (not as query
+    // parameters) follow the same rule as fields: literal material is never
+    // copied into the test plan.
+    for pair in target.query[..base_query.min(target.query.len())].split('&') {
+        let (raw_name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let qname = percent_decode(raw_name);
+        if anvil_domain::credential_names::is_export_secret_name(&qname, &ctx.redaction_names)
+            && needs_property(&t.markers, value) != Ok(false)
+        {
+            rs.push(reason(
+                rq,
+                "url_credential",
+                format!(
+                    "the URL's query holds a value for the credential '{}'; the export would copy it into the test plan. Move it to the request's query parameters or an API key auth, where it becomes a JMeter property",
+                    qname
+                ),
+            ));
+        }
+    }
     if t.markers.has_marks(&target.path) || t.markers.has_marks(&target.query[..base_query.min(target.query.len())]) {
         t.note("A per-iteration value in the URL path or in the URL's own query is inserted as it is by JMeter; Anvil percent-encodes the characters a request target cannot carry (space, quotes, braces, non-ASCII).");
     }
@@ -1267,6 +1308,36 @@ fn translate_step(
             continue;
         }
         headers.push((n.clone(), Tmpl::raw(v.clone())));
+    }
+    // Accept-Encoding: JMeter 5.6.3 (HttpClient 4) decodes gzip, deflate and
+    // Brotli. Anvil's inferred header also offers zstd, which JMeter would
+    // receive and could not decode; the inferred header is sent without it.
+    // An explicit header JMeter cannot honour the same way is refused.
+    let explicit_ae = ctx.spec.headers.iter().any(|h| h.enabled && h.name.trim().eq_ignore_ascii_case("accept-encoding"));
+    if let Some((_, v)) = headers.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
+        let text = v.0.iter().map(|(s, _)| s.as_str()).collect::<String>();
+        if !explicit_ae {
+            *v = Tmpl::raw("gzip, deflate, br");
+            t.note("Accept-Encoding: Anvil's inferred header offers gzip, deflate, br and zstd; JMeter 5.6.3 cannot decode zstd, so the test plan offers gzip, deflate and br.");
+        } else if t.markers.has_marks(&text) {
+            rs.push(reason(rq, "accept_encoding", "the Accept-Encoding header comes from a per-iteration value or a secret"));
+        } else {
+            let codings: Vec<String> =
+                text.split(',').map(|c| c.split(';').next().unwrap_or("").trim().to_ascii_lowercase()).filter(|c| !c.is_empty()).collect();
+            if let Some(c) = codings.iter().find(|c| !matches!(c.as_str(), "gzip" | "x-gzip" | "deflate" | "br" | "identity")) {
+                rs.push(reason(
+                    rq,
+                    "accept_encoding",
+                    format!("the Accept-Encoding header offers '{c}', which JMeter 5.6.3 cannot decode (it decodes gzip, deflate and br)"),
+                ));
+            } else if !settings.decompress && codings.iter().any(|c| c != "identity") {
+                rs.push(reason(
+                    rq,
+                    "accept_encoding",
+                    "automatic decompression is off while the request asks for compressed responses: Anvil keeps the encoded body, JMeter always decodes it",
+                ));
+            }
+        }
     }
     fn set_header(headers: &mut Vec<(String, Tmpl)>, name: &str, value: Tmpl) {
         headers.retain(|(h, _)| !h.eq_ignore_ascii_case(name));
@@ -1385,6 +1456,25 @@ fn translate_step(
         ));
     }
     if follow {
+        // JMeter 5.6.3 turns every redirected method except HEAD into GET
+        // and drops the body (HTTPSamplerBase), where Anvil keeps a 307/308's
+        // method and body.
+        if !matches!(method.as_str(), "GET" | "HEAD") {
+            rs.push(reason(
+                rq,
+                "redirect_method",
+                format!("the request follows redirects with {method}; JMeter re-sends a redirected {method} as GET without its body, Anvil keeps the method and body of a 307 or 308. Turn off following redirects for this request to export it"),
+            ));
+        }
+        // A redirect can lead to an https URL, which Anvil verifies (and
+        // may reach over HTTP/2); JMeter would accept any certificate.
+        if target.scheme != "https" && !https_like_jmeter {
+            rs.push(reason(
+                rq,
+                "redirect_tls",
+                "the request follows redirects, and a redirect can lead to an https URL: Anvil verifies that certificate (and may negotiate HTTP/2), JMeter would accept any certificate over HTTP/1.1. Turn off following redirects for this request, or (only for a test system you deliberately do not verify) select a TLS profile with verification off and the HTTP/1.1-only version",
+            ));
+        }
         let max = settings.redirects.max.to_string();
         match t.jmeter_properties.iter().find(|(k, _)| k == "httpsampler.max_redirects") {
             Some((_, v)) if *v != max => rs.push(reason(
@@ -1395,7 +1485,10 @@ fn translate_step(
             Some(_) => {}
             None => t.jmeter_properties.push(("httpsampler.max_redirects".into(), max)),
         }
-        t.map("redirects (followed inside one request)", "Follow Redirects (one sample with sub-results; httpsampler.max_redirects)");
+        t.map(
+            "redirects of GET and HEAD (followed inside one request)",
+            "Follow Redirects (one sample with sub-results; httpsampler.max_redirects)",
+        );
     }
 
     // ---- timeouts and limits ----
@@ -1483,6 +1576,27 @@ fn translate_step(
         response_timeout,
         children,
     })
+}
+
+/// Percent-decode a query component (`+` is a space), for comparing names.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16);
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(if b[i] == b'+' { b' ' } else { b[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn auth_kind(a: &AuthConfig) -> &'static str {
@@ -1829,6 +1943,41 @@ fn thread_groups(t: &mut Translator<'_>) -> Vec<Group> {
             vec![Group { kind: GroupKind::Iterations { threads, loops, gate }, vu_offset: 0 }]
         }
         Workload::OpenArrivalRate { stages, max_in_flight } => {
+            // JMeter's open model has no in-flight cap: it starts every
+            // arrival. Exported only when Anvil's cap can never bind, so no
+            // arrival Anvil would drop is started by JMeter: the cap is at
+            // least the peak rate times the longest an iteration can take
+            // (the sum of its steps' total deadlines; the longest step for a mix).
+            let deadlines: Vec<Option<u64>> =
+                t.contexts.iter().map(|c| anvil_engine::settings::resolve(&c.settings_layers).timeouts.total_ms).collect();
+            let peak = stages.iter().map(|s| s.target).max().unwrap_or(0);
+            if deadlines.iter().any(Option::is_none) {
+                t.reasons.push(reason(
+                    None,
+                    "open_cap",
+                    "an open workload's request has no total deadline, so Anvil's in-flight cap could drop arrivals that JMeter's open model (which has no cap) would start. Give the plan's requests a total timeout to export it",
+                ));
+            } else {
+                let ms: Vec<u64> = deadlines.into_iter().flatten().collect();
+                let iteration_ms = if plan.mix.is_empty() { ms.iter().sum::<u64>() } else { ms.iter().copied().max().unwrap_or(0) };
+                let bound = (peak.saturating_mul(iteration_ms)).div_ceil(1000);
+                if *max_in_flight < bound {
+                    t.reasons.push(reason(
+                        None,
+                        "open_cap",
+                        format!(
+                            "the open workload caps in-flight iterations at {max_in_flight}, and Anvil drops arrivals beyond it; JMeter's open model has no cap and would start them. The cap must be at least the peak rate times an iteration's total deadline ({peak}/s × {iteration_ms} ms = {bound}) for the export to behave the same: raise the cap or lower the requests' total timeout"
+                        ),
+                    ));
+                }
+            }
+            if plan.connection_mode == ConnectionMode::Persistent {
+                t.reasons.push(reason(
+                    None,
+                    "open_connections",
+                    "an open workload in the persistent connection mode reuses connections and cookies across arrivals in Anvil; JMeter's open model starts every arrival as a new thread with its own connections. Choose the fresh connection mode to export it",
+                ));
+            }
             let mut schedule = String::from("rate(0/s)");
             for s in stages {
                 if s.duration_secs > 0 {
@@ -1843,7 +1992,7 @@ fn thread_groups(t: &mut Translator<'_>) -> Vec<Group> {
                 "Open Model Thread Group: even_arrivals between the stages' rates, one new thread per arrival",
             );
             t.note(format!(
-                "Open workload: Anvil drops (and counts) an arrival when {max_in_flight} iterations are already in flight; JMeter's open model starts every arrival, without a limit. Each JMeter arrival is a new thread, so it has its own connections and cookies even in the persistent connection mode."
+                "Open workload: the in-flight cap ({max_in_flight}) covers the peak rate times an iteration's deadline, so Anvil never drops an arrival and JMeter's uncapped open model starts the same arrivals; each JMeter arrival is a new thread with its own cookie jar."
             ));
             t.note("Arrival counts: Anvil schedules arrivals on the integral of the rate across stages; JMeter rounds each stage's arrivals down separately, so a multi-stage schedule may differ by one arrival per stage.");
             vec![Group { kind: GroupKind::Open { schedule }, vu_offset: 0 }]

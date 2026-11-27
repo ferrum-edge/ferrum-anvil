@@ -269,8 +269,14 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
     };
     let (c_ts, c_elapsed, c_label, c_code, c_success) =
         (required("timeStamp")?, required("elapsed")?, required("label")?, required("responseCode")?, required("success")?);
-    let (c_failure, c_bytes, c_sent, c_threads, c_url) =
-        (col("failureMessage"), col("bytes"), col("sentBytes"), col("allThreads"), col("URL"));
+    // A CSV result file names no sampler type: the URL is the only evidence
+    // that a sample is an HTTP request (a JDBC sample also writes code 200).
+    let c_url = col("URL").ok_or_else(|| {
+        JtlError::Invalid(
+            "the CSV has no 'URL' column, so nothing shows its samples are HTTP requests (other samplers also write status 200). Save the URL (jmeter.save.saveservice.url=true) or import the XML result file, which names each sample's type".into(),
+        )
+    })?;
+    let (c_failure, c_bytes, c_sent, c_threads) = (col("failureMessage"), col("bytes"), col("sentBytes"), col("allThreads"));
     let mut record = csv::StringRecord::new();
     let mut line = 1u64;
     loop {
@@ -289,9 +295,19 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
             }
         }
         line = record.position().map(|p| p.line()).unwrap_or(line + 1);
+        // The record's exact size (the guard allows for read-ahead).
+        let start = record.position().map(|p| p.byte()).unwrap_or(0);
+        if rdr.position().byte().saturating_sub(start) > limits.max_record_bytes {
+            return Err(JtlError::RecordTooLong { what: "a CSV record", limit: limits.max_record_bytes, position: start });
+        }
         let at = format!("CSV line {line}");
         let get = |c: Option<usize>| c.and_then(|c| record.get(c)).unwrap_or("");
-        let url = get(c_url);
+        let url = get(Some(c_url));
+        if url.trim().is_empty() {
+            return Err(JtlError::Invalid(format!(
+                "{at}: the sample has no URL, so nothing shows it is an HTTP request; import the XML result file, which names each sample's type"
+            )));
+        }
         check_http(url, &at)?;
         f(Sample {
             ts: parse_ts(get(Some(c_ts)), &at)?,
@@ -335,6 +351,7 @@ fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
     let mut buf = Vec::new();
     let mut depth = 0usize;
     let mut root = false;
+    let mut root_closed = false;
     let mut current: Option<Sample> = None;
     // Inside the current sample: an assertion result (name, failed), a
     // field being read, and the depth of a skipped sub-result subtree.
@@ -388,6 +405,13 @@ fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
                 return Err(limit_error(g, limits, "an XML element or text").unwrap_or_else(|| JtlError::Invalid(format!("{at}: {e}"))));
             }
         };
+        // The event's exact size (the guard allows for read-ahead).
+        if reader.buffer_position().saturating_sub(pos) > limits.max_record_bytes {
+            return Err(JtlError::RecordTooLong { what: "an XML element or text", limit: limits.max_record_bytes, position: pos });
+        }
+        if root_closed && matches!(event, Event::Start(_) | Event::Empty(_)) {
+            return Err(JtlError::Invalid(format!("{at}: content after </testResults>")));
+        }
         match event {
             Event::Eof => break,
             Event::DocType(_) => {
@@ -437,8 +461,10 @@ fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
                     f,
                     attrs,
                 )?;
+                root_closed |= depth == 0;
             }
             Event::End(_) => {
+                root_closed |= depth == 1;
                 if let Some(d) = sub_depth {
                     if depth == d {
                         sub_depth = None;
@@ -504,6 +530,12 @@ fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
     }
     if !root {
         return Err(JtlError::Invalid("the file has no <testResults> element".into()));
+    }
+    if !root_closed || depth != 0 || current.is_some() {
+        // An interrupted run leaves a prefix; it is not imported as a completed run.
+        return Err(JtlError::Invalid(
+            "the file ends before </testResults>: it is truncated (an interrupted or still running JMeter test?), so it is not imported as a completed run".into(),
+        ));
     }
     Ok(stats)
 }

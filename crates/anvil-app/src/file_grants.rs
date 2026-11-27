@@ -448,14 +448,51 @@ impl FileGrants {
         }
     }
 
+    /// The chosen destination of a write grant (its pinned folder and name),
+    /// for a command that must keep several destinations apart. Never sent
+    /// to the renderer.
+    pub fn destination(&self, token: &str, purpose: FilePurpose) -> Result<PathBuf, GrantError> {
+        match self.lookup(token, purpose)?.target {
+            Target::Write { dir, name, .. } => Ok(dir.join(name)),
+            Target::Read { .. } => Err(GrantError::WrongPurpose),
+        }
+    }
+
     /// [`FileGrants::write`] for a JMeter export: the test plan to the chosen
     /// file and, when given, its dataset beside it as
     /// `<chosen stem>.dataset.csv` in the same chosen folder (owner-only when
     /// it holds secrets). The sibling's name is derived here, never supplied
-    /// by the renderer.
-    pub fn write_with_dataset(&self, token: &str, bytes: &[u8], dataset: Option<(&[u8], bool)>) -> Result<usize, GrantError> {
+    /// by the renderer, and an existing sibling (which the save dialog never
+    /// confirmed) is replaced only with `replace_dataset`, the user's
+    /// explicit choice; nothing is written otherwise.
+    pub fn write_with_dataset(
+        &self,
+        token: &str,
+        bytes: &[u8],
+        dataset: Option<(&[u8], bool)>,
+        replace_dataset: bool,
+    ) -> Result<usize, GrantError> {
         let purpose = FilePurpose::JmeterExport;
+        if dataset.is_some_and(|(_, owner_only)| owner_only) && !OWNER_ONLY_FILES {
+            return Err(GrantError::Invalid(OWNER_ONLY_UNAVAILABLE.into()));
+        }
         let (entry, generation) = self.take(token, purpose)?;
+        let existing_sibling = match &entry.target {
+            Target::Write { dir, name, .. } if dataset.is_some() && !replace_dataset => {
+                let sibling = dataset_name(name);
+                std::fs::symlink_metadata(dir.join(&sibling)).is_ok().then(|| display_name(Some(&sibling)))
+            }
+            _ => None,
+        };
+        if let Some(sibling) = existing_sibling {
+            let mut g = self.state.lock();
+            if g.generation == generation {
+                self.admit(&mut g, token.to_owned(), entry);
+            }
+            return Err(GrantError::Invalid(format!(
+                "{sibling} already exists beside the chosen file; choose to replace it, or choose another name. Nothing was written"
+            )));
+        }
         let result = write_target(&entry.target, bytes, purpose.owner_only()).and_then(|()| match (dataset, &entry.target) {
             (Some((csv, owner_only)), Target::Write { dir, id, name }) => write_in(dir, *id, &dataset_name(name), csv, owner_only),
             _ => Ok(()),
@@ -563,6 +600,9 @@ impl FileGrants {
     pub fn write(&self, token: &str, purpose: FilePurpose, bytes: &[u8]) -> Result<usize, GrantError> {
         if purpose.access() != Access::Write {
             return Err(GrantError::WrongPurpose);
+        }
+        if purpose == FilePurpose::JmeterSecretsExport && !OWNER_ONLY_FILES {
+            return Err(GrantError::Invalid(OWNER_ONLY_UNAVAILABLE.into()));
         }
         let (entry, generation) = self.take(token, purpose)?;
         let result = write_target(&entry.target, bytes, purpose.owner_only());
@@ -780,6 +820,12 @@ fn refuse_directory(dest: &Path) -> Result<(), GrantError> {
         _ => Ok(()),
     }
 }
+
+/// Whether a write creates a file only its owner can read. On Unix the file
+/// is created 0600; elsewhere it inherits its folder's access list, so
+/// secret material that must stay private is refused there.
+pub const OWNER_ONLY_FILES: bool = cfg!(unix);
+const OWNER_ONLY_UNAVAILABLE: &str = "secret output is written only where an owner-only file can be created (macOS and Linux); on this platform a new file inherits its folder's access list, so others could read it";
 
 /// The dataset file written beside a JMeter test plan: `<stem>.dataset.csv`.
 pub fn dataset_name(plan_file: &OsStr) -> OsString {

@@ -923,7 +923,8 @@ export const api = {
   exportLoadReport: (runId: string, format: "json" | "csv" | "timeline_csv" | "html", grant: string) => call<number>("load_report_export", { runId, format, grant }),
   compareLoadReports: (a: string, b: string) => call<LoadComparison>("load_compare", { a, b }),
   /** Export a saved plan to JMeter (LOAD-012): the plan to `grant` (purpose `jmeter_export`) with its dataset beside it, the secrets only to `secretsGrant` (purpose `jmeter_secrets_export`). */
-  exportJmx: (planId: string, grant: string, secretsGrant: string | null) => call<JmxExportOutcome>("load_export_jmx", { planId, grant, secretsGrant }),
+  exportJmx: (planId: string, grant: string, secretsGrant: string | null, replaceDataset: boolean) =>
+    call<JmxExportOutcome>("load_export_jmx", { planId, grant, secretsGrant, replaceDataset }),
   /** Import a JMeter result file (`grant`, purpose `jtl_import`) as a load report; returns its run id. */
   importJtl: (workspaceId: string, grant: string, planId: string | null, jmeterVersion: string | null) =>
     call<string>("load_import_jtl", { workspaceId, grant, planId, jmeterVersion }),

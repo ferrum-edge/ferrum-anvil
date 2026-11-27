@@ -1109,6 +1109,14 @@ The real Alloy golden remains historical Edge 0.9.10 evidence. See
 [shared diagnostic import](architecture/shared-diagnostics-import.md) for exact pins,
 wire parity, bounds and hosted qualification limits.
 
+## JMeter result files (JTL)
+
+JMeter result files are not workspace imports: `anvil load import-jtl` (desktop:
+**Import** under Reports) turns a CSV or XML JTL into a load report, with its
+own bounds and validation (no DTD or entity expansion, size, sample and record
+limits, CSV samples that must carry their HTTP URL, XML that must be complete).
+See [load.md § JMeter adapter](load.md#jmeter-adapter-load-012).
+
 ## Known limitations
 
 * Sample payloads are produced by a constraint-aware generator, not

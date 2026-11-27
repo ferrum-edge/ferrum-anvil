@@ -293,6 +293,9 @@ pub enum LoadCmd {
         /// Also write the export report (mapping, differences, properties) as JSON.
         #[arg(long)]
         report: Option<PathBuf>,
+        /// Replace an existing `<name>.dataset.csv` beside the plan.
+        #[arg(long)]
+        force: bool,
     },
     /// Import a JMeter result file (CSV or XML JTL) as a load report.
     ImportJtl {
@@ -522,10 +525,10 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
                 0
             })
         }
-        LoadCmd::ExportJmx { workspace, plan, out, secrets_file, report } => {
+        LoadCmd::ExportJmx { workspace, plan, out, secrets_file, report, force } => {
             let ws = app.find_workspace(workspace)?.meta.id;
             let p = find_plan(app, &ws, plan)?;
-            crate::jmeter::export_jmx(app, &p, out, secrets_file.as_deref(), report.as_deref())
+            crate::jmeter::export_jmx(app, &p, out, secrets_file.as_deref(), report.as_deref(), *force)
         }
         LoadCmd::ImportJtl { workspace, file, plan, jmeter_version, warmup, json, html } => {
             let ws = app.find_workspace(workspace)?.meta.id;

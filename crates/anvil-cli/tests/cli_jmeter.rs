@@ -5,6 +5,7 @@
 use anvil_app::App;
 use anvil_app::profiles::ProfileManager;
 use anvil_domain::request::RequestSpec;
+use anvil_domain::settings::RedirectPolicy;
 use anvil_storage::KdfParams;
 use std::path::Path;
 use std::process::Output;
@@ -17,7 +18,42 @@ fn setup(root: &Path) {
     let h = anvil_storage::vault::read_header(&s.dir).unwrap();
     let app = App::open(s.dir, h, dek).unwrap();
     let ws = app.create_workspace("Shop").unwrap();
-    app.create_request(&ws.meta.id, None, "Echo", RequestSpec::http("GET", "http://127.0.0.1:9/echo")).unwrap();
+    // A request that follows redirects is exported only when every hop
+    // behaves as in JMeter; this one does not follow them.
+    let mut echo = RequestSpec::http("GET", "http://127.0.0.1:9/echo");
+    echo.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    let echo = app.create_request(&ws.meta.id, None, "Echo", echo).unwrap();
+    // A plan with a dataset, for the dataset file written beside the plan.
+    let attachment = app.put_attachment("users.csv", b"user\nalice\n", None).unwrap();
+    let dataset = app
+        .save_dataset(anvil_domain::workspace::Dataset {
+            meta: anvil_domain::workspace::Meta::new(),
+            workspace_id: ws.meta.id,
+            name: "users".into(),
+            format: anvil_domain::workspace::DatasetFormat::Csv,
+            attachment,
+            sensitive_columns: vec![],
+        })
+        .unwrap();
+    let now = anvil_domain::Timestamp::now();
+    app.save_load_plan(anvil_domain::load::LoadPlan {
+        id: anvil_domain::Id::new(),
+        workspace_id: ws.meta.id,
+        name: "withdata".into(),
+        workload: anvil_domain::load::Workload::Iterations { iterations: 2, concurrency: 1 },
+        chain: vec![echo.meta.id],
+        mix: vec![],
+        dataset_id: Some(dataset.meta.id),
+        environment_id: None,
+        connection_mode: Default::default(),
+        warmup_secs: 0,
+        abort: None,
+        seed: 1,
+        trusted: true,
+        created_at: now,
+        updated_at: now,
+    })
+    .unwrap();
     app.create_request(&ws.meta.id, None, "Secure", RequestSpec::http("GET", "https://api.example.test/")).unwrap();
 }
 
@@ -46,16 +82,60 @@ fn load_012_cli_exports_a_plan_refuses_strict_tls_and_imports_results() {
 
     let o = anvil(data, &["load", "create", "Shop", "echo", "--request", "Echo", "--iterations", "4", "--concurrency", "2"]);
     assert!(o.status.success(), "{}", text(&o));
-    let jmx = out.path().join("echo.jmx");
+    // A name with a space: the printed command quotes it.
+    let jmx = out.path().join("echo plan.jmx");
     let report = out.path().join("echo.report.json");
     let o = anvil(data, &["load", "export-jmx", "Shop", "echo", "--out", jmx.to_str().unwrap(), "--report", report.to_str().unwrap()]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
-    assert!(text(&o).contains("run: jmeter -n -t"), "{}", text(&o));
+    let quoted = if cfg!(windows) { format!("\"{}\"", jmx.display()) } else { format!("'{}'", jmx.display()) };
+    assert!(text(&o).contains(&format!("run: jmeter -n -t {quoted} -l results.jtl")), "{}", text(&o));
     let plan = std::fs::read_to_string(&jmx).unwrap();
     assert!(plan.contains("<HTTPSamplerProxy") && plan.contains("jmeterTestPlan"), "{plan}");
     let r: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
     assert_eq!(r["expected_samples"], 4);
     assert_eq!(r["jmeter_version"], anvil_jmeter::JMETER_VERSION);
+
+    // An existing dataset file beside the plan is replaced only with --force.
+    let with_data = out.path().join("d.jmx");
+    let sibling = out.path().join("d.dataset.csv");
+    std::fs::write(&sibling, b"unrelated").unwrap();
+    let o = anvil(data, &["load", "export-jmx", "Shop", "withdata", "--out", with_data.to_str().unwrap()]);
+    assert!(!o.status.success() && text(&o).contains("--force"), "{}", text(&o));
+    assert!(!with_data.exists());
+    assert_eq!(std::fs::read(&sibling).unwrap(), b"unrelated");
+    let o = anvil(data, &["load", "export-jmx", "Shop", "withdata", "--out", with_data.to_str().unwrap(), "--force"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "\"user\"\n\"alice\"\n");
+
+    // Two destinations naming one file are refused before anything is written.
+    let same = out.path().join("same.jmx");
+    let o = anvil(data, &["load", "export-jmx", "Shop", "echo", "--out", same.to_str().unwrap(), "--report", same.to_str().unwrap()]);
+    assert!(!o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("name the same file"), "{}", text(&o));
+    assert!(!same.exists());
+
+    // Secret output needs an owner-only file, which only Unix creates here.
+    let secrets = out.path().join("echo.secrets.properties");
+    let o = anvil(
+        data,
+        &[
+            "load",
+            "export-jmx",
+            "Shop",
+            "echo",
+            "--out",
+            out.path().join("s.jmx").to_str().unwrap(),
+            "--secrets-file",
+            secrets.to_str().unwrap(),
+        ],
+    );
+    if cfg!(unix) {
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+        assert!(text(&o).contains("-q <the --secrets-file you chose>") || !secrets.exists(), "{}", text(&o));
+    } else {
+        assert!(!o.status.success() && text(&o).contains("refused on this platform"), "{}", text(&o));
+        assert!(!secrets.exists());
+    }
 
     // A request Anvil sends with certificate verification is refused, and nothing is written.
     let o = anvil(data, &["load", "create", "Shop", "strict", "--request", "Secure", "--iterations", "1"]);

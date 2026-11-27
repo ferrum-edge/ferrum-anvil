@@ -245,3 +245,43 @@ fn load_012_jtl_rejects_what_it_cannot_read_faithfully() {
     s += &format!("{T0},1,a,200\n");
     assert!(import(&s, &opts()).is_err());
 }
+
+#[test]
+fn load_012_jtl_truncated_xml_is_never_a_completed_run() {
+    let full = xml_results();
+    // An interrupted run: no closing </testResults>.
+    let cut = full.trim_end().strip_suffix("</testResults>").unwrap().to_string();
+    let e = import(&cut, &opts()).unwrap_err();
+    assert!(e.to_string().contains("truncated"), "{e}");
+    // A sample still open at the end.
+    let open = format!(r#"<testResults><httpSample t="1" ts="{T0}" s="true" lb="a" rc="200"><assertionResult>"#);
+    assert!(import(&open, &opts()).unwrap_err().to_string().contains("truncated"));
+    // Anything after the root.
+    let after = format!("{full}<testResults/>");
+    assert!(import(&after, &opts()).unwrap_err().to_string().contains("after </testResults>"));
+}
+
+#[test]
+fn load_012_jtl_csv_samples_must_show_they_are_http() {
+    // No URL column: nothing shows the samples are HTTP (a JDBC sample also writes 200).
+    let e = import(&format!("timeStamp,elapsed,label,responseCode,success\n{T0},1,jdbc,200,true\n"), &opts()).unwrap_err();
+    assert!(e.to_string().contains("'URL' column") && e.to_string().contains("XML"), "{e}");
+    // An empty URL.
+    let mut s = String::from(CSV_HEADER);
+    s += &format!("{T0},1,jdbc,200,OK,t,text,true,,1,1,1,1,,1,0,0\n");
+    assert!(import(&s, &opts()).unwrap_err().to_string().contains("has no URL"));
+}
+
+#[test]
+fn load_012_jtl_record_limit_is_exact() {
+    let mut o = opts();
+    o.limits.max_record_bytes = 1_000;
+    let row = |label_len: usize| format!("{T0},1,{},200,OK,t,text,true,,1,1,1,1,http://h/,1,0,0\n", "x".repeat(label_len));
+    // Under the limit: accepted; just over it (within the read-ahead allowance): refused.
+    assert!(import(&format!("{CSV_HEADER}{}", row(900)), &o).is_ok());
+    let e = import(&format!("{CSV_HEADER}{}", row(1_000)), &o).unwrap_err();
+    assert!(matches!(e, JtlError::RecordTooLong { limit: 1_000, .. }), "{e}");
+    let tag = |n: usize| format!(r#"<testResults><httpSample t="1" ts="{T0}" s="true" lb="{}" rc="200"/></testResults>"#, "x".repeat(n));
+    assert!(import(&tag(900), &o).is_ok());
+    assert!(matches!(import(&tag(1_000), &o).unwrap_err(), JtlError::RecordTooLong { limit: 1_000, .. }));
+}

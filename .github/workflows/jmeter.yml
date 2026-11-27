@@ -9,9 +9,13 @@ on:
     paths:
       - "crates/anvil-jmeter/**"
       - "crates/anvil-load/**"
-      - "crates/anvil-engine/src/prepare.rs"
-      - "crates/anvil-engine/src/vars.rs"
-      - "crates/anvil-fixtures/src/http.rs"
+      # The native engine is the round trip's oracle: its request
+      # preparation, redirects, TLS, transport, auth and domain model.
+      - "crates/anvil-engine/**"
+      - "crates/anvil-transport/**"
+      - "crates/anvil-auth/**"
+      - "crates/anvil-domain/**"
+      - "crates/anvil-fixtures/**"
       - "Cargo.lock"
       - ".github/workflows/jmeter.yml"
   push:
@@ -19,9 +23,13 @@ on:
     paths:
       - "crates/anvil-jmeter/**"
       - "crates/anvil-load/**"
-      - "crates/anvil-engine/src/prepare.rs"
-      - "crates/anvil-engine/src/vars.rs"
-      - "crates/anvil-fixtures/src/http.rs"
+      # The native engine is the round trip's oracle: its request
+      # preparation, redirects, TLS, transport, auth and domain model.
+      - "crates/anvil-engine/**"
+      - "crates/anvil-transport/**"
+      - "crates/anvil-auth/**"
+      - "crates/anvil-domain/**"
+      - "crates/anvil-fixtures/**"
       - "Cargo.lock"
       - ".github/workflows/jmeter.yml"
   schedule:

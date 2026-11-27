@@ -5,7 +5,7 @@
 use anvil_domain::assertions::{Assertion, AssertionKind};
 use anvil_domain::load::{ConnectionMode, LoadPlan, Workload};
 use anvil_domain::request::RequestSpec;
-use anvil_domain::settings::SettingsOverrides;
+use anvil_domain::settings::{RedirectPolicy, SettingsOverrides};
 use anvil_domain::tls::TlsProfile;
 use anvil_domain::{Id, Timestamp};
 use anvil_engine::ExecutionContext;
@@ -14,7 +14,13 @@ use anvil_jmeter::{Export, ExportInput, ExportOptions, ExportRefused};
 use anvil_load::{Dataset, DatasetFormat, LoadJob};
 use std::collections::HashMap;
 
-pub fn step(spec: RequestSpec) -> (Id, ExecutionContext) {
+/// A step whose request does not follow redirects (a redirect-following
+/// request is exported only when every hop behaves alike; see the tests that
+/// cover it).
+pub fn step(mut spec: RequestSpec) -> (Id, ExecutionContext) {
+    if spec.settings.redirects.is_none() {
+        spec.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    }
     let id = Id::new();
     let mut c = ExecutionContext::standalone(spec);
     c.request_id = Some(id);

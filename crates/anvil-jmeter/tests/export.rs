@@ -6,10 +6,10 @@ mod common;
 
 use anvil_domain::assertions::{AssertionKind, Comparison, Extraction, ExtractionSource};
 use anvil_domain::auth::{AuthConfig, KeyLocation};
-use anvil_domain::load::{AbortRule, Stage, WeightedStep, Workload};
-use anvil_domain::request::{Body, KeyValue, Protocol, RequestSpec};
+use anvil_domain::load::{AbortRule, ConnectionMode, Stage, WeightedStep, Workload};
+use anvil_domain::request::{Body, KeyValue, LintSendPolicy, Protocol, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
-use anvil_domain::settings::{HttpVersionPolicy, RedirectPolicy, SettingsOverrides};
+use anvil_domain::settings::{HttpVersionPolicy, RedirectPolicy, SettingsOverrides, TimeoutOverrides};
 use anvil_jmeter::{ExportOptions, ExportRefused};
 use common::*;
 
@@ -105,6 +105,8 @@ fn load_012_chain_maps_to_samplers_with_dataset_assertions_and_extraction() {
     login.params.push(KeyValue::new("user", "{{user}}"));
     login.headers.push(KeyValue::new("X-Run", "{{run}}"));
     login.body = Body::Json { text: r#"{"user":"{{user}}","n":{{anvil.iteration}},"price":"$5"}"#.into() };
+    // Per-iteration values in a JSON body need a non-blocking lint policy.
+    login.lint_policy = LintSendPolicy::Warn;
     login.assertions.push(assertion(AssertionKind::Status { comparison: Comparison::Equals, value: "200".into() }));
     login.assertions.push(assertion(AssertionKind::JsonPath {
         path: "$.method".into(),
@@ -153,7 +155,8 @@ fn load_012_chain_maps_to_samplers_with_dataset_assertions_and_extraction() {
     assert!(headers.contains(&("X-Run".to_string(), "nightly".to_string())), "{headers:?}");
     assert!(headers.contains(&("Content-Type".to_string(), "application/json".to_string())), "{headers:?}");
     assert!(headers.iter().any(|(n, v)| n == "User-Agent" && v.starts_with("Ferrum-Anvil/")), "{headers:?}");
-    assert!(headers.contains(&("Accept-Encoding".to_string(), "gzip, deflate, br, zstd".to_string())), "{headers:?}");
+    assert!(headers.contains(&("Accept-Encoding".to_string(), "gzip, deflate, br".to_string())), "{headers:?}");
+    assert!(out.report.differences.iter().any(|d| d.contains("cannot decode zstd")));
     assert_eq!(doc.prop(doc.child(first, "ResponseAssertion"), "Assertion.test_field"), "Assertion.response_code");
     let json = doc.child(first, "JSONPathAssertion");
     assert_eq!(doc.prop(json, "JSON_PATH"), "$.method");
@@ -199,8 +202,9 @@ fn load_012_secrets_are_properties_and_written_only_on_the_secret_export_path() 
     let out = fx.export(&ExportOptions { include_secrets: true, ..Default::default() }).expect("exported");
     assert!(!out.jmx.contains("SENSITIVE"));
     let props = out.secrets_properties.expect("secrets written");
-    assert!(props.contains("anvil.secret.var.token=tok-SENSITIVE-value\n"), "{}", props.as_str());
-    assert!(props.contains("=literal-key-SENSITIVE\n"), "{}", props.as_str());
+    // Never printed, even on failure.
+    assert!(props.contains("anvil.secret.var.token=tok-SENSITIVE-value\n"));
+    assert!(props.contains("=literal-key-SENSITIVE\n"));
     assert!(out.report.secrets_written);
 }
 
@@ -208,7 +212,10 @@ fn load_012_secrets_are_properties_and_written_only_on_the_secret_export_path() 
 fn load_012_credentials_that_follow_redirects_are_refused() {
     let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/echo");
     spec.auth = AuthConfig::ApiKey { name: "X-Key".into(), value: SensitiveValue::template("{{k}}"), location: KeyLocation::Header };
+    spec.settings.redirects = Some(RedirectPolicy::default());
+    spec.settings.http_version = Some(HttpVersionPolicy::Http1Only);
     let (id, mut c) = step(spec);
+    with_tls_profile(&mut c, false);
     c.var_layers.push(layer("workspace", &[("k", "v", true)]));
     let e = refused(Fx::new(iterations(1, 1), vec![(id, c, "echo")], None).export(&ExportOptions::default()));
     assert_eq!(codes(&e), ["redirect_credentials"], "{e}");
@@ -238,13 +245,16 @@ fn load_012_workloads_become_thread_groups() {
     // Open: the open model's schedule, with Anvil's 5 s graceful stop.
     let open = Workload::OpenArrivalRate {
         stages: vec![Stage { duration_secs: 0, target: 5 }, Stage { duration_secs: 30, target: 5 }],
-        max_in_flight: 50,
+        // 5/s × the default 120 s total deadline: Anvil's cap never binds.
+        max_in_flight: 600,
     };
-    let out = Fx::new(open, vec![(id, c.clone(), "root")], None).export(&ExportOptions::default()).expect("exported");
+    let mut fx = Fx::new(open, vec![(id, c.clone(), "root")], None);
+    fx.plan.connection_mode = ConnectionMode::Fresh;
+    let out = fx.export(&ExportOptions::default()).expect("exported");
     let doc = Doc::parse(&out.jmx);
     let g = doc.first("OpenModelThreadGroup");
     assert_eq!(doc.prop(g, "OpenModelThreadGroup.schedule"), "rate(0/s) rate(5/s) even_arrivals(30 s) rate(5/s) pause(5 s)");
-    assert!(out.report.differences.iter().any(|d| d.contains("drops (and counts) an arrival")));
+    assert!(out.report.differences.iter().any(|d| d.contains("never drops an arrival")));
 
     // Iterations that do not divide among the lanes: a shared counter gate.
     let out = Fx::new(iterations(7, 3), vec![(id, c, "root")], None).export(&ExportOptions::default()).expect("exported");
@@ -327,4 +337,128 @@ fn load_012_a_plan_settings_override_layer_is_respected() {
         .insert(0, ("workspace".into(), SettingsOverrides { http_version: Some(HttpVersionPolicy::Http2Only), ..Default::default() }));
     let e = refused(Fx::new(iterations(1, 1), vec![(id, c, "root")], None).export(&ExportOptions::default()));
     assert_eq!(codes(&e), ["http_version"]);
+}
+
+// ------------------------------------------------------------ review findings
+
+fn export_codes(fx: &Fx) -> Vec<&'static str> {
+    match fx.export(&ExportOptions::default()) {
+        Ok(_) => vec![],
+        Err(e) => e.reasons.iter().map(|r| r.code).collect(),
+    }
+}
+
+fn following(spec: &mut RequestSpec) {
+    spec.settings.redirects = Some(RedirectPolicy::default());
+}
+
+#[test]
+fn load_012_redirects_that_can_reach_https_are_refused_unless_https_behaves_alike() {
+    // A cleartext request that follows redirects: a redirect can lead to
+    // https, which Anvil verifies and JMeter would not.
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/redirect");
+    following(&mut spec);
+    let (id, c) = step(spec.clone());
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "r")], None)), ["redirect_tls"]);
+    // A TLS profile that verifies is not enough, nor HTTP/1.1 alone.
+    spec.settings.http_version = Some(HttpVersionPolicy::Http1Only);
+    let (id, mut c) = step(spec.clone());
+    with_tls_profile(&mut c, true);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "r")], None)), ["redirect_tls"]);
+    // Verification off and HTTP/1.1 only: every hop behaves as in JMeter.
+    let (id, mut c) = step(spec);
+    with_tls_profile(&mut c, false);
+    assert!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "r")], None)).is_empty());
+}
+
+#[test]
+fn load_012_redirected_methods_other_than_get_and_head_are_refused() {
+    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:8080/echo");
+    spec.body = Body::Raw { text: "x".into(), content_type: None };
+    following(&mut spec);
+    spec.settings.http_version = Some(HttpVersionPolicy::Http1Only);
+    let (id, mut c) = step(spec);
+    with_tls_profile(&mut c, false);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "post")], None)), ["redirect_method"]);
+}
+
+#[test]
+fn load_012_credentials_in_the_url_query_never_reach_the_test_plan() {
+    let (id, c) = step(RequestSpec::http("GET", "http://127.0.0.1:8080/echo?page=2&access%5Ftoken=lit-SENSITIVE"));
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "q")], None)), ["url_credential"]);
+    // A secret variable there becomes a property.
+    let (id, mut c) = step(RequestSpec::http("GET", "http://127.0.0.1:8080/echo?access_token={{tok}}"));
+    c.var_layers.push(layer("workspace", &[("tok", "tok-SENSITIVE", true)]));
+    let out = Fx::new(iterations(1, 1), vec![(id, c, "q")], None).export(&ExportOptions::default()).expect("exported");
+    assert!(!out.jmx.contains("SENSITIVE"));
+    let doc = Doc::parse(&out.jmx);
+    assert_eq!(doc.prop(doc.first("HTTPSamplerProxy"), "HTTPSampler.path"), "/echo?access_token=${__P(anvil.secret.var.tok,)}");
+}
+
+#[test]
+fn load_012_open_workloads_need_a_cap_that_never_binds_and_fresh_connections() {
+    let open = |cap: u64| Workload::OpenArrivalRate {
+        stages: vec![Stage { duration_secs: 0, target: 10 }, Stage { duration_secs: 5, target: 10 }],
+        max_in_flight: cap,
+    };
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/");
+    spec.settings.timeouts = Some(TimeoutOverrides { total_ms: Some(Some(2_000)), ..Default::default() });
+    let (id, c) = step(spec);
+    let fx = |cap: u64, mode: ConnectionMode| {
+        let mut f = Fx::new(open(cap), vec![(id, c.clone(), "root")], None);
+        f.plan.connection_mode = mode;
+        f
+    };
+    // 10/s × 2 s = 20 in flight at most.
+    assert_eq!(export_codes(&fx(5, ConnectionMode::Fresh)), ["open_cap"]);
+    assert!(export_codes(&fx(20, ConnectionMode::Fresh)).is_empty());
+    assert_eq!(export_codes(&fx(20, ConnectionMode::Persistent)), ["open_connections"]);
+    // Without a total deadline the cap cannot be shown never to bind.
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/");
+    spec.settings.timeouts = Some(TimeoutOverrides { total_ms: Some(None), ..Default::default() });
+    let (id2, c2) = step(spec);
+    let mut f = Fx::new(open(10_000), vec![(id2, c2, "root")], None);
+    f.plan.connection_mode = ConnectionMode::Fresh;
+    assert_eq!(export_codes(&f), ["open_cap"]);
+}
+
+#[test]
+fn load_012_accept_encoding_jmeter_cannot_decode_is_refused() {
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/");
+    spec.headers.push(KeyValue::new("Accept-Encoding", "zstd, gzip"));
+    let (id, c) = step(spec);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "root")], None)), ["accept_encoding"]);
+    // Asked for, but left encoded by Anvil (decompression off): JMeter would decode.
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/");
+    spec.headers.push(KeyValue::new("Accept-Encoding", "gzip"));
+    spec.settings.decompress = Some(false);
+    let (id, c) = step(spec);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "root")], None)), ["accept_encoding"]);
+}
+
+#[test]
+fn load_012_per_iteration_json_under_a_blocking_lint_policy_is_refused() {
+    let mut spec = RequestSpec::http("POST", "http://127.0.0.1:8080/echo");
+    spec.body = Body::Json { text: r#"{"user":"{{user}}"}"#.into() };
+    let (id, c) = step(spec.clone());
+    let fx = Fx::new(iterations(2, 1), vec![(id, c, "json")], Some(dataset("user\na\"b\n")));
+    assert_eq!(export_codes(&fx), ["lint"]);
+    spec.lint_policy = LintSendPolicy::Warn;
+    let (id, c) = step(spec);
+    let fx = Fx::new(iterations(2, 1), vec![(id, c, "json")], Some(dataset("user\na\n")));
+    assert!(export_codes(&fx).is_empty());
+}
+
+#[test]
+fn load_012_repeated_credential_fields_keep_their_own_values() {
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/echo");
+    spec.params.push(KeyValue::new("api_key", "first-SENSITIVE"));
+    spec.params.push(KeyValue::new("api_key", "second-SENSITIVE"));
+    let (id, c) = step(spec);
+    let fx = Fx::new(iterations(1, 1), vec![(id, c, "dup")], None);
+    let out = fx.export(&ExportOptions { include_secrets: true, ..Default::default() }).expect("exported");
+    assert_eq!(out.report.secret_properties.len(), 2);
+    assert!(!out.jmx.contains("SENSITIVE"));
+    let props = out.secrets_properties.expect("secrets written");
+    assert!(props.contains("=first-SENSITIVE\n") && props.contains("=second-SENSITIVE\n"));
 }

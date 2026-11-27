@@ -20,7 +20,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 import { listen } from "@tauri-apps/api/event";
 import type { LoadPlanCheck, LoadPreflight } from "./api";
 import type { Dataset, LatencySummary, LoadPlan, LoadReport, ProtocolLoadMetrics, RequestCounts, UnitSemantics } from "./generated/contracts";
-import { LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox } from "./LoadView";
+import { LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox, jmeterCommand } from "./LoadView";
 
 const notify = vi.fn();
 
@@ -1267,9 +1267,9 @@ describe("LOAD-012 JMeter adapter", () => {
     const done = await screen.findByTestId("jmx-exported");
     expect(calls("load_plan_save")).toHaveLength(1);
     expect(calls("file_choose")).toEqual([{ purpose: "jmeter_export", options: { file_name: "Sockets.jmx", filters: [{ name: "JMeter test plan", extensions: ["jmx"] }], multiple: false } }]);
-    expect(calls("load_export_jmx")).toEqual([{ planId: "plan-1", grant: "fg-jmx", secretsGrant: null }]);
+    expect(calls("load_export_jmx")).toEqual([{ planId: "plan-1", grant: "fg-jmx", secretsGrant: null, replaceDataset: false }]);
     expect(done.textContent).toContain("Exported to Sockets.jmx");
-    expect(done.textContent).toContain("jmeter -n -t Sockets.jmx -l results.jtl -Jhttpsampler.max_redirects=10");
+    expect(screen.getByTestId("jmx-command").textContent).toBe('jmeter -n -t "Sockets.jmx" -l results.jtl "-Jhttpsampler.max_redirects=10"');
     expect(done.textContent).toContain("anvil.secret.var.token");
     expect(screen.getByTestId("jmx-differences").textContent).toContain("Dataset rows");
   });
@@ -1293,11 +1293,13 @@ describe("LOAD-012 JMeter adapter", () => {
     render(<PlanEditor plan={plan()} {...editorProps} />);
     fireEvent.click(screen.getByRole("button", { name: "Export to JMeter…" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: /secrets to a separate properties file/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Replace the dataset file/ }));
     fireEvent.click(screen.getByRole("button", { name: "Choose file and export…" }));
-    const done = await screen.findByTestId("jmx-exported");
+    await screen.findByTestId("jmx-exported");
     expect(calls("file_choose").map((c) => c.purpose)).toEqual(["jmeter_export", "jmeter_secrets_export"]);
-    expect(calls("load_export_jmx")).toEqual([{ planId: "plan-1", grant: "fg-jmx", secretsGrant: "fg-secrets" }]);
-    expect(done.textContent).toContain("-q Sockets.secrets.properties");
+    expect(calls("load_export_jmx")).toEqual([{ planId: "plan-1", grant: "fg-jmx", secretsGrant: "fg-secrets", replaceDataset: true }]);
+    // The secrets file can be in another folder: a quoted placeholder for its full path.
+    expect(screen.getByTestId("jmx-command").textContent).toContain('-q "<full path of Sockets.secrets.properties>"');
   });
 
   it("LOAD-012 shows every refusal (strict TLS among them) and that nothing was written", async () => {
@@ -1381,5 +1383,16 @@ describe("LOAD-012 JMeter adapter", () => {
     expect(calls("file_choose")[0].purpose).toBe("jtl_import");
     expect(await screen.findByText("imported from JMeter")).toBeTruthy();
     expect(notify).toHaveBeenCalledWith("JMeter results imported as a report.");
+  });
+});
+
+describe("LOAD-012 jmeterCommand", () => {
+  it("LOAD-012 quotes file names with spaces and shell characters", () => {
+    const o = {
+      report: { secrets_written: true, jmeter_properties: [] as [string, string][] },
+      refused: [],
+      written: ["Checkout run.jmx", 'odd "$x".properties'],
+    } as unknown as Parameters<typeof jmeterCommand>[0];
+    expect(jmeterCommand(o)).toBe('jmeter -n -t "Checkout run.jmx" -l results.jtl -q "<full path of odd \\"\\$x\\".properties>"');
   });
 });

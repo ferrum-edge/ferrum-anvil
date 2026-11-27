@@ -15,8 +15,9 @@ mod common;
 
 use anvil_domain::assertions::{AssertionKind, Comparison, Extraction, ExtractionSource};
 use anvil_domain::auth::AuthConfig;
+use anvil_domain::load::ConnectionMode;
 use anvil_domain::load::{LoadReport, Stage, WeightedStep, Workload};
-use anvil_domain::request::{Body, KeyValue, RequestSpec};
+use anvil_domain::request::{Body, KeyValue, LintSendPolicy, RequestSpec};
 use anvil_domain::secret::SensitiveValue;
 use anvil_domain::settings::{HttpVersionPolicy, RedirectPolicy};
 use anvil_fixtures::GroundTruth;
@@ -132,6 +133,8 @@ fn chain_plan(f: &fx::Fixture) -> Fx {
     login.params.push(KeyValue::new("user", "{{user}}"));
     login.headers.push(KeyValue::new("X-Run", "{{run}}"));
     login.body = Body::Json { text: r#"{"user":"{{user}}","iteration":{{anvil.iteration}}}"#.into() };
+    // Per-iteration values in a JSON body are exported under a non-blocking lint policy.
+    login.lint_policy = LintSendPolicy::Warn;
     login.auth = AuthConfig::Bearer { token: SensitiveValue::template("{{token}}"), prefix: "Bearer".into() };
     login.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
     login.assertions.push(assertion(AssertionKind::Status { comparison: Comparison::Equals, value: "200".into() }));
@@ -298,9 +301,11 @@ async fn load_012_jmeter_runs_closed_open_and_mixed_workloads() {
     // Open: 5 arrivals/s for 3 s.
     let open = Workload::OpenArrivalRate {
         stages: vec![Stage { duration_secs: 0, target: 5 }, Stage { duration_secs: 3, target: 5 }],
-        max_in_flight: 20,
+        // The cap covers 5/s × the default 120 s deadline; connections are fresh.
+        max_in_flight: 1_000,
     };
-    let fx_open = Fx::new(open, vec![(id, c, "root")], None);
+    let mut fx_open = Fx::new(open, vec![(id, c, "root")], None);
+    fx_open.plan.connection_mode = ConnectionMode::Fresh;
     let out = fx_open.export(&export_opts(false)).expect("exported");
     f.log.clear();
     let r = import(&run_jmeter(&out, "csv", false).await, &fx_open);
@@ -319,4 +324,49 @@ async fn load_012_jmeter_runs_closed_open_and_mixed_workloads() {
     assert_eq!(r.requests.started, 40, "exactly one request per iteration");
     let twohundred = r.status_distribution.iter().find(|(s, _)| *s == 200).map(|(_, n)| *n).unwrap_or(0);
     assert!((15..=40).contains(&twohundred), "the heavier request dominates: {:?}", r.status_distribution);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs Apache JMeter (ANVIL_JMETER_HOME); run by .github/workflows/jmeter.yml"]
+async fn load_012_jmeter_redirect_to_an_untrusted_https_target_is_refused_or_matches() {
+    init();
+    let pki = anvil_fixtures::LabPki::generate();
+    let tf = fx::serve("127.0.0.1:0", Some(anvil_fixtures::TlsServerOptions::new(pki.server.chain_with(&pki.ca), pki.server.key.clone())))
+        .await
+        .unwrap();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let to = url_escape(&tf.url("/"));
+    let mut spec = RequestSpec::http("GET", &f.url(&format!("/redirect?status=302&to={to}")));
+    spec.settings.redirects = Some(RedirectPolicy::default());
+
+    // Following: Anvil refuses the untrusted certificate at the https hop...
+    let (id, c) = step(spec.clone());
+    let following = Fx::new(iterations(3, 1), vec![(id, c, "hop")], None);
+    let anvil = native(&following).await;
+    assert_eq!((anvil.requests.started, anvil.requests.completed), (3, 0), "{:?}", anvil.requests);
+    // ...and the export refuses the plan, which JMeter would complete.
+    let e = match following.export(&export_opts(false)) {
+        Ok(_) => panic!("a redirect that can reach an untrusted https target must not be exported"),
+        Err(e) => e,
+    };
+    assert_eq!(e.reasons.iter().map(|r| r.code).collect::<Vec<_>>(), ["redirect_tls"]);
+
+    // Not following: both record the redirect itself, and nothing reaches the https target.
+    spec.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    let (id, c) = step(spec);
+    let plain = Fx::new(iterations(3, 1), vec![(id, c, "hop")], None);
+    tf.log.clear();
+    let anvil = native(&plain).await;
+    assert_eq!(anvil.status_distribution, vec![(302, 3)]);
+    let out = plain.export(&export_opts(false)).expect("exported");
+    let jmeter = import(&run_jmeter(&out, "csv", false).await, &plain);
+    assert_eq!(jmeter.status_distribution, vec![(302, 3)]);
+    assert_eq!(tf.log.count_requests(), 0);
+}
+
+/// `s` percent-encoded for a query value.
+fn url_escape(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
 }

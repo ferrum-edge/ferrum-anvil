@@ -331,14 +331,33 @@ pub struct JmxExportOutcome {
 /// `jmeter_secrets_export`, owner-only); otherwise the test plan names them
 /// as JMeter properties (LOAD-012).
 #[tauri::command]
-pub async fn load_export_jmx(handle: AppHandle, plan_id: String, grant: String, secrets_grant: Option<String>) -> R<JmxExportOutcome> {
+pub async fn load_export_jmx(
+    handle: AppHandle,
+    plan_id: String,
+    grant: String,
+    secrets_grant: Option<String>,
+    replace_dataset: bool,
+) -> R<JmxExportOutcome> {
     blocking(&handle, move |st| {
+        if secrets_grant.is_some() && !anvil_app::file_grants::OWNER_ONLY_FILES {
+            return Err("writing the secrets file is refused on this platform: a new file inherits its folder's access list here, so others could read it. Export without it and set the properties another way".into());
+        }
         let app = st.app()?;
         let plan = app.load_plan(&id(&plan_id)?).map_err(e)?;
         let chosen = st.file_grants.chosen_name(&grant, FilePurpose::JmeterExport).map_err(|x| x.to_string())?;
         let dataset_file = anvil_app::file_grants::dataset_name(std::ffi::OsStr::new(&chosen)).to_string_lossy().into_owned();
         let secrets_name = match &secrets_grant {
-            Some(g) => Some(st.file_grants.chosen_name(g, FilePurpose::JmeterSecretsExport).map_err(|x| x.to_string())?),
+            Some(g) => {
+                // Three distinct files: the plan, its dataset, the secrets.
+                let plan_dest = st.file_grants.destination(&grant, FilePurpose::JmeterExport).map_err(|x| x.to_string())?;
+                let secrets_dest = st.file_grants.destination(g, FilePurpose::JmeterSecretsExport).map_err(|x| x.to_string())?;
+                let dataset_dest = plan_dest.with_file_name(&dataset_file);
+                let same = |a: &std::path::Path, b: &std::path::Path| a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase();
+                if same(&plan_dest, &secrets_dest) || same(&dataset_dest, &secrets_dest) {
+                    return Err("the secrets file must be another file than the test plan and its dataset; nothing was written".into());
+                }
+                Some(st.file_grants.chosen_name(g, FilePurpose::JmeterSecretsExport).map_err(|x| x.to_string())?)
+            }
             None => None,
         };
         let opts = anvil_app::jmeter::ExportOptions { include_secrets: secrets_grant.is_some(), dataset_file: dataset_file.clone() };
@@ -348,7 +367,7 @@ pub async fn load_export_jmx(handle: AppHandle, plan_id: String, grant: String, 
         };
         let sensitive = export.report.dataset.as_ref().is_some_and(|d| !d.sensitive_columns.is_empty());
         let dataset = export.dataset_csv.as_deref().map(|csv| (csv, sensitive));
-        st.file_grants.write_with_dataset(&grant, export.jmx.as_bytes(), dataset).map_err(|x| x.to_string())?;
+        st.file_grants.write_with_dataset(&grant, export.jmx.as_bytes(), dataset, replace_dataset).map_err(|x| x.to_string())?;
         let mut written = vec![chosen];
         if dataset.is_some() {
             written.push(dataset_file);
