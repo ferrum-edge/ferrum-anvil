@@ -220,7 +220,7 @@ export async function until(what: string, check: () => boolean, timeoutMs: numbe
     if (check()) {
       // Progress goes to the worker's output as it happens, so a run whose
       // reporter output is lost still shows how far it got.
-      console.log(`REL-003: ${what} after ${Math.round((Date.now() - start) / 1000)} s`);
+      console.log(`updater e2e: ${what} after ${Math.round((Date.now() - start) / 1000)} s`);
       return;
     }
     await new Promise((r) => setTimeout(r, 1000));

@@ -66,7 +66,7 @@ describe("REL-003: after the refusals, the relaunched bundle is unchanged and a 
             const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
             void internals.invoke("update_install", { version: v }).catch(() => {});
           }, OFFERED)
-          .catch((e: Error) => console.log(`REL-003: starting update_install did not answer: ${e.message}`));
+          .catch((e: Error) => console.log(`updater e2e: starting update_install did not answer: ${e.message}`));
         await until("the update to be downloaded", () => server.requests.includes("/update"), 120_000);
         await until(`the installed executable to report ${OFFERED}`, () => installedExeVersion() === OFFERED, 300_000);
         await until("the update installer to finish", () => runningInstallers().length === 0, 300_000);
