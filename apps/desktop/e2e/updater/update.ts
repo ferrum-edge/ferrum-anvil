@@ -10,10 +10,11 @@
 //                               or on Windows the install folder
 //   ANVIL_E2E_UPDATE_BUNDLE     Windows: nsis or msi, the install under test (its latest.json key)
 //   ANVIL_E2E_APP               the installed app's executable
+//   ANVIL_E2E_UPDATE_OFFERED    the version the update offers (newer than the shipped one)
 //   ANVIL_E2E_UPDATE_FIXTURES   folder with update.bin (the signed updater artifact of the
-//                               0.2.0 build), update.sig (its signature from `tauri build`),
+//                               offered build), update.sig (its signature from `tauri build`),
 //                               wrong-key.sig (`tauri signer sign` with another key) and, on
-//                               macOS, expected.app (the 0.2.0 bundle)
+//                               macOS, expected.app (the offered bundle)
 //   ANVIL_E2E_UPDATE_PORT       the port compiled into the endpoint
 //   ANVIL_DATA_DIR              the profile store, kept across the three runs
 import { execFileSync } from "node:child_process";
@@ -29,8 +30,8 @@ export function required(name: string): string {
   return v;
 }
 
-/** The version the update offers: the update bundle was built with it. */
-export const OFFERED = "0.2.0";
+/** The version the update offers: the update bundle was built with it (the shipped major + 1). */
+export const OFFERED: string = required("ANVIL_E2E_UPDATE_OFFERED");
 
 /** The installed bundle's version: the shipped tauri.conf.json version. */
 export const INSTALLED_VERSION: string = JSON.parse(readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8")).version;
@@ -179,7 +180,10 @@ export function runningInstalledApps(): number[] {
 /** Windows: process ids of a running update installer (NSIS setup or msiexec). */
 export function runningInstallers(): number[] {
   const out = powershell(
-    "@(Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*-setup.exe' -or ($_.Name -eq 'msiexec.exe' -and $_.CommandLine -match '/i ') } | Select-Object -ExpandProperty ProcessId) -join ','",
+    // The updater stages the NSIS installer in the temp folder as
+    // `<app>-<version>-installer.exe` (tauri-plugin-updater write_to_temp) and
+    // starts msiexec `/i <msi>` for an MSI.
+    "@(Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*-installer.exe' -or $_.Name -like '*-setup.exe' -or ($_.Name -eq 'msiexec.exe' -and $_.CommandLine -match '/i ') } | Select-Object -ExpandProperty ProcessId) -join ','",
   );
   return out ? out.split(",").map(Number) : [];
 }

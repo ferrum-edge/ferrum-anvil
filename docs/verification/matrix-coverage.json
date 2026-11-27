@@ -7926,7 +7926,7 @@
     },
     {
      "path": "apps/desktop/e2e/updater/rel003-2-install.e2e.ts",
-     "line": 12,
+     "line": 33,
      "kind": "native_e2e"
     },
     {
@@ -7946,12 +7946,12 @@
     },
     {
      "path": "apps/desktop/e2e/updater/update.ts",
-     "line": 37,
+     "line": 43,
      "kind": "native_e2e"
     },
     {
      "path": "apps/desktop/e2e/updater/update.ts",
-     "line": 146,
+     "line": 153,
      "kind": "native_e2e"
     },
     {
