@@ -17,8 +17,8 @@ backend path parameters are involved.
 
 ## Contract and producer pins
 
-- **Contract.** `contracts-edge-0.9.20`, full commit
-  `39da322083044c2e92617209e62983c92387f0ad`, vendored byte-exact and covered
+- **Contract.** `contracts-edge-0.9.21`, full commit
+  `92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f`, vendored byte-exact and covered
   by `contracts/ferrum-contracts/PIN` (see [ferrum-contracts.md](../ferrum-contracts.md)).
   The diagnostic-report schema and every earlier report, finding and reference
   fixture are byte-identical to `contracts-edge-0.9.11`, which first published
@@ -29,8 +29,12 @@ backend path parameters are involved.
   `detail.rejection_phase`, and five valid and five invalid diagnostic-ref
   fixtures (`client-disconnect-upload`, `gateway-closed-h3-upload`,
   `proxy-hop-limit`, `proxy-hops-invalid`, `query-trigger-admission`, each
-  invalid one carrying its label in `detail.rejection_phase`); the
-  diagnostic-ref fixtures are now 10 valid and 12 invalid. Owner descriptions
+  invalid one carrying its label in `detail.rejection_phase`).
+  `contracts-edge-0.9.21` adds the `grpc-post-required` pair (an `all`-mode
+  gRPC-Web reference resolving with `status: 200`, raw phase
+  `grpc_post_required` accepted in `rejection.phase` and refused in
+  `detail.rejection_phase`) with byte-identical schemas; the diagnostic-ref
+  fixtures are now 11 valid and 13 invalid. Owner descriptions
   keep historical PROPOSED wording; those paired bytes must remain exact after
   removing only `$id`/`x-contract`.
 - **Producer.** Alloy is unreleased (`publish = false`). Tests pin the exact CLI

@@ -3,19 +3,20 @@
 Anvil vendors the Ferrum Edge contracts it consumes under
 [`contracts/ferrum-contracts`](../contracts/ferrum-contracts). The current pin
 is recorded in `contracts/ferrum-contracts/PIN`: published tag
-`contracts-edge-0.9.20`, commit `39da322083044c2e92617209e62983c92387f0ad`,
-targeting immutable Edge v0.9.20 (`e4a606a00352674daaef08636e3e359e6c48ba18`).
-Publication is verified by [canonical PR #47](https://github.com/ferrum-edge/ferrum-contracts/pull/47),
-the successful [main validation](https://github.com/ferrum-edge/ferrum-contracts/actions/runs/41611708250)
-and the [tag release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.20).
-The lab and new-profile default select v0.9.20, source-audited with
-[hosted Anvil qualification](audit/gateway-0.9.20-delta.md#qualification-status)
-recorded. Earlier catalogs stay embedded for existing profiles, each tied to
-its own contracts tag; their lab locks were retired (see
-[lab/README.md](lab/README.md)):
+`contracts-edge-0.9.21`, commit `92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f`,
+targeting immutable Edge v0.9.21 (`f9915358c8032214f4034a17c28cdf72d14006c3`).
+Its release record is `docs/releases/contracts-edge-0.9.21.md` at that tag, and the
+[tag release](https://github.com/ferrum-edge/ferrum-contracts/releases/tag/contracts-edge-0.9.21)
+records the signed-tag verification.
+The lab and new-profile default select v0.9.21, source-audited (hosted Anvil
+qualification status in
+[the delta audit](audit/gateway-0.9.21-delta.md#qualification-status)).
+Earlier catalogs stay embedded for existing profiles, each tied to its own
+contracts tag; their lab locks were retired (see [lab/README.md](lab/README.md)):
 
 | Edge release | Contracts tag |
 | --- | --- |
+| v0.9.21 | `contracts-edge-0.9.21` |
 | v0.9.20 | `contracts-edge-0.9.20` |
 | v0.9.15 | `contracts-edge-0.9.15` |
 | v0.9.14 | `contracts-edge-0.9.14` |
@@ -27,7 +28,21 @@ preparation-time publication wording byte-exact; current publication facts
 are documented here. Owner (Alloy) availability remains unreleased. The
 `route_protocol_admission` rejection phase added in v0.9.15 maps to no token.
 
-`contracts-edge-0.9.20` changes four vendored files: the gateway error and
+`contracts-edge-0.9.21` changes three vendored files and adds two. The gateway
+error vocabulary (Edge v0.9.21 provenance; `circuit_breaker_open` keeps only the
+`circuit_breaker_open` rejection phase because HTTP/3 no longer logs the
+`circuit_breaker` alias; the nine tokens, 19 error classes and mappings are
+unchanged), the header vocabulary (repinned; no gateway diagnostic header added,
+removed or renamed) and the negative manifest change. The manifest names one new
+invalid diagnostic-ref fixture, `grpc-post-required-as-detail-phase.json`, so it
+and its valid counterpart (an `all`-mode gRPC-Web reference resolving with
+`status: 200` and raw phase `grpc_post_required`, both accepted by Anvil's
+reader) are vendored: diagnostic-ref fixtures are now 11 valid and 13 invalid.
+The schemas are byte-identical. The pinned vocabulary covers the 0.9.21 catalog
+only; the table above keeps each older release's mapping. The v0.9.21 delta is
+in [the Edge delta audit](audit/gateway-0.9.21-delta.md#contracts-and-g01).
+
+Previously, `contracts-edge-0.9.20` changed four vendored files: the gateway error and
 header vocabularies (Edge v0.9.20 provenance; the closed token vocabulary adds
 `loop_detected`, the proxy hop limit 508, so it has nine tokens; the 19 error
 classes and their mappings are unchanged), the diagnostic-ref schema (adds
@@ -46,7 +61,7 @@ the v0.9.20 delta in [the Edge delta audit](audit/gateway-0.9.20-delta.md#contra
 Hosted `anvil-diagnostics` gates parse `PIN` strictly (positional headers;
 sorted, unique, canonical rows; no `PIN` self-row), refuse a symbolic link or
 any other non-regular entry under the vendored tree, and check every vendored
-byte against `PIN` and exact adopted file presence; token/class/header parity with the 0.9.20
+byte against `PIN` and exact adopted file presence; token/class/header parity with the 0.9.21
 catalog; the current owner source
 identity; local DiagnosticFinding schema parity; and strict diagnostic-ref
 reader vocabularies. All original fixtures and precise negative expectations

@@ -321,5 +321,5 @@ it, and the scenarios accept exactly that alternative shape.
 After every batch `pgrep -fl ferrum-edge` showed no gateway left from the lab.
 Per-scenario coverage is in
 [matrix-coverage.md](../verification/matrix-coverage.md), generated from the
-newest hosted Lab results (v0.9.20); current hosted qualification is linked
+newest recorded hosted Lab results (v0.9.20); current hosted qualification is linked
 from the [README](README.md).

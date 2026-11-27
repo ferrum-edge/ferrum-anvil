@@ -23,16 +23,14 @@ public tool names are `fx.<tool>`. The policy (`policy.tools`, keyed by public n
 | Tool | Policy | Listed | `tools/call` |
 |---|---|---|---|
 | `fx.echo`, `fx.add`, `fx.fail` | `allow` | yes | forwarded (arguments validated against `inputSchema`) |
-| `fx.delete_all` | `deny` | yes (`hide_denied_tools` and `hide_denied_items` off) | `-32001` |
+| `fx.delete_all` | `deny` | yes (`hide_denied_tools` off) | `-32001` |
 | `fx.internal_audit` | `hide_from_discovery` | no | `-32001` |
 | `fx.session`, `fx.new_tool` | not configured: `default_action: deny`, `discovery.on_new_tool: hide_until_configured` (default) | no | `-32001` |
 
-At v0.9.20 a denied tool is listed only when both `policy.hide_denied_tools` and
-`discovery.hide_denied_items` are off, and `hide_denied_items` defaults to on, so the profile sets
-both. Ferrum Edge after v0.9.20 removes `discovery.hide_denied_items` (#7136: the key fails config
-load) and `policy.hide_denied_tools` is the single setting. When the lab moves past v0.9.20, the
-profile drops its `discovery` block; `lab/gateway/lint-profiles.rb` refuses the key as soon as
-`RELEASE.lock` names a later release.
+At v0.9.21 `policy.hide_denied_tools` is the single setting: v0.9.21 removed
+`discovery.hide_denied_items` (#7136; the key fails config load), so the profile no longer sets a
+`discovery` block and `lab/gateway/lint-profiles.rb` refuses that key. (At the retired v0.9.20 a
+denied tool was listed only when both were off, and `hide_denied_items` defaulted to on.)
 
 ## Scenarios
 

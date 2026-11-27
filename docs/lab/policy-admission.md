@@ -12,8 +12,9 @@ an injected `X-Gateway-Upstream-Status` (GW-019-ERROR/OK/FORGED); those expectat
 audit ([gateway-0.9.8-delta.md](../audit/gateway-0.9.8-delta.md); unchanged in
 [gateway-0.9.9-delta.md](../audit/gateway-0.9.9-delta.md), [gateway-0.9.10-delta.md](../audit/gateway-0.9.10-delta.md),
 [gateway-0.9.11-delta.md](../audit/gateway-0.9.11-delta.md), [gateway-0.9.14-delta.md](../audit/gateway-0.9.14-delta.md),
-[gateway-0.9.15-delta.md](../audit/gateway-0.9.15-delta.md) and
-[gateway-0.9.20-delta.md](../audit/gateway-0.9.20-delta.md)).
+[gateway-0.9.15-delta.md](../audit/gateway-0.9.15-delta.md),
+[gateway-0.9.20-delta.md](../audit/gateway-0.9.20-delta.md) and
+[gateway-0.9.21-delta.md](../audit/gateway-0.9.21-delta.md)).
 
 | Profile | Gateway listeners | Fixture ports | Config | Scenarios |
 |---|---|---|---|---|
