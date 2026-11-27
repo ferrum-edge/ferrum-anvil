@@ -199,7 +199,9 @@ artifact per OS and release.
 | actions/upload-artifact | v7.0.2 `cf430e030ddbb5b0abf93d22962f4752f3646cd9` |
 | actions/download-artifact | v8.0.2 `9000827ccba6bdab643e8b6fd33ac0654aef8333` |
 | Swatinem/rust-cache | v2.9.3 `d1527c8f67ef9af357290475d4af4b0fab8f12e0` |
-| taiki-e/install-action | v2.90.3 `cfdb7ed4ccc7c7dce37759eae89dc5674b469b39` |
+| taiki-e/install-action | v2.90.8 `fe3acb53a98b62c772db35de75ce0e4595e7ca8c` |
+| azure/login | v3.1.0 `a641126d1b8aa4d1fa005f4f92df94a3a4c4c906` (release workflow, Artifact Signing OIDC route only) |
+| Microsoft.ArtifactSigning.Client | 1.0.151, nuget.org SHA-512 pinned in `release.yml` (Artifact Signing routes only) |
 | Node.js | 22.23.3 |
 | cargo-deny / cargo-cyclonedx | 0.20.2 / 0.5.9 |
 | gitleaks | 8.30.1 (linux x64 SHA-256 `551f6fc8…f2470eb`) |
@@ -209,5 +211,10 @@ artifact per OS and release.
 
 ## Not yet exercised
 
-The signing branches of `release.yml` have not run, because no signing
-credentials are configured (see [release.md](release.md#signing-and-what-unsigned-means)).
+The platform code-signing routes of `release.yml` (macOS Developer ID and
+notarization by App Store Connect API key or Apple ID; Windows Azure Artifact
+Signing or `.pfx`) have not run, because no platform signing credentials are
+configured; every release so far is unsigned and its evidence says so (see
+[release.md](release.md#signing-and-what-unsigned-means)). The updater-signing
+branch has run: every published release from `anvil-v0.1.0` to `anvil-v0.1.9`
+was built with the owner's updater key and ships a signed `latest.json`.

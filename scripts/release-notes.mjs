@@ -26,6 +26,13 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 export const UNSIGNED = "unsigned — owner credentials not configured";
 export const SIGNED = "signed and verified on the build runner (see targets[].signing)";
+export const PARTIAL = "partially signed — see platform_signing and targets[].signing";
+// Per-platform signing status in release-evidence.json `platform_signing`.
+// Linux packages have no platform code signing, so Linux is "not applicable".
+export const PLATFORM_STATUS = ["signed", "unsigned", "partial", "not applicable"];
+const PLATFORM_NAMES = { macos: "macOS", windows: "Windows", linux: "Linux" };
+const PLATFORM_OF_OS = { macOS: "macos", Windows: "windows", Linux: "linux" };
+const UNSIGNED_EFFECT = { macos: "macOS Gatekeeper will warn", windows: "Windows SmartScreen will warn" };
 // Text that marks a draft placeholder body, as a case-insensitive POSIX ERE.
 // None of it may reach a release body. This is the only definition: the
 // release job (DRAFT_TEXT in release.yml) and the owner checklist in
@@ -135,11 +142,27 @@ export function checkEvidence(evidence, version) {
   if (evidence.release?.version !== version) {
     throw new Error(`release evidence is for version ${JSON.stringify(evidence.release?.version)}, not ${version}`);
   }
-  if (![SIGNED, UNSIGNED].includes(evidence.signing) || typeof evidence.signed !== "boolean") {
+  if (![SIGNED, UNSIGNED, PARTIAL].includes(evidence.signing) || typeof evidence.signed !== "boolean") {
     throw new Error("release evidence signing has an invalid value");
   }
   if (evidence.signed !== (evidence.signing === SIGNED)) {
     throw new Error("release evidence signed and signing disagree");
+  }
+  const platforms = evidence.platform_signing;
+  if (
+    !platforms ||
+    typeof platforms !== "object" ||
+    Array.isArray(platforms) ||
+    Object.keys(platforms).length === 0 ||
+    Object.entries(platforms).some(([k, v]) => !Object.hasOwn(PLATFORM_NAMES, k) || !PLATFORM_STATUS.includes(v))
+  ) {
+    throw new Error("release evidence platform_signing has an invalid shape");
+  }
+  // The platform statuses must say what `signing` says.
+  const statuses = Object.values(platforms).filter((v) => v !== "not applicable");
+  const expected = statuses.length > 0 && statuses.every((v) => v === "signed") ? SIGNED : statuses.some((v) => v === "signed" || v === "partial") ? PARTIAL : UNSIGNED;
+  if (evidence.signing !== expected) {
+    throw new Error("release evidence signing and platform_signing disagree");
   }
   const updater = evidence.updater;
   if (!updater || typeof updater !== "object" || Array.isArray(updater)) {
@@ -171,6 +194,29 @@ export function checkEvidence(evidence, version) {
   return { repository, commit, runId, runUrl, server: runUrl.slice(0, -`/${repository}/actions/runs/${runId}`.length) };
 }
 
+// The signing summary of a set of build targets (release-evidence.json
+// targets: `os`, `signed`, `signing_applicable`): `signed` is true only when
+// every target that has platform code signing (macOS, Windows) is signed and
+// verified, and at least one exists; Linux never counts as signed or unsigned.
+export function signingSummary(targets) {
+  const groups = {};
+  for (const t of targets) {
+    const platform = PLATFORM_OF_OS[t.os];
+    if (!platform) throw new Error(`unknown build OS ${JSON.stringify(t.os)}`);
+    (groups[platform] ??= []).push(t);
+  }
+  const platform_signing = {};
+  for (const [platform, ts] of Object.entries(groups)) {
+    const applicable = ts.filter((t) => t.signing_applicable);
+    platform_signing[platform] =
+      applicable.length === 0 ? "not applicable" : applicable.every((t) => t.signed) ? "signed" : applicable.some((t) => t.signed) ? "partial" : "unsigned";
+  }
+  const applicable = targets.filter((t) => t.signing_applicable);
+  const signed = applicable.length > 0 && applicable.every((t) => t.signed);
+  const signing = signed ? SIGNED : targets.some((t) => t.signed) ? PARTIAL : UNSIGNED;
+  return { signed, signing, platform_signing };
+}
+
 export function assertNoDraftText(body) {
   const m = DRAFT_MARKER.exec(body);
   if (m) throw new Error(`release notes contain draft-only text (${JSON.stringify(m[0])})`);
@@ -189,12 +235,27 @@ export function releaseNotes({ changelog, version, tag, evidence }) {
     : "In-app updates are not signed for this release: the app links to this release page instead.";
 
   const out = [];
+  const platforms = evidence.platform_signing;
+  const named = (status) => Object.keys(PLATFORM_NAMES).filter((p) => platforms[p] === status);
+  const list = (ps) => ps.map((p) => PLATFORM_NAMES[p]).join(" and ");
+  const linux = platforms.linux === "not applicable" ? " Linux packages (`.deb`, `.rpm`, AppImage) have no platform code signing." : "";
   if (evidence.signed) {
-    out.push(`**Signing:** the installers are code-signed and verified on the build runner. Verify downloads with \`SHA256SUMS\`. ${updater}`, "");
-  } else {
+    out.push(`**Signing:** the ${list(named("signed"))} installers are code-signed and verified on the build runner.${linux} Verify downloads with \`SHA256SUMS\`. ${updater}`, "");
+  } else if (evidence.signing === UNSIGNED) {
     out.push(
       "> [!WARNING]",
       `> **Unsigned installers.** The installers are not code-signed yet (no Apple Developer ID or Windows certificate): macOS Gatekeeper and Windows SmartScreen will warn. Verify downloads with \`SHA256SUMS\` before running them. ${updater}`,
+      "",
+    );
+  } else {
+    // Some platforms signed, some not: say which, per platform.
+    const signedPart = named("signed").length ? ` Code-signed and verified on the build runner: ${list(named("signed"))}.` : "";
+    const partialPart = named("partial").length ? ` Only some ${list(named("partial"))} installers are code-signed (see \`release-evidence.json\`).` : "";
+    const unsigned = named("unsigned");
+    const unsignedPart = unsigned.length ? ` Not code-signed: ${list(unsigned)} (${unsigned.map((p) => UNSIGNED_EFFECT[p]).join("; ")}).` : "";
+    out.push(
+      "> [!WARNING]",
+      `> **Unsigned installers.** Not every installer is code-signed.${signedPart}${partialPart}${unsignedPart}${linux} Verify downloads with \`SHA256SUMS\` before running them. ${updater}`,
       "",
     );
   }

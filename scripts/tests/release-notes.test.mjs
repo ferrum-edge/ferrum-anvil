@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   DRAFT_TEXT,
+  PARTIAL,
   SIGNED,
   UNSIGNED,
   absoluteLinks,
@@ -13,6 +14,7 @@ import {
   changelogSection,
   checkEvidence,
   releaseNotes,
+  signingSummary,
   summaryParagraph,
 } from "../release-notes.mjs";
 
@@ -87,6 +89,7 @@ function evidence(overrides = {}) {
     build: { workflow: "Release", run_id: 37859968362, run_attempt: 1, run_url: RUN_URL },
     signed: false,
     signing: UNSIGNED,
+    platform_signing: { macos: "unsigned", windows: "unsigned", linux: "not applicable" },
     updater: { signed: true, manifest: "latest.json", key_id: "BFE08514FEC0E65A", platforms: ["linux-x86_64-appimage"], detail: "verified" },
     ...overrides,
   };
@@ -204,10 +207,61 @@ test("summary lists, lowercase headings and relative links reach the body", () =
   assert.ok(body.includes("\n\n- A format changes.\n\nBuilt from"));
 });
 
-test("signed release has a signing line instead of the warning", () => {
-  const body = releaseNotes({ changelog, version: "1.2.0", evidence: evidence({ signed: true, signing: SIGNED }) });
+const SIGNED_PLATFORMS = { macos: "signed", windows: "signed", linux: "not applicable" };
+
+test("signed release has a signing line instead of the warning, and says Linux has no platform signing", () => {
+  const body = releaseNotes({ changelog, version: "1.2.0", evidence: evidence({ signed: true, signing: SIGNED, platform_signing: SIGNED_PLATFORMS }) });
   assert.ok(!body.includes("[!WARNING]"));
-  assert.ok(body.startsWith("**Signing:** the installers are code-signed and verified on the build runner. Verify downloads with `SHA256SUMS`."));
+  assert.ok(
+    body.startsWith(
+      "**Signing:** the macOS and Windows installers are code-signed and verified on the build runner. " +
+        "Linux packages (`.deb`, `.rpm`, AppImage) have no platform code signing. Verify downloads with `SHA256SUMS`.",
+    ),
+    body,
+  );
+});
+
+test("partly signed release keeps the warning and names each platform's status", () => {
+  const body = releaseNotes({
+    changelog,
+    version: "1.2.0",
+    evidence: evidence({ signing: PARTIAL, platform_signing: { macos: "signed", windows: "unsigned", linux: "not applicable" } }),
+  });
+  const [first, second] = body.split("\n");
+  // release.yml's release job checks exactly these two line prefixes for signed: false.
+  assert.equal(first, "> [!WARNING]");
+  assert.ok(
+    second.startsWith(
+      "> **Unsigned installers.** Not every installer is code-signed. Code-signed and verified on the build runner: macOS. " +
+        "Not code-signed: Windows (Windows SmartScreen will warn). Linux packages (`.deb`, `.rpm`, AppImage) have no platform code signing.",
+    ),
+    second,
+  );
+  assert.ok(!second.includes("not code-signed yet (no Apple Developer ID or Windows certificate)"));
+  const some = releaseNotes({
+    changelog,
+    version: "1.2.0",
+    evidence: evidence({ signing: PARTIAL, platform_signing: { macos: "partial", windows: "signed" } }),
+  });
+  assert.ok(some.includes("Code-signed and verified on the build runner: Windows. Only some macOS installers are code-signed (see `release-evidence.json`)."), some);
+});
+
+test("signingSummary: Linux is never signed or unsigned, and every macOS and Windows target must be signed", () => {
+  const t = (os, signed, applicable = os !== "Linux") => ({ os, signed, signing_applicable: applicable });
+  const none = signingSummary([t("macOS", false), t("macOS", false), t("Linux", false), t("Windows", false)]);
+  assert.deepEqual(none, { signed: false, signing: UNSIGNED, platform_signing: { macos: "unsigned", linux: "not applicable", windows: "unsigned" } });
+  const all = signingSummary([t("macOS", true), t("macOS", true), t("Linux", false), t("Windows", true)]);
+  assert.deepEqual(all, { signed: true, signing: SIGNED, platform_signing: { macos: "signed", linux: "not applicable", windows: "signed" } });
+  const mac = signingSummary([t("macOS", true), t("macOS", true), t("Linux", false), t("Windows", false)]);
+  assert.deepEqual(mac, { signed: false, signing: PARTIAL, platform_signing: { macos: "signed", linux: "not applicable", windows: "unsigned" } });
+  const half = signingSummary([t("macOS", true), t("macOS", false), t("Windows", true)]);
+  assert.equal(half.platform_signing.macos, "partial");
+  assert.equal(half.signing, PARTIAL);
+  // A Linux-only set has nothing to sign: never "signed".
+  assert.deepEqual(signingSummary([t("Linux", false)]), { signed: false, signing: UNSIGNED, platform_signing: { linux: "not applicable" } });
+  assert.throws(() => signingSummary([t("FreeBSD", false)]), /unknown build OS/);
+  // Every summary is accepted by the notes' evidence check.
+  for (const s of [none, all, mac, half]) assert.doesNotThrow(() => checkEvidence(evidence(s), "1.2.0"));
 });
 
 test("refuses a tag that is not the version's", () => {
@@ -222,6 +276,14 @@ test("refuses invalid evidence", () => {
     [evidence({ release: { version: "1.1.0" } }), /not 1\.2\.0/],
     [evidence({ signing: "signed" }), /signing has an invalid value/],
     [evidence({ signed: true }), /disagree/],
+    [evidence({ signing: PARTIAL }), /signing and platform_signing disagree/],
+    [evidence({ platform_signing: { macos: "signed", windows: "unsigned" } }), /signing and platform_signing disagree/],
+    [evidence({ signed: true, signing: SIGNED, platform_signing: { macos: "signed", windows: "partial" } }), /signing and platform_signing disagree/],
+    [evidence({ signed: true, signing: SIGNED, platform_signing: { linux: "not applicable" } }), /signing and platform_signing disagree/],
+    [evidence({ platform_signing: undefined }), /platform_signing has an invalid shape/],
+    [evidence({ platform_signing: {} }), /platform_signing has an invalid shape/],
+    [evidence({ platform_signing: { ios: "unsigned" } }), /platform_signing has an invalid shape/],
+    [evidence({ platform_signing: { macos: "maybe" } }), /platform_signing has an invalid shape/],
     [evidence({ updater: { signed: true, key_id: null } }), /updater has an invalid shape/],
     [evidence({ updater: { signed: false, key_id: "`) [x](y" } }), /updater has an invalid shape/],
     [evidence({ source: { repository: "a/b c", commit: COMMIT } }), /source\.repository/],
@@ -277,4 +339,17 @@ test("the notes artifact is outside the publish job's release-* download pattern
   const names = workflow.match(/name: notes-\$\{\{ needs\.preflight\.outputs\.version \}\}/g) ?? [];
   assert.equal(names.length, 2, "the notes are uploaded and downloaded as notes-<version>");
   assert.ok(!workflow.includes("release-notes-"));
+});
+
+test("the release job's signing-status check matches the notes' first lines", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
+  assert.ok(workflow.includes(`true) [[ "$first" == '**Signing:** '* ]] ;;`));
+  assert.ok(workflow.includes(`false) [ "$first" = '> [!WARNING]' ] && [[ "$(sed -n 2p "$notes")" == '> **Unsigned installers.** '* ]] ;;`));
+  const signed = releaseNotes({ changelog, version: "1.2.0", evidence: evidence({ signed: true, signing: SIGNED, platform_signing: SIGNED_PLATFORMS }) });
+  assert.ok(signed.split("\n")[0].startsWith("**Signing:** "));
+  for (const ev of [evidence(), evidence({ signing: PARTIAL, platform_signing: { macos: "signed", windows: "unsigned", linux: "not applicable" } })]) {
+    const lines = releaseNotes({ changelog, version: "1.2.0", evidence: ev }).split("\n");
+    assert.equal(lines[0], "> [!WARNING]");
+    assert.ok(lines[1].startsWith("> **Unsigned installers.** "));
+  }
 });

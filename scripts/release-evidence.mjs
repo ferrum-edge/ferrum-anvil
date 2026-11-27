@@ -16,7 +16,10 @@
 //
 // Signing is reported exactly as recorded by the build jobs, which only mark a
 // target signed after verifying the signature on the runner. Nothing here can
-// turn an unsigned artifact into a signed one.
+// turn an unsigned artifact into a signed one. `platform_signing` summarizes
+// it per platform (Linux packages have no platform code signing: "not
+// applicable"), and the top-level `signed` is true only when every macOS and
+// Windows target is signed (scripts/release-notes.mjs `signingSummary`).
 //
 // Updater artifacts (`*.sig` beside an .app.tar.gz, AppImage or Windows
 // installer) and the shared latest.json exist only when the build ran with the
@@ -28,6 +31,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { UNSIGNED, signingSummary } from "./release-notes.mjs";
 import { builtPubkey, checkSignedVersion, decodePublicKey, unpairedSignatures, updaterArtifacts, verifyUpdaterSignature } from "./updater-manifest.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -40,7 +44,6 @@ if (!dist || !existsSync(dist)) {
   console.error("usage: release-evidence.mjs --dist <dir> [--test-runs <runs.json>] [--tag <tag>]");
   process.exit(2);
 }
-const UNSIGNED = "unsigned — owner credentials not configured";
 const GENERATED = new Set(["SHA256SUMS", "release-evidence.json"]);
 const META = new Set(["build-info.json"]);
 
@@ -124,6 +127,9 @@ for (const d of readdirSync(dist).sort()) {
   const reportFile = artifacts.find((a) => a.kind === "release-check-report");
   const report = reportFile ? readJson(join(dir, reportFile.name)) : null;
   const signed = info.signing?.signed === true;
+  // Platform code signing exists for macOS and Windows builds only. Older
+  // build-info.json files have no `applicable` field.
+  const signingApplicable = typeof info.signing?.applicable === "boolean" ? info.signing.applicable : info.os !== "Linux";
   const updater = updaterArtifacts(dir, info.target);
   targets.push({
     target: info.target,
@@ -132,6 +138,7 @@ for (const d of readdirSync(dist).sort()) {
     runner: info.runner ?? null,
     toolchain: info.toolchain ?? null,
     signed,
+    signing_applicable: signingApplicable,
     signing: signed ? info.signing.method : UNSIGNED,
     signing_detail: info.signing?.detail ?? null,
     release_check: report ? { result: report.result, graph: report.graph, report: reportFile.name, artifacts: report.artifacts } : { result: "missing" },
@@ -152,6 +159,7 @@ for (const t of targets) {
   if (!t.artifacts.some((a) => a.kind === "desktop-installer")) problems.push(`${t.target}: no desktop installer`);
   if (!t.artifacts.some((a) => a.kind === "cli")) problems.push(`${t.target}: no CLI archive`);
   if (!t.artifacts.some((a) => a.kind === "sbom")) problems.push(`${t.target}: no SBOM`);
+  if (t.signed && !t.signing_applicable) problems.push(`${t.target}: recorded as signed although its platform has no code signing`);
 }
 const allNames = [...targets.flatMap((t) => t.artifacts.map((a) => a.name)), ...shared.map((a) => a.name)];
 const dupes = allNames.filter((n, i) => allNames.indexOf(n) !== i);
@@ -237,7 +245,14 @@ writeFileSync(join(dist, "SHA256SUMS"), sums.join("\n") + "\n");
 
 const env = process.env;
 const runs = arg("--test-runs") && existsSync(arg("--test-runs")) ? readJson(arg("--test-runs")) : null;
-const allSigned = targets.every((t) => t.signed);
+let signingStatus;
+try {
+  signingStatus = signingSummary(targets);
+} catch (e) {
+  problems.push(`signing: ${e.message}`);
+  signingStatus = { signed: false, signing: UNSIGNED, platform_signing: {} };
+}
+const allSigned = signingStatus.signed;
 const evidence = {
   format: "anvil-release-evidence",
   version: 1,
@@ -263,7 +278,8 @@ const evidence = {
     run_url: env.GITHUB_RUN_ID ? `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` : null,
   },
   signed: allSigned,
-  signing: allSigned ? "signed and verified on the build runner (see targets[].signing)" : UNSIGNED,
+  signing: signingStatus.signing,
+  platform_signing: signingStatus.platform_signing,
   updater: updaterEvidence,
   targets,
   shared_artifacts: shared,
@@ -287,7 +303,9 @@ const evidence = {
   problems,
 };
 writeFileSync(join(dist, "release-evidence.json"), JSON.stringify(evidence, null, 2) + "\n");
-console.log(`wrote ${basename(dist)}/SHA256SUMS (${sums.length} files) and release-evidence.json — signed: ${allSigned}, updater signed: ${updaterSigned}`);
+console.log(
+  `wrote ${basename(dist)}/SHA256SUMS (${sums.length} files) and release-evidence.json — signed: ${allSigned} (${JSON.stringify(signingStatus.platform_signing)}), updater signed: ${updaterSigned}`,
+);
 if (problems.length) {
   console.error("release evidence problems:\n  " + problems.join("\n  "));
   process.exit(1);

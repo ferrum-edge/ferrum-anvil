@@ -11,10 +11,19 @@
 # `release` environment, which should hold the owner's credentials (Apple and
 # Windows code signing, TAURI_SIGNING_PRIVATE_KEY for the updater), and the
 # workflow passes none of them to a dry run. They reach only the bundle step,
-# never the compile step. A target is recorded as signed only after the
-# signature is verified on the runner; otherwise it is "unsigned — owner
-# credentials not configured". Signed updater artifacts and latest.json also
-# need the variable ANVIL_UPDATER_PUBKEY. See docs/release.md.
+# never the compile step. Which signing route each platform takes is chosen
+# from which secrets and variables exist (the "Signing route" step):
+#   macOS:   Developer ID certificate + notarization with an App Store Connect
+#            API key (preferred) or an Apple ID app-specific password
+#   Windows: Azure Artifact Signing through Tauri's bundle.windows.signCommand
+#            (OIDC or client secret; preferred) or an exportable .pfx
+# With none configured a platform builds unsigned, as before. A half-configured
+# route fails the run, and so does a configured route whose signature (or
+# notarization) does not verify: a release never ships unsigned by accident.
+# A target is recorded as signed only after the signature is verified on the
+# runner; otherwise it is "unsigned — owner credentials not configured".
+# Signed updater artifacts and latest.json also need the variable
+# ANVIL_UPDATER_PUBKEY. See docs/release.md.
 name: Release
 
 on:
@@ -140,6 +149,12 @@ jobs:
     # reviewers, anvil-v* deployment rule; the updater key lives there). A dry
     # run uses no environment and never sees the updater key.
     environment: ${{ needs.preflight.outputs.tag != '' && 'release' || '' }}
+    permissions:
+      contents: read
+      # Azure Artifact Signing's OIDC login (azure/login). The Entra ID
+      # federated credential trusts only this repository's `release`
+      # environment, so a token minted by a dry run (no environment) is refused.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -246,6 +261,79 @@ jobs:
             { echo "updater=false"; echo "config="; echo "pubkey="; } >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Signing route (tagged release only; reads whether secrets exist, never their values)
+        id: route
+        shell: bash
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          HAS_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+          HAS_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
+          HAS_APPLE_ID: ${{ secrets.APPLE_ID != '' }}
+          HAS_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD != '' }}
+          HAS_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID != '' }}
+          HAS_APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER != '' }}
+          HAS_APPLE_API_KEY: ${{ secrets.APPLE_API_KEY != '' }}
+          HAS_APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+          HAS_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+          HAS_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+          HAS_AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
+          HAS_AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID != '' }}
+          HAS_AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID != '' }}
+          HAS_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT != '' }}
+          HAS_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT != '' }}
+          HAS_ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE != '' }}
+        run: |
+          # Every platform's configuration is checked on every target, so a
+          # half-configured route fails the whole run before anything is built.
+          present() { local n v out=(); for n in "$@"; do v="HAS_$n"; [ "${!v}" = "true" ] && out+=("$n"); done; echo "${out[*]}"; }
+          missing() { local n v out=(); for n in "$@"; do v="HAS_$n"; [ "${!v}" = "true" ] || out+=("$n"); done; echo "${out[*]}"; }
+          fail() { echo "::error::$1"; exit 1; }
+          macos=none; windows=none
+          if [ -z "$TAG" ]; then
+            echo "Dry run: no signing credential is read; every target builds unsigned."
+          else
+            apple_cert=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD)
+            apple_api=(APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8)
+            apple_id=(APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID)
+            any="$(present "${apple_cert[@]}" APPLE_SIGNING_IDENTITY "${apple_api[@]}" "${apple_id[@]}")"
+            if [ -n "$any" ]; then
+              m="$(missing "${apple_cert[@]}")"; [ -z "$m" ] || fail "macOS signing is partly configured (set: $any); missing: $m"
+              api="$(present "${apple_api[@]}")"; m="$(missing "${apple_api[@]}")"
+              [ -z "$api" ] || [ -z "$m" ] || fail "App Store Connect API-key notarization is partly configured (set: $api); missing: $m"
+              idp="$(present APPLE_ID APPLE_PASSWORD)"; m="$(missing "${apple_id[@]}")"
+              [ -z "$idp" ] || [ -z "$m" ] || fail "Apple ID notarization is partly configured (set: $idp); missing: $m"
+              if [ -n "$api" ]; then
+                macos="api-key"
+                [ -z "$idp" ] || echo "::notice::both notarization credentials are configured; using the App Store Connect API key, not the Apple ID"
+              elif [ -n "$idp" ]; then
+                macos="apple-id"
+              else
+                fail "macOS signing needs notarization credentials too: APPLE_API_ISSUER, APPLE_API_KEY and APPLE_API_KEY_P8 (recommended), or APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID"
+              fi
+            fi
+            ats=(AZURE_TENANT_ID AZURE_CLIENT_ID ARTIFACT_SIGNING_ENDPOINT ARTIFACT_SIGNING_ACCOUNT ARTIFACT_SIGNING_CERTIFICATE_PROFILE)
+            pfx=(WINDOWS_CERTIFICATE WINDOWS_CERTIFICATE_PASSWORD)
+            any_ats="$(present "${ats[@]}" AZURE_CLIENT_SECRET)"; any_pfx="$(present "${pfx[@]}")"
+            if [ -n "$any_ats" ]; then
+              m="$(missing "${ats[@]}")"; [ -z "$m" ] || fail "Azure Artifact Signing is partly configured (set: $any_ats); missing: $m"
+              if [ "$HAS_AZURE_CLIENT_SECRET" = "true" ]; then windows="artifact-signing-secret"; else windows="artifact-signing-oidc"; fi
+              [ -z "$any_pfx" ] || echo "::notice::both Windows routes are configured; using Azure Artifact Signing, not the .pfx"
+            elif [ -n "$any_pfx" ]; then
+              m="$(missing "${pfx[@]}")"; [ -z "$m" ] || fail "Windows .pfx signing is partly configured (set: $any_pfx); missing: $m"
+              windows=pfx
+            fi
+            echo "Signing routes: macOS $macos, Windows $windows, Linux none (no platform code signing)."
+          fi
+          # Only this runner's platform route takes effect here.
+          route=none
+          case "$RUNNER_OS" in
+            macOS) route="$macos" ;;
+            Windows) route="$windows" ;;
+          esac
+          [ "$route" = "none" ] && [ -n "$TAG" ] && [ "$RUNNER_OS" != "Linux" ] && echo "::notice::no $RUNNER_OS signing credentials configured; $TARGET builds unsigned"
+          { echo "route=$route"; echo "macos=$([ "$RUNNER_OS" = macOS ] && echo "$macos" || echo none)"; echo "windows=$([ "$RUNNER_OS" = Windows ] && echo "$windows" || echo none)"; } >> "$GITHUB_OUTPUT"
+
       - name: Build desktop app (release profile, default features — no e2e; no signing credentials)
         shell: bash
         working-directory: apps/desktop
@@ -259,19 +347,15 @@ jobs:
           if [ -n "${UPDATER_CONFIG:-}" ]; then args+=(--config "$UPDATER_CONFIG"); fi
           npx tauri "${args[@]}"
 
-      - name: Import Windows signing certificate (tagged release with owner credentials only)
+      - name: Import Windows signing certificate (.pfx route, tagged release only)
         id: wincert
-        if: runner.os == 'Windows' && needs.preflight.outputs.tag != ''
+        if: runner.os == 'Windows' && needs.preflight.outputs.tag != '' && steps.route.outputs.windows == 'pfx'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          if (-not $env:WINDOWS_CERTIFICATE -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
-            "config=" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-            Write-Host "Windows signing credentials not configured; building unsigned."
-            exit 0
-          }
+          $ErrorActionPreference = "Stop"
           $pfx = Join-Path $env:RUNNER_TEMP "anvil-signing.pfx"
           try {
             [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
@@ -287,6 +371,79 @@ jobs:
           $cfg = @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" } } } | ConvertTo-Json -Compress -Depth 5
           "config=$cfg" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
+      # Azure Artifact Signing (formerly Trusted Signing): SignTool with
+      # Microsoft's Artifact Signing dlib, set as Tauri's
+      # bundle.windows.signCommand, so Tauri signs the app binary, the WiX and
+      # NSIS helpers, the uninstaller and both installers as it bundles them.
+      # Microsoft's setup: https://learn.microsoft.com/azure/artifact-signing/how-to-signing-integrations
+      - name: Azure login for Artifact Signing (OIDC route, tagged release only)
+        if: runner.os == 'Windows' && needs.preflight.outputs.tag != '' && steps.route.outputs.windows == 'artifact-signing-oidc'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: ${{ vars.AZURE_SUBSCRIPTION_ID == '' }}
+
+      - name: Artifact Signing sign command (tagged release only)
+        id: winats
+        if: runner.os == 'Windows' && needs.preflight.outputs.tag != '' && startsWith(steps.route.outputs.windows, 'artifact-signing')
+        shell: pwsh
+        env:
+          ROUTE: ${{ steps.route.outputs.windows }}
+          ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          CERTIFICATE_PROFILE: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          # Microsoft.ArtifactSigning.Client on nuget.org: version and the
+          # registry's own SHA-512 package hash (catalog `packageHash`).
+          DLIB_VERSION: "1.0.151"
+          DLIB_SHA512: "BvPApD/Bxbzj2uf8qBYJ0wPoZYvAySHfrsIMZ2JkMQXy7NdTbQ81Gs71A0n/tOYOIWk3xpKY3YVZ1VtH0jcZhQ=="
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Only an Artifact Signing regional endpoint, and plain resource names.
+          if ($env:ENDPOINT -notmatch '^https://[a-z0-9]+\.codesigning\.azure\.net/?$') { throw "ARTIFACT_SIGNING_ENDPOINT must be a regional https://<region>.codesigning.azure.net endpoint" }
+          if ($env:ACCOUNT -notmatch '^[A-Za-z0-9-]{3,64}$') { throw "ARTIFACT_SIGNING_ACCOUNT is not an account name" }
+          if ($env:CERTIFICATE_PROFILE -notmatch '^[A-Za-z0-9-]{3,64}$') { throw "ARTIFACT_SIGNING_CERTIFICATE_PROFILE is not a certificate profile name" }
+
+          # SignTool from the newest installed Windows SDK; the dlib needs
+          # 10.0.22621 or later (Microsoft: the 20348 SDK is not supported).
+          $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+          $signtool = Get-ChildItem -Path $kits -Directory |
+            Where-Object { $_.Name -match '^10\.0\.(\d+)\.\d+$' -and [int]$Matches[1] -ge 22621 -and (Test-Path (Join-Path $_.FullName "x64\signtool.exe")) } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 |
+            ForEach-Object { Join-Path $_.FullName "x64\signtool.exe" }
+          if (-not $signtool) { throw "no x64 signtool.exe from Windows SDK 10.0.22621 or later under $kits" }
+          Write-Host "SignTool: $signtool"
+
+          $dir = Join-Path $env:RUNNER_TEMP "artifact-signing"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $pkg = Join-Path $dir "client.zip"
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/$($env:DLIB_VERSION)/microsoft.artifactsigning.client.$($env:DLIB_VERSION).nupkg"
+          Invoke-WebRequest -Uri $url -OutFile $pkg -MaximumRetryCount 3 -RetryIntervalSec 5
+          $sha = [Convert]::ToBase64String([Security.Cryptography.SHA512]::Create().ComputeHash([IO.File]::ReadAllBytes($pkg)))
+          if ($sha -ne $env:DLIB_SHA512) { throw "Microsoft.ArtifactSigning.Client $($env:DLIB_VERSION) does not match its pinned SHA-512" }
+          Expand-Archive -Path $pkg -DestinationPath (Join-Path $dir "client") -Force
+          $dlib = Join-Path $dir "client\bin\x64\Azure.CodeSigning.Dlib.dll"
+          $sig = Get-AuthenticodeSignature -LiteralPath $dlib
+          if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw "Azure.CodeSigning.Dlib.dll is not validly signed by Microsoft ($($sig.Status))" }
+
+          # DefaultAzureCredential, limited to the one credential this route
+          # uses: the Azure CLI session from azure/login (OIDC), or
+          # AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_CLIENT_SECRET in the
+          # bundle step's environment (EnvironmentCredential).
+          $exclude = @("ManagedIdentityCredential", "WorkloadIdentityCredential", "SharedTokenCacheCredential", "VisualStudioCredential", "VisualStudioCodeCredential", "AzurePowerShellCredential", "AzureDeveloperCliCredential", "InteractiveBrowserCredential")
+          if ($env:ROUTE -eq "artifact-signing-secret") { $exclude += "AzureCliCredential" }
+          $metadata = Join-Path $dir "metadata.json"
+          @{ Endpoint = $env:ENDPOINT; CodeSigningAccountName = $env:ACCOUNT; CertificateProfileName = $env:CERTIFICATE_PROFILE; CorrelationId = "ferrum-anvil-$($env:GITHUB_RUN_ID)-$($env:TARGET)"; ExcludeCredentials = $exclude } |
+            ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8 -LiteralPath $metadata
+
+          # Tauri replaces "%1" with each file it signs (object notation keeps
+          # the spaces in the SignTool path and the description).
+          $cfg = Join-Path $env:RUNNER_TEMP "anvil-artifact-signing.conf.json"
+          @{ bundle = @{ windows = @{ signCommand = @{ cmd = $signtool; args = @("sign", "/v", "/fd", "SHA256", "/tr", "http://timestamp.acs.microsoft.com", "/td", "SHA256", "/d", "Ferrum Anvil", "/dlib", $dlib, "/dmdf", $metadata, "%1") } } } } |
+            ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 -LiteralPath $cfg
+          "config=$cfg" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
       - name: Bundle and sign
         shell: bash
         working-directory: apps/desktop
@@ -297,7 +454,15 @@ jobs:
           APPLE_ID: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_TEAM_ID || '' }}
-          WIN_SIGN_CONFIG: ${{ steps.wincert.outputs.config }}
+          APPLE_API_ISSUER: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_API_KEY || '' }}
+          APPLE_API_KEY_P8: ${{ needs.preflight.outputs.tag != '' && secrets.APPLE_API_KEY_P8 || '' }}
+          MACOS_ROUTE: ${{ steps.route.outputs.macos }}
+          # Artifact Signing with a client secret (EnvironmentCredential).
+          AZURE_TENANT_ID: ${{ steps.route.outputs.windows == 'artifact-signing-secret' && vars.AZURE_TENANT_ID || '' }}
+          AZURE_CLIENT_ID: ${{ steps.route.outputs.windows == 'artifact-signing-secret' && vars.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ steps.route.outputs.windows == 'artifact-signing-secret' && secrets.AZURE_CLIENT_SECRET || '' }}
+          WIN_SIGN_CONFIG: ${{ steps.wincert.outputs.config || steps.winats.outputs.config }}
           UPDATER_CONFIG: ${{ steps.updater.outputs.config }}
           # Only a tagged release (in the `release` environment) receives any
           # signing credential; a dry run is always unsigned.
@@ -309,8 +474,23 @@ jobs:
           # loads its EGL driver against the host's copy). Read by linuxdeploy.
           LINUXDEPLOY_EXCLUDED_LIBRARIES: libwayland-client.so*
         run: |
+          # macOS: only the selected route's credentials reach Tauri (its
+          # bundler prefers APPLE_ID over APPLE_API_KEY when both are set).
+          case "${MACOS_ROUTE:-none}" in
+            api-key)
+              unset APPLE_ID APPLE_PASSWORD
+              [[ "$APPLE_API_KEY" =~ ^[A-Z0-9]{8,16}$ ]] || { echo "::error::APPLE_API_KEY must be the App Store Connect key ID (letters and digits), not the key itself"; exit 1; }
+              keydir="$RUNNER_TEMP/anvil-asc-key"
+              (umask 077 && mkdir -p "$keydir" && printf '%s\n' "$APPLE_API_KEY_P8" > "$keydir/AuthKey_$APPLE_API_KEY.p8")
+              export APPLE_API_KEY_PATH="$keydir/AuthKey_$APPLE_API_KEY.p8"
+              grep -q -- '-----BEGIN PRIVATE KEY-----' "$APPLE_API_KEY_PATH" || { rm -rf "$keydir"; echo "::error::APPLE_API_KEY_P8 must hold the contents of the AuthKey_<key id>.p8 file"; exit 1; }
+              trap 'rm -rf "$keydir"' EXIT ;;
+            apple-id) unset APPLE_API_ISSUER APPLE_API_KEY ;;
+            *) unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_ISSUER APPLE_API_KEY ;;
+          esac
+          unset APPLE_API_KEY_P8
           # Unset empty credentials so Tauri never attempts a half-configured signing.
-          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_ISSUER APPLE_API_KEY AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
             [ -n "${!v:-}" ] || unset "$v"
           done
           if [ -z "${UPDATER_CONFIG:-}" ]; then unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; fi
@@ -411,7 +591,7 @@ jobs:
             scripts/release-check.sh "${args[@]}" "${files[@]}"
           fi
 
-      - name: Verify signatures (records signed only if verified)
+      - name: Verify signatures (records signed only if verified; fails if configured signing did not verify)
         id: signing
         shell: bash
         env:
@@ -419,6 +599,7 @@ jobs:
           UPDATER: ${{ steps.updater.outputs.updater }}
           UPDATER_PUBKEY: ${{ steps.updater.outputs.pubkey }}
           APP: ${{ steps.collect.outputs.app }}
+          ROUTE: ${{ steps.route.outputs.route }}
         run: |
           out="dist/$TARGET"
           # Evidence that the updater public key is compiled into the app binary.
@@ -426,7 +607,7 @@ jobs:
             [ -n "$UPDATER_PUBKEY" ] || { echo "::error::updater configured without a public key"; exit 1; }
             LC_ALL=C grep -aqF "$UPDATER_PUBKEY" "$APP" || { echo "::error::the updater public key is not in $APP"; exit 1; }
           fi
-          signed=false; method="none"; detail="unsigned — owner credentials not configured"
+          signed=false; applicable=true; notarized=false; method="none"; detail="unsigned — owner credentials not configured"
           case "$RUNNER_OS" in
             macOS)
               app="$(find "target/$TARGET/release/bundle/macos" -maxdepth 1 -name "*.app" | head -1)"
@@ -435,8 +616,9 @@ jobs:
                 signed=true; method="Developer ID codesign"
                 detail="$(grep -E '^(Authority|TeamIdentifier)=' <<<"$info" | head -2 | tr '\n' ' ')"
                 dmg="$(find "$out" -maxdepth 1 -name "*.dmg" | head -1)"
-                if xcrun stapler validate "$dmg" >/dev/null 2>&1 || spctl -a -t exec -vv "$app" 2>&1 | grep -q "Notarized Developer ID"; then
-                  method="$method + notarized"
+                # Tauri notarizes and staples the .app; the DMG is built from it.
+                if xcrun stapler validate "$app" >/dev/null 2>&1 || xcrun stapler validate "$dmg" >/dev/null 2>&1 || spctl -a -t exec -vv "$app" 2>&1 | grep -q "Notarized Developer ID"; then
+                  notarized=true; method="$method + notarized"
                 else
                   method="$method (not notarized)"
                 fi
@@ -444,28 +626,49 @@ jobs:
                 detail="unsigned — owner credentials not configured (ad-hoc signature only, not a Developer ID)"
               fi ;;
             Windows)
-              status="$(pwsh -NoProfile -Command "\$s = Get-ChildItem '$out' -Include *.msi,*-setup.exe -Recurse | ForEach-Object { (Get-AuthenticodeSignature \$_.FullName).Status }; if (\$s -and -not (\$s | Where-Object { \$_ -ne 'Valid' })) { 'Valid' } else { (\$s -join ',') }")"
-              if [ "$status" = "Valid" ]; then signed=true; method="Authenticode"; detail="all installers: Valid"; fi ;;
+              # Every MSI and NSIS installer must be Valid. (Tauri restores the
+              # unsigned app binary in target/ after bundling; the signed copy
+              # is inside the installers.)
+              IFS=$'\t' read -r status subject < <(pwsh -NoProfile -File scripts/authenticode-status.ps1 -Dir "$out") || true
+              subject="${subject%$'\r'}"
+              if [ "$status" = "Valid" ]; then signed=true; method="Authenticode"; detail="all installers: Valid; signer: $subject"; fi ;;
             Linux)
+              applicable=false
               detail="unsigned — owner credentials not configured (no platform code signing for .deb/.rpm/.AppImage; verify with SHA256SUMS)" ;;
           esac
-          echo "signed=$signed method=$method detail=$detail"
+          if [ "$signed" = "true" ]; then
+            case "$ROUTE" in
+              api-key) method="$method (App Store Connect API key)" ;;
+              apple-id) method="$method (Apple ID)" ;;
+              pfx) method="$method (imported .pfx certificate)" ;;
+              artifact-signing-*) method="$method (Azure Artifact Signing)" ;;
+            esac
+          fi
+          echo "route=$ROUTE signed=$signed method=$method detail=$detail"
+          # Credentials were configured for this platform: anything less than
+          # a verified (and, on macOS, notarized) signature fails the release.
+          if [ "${ROUTE:-none}" != "none" ]; then
+            [ "$signed" = "true" ] || { echo "::error::signing is configured for $RUNNER_OS (route $ROUTE) but $TARGET is not signed: $detail"; exit 1; }
+            if [ "$RUNNER_OS" = "macOS" ] && [ "$notarized" != "true" ]; then
+              echo "::error::$TARGET is Developer ID signed but not notarized (route $ROUTE); refusing to record or ship it"; exit 1
+            fi
+          fi
           # shellcheck disable=SC2016 # JavaScript source, not shell
           node -e '
-            const [target, os, arch, runner, signed, method, detail, updater, pubkey] = process.argv.slice(1);
+            const [target, os, arch, runner, signed, method, detail, updater, pubkey, applicable, route] = process.argv.slice(1);
             const { execSync } = require("node:child_process");
             const v = (c) => { try { return execSync(c, { encoding: "utf8" }).trim(); } catch { return null; } };
             const info = {
               target, os, arch, runner,
               toolchain: { rustc: v("rustc -V"), cargo: v("cargo -V"), node: process.version, tauri_cli: v("node apps/desktop/node_modules/@tauri-apps/cli/tauri.js -V") },
-              signing: { signed: signed === "true", method, detail },
+              signing: { signed: signed === "true", applicable: applicable === "true", route, method, detail },
               // Built with the owner updater key: the public key compiled into the
               // app (found in the binary above), which the publish job verifies
               // every signature against.
               updater: updater === "true" ? { configured: true, pubkey, embedded: true } : { configured: false },
             };
             require("node:fs").writeFileSync(`dist/${target}/build-info.json`, JSON.stringify(info, null, 2) + "\n");
-          ' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "$RUNNER_LABEL" "$signed" "$method" "$detail" "$UPDATER" "$UPDATER_PUBKEY"
+          ' "$TARGET" "$RUNNER_OS" "${TARGET%%-*}" "$RUNNER_LABEL" "$signed" "$method" "$detail" "$UPDATER" "$UPDATER_PUBKEY" "$applicable" "${ROUTE:-none}"
 
       - name: CycloneDX SBOMs (Rust, per target)
         shell: bash
@@ -621,7 +824,7 @@ jobs:
           # consistency check: SHA256SUMS does not cover that file).
           first="$(head -n 1 "$notes")"
           case "$(jq -r '.signed | if type == "boolean" then tostring else "invalid" end' upload/release-evidence.json)" in
-            true) [[ "$first" == '**Signing:** the installers are code-signed '* ]] ;;
+            true) [[ "$first" == '**Signing:** '* ]] ;;
             false) [ "$first" = '> [!WARNING]' ] && [[ "$(sed -n 2p "$notes")" == '> **Unsigned installers.** '* ]] ;;
             *) false ;;
           esac || { echo "::error::the release notes' signing status does not match release-evidence.json"; exit 1; }
