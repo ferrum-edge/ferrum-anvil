@@ -99,5 +99,10 @@ plugin_configs:
               - name: ping
                 method: GET
                 path: /e21-bridge/ping
+      # Listed explicitly: discovery.on_new_tool defaults to hide_until_configured, which
+      # refused the unlisted generated tool with -32001 before the route check (Lab run
+      # 46068538969).
       policy:
         default_action: allow
+        tools:
+          br.ping: { action: allow }
