@@ -22,13 +22,8 @@ new on each attempt, retry and load iteration.
   (`http://www.w3.org/2001/10/xml-exc-c14n#`) for `ds:SignedInfo` and as the
   one transform of every reference. An optional InclusiveNamespaces
   PrefixList (for QNames in content such as `xsi:type="t:Kind"`) is applied to
-  every reference. A listed prefix is declared wherever it is in scope and not
-  already in effect, as the specification and Ferrum Edge read it. libxml2
-  (and so xmlsec1) differs only when a listed prefix is redeclared on an
-  element *below* the signed one: it declares it there only where it is used.
-  List prefixes that are declared on or above the Body, as is usual, and the
-  two agree; the interop workflow checks both the agreement and that this
-  one divergence is still the only one.
+  every reference: a listed prefix is declared wherever it is in scope and
+  not already in effect (Canonical XML's rule), as libxml2 and Ferrum Edge do.
 - **Digests.** SHA-256 (`http://www.w3.org/2001/04/xmlenc#sha256`).
 - **Signature.** RSA PKCS#1 v1.5 with SHA-256
   (`http://www.w3.org/2001/04/xmldsig-more#rsa-sha256`) for an RSA key, or
@@ -118,7 +113,7 @@ value at run time) or a vault reference, as for any other credential.
 - The `xmldsig-interop` workflow (`crates/anvil-auth/tests/xmldsig_interop.rs`):
   canonical forms equal libxml2's (`xmllint --exc-c14n`, and lxml's exclusive
   C14N for every element subtree with and without comments and with prefix
-  lists), and envelopes Anvil signs with OpenSSL-made RSA-2048/3072 and P-256
+  lists; `#default`, which lxml cannot pass, through xmlsec1), and envelopes Anvil signs with OpenSSL-made RSA-2048/3072 and P-256
   keys verify with `xmlsec1`, which refuses them once the Body or the
   Timestamp changes.
 - Lab scenario AUTH-030 ([lab/auth-tls.md](lab/auth-tls.md)): Ferrum Edge's
