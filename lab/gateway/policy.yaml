@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "policy" (ferrum-edge v0.9.20, file mode)
+# Ferrum Anvil failure lab - profile "policy" (ferrum-edge v0.9.21, file mode)
 #
 # Scenarios: GW-001 half-open recovery (circuit_breaker), GW-004 (adaptive_concurrency),
 #            GW-009 (response_transformer output ceiling + response_size_limiting lookalike),

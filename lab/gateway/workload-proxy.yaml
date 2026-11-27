@@ -1,4 +1,4 @@
-# Ferrum Anvil failure lab - profile "workload", relying gateway (ferrum-edge v0.9.20, file mode)
+# Ferrum Anvil failure lab - profile "workload", relying gateway (ferrum-edge v0.9.21, file mode)
 #
 # Scenarios: WL-002 (JWT-SVID accepted), WL-003 (wrong audience), WL-004 (expired, sent anyway)
 #            (see docs/lab/workload.md).

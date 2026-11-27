@@ -20,10 +20,10 @@ use std::sync::OnceLock;
 
 /// The source-audited release new profiles default to. The audit and its
 /// qualification status (the hosted all-profile Lab run, also recorded in the
-/// catalog's `qualification`) are in `docs/audit/gateway-0.9.20-delta.md`.
-pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.20";
+/// catalog's `qualification`) are in `docs/audit/gateway-0.9.21-delta.md`.
+pub const DEFAULT_COMPATIBILITY_ID: &str = "ferrum-edge-0.9.21";
 
-const EDGE_0_9_20: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json");
+const EDGE_0_9_21: &str = include_str!("../../../catalog/ferrum/ferrum-edge-0.9.21/outcomes.json");
 
 /// Every embedded catalog, oldest release first: (compatibility id, outcomes.json).
 const EMBEDDED: &[(&str, &str)] = &[
@@ -35,7 +35,8 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("ferrum-edge-0.9.11", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.11/outcomes.json")),
     ("ferrum-edge-0.9.14", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.14/outcomes.json")),
     ("ferrum-edge-0.9.15", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.15/outcomes.json")),
-    ("ferrum-edge-0.9.20", EDGE_0_9_20),
+    ("ferrum-edge-0.9.20", include_str!("../../../catalog/ferrum/ferrum-edge-0.9.20/outcomes.json")),
+    ("ferrum-edge-0.9.21", EDGE_0_9_21),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -562,6 +563,7 @@ mod tests {
                 "ferrum-edge-0.9.14",
                 "ferrum-edge-0.9.15",
                 "ferrum-edge-0.9.20",
+                "ferrum-edge-0.9.21",
             ]
         );
         for id in ids {
@@ -580,11 +582,11 @@ mod tests {
             assert!(c.outcomes.iter().all(|o| seen.insert(o.id.as_str())), "{id}: duplicate outcome ids");
         }
         assert_eq!(default_catalog().compatibility_id, DEFAULT_COMPATIBILITY_ID);
-        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.20");
+        assert_eq!(default_catalog().release_label(), "Ferrum Edge 0.9.21");
     }
 
     /// `request_timeout` joined the closed vocabulary in 0.9.8 (0.9.9,
-    /// 0.9.10, 0.9.11, 0.9.14, 0.9.15 and 0.9.20 keep it); the older catalogs do not
+    /// 0.9.10, 0.9.11, 0.9.14, 0.9.15, 0.9.20 and 0.9.21 keep it); the older catalogs do not
     /// know it, so it is not part of the shared vocabulary.
     #[test]
     fn request_timeout_is_a_token_of_the_0_9_8_and_later_catalogs_only() {
@@ -623,9 +625,9 @@ mod tests {
 
     /// The `ai_prompt_shield` MCP refusals new in 0.9.10 (a non-UTF-8 request
     /// charset, an unparseable body that may carry a tool call) match from
-    /// their public body from 0.9.10 onward, including 0.9.11, 0.9.14, 0.9.15
-    /// and 0.9.20. The content-encoding message existed at 0.9.9 and matches
-    /// all six.
+    /// their public body from 0.9.10 onward, including 0.9.11, 0.9.14, 0.9.15,
+    /// 0.9.20 and 0.9.21. The content-encoding message existed at 0.9.9 and
+    /// matches all seven.
     #[test]
     fn outcomes_new_in_0_9_10_match_only_their_own_catalog() {
         for reason in ["unsupported_charset", "jsonrpc_request_unparseable"] {
@@ -633,7 +635,14 @@ mod tests {
             let bf = body_facts(Some("application/json"), text.as_bytes());
             let signal = Signal { status: 400, token: None, body_text: &text, body: &bf, grpc_status: None, grpc_no_message: false };
             let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
-            for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20"] {
+            for id in [
+                "ferrum-edge-0.9.10",
+                "ferrum-edge-0.9.11",
+                "ferrum-edge-0.9.14",
+                "ferrum-edge-0.9.15",
+                "ferrum-edge-0.9.20",
+                "ferrum-edge-0.9.21",
+            ] {
                 let catalog = catalog_for(id).unwrap();
                 let expected = ["plugin.ai_prompt_shield.mcp_body_uninspectable"];
                 assert_eq!(ids(catalog), expected, "{id}: {reason}");
@@ -645,7 +654,14 @@ mod tests {
         let bf = body_facts(Some("application/json"), text.as_bytes());
         let signal = Signal { status: 400, token: None, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
         let ids = |c: &FerrumCatalog| c.match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect::<Vec<_>>();
-        for id in ["ferrum-edge-0.9.10", "ferrum-edge-0.9.11", "ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20"] {
+        for id in [
+            "ferrum-edge-0.9.10",
+            "ferrum-edge-0.9.11",
+            "ferrum-edge-0.9.14",
+            "ferrum-edge-0.9.15",
+            "ferrum-edge-0.9.20",
+            "ferrum-edge-0.9.21",
+        ] {
             let expected = ["plugin.ai_prompt_shield.mcp_body_uninspectable"];
             assert_eq!(ids(catalog_for(id).unwrap()), expected);
         }
@@ -655,7 +671,7 @@ mod tests {
 
     /// 0.9.14 answers a buffered-collector read error with the eager
     /// collector's body, so that body is ambiguous between the two collectors
-    /// from 0.9.14 (0.9.15 and 0.9.20 keep it) and the old body matches only the earlier
+    /// from 0.9.14 (0.9.15, 0.9.20 and 0.9.21 keep it) and the old body matches only the earlier
     /// catalogs.
     #[test]
     fn buffered_read_error_body_changed_in_0_9_14() {
@@ -670,7 +686,7 @@ mod tests {
         let current = r#"{"error":"Backend response body read failed"}"#;
         let old = r#"{"error":"Backend response read error"}"#;
         let both = ["upstream.body_read_failed.buffered_collector", "upstream.body_read_failed.eager_buffer"];
-        for id in ["ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20"] {
+        for id in ["ferrum-edge-0.9.14", "ferrum-edge-0.9.15", "ferrum-edge-0.9.20", "ferrum-edge-0.9.21"] {
             assert_eq!(ids(id, current), both, "{id}");
             assert!(ids(id, old).is_empty(), "{id}");
         }
@@ -716,6 +732,7 @@ mod tests {
         assert_eq!(ids("ferrum-edge-0.9.14"), ["plugin.oidc_relying_party.challenge_browser_state_cache_full"]);
         assert!(ids("ferrum-edge-0.9.15").is_empty());
         assert_eq!(ids("ferrum-edge-0.9.20"), ["plugin.oidc_relying_party.challenge_browser_state_cache_full"]);
+        assert_eq!(ids("ferrum-edge-0.9.21"), ["plugin.oidc_relying_party.challenge_browser_state_cache_full"]);
     }
 
     /// Refusals new between 0.9.15 and 0.9.20 (the proxy hop limit and its
@@ -882,6 +899,88 @@ mod tests {
             let m = c.match_jsonrpc_error(&JsonRpcSignal { status: 200, token: None, code: -32001, message, gateway: None });
             assert_eq!(m.exact.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), [expected], "{message}");
         }
+    }
+
+    /// Refusals new between 0.9.20 and 0.9.21 (the token plugins' ambiguous
+    /// query alias, the transformers' duplicate-member screen, untranslated
+    /// gRPC-Web on a route with gateway-asserted headers, and the repeated
+    /// Content-Type guard) match from their public signal in the 0.9.21
+    /// catalog only; the removed hmac_auth v1 nonce refusal matches only
+    /// 0.9.20.
+    #[test]
+    fn outcomes_new_in_0_9_21_match_only_their_own_catalog() {
+        let ids_for = |id: &str, status: u16, token: Option<&'static str>, text: &str| {
+            let bf = body_facts(Some("application/json"), text.as_bytes());
+            let signal = Signal { status, token, body_text: text, body: &bf, grpc_status: None, grpc_no_message: false };
+            let mut ids: Vec<String> = catalog_for(id).unwrap().match_signal(&signal).into_iter().map(|(o, _)| o.id.clone()).collect();
+            ids.sort();
+            ids
+        };
+        let ambiguous = r#"{"error":"Ambiguous token query parameter"}"#;
+        assert_eq!(
+            ids_for("ferrum-edge-0.9.21", 401, None, ambiguous),
+            [
+                "plugin.jwks_auth.ambiguous_query_token",
+                "plugin.jwt_auth.ambiguous_query_token",
+                "plugin.oauth2_introspection.ambiguous_query_token"
+            ]
+        );
+        assert!(ids_for("ferrum-edge-0.9.20", 401, None, ambiguous).is_empty());
+        let cases = [
+            (
+                400,
+                None,
+                r#"{"error":"Request body contains duplicate JSON object member names or a JSON document the gateway could not evaluate"}"#,
+                "plugin.request_transformer.ambiguous_json_body",
+            ),
+            (
+                502,
+                Some("backend_error"),
+                r#"{"error":"Backend response body contains duplicate JSON object member names or a JSON document the gateway could not evaluate"}"#,
+                "plugin.response_transformer.ambiguous_json_body",
+            ),
+            (
+                415,
+                None,
+                r#"{"error":"gRPC-Web must be translated on a route with gateway-asserted headers"}"#,
+                "gateway.routing.grpc_web_untranslated_on_assertion_route",
+            ),
+        ];
+        for (status, token, text, expected) in cases {
+            assert_eq!(ids_for("ferrum-edge-0.9.21", status, token, text), [expected], "{text}");
+            assert!(ids_for("ferrum-edge-0.9.20", status, token, text).is_empty(), "{text}");
+        }
+        // The repeated Content-Type refusals join the protocol header guard,
+        // which 0.9.20 already had for its other bodies.
+        for text in [
+            r#"{"error":"Request contains multiple Content-Type headers"}"#,
+            r#"{"error":"Content-Type header contains more than one media type"}"#,
+        ] {
+            assert_eq!(ids_for("ferrum-edge-0.9.21", 400, None, text), ["frontend_parse.protocol_header_violation"], "{text}");
+            assert!(ids_for("ferrum-edge-0.9.20", 400, None, text).is_empty(), "{text}");
+        }
+        // hmac_auth's v1 signing profile is gone (#7114), and its nonce refusal with it.
+        let v1 = r#"{"error":"HMAC authorization nonce is not accepted by this signing profile"}"#;
+        assert_eq!(ids_for("ferrum-edge-0.9.20", 401, None, v1), ["plugin.hmac_auth.nonce_not_accepted_v1"]);
+        assert!(ids_for("ferrum-edge-0.9.21", 401, None, v1).is_empty());
+        // A backend refusal of a WebSocket upgrade is relayed from 0.9.21
+        // (#7414), but the gateway 502 remains for answers it cannot relay,
+        // with either token.
+        let ws = r#"{"error":"Backend WebSocket connection failed"}"#;
+        for token in ["connection_failure", "backend_error"] {
+            assert_eq!(ids_for("ferrum-edge-0.9.21", 502, Some(token), ws), ["protocol.ws.backend_connect_failed"], "{token}");
+        }
+        // The OpenAPI bridge refusal outside the route (#7410) is its own exact JSON-RPC outcome.
+        let bridge = JsonRpcSignal {
+            status: 200,
+            token: None,
+            code: -32603,
+            message: "OpenAPI bridge operation path is outside this proxy's route",
+            gateway: None,
+        };
+        let m = catalog_for("ferrum-edge-0.9.21").unwrap().match_jsonrpc_error(&bridge);
+        assert_eq!(m.exact.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), ["plugin.mcp_gateway.openapi_bridge_outside_route"]);
+        assert!(catalog_for("ferrum-edge-0.9.20").unwrap().match_jsonrpc_error(&bridge).exact.is_empty());
     }
 
     #[test]

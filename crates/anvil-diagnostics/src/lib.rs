@@ -24,7 +24,7 @@ pub use facts::{BodyFacts, DiagnosticInput, FerrumTrust};
 
 /// Catalog versions this build embeds: the findings wording catalog and every
 /// Ferrum compatibility catalog, oldest release first (e.g.
-/// `findings:V ferrum:ferrum-edge-0.9.5,ferrum-edge-0.9.7,…,ferrum-edge-0.9.20`).
+/// `findings:V ferrum:ferrum-edge-0.9.5,ferrum-edge-0.9.7,…,ferrum-edge-0.9.21`).
 pub fn catalog_version() -> String {
     format!("findings:{} ferrum:{}", render::catalog().version, ferrum::compatibility_ids().collect::<Vec<_>>().join(","))
 }

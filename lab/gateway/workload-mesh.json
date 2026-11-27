@@ -47,6 +47,10 @@
       {
         "name": "anvil-lab-workload-strict",
         "namespace": "ferrum",
+        "scope": {
+          "kind": "namespace",
+          "namespace": "ferrum"
+        },
         "mtls_mode": "strict"
       }
     ]

@@ -43,9 +43,10 @@ const now = () => new Date().toISOString();
 
 /** Ferrum Edge releases with a source-audited catalog in anvil-diagnostics
  * (`catalog/ferrum/<id>/outcomes.json`), newest first; new profiles use the first.
- * Only 0.9.20 is supported; the older catalogs stay for existing profiles. */
+ * Only 0.9.21 is supported; the older catalogs stay for existing profiles. */
 export const FERRUM_COMPATIBILITY = [
-  { id: "ferrum-edge-0.9.20", label: "Ferrum Edge 0.9.20" },
+  { id: "ferrum-edge-0.9.21", label: "Ferrum Edge 0.9.21" },
+  { id: "ferrum-edge-0.9.20", label: "Ferrum Edge 0.9.20 (no longer supported)" },
   { id: "ferrum-edge-0.9.15", label: "Ferrum Edge 0.9.15 (no longer supported)" },
   { id: "ferrum-edge-0.9.14", label: "Ferrum Edge 0.9.14 (no longer supported)" },
   { id: "ferrum-edge-0.9.11", label: "Ferrum Edge 0.9.11 (no longer supported)" },

@@ -54,6 +54,10 @@
       {
         "name": "anvil-lab-{{MTLS_MODE}}",
         "namespace": "ferrum",
+        "scope": {
+          "kind": "namespace",
+          "namespace": "ferrum"
+        },
         "mtls_mode": "{{MTLS_MODE}}"
       }
     ]

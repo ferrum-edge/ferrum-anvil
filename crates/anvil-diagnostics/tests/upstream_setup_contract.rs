@@ -1,5 +1,5 @@
 //! Public-signal contract tests for gateway-to-upstream setup outcomes that
-//! the lab cannot (or may not) reproduce live on 0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10, 0.9.11, 0.9.14, 0.9.15 or 0.9.20:
+//! the lab cannot (or may not) reproduce live on 0.9.5, 0.9.7, 0.9.8, 0.9.9, 0.9.10, 0.9.11, 0.9.14, 0.9.15, 0.9.20 or 0.9.21:
 //!
 //! * UP-017 ephemeral-port exhaustion (EADDRNOTAVAIL at connect): no audited release has a
 //!   dial-admission hook, and exhausting the lab host's real ephemeral ports
@@ -16,12 +16,13 @@
 //!   releases, direct H1 on 0.9.11 (hosted qualification recorded in
 //!   `docs/audit/gateway-0.9.11-delta.md`), 0.9.14 (hosted qualification
 //!   recorded in `docs/audit/gateway-0.9.14-delta.md`), 0.9.15 (hosted
-//!   qualification recorded in `docs/audit/gateway-0.9.15-delta.md`) and
-//!   0.9.20 (recorded in `docs/audit/gateway-0.9.20-delta.md`).
+//!   qualification recorded in `docs/audit/gateway-0.9.15-delta.md`),
+//!   0.9.20 (recorded in `docs/audit/gateway-0.9.20-delta.md`) and 0.9.21
+//!   (`docs/audit/gateway-0.9.21-delta.md`).
 //!
 //! These are NOT live reproductions and NOT hook-based tests: they feed only
 //! the exact public signal the source-audited catalogs record for each outcome
-//! (`catalog/ferrum/ferrum-edge-{0.9.5,0.9.7,0.9.8,0.9.9,0.9.10,0.9.11,0.9.14,0.9.15,0.9.20}/outcomes.json`;
+//! (`catalog/ferrum/ferrum-edge-{0.9.5,0.9.7,0.9.8,0.9.9,0.9.10,0.9.11,0.9.14,0.9.15,0.9.20,0.9.21}/outcomes.json`;
 //! every test runs against each embedded release's catalog) through the engine's
 //! diagnosis and assert what Anvil may and may not conclude from it. No
 //! private ground truth (operator `error_class`) is ever an input.
@@ -84,7 +85,7 @@ fn diagnose_http(r: &ResponseRecord, body: &[u8], trust: FerrumTrust) -> Diagnos
 
 /// The strongest trust Anvil can have in an audited gateway release: a trusted
 /// profile over verified TLS. Markers stay spoofable on every audited release
-/// (0.9.5 through 0.9.20), so attribution never exceeds `likely`.
+/// (0.9.5 through 0.9.21), so attribution never exceeds `likely`.
 fn trusted_verified(compat: &str) -> FerrumTrust {
     FerrumTrust::Trusted { profile_name: "lab".into(), compatibility_id: compat.into(), channel_authenticated: true }
 }
@@ -169,7 +170,7 @@ fn ambiguous_candidates(d: &Diagnosis) -> (&DiagnosticFinding, Vec<String>) {
 }
 
 /// UP-017 — public-signal contract test, NOT a live reproduction and NOT a
-/// dial hook: Ferrum Edge 0.9.5 / 0.9.7 / 0.9.8 / 0.9.9 / 0.9.10 / 0.9.11 / 0.9.14 / 0.9.15 / 0.9.20 have no
+/// dial hook: Ferrum Edge 0.9.5 / 0.9.7 / 0.9.8 / 0.9.9 / 0.9.10 / 0.9.11 / 0.9.14 / 0.9.15 / 0.9.20 / 0.9.21 have no
 /// lab dial-admission hook, and draining
 /// the host's ephemeral ports would be unsafe. The gateway answers port
 /// exhaustion with the same `502 connection_failure {"error":"Backend

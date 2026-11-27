@@ -203,12 +203,13 @@ fn differences(expected: &BTreeSet<String>, actual: &BTreeSet<String>) -> (Vec<S
     (missing, extra)
 }
 
-/// The published pin targets Edge v0.9.20. Its vocabulary adds the
+/// The published pin targets Edge v0.9.21. Its vocabulary has the
 /// `loop_detected` token (Edge v0.9.17), which the retained v0.9.9 to v0.9.15
-/// catalogs do not have, so it covers the v0.9.20 catalog only; their
-/// historical release-to-contract mappings remain contracts-edge-0.9.9(-r2),
+/// catalogs do not have. The retained v0.9.20 catalog keeps its own
+/// historical mapping (contracts-edge-0.9.20), so the pin covers the v0.9.21
+/// catalog only; the older mappings remain contracts-edge-0.9.9(-r2),
 /// contracts-edge-0.9.11, contracts-edge-0.9.14 and contracts-edge-0.9.15.
-const PINNED_RELEASES: [&str; 1] = ["ferrum-edge-0.9.20"];
+const PINNED_RELEASES: [&str; 1] = ["ferrum-edge-0.9.21"];
 
 /// A catalog of a release the pin covers agrees with the pinned vocabularies:
 /// the same public tokens and error classes, each class with the contract's
@@ -285,9 +286,9 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
     let pin = String::from_utf8(pin).expect("PIN is not UTF-8");
     let pin = parse_pin(&pin).unwrap_or_else(|error| panic!("contracts/ferrum-contracts/PIN: {error}"));
     let tag = pin.tag.as_str();
-    assert_eq!(tag, "contracts-edge-0.9.20");
-    assert_eq!(pin.commit, "39da322083044c2e92617209e62983c92387f0ad");
-    assert!(pin.edge_version.as_deref().is_none_or(|version| version == "v0.9.20"), "edge_version {:?}", pin.edge_version);
+    assert_eq!(tag, "contracts-edge-0.9.21");
+    assert_eq!(pin.commit, "92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f");
+    assert!(pin.edge_version.as_deref().is_none_or(|version| version == "v0.9.21"), "edge_version {:?}", pin.edge_version);
     let hashes: BTreeMap<String, String> = pin.rows.into_iter().collect();
     let expected_files: BTreeSet<String> = [
         "vocabularies/gateway-errors.json",
@@ -302,6 +303,7 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         "fixtures/diagnostic-ref/valid/client-disconnect-upload.json",
         "fixtures/diagnostic-ref/valid/connection-failure.json",
         "fixtures/diagnostic-ref/valid/gateway-closed-h3-upload.json",
+        "fixtures/diagnostic-ref/valid/grpc-post-required.json",
         "fixtures/diagnostic-ref/valid/plugin-rejection.json",
         "fixtures/diagnostic-ref/valid/proxy-hop-limit.json",
         "fixtures/diagnostic-ref/valid/proxy-hops-invalid.json",
@@ -314,6 +316,7 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
         "fixtures/diagnostic-ref/invalid/detail-missing-backend-dispatch.json",
         "fixtures/diagnostic-ref/invalid/gateway-closed-h3-upload-as-detail-phase.json",
         "fixtures/diagnostic-ref/invalid/granular-class-as-token.json",
+        "fixtures/diagnostic-ref/invalid/grpc-post-required-as-detail-phase.json",
         "fixtures/diagnostic-ref/invalid/malformed-ref.json",
         "fixtures/diagnostic-ref/invalid/proxy-hop-limit-as-detail-phase.json",
         "fixtures/diagnostic-ref/invalid/proxy-hops-invalid-as-detail-phase.json",
@@ -355,12 +358,12 @@ fn pinned_contract_hashes_and_anvil_copies_match() {
 
     let errors = read_json(&vendor.join("vocabularies/gateway-errors.json"));
     let headers = read_json(&vendor.join("vocabularies/gateway-headers.json"));
-    assert_eq!(errors["edge_release"], "v0.9.20");
-    assert_eq!(headers["edge_release"], "v0.9.20");
+    assert_eq!(errors["edge_release"], "v0.9.21");
+    assert_eq!(headers["edge_release"], "v0.9.21");
     for vocabulary in [&errors, &headers] {
         for source in vocabulary["provenance"].as_array().unwrap() {
-            assert_eq!(source["ref"], "v0.9.20");
-            assert_eq!(source["commit"], "e4a606a00352674daaef08636e3e359e6c48ba18");
+            assert_eq!(source["ref"], "v0.9.21");
+            assert_eq!(source["commit"], "f9915358c8032214f4034a17c28cdf72d14006c3");
         }
     }
     // The lab's default pin is a release the contract pin covers.
@@ -485,7 +488,7 @@ fn pinned_diagnostic_ref_contract_matches_anvils_reader() {
     let vendor = try_vendored_dir(&repo_root()).unwrap_or_else(|error| panic!("{error}"));
     // Refuse a link or special file anywhere in the tree before reading any.
     files_under(&vendor, &vendor);
-    assert_diagnostic_ref_contract_matches_anvils_reader(&vendor, Some(22));
+    assert_diagnostic_ref_contract_matches_anvils_reader(&vendor, Some(24));
 }
 
 /// The `ferrum.diagnostic_ref.v1` schema, error classes and fixtures in

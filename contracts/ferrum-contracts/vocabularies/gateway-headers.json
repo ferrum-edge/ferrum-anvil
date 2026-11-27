@@ -2,50 +2,54 @@
   "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-gateway-headers/v1.schema.json",
   "vocabulary": "gateway-headers",
   "version": 1,
-  "edge_release": "v0.9.20",
-  "description": "HTTP header names and prefixes with Ferrum Edge semantics: gateway assertions, diagnostic response headers, internal markers, mesh control headers, and admin API headers, including standard HTTP ETag and If-Match. Names and prefixes match case-insensitively. Availability records the first Edge tag containing the surface. From Edge v0.9.15 the gateway writes its request assertions after it has resolved a client's Connection nominations at HTTP/1.1 and HTTP/3 ingress; the src/proxy/headers.rs provenance note gives the rule.",
+  "edge_release": "v0.9.21",
+  "description": "HTTP header names and prefixes with Ferrum Edge semantics: gateway assertions, diagnostic response headers, internal markers, mesh control headers, and admin API headers, including standard HTTP ETag and If-Match. Names and prefixes match case-insensitively. Availability records the first published Edge release that has the header (v0.9.4 is the first published release; tags v0.9.0 to v0.9.3, v0.9.6, v0.9.16 and v0.9.18 were never published). From Edge v0.9.15 the gateway writes its request assertions after it has resolved a client's Connection nominations at HTTP/1.1 and HTTP/3 ingress; the src/proxy/headers.rs provenance note gives the rule.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "src/proxy/headers.rs",
       "symbols": [
         "confine_connection_nominated_request_headers",
         "is_retained_connection_option",
         "is_ingress_protected_nominated_field",
-        "field_names_equivalent_for_backends"
+        "field_names_equivalent_for_backends",
+        "WEBSOCKET_HANDSHAKE_STRIP_HEADER_NAMES",
+        "is_websocket_handshake_strip_header",
+        "is_websocket_backend_request_strip_header",
+        "is_reserved_assertion_destination"
       ],
-      "note": "Connection nominations (ferrum-edge#6090, issue #6087, from v0.9.15): HTTP/1.1 and HTTP/3 ingress removes every field a client's Connection header nominates before any plugin runs, and rewrites Connection to keep only the close option and the request hop-by-hop names connection, keep-alive, proxy-authorization, proxy-connection, te, trailer, transfer-encoding and upgrade. Host, Content-Length, Expect, Forwarded, X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Port, X-Forwarded-Proto, X-Real-IP and the configured FERRUM_REAL_IP_HEADER are protected and keep their client values for routing, framing and trusted-proxy client-IP resolution. A nominated Authorization is removed before authentication. Gateway assertions (consumer identity, X-Authenticated-Identity, claim_headers destinations, X-Geo-Country, path-param captures) and transformer-added headers are written afterwards, so a client nomination cannot remove them. HTTP/2 rejects Connection and is unchanged. Gateway-owned assertion names match ASCII case-insensitively with _ equivalent to - (field_names_equivalent_for_backends), the folding CGI-style backends apply. From v0.9.17, enabled X-Ferrum-Hops is stamped before confinement and protected from Connection nominations, then reasserted after mutable hook phases; the zero-disable passthrough rule is described in its entry."
+      "note": "Connection nominations (ferrum-edge#6090, issue #6087, from v0.9.15): HTTP/1.1 and HTTP/3 ingress removes every field a client's Connection header nominates before any plugin runs, and rewrites Connection to keep only the close option and the request hop-by-hop names connection, keep-alive, proxy-authorization, proxy-connection, te, trailer, transfer-encoding and upgrade. Host, Content-Length, Expect, Forwarded, X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Port, X-Forwarded-Proto, X-Real-IP and the configured FERRUM_REAL_IP_HEADER are protected and keep their client values for routing, framing and trusted-proxy client-IP resolution. A nominated Authorization is removed before authentication. Gateway assertions (consumer identity, X-Authenticated-Identity, claim_headers destinations, X-Geo-Country, path-param captures) and transformer-added headers are written afterwards, so a client nomination cannot remove them. HTTP/2 rejects Connection and is unchanged. Gateway-owned assertion names match ASCII case-insensitively with _ equivalent to - (field_names_equivalent_for_backends), the folding CGI-style backends apply. From v0.9.17, enabled X-Ferrum-Hops is stamped before confinement and protected from Connection nominations, then reasserted after mutable hook phases; the zero-disable passthrough rule is described in its entry. From v0.9.21: HTTP/1.1, HTTP/2 and HTTP/3 WebSocket upgrades share is_websocket_backend_request_strip_header (BACKEND_REQUEST_STRIP_HEADER_NAMES plus WEBSOCKET_HANDSHAKE_STRIP_HEADER_NAMES plus is_consumer_assertion_header; Edge #7048), so HTTP/3 also strips Content-Length, Expect, X-Ferrum-Original-Content-Encoding and x-grpc-web-mode; WebSocket handshakes forward backend 101/200 headers under the backend-response strip and honor preserve_host_header (Edge #7414); and route-owned plugin assertions (claim_headers, output_claim_headers, opa decision_request_headers, spiffe_identity forward_identity=true) are enforced by enforce_route_owned_request_assertions, stripped from request trailers with _/- folding, protected from header-mutation collisions, and refuse untranslated gRPC-Web with 415, while is_reserved_assertion_destination refuses standard and gateway-written claim destinations (Edge #7064)."
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "docs/admin_api.md"
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "docs/error_classification.md"
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "docs/plugin_execution_order.md"
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "openapi.yaml"
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "docs/api_specs.md",
       "sections": [
         "x-ferrum-mcp"
@@ -53,8 +57,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "src/admin/preconditions.rs",
       "symbols": [
         "resource_etag",
@@ -64,8 +68,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "src/admin/conditional_snapshots.rs",
       "symbols": [
         "consumer_verification",
@@ -75,8 +79,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "docs/admin_backup_restore.md",
       "sections": [
         "Conditional snapshots and restore"
@@ -84,8 +88,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "src/admin/deployment_mutations.rs",
       "symbols": [
         "snapshot",
@@ -95,8 +99,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "docs/deployment_mutations.md"
     }
   ],
@@ -120,12 +124,12 @@
       "direction": "gateway_to_backend",
       "role": "gateway_assertion",
       "edge_behavior": "Gateway-owned consumer assertion namespace. Matching is ASCII case-insensitive and treats _ as equivalent to -. The gateway may emit only its authenticated identity values beneath this prefix; backend boundaries reject client or plugin values across the whole prefix, and it is forbidden in request and response trailers. From v0.9.15 the same gateway-owned check (is_consumer_assertion_header) also covers the exact name X-Authenticated-Identity, listed separately.",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "is_consumer_assertion_header",
@@ -134,8 +138,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugins.md",
           "sections": [
             "grpc_web"
@@ -150,12 +154,12 @@
       "direction": "gateway_to_backend",
       "role": "gateway_assertion",
       "edge_behavior": "Set by the gateway only after a principal is resolved; never trusted from clients. Any client copy is removed before dispatch. From v0.9.15 (ferrum-edge#6088, issue #6082) the value is only the username of a gateway Consumer that the authentication flow mapped. An external identity or display claim without a mapped Consumer is sent as X-Authenticated-Identity instead, and external authentication no longer maps a principal to a Consumer by matching a username, ID or custom ID. Up to v0.9.14 this header fell back to the external display identity, then the raw external identity.",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "strip_reserved_gateway_assertion_headers"
@@ -163,8 +167,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/mod.rs",
           "symbols": [
             "RequestContext::backend_consumer_username"
@@ -172,8 +176,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugin_execution_order.md",
           "sections": [
             "Finalized Request Egress",
@@ -182,8 +186,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugins.md",
           "sections": [
             "Consumer Identity Headers"
@@ -198,12 +202,12 @@
       "direction": "gateway_to_backend",
       "role": "gateway_assertion",
       "edge_behavior": "Set by the gateway only after a principal with a custom_id is resolved; never trusted from clients. Any client copy is removed before dispatch. The principal is a mapped gateway Consumer; from v0.9.15 an external identity no longer maps to a Consumer by matching its custom ID.",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "strip_reserved_gateway_assertion_headers"
@@ -211,8 +215,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/mod.rs",
           "symbols": [
             "RequestContext::backend_consumer_custom_id"
@@ -220,8 +224,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugin_execution_order.md",
           "sections": [
             "Finalized Request Egress",
@@ -241,8 +245,8 @@
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "is_consumer_assertion_header",
@@ -252,8 +256,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/mod.rs",
           "symbols": [
             "refresh_backend_gateway_assertion_headers"
@@ -261,8 +265,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/mod.rs",
           "symbols": [
             "RequestContext::backend_authenticated_identity"
@@ -270,8 +274,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "openapi.yaml",
           "symbols": [
             "components.schemas.JwksAuthConfig",
@@ -280,8 +284,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugins.md",
           "sections": [
             "Consumer Identity Headers"
@@ -289,8 +293,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/upgrade_guide.md",
           "sections": [
             "External authentication identity headers"
@@ -305,12 +309,12 @@
       "direction": "gateway_to_backend",
       "role": "gateway_assertion",
       "edge_behavior": "Set by the gateway only after a successful GeoIP lookup. Any client copy is removed before dispatch. From v0.9.15 (ferrum-edge#6090) matching treats _ as equivalent to -, so a client X_Geo_Country is removed too.",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "strip_reserved_gateway_assertion_headers",
@@ -319,8 +323,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugin_execution_order.md",
           "sections": [
             "Backend Request Trailers"
@@ -335,12 +339,12 @@
       "direction": "any",
       "role": "ferrum_owned",
       "edge_behavior": "Ferrum-owned header namespace. Forbidden in request trailers sent to a backend and in gRPC end-of-stream trailers. Individual members below have narrower rules. In v0.9.19 the request-trailer boundary also folds underscores to hyphens, including x_ferrum_peer_spiffe_id.",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "is_forbidden_backend_request_trailer_name"
@@ -348,8 +352,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugin_execution_order.md",
           "sections": [
             "Backend Request Trailers"
@@ -357,8 +361,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugins.md",
           "sections": [
             "grpc_web"
@@ -373,12 +377,12 @@
       "direction": "gateway_to_backend",
       "role": "ferrum_owned",
       "edge_behavior": "Ferrum-owned path-parameter namespace. Forbidden in request trailers sent to a backend. From v0.9.15 (ferrum-edge#6090) matching is ASCII case-insensitive with _ equivalent to -, so a client X_Path_Param_Id is removed beside the gateway's route path-param capture.",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "is_forbidden_backend_request_trailer_name",
@@ -387,8 +391,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugin_execution_order.md",
           "sections": [
             "Backend Request Trailers"
@@ -407,12 +411,12 @@
         "vocabulary": "gateway-errors",
         "field": "x_gateway_error_tokens"
       },
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "X_GATEWAY_ERROR_HEADER",
@@ -421,8 +425,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/error_classification.md",
           "sections": [
             "HTTP observability vocabulary (X-Gateway-Error)"
@@ -442,12 +446,12 @@
           "degraded"
         ]
       },
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "X_GATEWAY_UPSTREAM_STATUS_HEADER",
@@ -456,8 +460,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/load_balancing.md",
           "sections": [
             "X-Gateway-Upstream-Status"
@@ -471,13 +475,13 @@
       "surface": "proxy",
       "direction": "internal",
       "role": "internal_marker",
-      "edge_behavior": "Internal compression-plugin marker for the pre-compression encoding. Never forwarded to a backend.",
-      "availability": "v0.9.8",
+      "edge_behavior": "Internal compression-plugin marker for the pre-compression encoding. Never forwarded to a backend; from v0.9.21 (Edge #7048) HTTP/3 WebSocket handshakes share is_websocket_backend_request_strip_header with HTTP/1.1 and HTTP/2 and strip it too.",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "BACKEND_REQUEST_STRIP_HEADER_NAMES"
@@ -492,12 +496,12 @@
       "direction": "internal",
       "role": "internal_marker",
       "edge_behavior": "Internal grpc_web response-header bridge for trailer-name provenance. Consumed and removed before the client-visible response; a backend copy is stripped.",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/grpc_web.rs",
           "symbols": [
             "HEADER_GRPC_WEB_TRAILER_NAMES",
@@ -507,8 +511,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "is_backend_response_strip_header"
@@ -523,12 +527,12 @@
       "direction": "internal",
       "role": "internal_marker",
       "edge_behavior": "Internal grpc_web response-header bridge for shadowed trailer values. Consumed and removed before the client-visible response; a backend copy is stripped.",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/grpc_web.rs",
           "symbols": [
             "HEADER_GRPC_WEB_TRAILER_NAMES",
@@ -538,8 +542,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "is_backend_response_strip_header"
@@ -554,12 +558,12 @@
       "direction": "internal",
       "role": "internal_marker",
       "edge_behavior": "Internal grpc_web response-header bridge for the plugin's own Accept-negotiation 406. Consumed and removed before the client-visible response; a backend copy is stripped.",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/grpc_web.rs",
           "symbols": [
             "HEADER_GRPC_WEB_TRAILER_NAMES",
@@ -569,8 +573,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "is_backend_response_strip_header"
@@ -585,18 +589,18 @@
       "direction": "peer_to_peer",
       "role": "mesh_control",
       "edge_behavior": "Optional HBONE CONNECT marker between Ferrum mesh peers (value hbone, or a datagram-over-HBONE value).",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/modes/mesh/hbone.rs"
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/mesh.md",
           "sections": [
             "HBONE Protocol"
@@ -616,12 +620,12 @@
           "fenced"
         ]
       },
-      "availability": "v0.9.8",
+      "availability": "v0.9.7",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/modes/mesh/hbone.rs",
           "symbols": [
             "TUNNEL_REUSE_HEADER"
@@ -629,8 +633,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/mesh.md",
           "sections": [
             "HBONE Inner Application Connection Reuse"
@@ -650,12 +654,12 @@
         "max_length": 254,
         "default": "ferrum"
       },
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "openapi.yaml",
           "symbols": [
             "components.parameters.XFerrumNamespace"
@@ -663,8 +667,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/admin_api.md"
         }
       ]
@@ -684,8 +688,8 @@
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/admin/provisioning.rs",
           "symbols": [
             "PROVISIONED_BY_HEADER",
@@ -694,8 +698,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "openapi.yaml",
           "symbols": [
             "components.parameters.ProvisionedBy"
@@ -703,8 +707,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/admin_api.md",
           "sections": [
             "Resource labels and application attribution"
@@ -722,12 +726,12 @@
       "values": {
         "pattern": "^[0-9]+:[0-9]+$"
       },
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "openapi.yaml",
           "symbols": [
             "components.headers.X-Ferrum-Config-Cursor"
@@ -735,8 +739,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/admin_api.md"
         }
       ]
@@ -753,12 +757,12 @@
           "true"
         ]
       },
-      "availability": "v0.9.8",
+      "availability": "v0.9.5",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "openapi.yaml",
           "symbols": [
             "components.headers.X-Ferrum-Namespace-Unserved"
@@ -766,8 +770,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/admin_api.md"
         }
       ]
@@ -779,18 +783,18 @@
       "direction": "gateway_to_recipient",
       "role": "notification",
       "edge_behavior": "Header on email notifications sent by the gateway.",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/notifications/channels/email.rs"
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/notifications.md",
           "sections": [
             "Email (SMTP)"
@@ -805,18 +809,18 @@
       "direction": "gateway_to_recipient",
       "role": "notification",
       "edge_behavior": "Header on email notifications sent by the gateway.",
-      "availability": "v0.9.8",
+      "availability": "v0.9.4",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/notifications/channels/email.rs"
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/notifications.md",
           "sections": [
             "Email (SMTP)"
@@ -830,7 +834,7 @@
       "surface": "proxy",
       "direction": "gateway_to_client",
       "role": "gateway_diagnostic",
-      "edge_behavior": "Opaque gateway-minted diagnostic reference (fd1_<32 hex> or fd2_<8 hex>_<32 hex>), off by default (FERRUM_DIAGNOSTIC_REFS). Gateway-owned whatever the setting: backend and hook copies are stripped. Resolves via GET /diagnostics/v1/refs/{ref}; body is schemas/diagnostic-ref/v1.",
+      "edge_behavior": "Opaque gateway-minted diagnostic reference (fd1_<32 hex> or fd2_<8 hex>_<32 hex>), off by default (FERRUM_DIAGNOSTIC_REFS). Gateway-owned whatever the setting: backend and hook copies are stripped. Resolves via GET /diagnostics/v1/refs/{ref}; body is schemas/diagnostic-ref/v1. From v0.9.21 (Edge #7411), in all mode a recorded gRPC-Web rejection (HTTP 200 head with non-zero grpc-status in the body trailer frame) is also stamped even without an X-Gateway-Error token and resolves with status 200, and every stamped gRPC-Web response appends x-ferrum-diagnostic-ref once to an existing Access-Control-Expose-Headers field.",
       "values": {
         "pattern": "^(fd1_[0-9a-f]{32}|fd2_[0-9a-f]{8}_[0-9a-f]{32})$"
       },
@@ -838,8 +842,8 @@
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "X_FERRUM_DIAGNOSTIC_REF_HEADER",
@@ -848,8 +852,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/error_classification.md",
           "sections": [
             "Gateway diagnostic references"
@@ -871,8 +875,8 @@
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/diagnostic_ref.rs",
           "symbols": [
             "DIAGNOSTIC_REF_OWNER_REPLICA_HEADER"
@@ -880,8 +884,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "openapi.yaml"
         }
       ]
@@ -892,13 +896,13 @@
       "surface": "admin",
       "direction": "gateway_to_client",
       "role": "admin_response",
-      "edge_behavior": "Standard HTTP header. Row CRUD reads emit an opaque quoted strong tag bound to kind, namespace, id and complete stored state, including credentials redacted from ordinary consumer reads. The v0.9.11 admin-only verification read and conditional backup row maps share those tags. Conditional backup also emits a distinct coherent namespace tag equal to conditional.namespace_etag. No tag on cached row fallback or write responses; credential-complete verification and conditional backup never use cached fallback and require audit admission before response with Cache-Control: no-store. Shared admin JWT secrets allow replica agreement; secret rotation invalidates tags. Released v0.9.12 GET /deployment-snapshot emits a separate original quoted deployment-v1 token equal to namespace_etag, with admin-only unfiltered secret-complete evidence, mandatory security audit admission and no-store. Backup namespace and row tags cannot authorize this deployment profile. From v0.9.13 the conditional backup namespace tag and the deployment-v1 token MAC a bounded SHA-256 of the canonical snapshot (namespace_snapshot.v2 and deployment_snapshot.v2 domains) in which stored spec and other binary content counts as SHA-256 and length; tags issued by v0.9.12 or earlier keep their syntax but no longer match. A namespace over the 64 MiB canonical bound gets 507 and no tag. Edge v0.9.14 documents the conditional backup ETag as a namespace state token equal to conditional.namespace_etag, not a validator of the response bytes: two exports of unchanged state share it although their bodies differ (exported_at). Use it only as If-Match on POST /restore?confirm=true for that namespace, never for caching or If-None-Match.",
-      "availability": "v0.9.9",
+      "edge_behavior": "Standard HTTP header. Row CRUD reads emit an opaque quoted strong tag bound to kind, namespace, id and complete stored state, including credentials redacted from ordinary consumer reads. From v0.9.21 (Edge #7413, GHSA-crqx-mp2f-v8c8), row reads emit no ETag to a token verified by FERRUM_ADMIN_JWT_VIEWER_SECRET. The v0.9.11 admin-only verification read and conditional backup row maps share those tags. Conditional backup also emits a distinct coherent namespace tag equal to conditional.namespace_etag. No tag on cached row fallback or write responses; credential-complete verification and conditional backup never use cached fallback and require audit admission before response with Cache-Control: no-store. Shared admin JWT secrets allow replica agreement; secret rotation invalidates tags. Released v0.9.12 GET /deployment-snapshot emits a separate original quoted deployment-v1 token equal to namespace_etag, with admin-only unfiltered secret-complete evidence, mandatory security audit admission and no-store. Backup namespace and row tags cannot authorize this deployment profile. From v0.9.13 the conditional backup namespace tag and the deployment-v1 token MAC a bounded SHA-256 of the canonical snapshot (namespace_snapshot.v2 and deployment_snapshot.v2 domains) in which stored spec and other binary content counts as SHA-256 and length; tags issued by v0.9.12 or earlier keep their syntax but no longer match. A namespace over the 64 MiB canonical bound gets 507 and no tag. Edge v0.9.14 documents the conditional backup ETag as a namespace state token equal to conditional.namespace_etag, not a validator of the response bytes: two exports of unchanged state share it although their bodies differ (exported_at). Use it only as If-Match on POST /restore?confirm=true for that namespace, never for caching or If-None-Match.",
+      "availability": "v0.9.7",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "openapi.yaml",
           "symbols": [
             "components.headers.ResourceETag",
@@ -909,8 +913,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/admin/preconditions.rs",
           "symbols": [
             "resource_etag",
@@ -920,8 +924,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/admin/conditional_snapshots.rs",
           "symbols": [
             "namespace_tag",
@@ -930,8 +934,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/admin/deployment_mutations.rs",
           "symbols": [
             "snapshot",
@@ -947,13 +951,13 @@
       "surface": "admin",
       "direction": "client_to_gateway",
       "role": "admin_request",
-      "edge_behavior": "Standard HTTP precondition header. Row PUT/DELETE for proxies, consumers, upstreams and plugin configs compare complete stored row state under the namespace admission lease; weak tags never match, strong lists match any member, and * checks existence. The v0.9.11 POST /restore?confirm=true exception requires the coherent namespace tag from conditional backup on the same namespace: atomic comparison and complete replacement, including empty replacement and lease entry/commit fences. Row tags and body metadata do not authorize restore; namespace wildcard/malformed/empty headers return 400, stale or weak-only tags 412, unsupported topology 501, unavailable state/lease 503. Omission preserves unconditional restore. Released v0.9.12 DELETE /proxies/{id}?conditional=true&cleanup_orphaned_upstream=false and PUT /api-specs/{id}?conditional=true instead require exactly one ORIGINAL strong quoted deployment-v1 token from GET /deployment-snapshot. Missing/weak/wildcard/list/duplicate/wrong-profile authority or ambiguous modes are 400; stale dependencies are 412. Comparison and selected writes share entry/commit transaction fences; no fresh-token retry, whole-namespace restore or unconditional fallback. apply=async is refused. Other mutating routes refuse If-Match with 400. Automatic recovery cleanup requires the explicit deployment acknowledgement, never transport status alone. From v0.9.13 namespace and deployment tags issued by v0.9.12 or earlier fail closed with 412 and change nothing; a namespace over the 64 MiB canonical bound gets 507 (deployment mutations report durable not_started before the transaction and not_committed inside it). Do not retry a 507 for unchanged state. Edge v0.9.14 documents that a deployment-v1 token fences the whole namespace, so any other consumer, credential, trust, registry-metadata or resource write in the namespace makes it stale (412). A 503 store failure before the mutation transaction reports durable not_started, one inside the rolled-back transaction not_committed, and only a failed commit or commit acknowledgement unknown.",
-      "availability": "v0.9.9",
+      "edge_behavior": "Standard HTTP precondition header. Row PUT/DELETE for proxies, consumers, upstreams and plugin configs compare complete stored row state under the namespace admission lease; weak tags never match, strong lists match any member, and * checks existence. From v0.9.21 (Edge #7412), PUT/POST/DELETE /consumers/{consumer_id}/credentials/{cred_type} and DELETE /consumers/{consumer_id}/credentials/{cred_type}/{index} also evaluate If-Match against the Consumer's own ETag from GET /consumers/{id} under the same lease (412 on stale tag, 400 on malformed/empty, unconditional when omitted), and POST /api-specs and DELETE /api-specs/{id} explicitly refuse If-Match with 400 before lookup (Edge #7459). The v0.9.11 POST /restore?confirm=true exception requires the coherent namespace tag from conditional backup on the same namespace: atomic comparison and complete replacement, including empty replacement and lease entry/commit fences. Row tags and body metadata do not authorize restore; namespace wildcard/malformed/empty headers return 400, stale or weak-only tags 412, unsupported topology 501, unavailable state/lease 503. Omission preserves unconditional restore. Released v0.9.12 DELETE /proxies/{id}?conditional=true&cleanup_orphaned_upstream=false and PUT /api-specs/{id}?conditional=true instead require exactly one ORIGINAL strong quoted deployment-v1 token from GET /deployment-snapshot. Missing/weak/wildcard/list/duplicate/wrong-profile authority or ambiguous modes are 400; stale dependencies are 412. Comparison and selected writes share entry/commit transaction fences; no fresh-token retry, whole-namespace restore or unconditional fallback. apply=async is refused. Other mutating routes refuse If-Match with 400. Automatic recovery cleanup requires the explicit deployment acknowledgement, never transport status alone. From v0.9.13 namespace and deployment tags issued by v0.9.12 or earlier fail closed with 412 and change nothing; a namespace over the 64 MiB canonical bound gets 507 (deployment mutations report durable not_started before the transaction and not_committed inside it). Do not retry a 507 for unchanged state. Edge v0.9.14 documents that a deployment-v1 token fences the whole namespace, so any other consumer, credential, trust, registry-metadata or resource write in the namespace makes it stale (412). A 503 store failure before the mutation transaction reports durable not_started, one inside the rolled-back transaction not_committed, and only a failed commit or commit acknowledgement unknown.",
+      "availability": "v0.9.7",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "openapi.yaml",
           "symbols": [
             "components.parameters.IfMatch",
@@ -964,8 +968,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/admin_api.md",
           "sections": [
             "Conditional writes (ETag / If-Match)"
@@ -973,8 +977,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/admin_backup_restore.md",
           "sections": [
             "Conditional snapshots and restore"
@@ -982,8 +986,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/admin/deployment_mutations.rs",
           "symbols": [
             "snapshot",
@@ -1005,32 +1009,32 @@
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/hop_limit.rs"
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs"
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/mod.rs"
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/mod.rs"
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/routing.md"
         }
       ]
@@ -1041,13 +1045,13 @@
       "surface": "mesh",
       "direction": "gateway_to_backend",
       "role": "gateway_assertion",
-      "edge_behavior": "With spiffe_identity forward_identity=true (default false), the before_proxy hook removes every client copy using ASCII case-insensitive names with _ equivalent to -, then writes the admitted peer SPIFFE ID if present. With forwarding disabled the hook does not mutate this header. HTTP family only; the shared request-trailer boundary always drops client copies through its folded x-ferrum-* rule. require_identity and allowed_trust_domains govern admission independently.",
+      "edge_behavior": "With spiffe_identity forward_identity=true (default false), the before_proxy hook removes every client copy using ASCII case-insensitive names with _ equivalent to -, then writes the admitted peer SPIFFE ID if present. From v0.9.21 (Edge #7064), a trigger-skipped forward_identity instance still removes client copies, enforce_route_owned_request_assertions keeps only the exact identity an admitted instance installed, and untranslated gRPC-Web on such a route is refused with 415. With forwarding disabled the hook does not own or mutate this header. HTTP family only; the shared request-trailer boundary always drops client copies through its folded x-ferrum-* rule. require_identity and allowed_trust_domains govern admission independently.",
       "availability": "v0.9.19",
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/mesh/spiffe_identity.rs",
           "symbols": [
             "FORWARDED_IDENTITY_HEADER",
@@ -1056,8 +1060,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/proxy/headers.rs",
           "symbols": [
             "is_forbidden_backend_request_trailer_name"
@@ -1065,8 +1069,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "openapi.yaml",
           "symbols": [
             "components.schemas.SpiffeIdentityConfig"
@@ -1074,8 +1078,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugins.md",
           "sections": [
             "spiffe_identity"
@@ -1094,8 +1098,8 @@
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/mesh/ext_authz.rs",
           "symbols": [
             "SOURCE_PRINCIPAL_CHECK_HEADER",
@@ -1104,8 +1108,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugins.md",
           "sections": [
             "CUSTOM delegation"
@@ -1113,8 +1117,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/mesh.md",
           "sections": [
             "AuthorizationPolicy action: CUSTOM"
@@ -1133,8 +1137,8 @@
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/mesh/ext_authz.rs",
           "symbols": [
             "SOURCE_NAMESPACE_CHECK_HEADER",
@@ -1143,8 +1147,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugins.md",
           "sections": [
             "CUSTOM delegation"
@@ -1152,8 +1156,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/mesh.md",
           "sections": [
             "AuthorizationPolicy action: CUSTOM"
@@ -1172,8 +1176,8 @@
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/mesh/ext_authz.rs",
           "symbols": [
             "SOURCE_SERVICE_ACCOUNT_CHECK_HEADER",
@@ -1182,8 +1186,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugins.md",
           "sections": [
             "CUSTOM delegation"
@@ -1191,8 +1195,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/mesh.md",
           "sections": [
             "AuthorizationPolicy action: CUSTOM"
@@ -1211,8 +1215,8 @@
       "sources": [
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "src/plugins/mesh/ext_authz.rs",
           "symbols": [
             "REQUEST_PRINCIPAL_CHECK_HEADER",
@@ -1221,8 +1225,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/plugins.md",
           "sections": [
             "CUSTOM delegation"
@@ -1230,8 +1234,8 @@
         },
         {
           "repo": "ferrum-edge/ferrum-edge",
-          "ref": "v0.9.20",
-          "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+          "ref": "v0.9.21",
+          "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
           "path": "docs/mesh.md",
           "sections": [
             "AuthorizationPolicy action: CUSTOM"

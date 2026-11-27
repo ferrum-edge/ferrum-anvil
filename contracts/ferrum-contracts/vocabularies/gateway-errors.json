@@ -2,13 +2,13 @@
   "$schema": "https://github.com/ferrum-edge/ferrum-contracts/schemas/vocabulary-gateway-errors/v1.schema.json",
   "vocabulary": "gateway-errors",
   "version": 1,
-  "edge_release": "v0.9.20",
+  "edge_release": "v0.9.21",
   "description": "Ferrum Edge's closed error vocabularies: the granular ErrorClass (access-log error_class, ferrum_requests_total{error_class}, stream disconnect metrics) and the nine coarse client-facing X-Gateway-Error tokens. The header token is a stable contract and must not change spelling.",
   "provenance": [
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "src/retry.rs",
       "symbols": [
         "ErrorClass",
@@ -31,8 +31,8 @@
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "docs/error_classification.md",
       "sections": [
         "Canonical taxonomy (ErrorClass)",
@@ -43,22 +43,22 @@
         "HTTP/1.1 parse-layer 400 contract",
         "Client-abort terminal"
       ],
-      "note": "v0.9.17 adds loop_detected for the pre-routing proxy_hop_limit HTTP 508 fence; proxy_hops_invalid and route_protocol_admission map to no token. The closed header vocabulary has nine tokens, the reserved HTTP metrics vocabulary 25 labels, and ErrorClass 19 values. The hop fence emits status counters and bounded warnings, not a transaction summary or loop_detected metric row. Timeout descriptions clarify existing behavior: the backend handoff is marked immediately before send(), including connection setup, rather than after remote acceptance. Re-read at v0.9.19: the same nine tokens, 19 ErrorClass values and 25 reserved HTTP metric labels remain; no token-mapped phase is added. Transcribed connection_failure statuses widen from 502 to 502/504/503: connect timeouts answer 504 (Edge #6770), and pooled-transport DestinationRule maxConnections refusals answer 503 (Edge #6771), retaining their pre-wire class and token. The TLS meaning also includes typed setup errors without an underlying rustls source. Re-read at v0.9.20: the same nine tokens, 19 ErrorClass values, 25 reserved HTTP metric labels, class-to-token mapping and transcribed dispatch-failure statuses remain; src/retry.rs and http_backend_failure_status_and_body are unchanged from v0.9.19. The HTTP/1.1 parse-layer 400 contract now says duplicate Host and combined Content-Length + Transfer-Encoding that reach the handler keep their JSON 400 for ordinary HTTP requests and WebSocket handshakes, while native gRPC and gRPC-Web receive the handler's framed INVALID_ARGUMENT refusal (Edge #6965, issue #6943). A gRPC backend failure, a CANCEL reset included, that the gateway observes at or after the client RPC deadline is settled as that deadline (DEADLINE_EXCEEDED, health-neutral) instead of being charged to the backend; one observed before the deadline keeps its class (Edge #6973 and #6979, issues #6022 and #6976). The connection_timeout transaction-summary example now records 504, matching the status that shipped in v0.9.19."
+      "note": "v0.9.17 adds loop_detected for the pre-routing proxy_hop_limit HTTP 508 fence; proxy_hops_invalid and route_protocol_admission map to no token. The closed header vocabulary has nine tokens, the reserved HTTP metrics vocabulary 25 labels, and ErrorClass 19 values. The hop fence emits status counters and bounded warnings, not a transaction summary or loop_detected metric row. Timeout descriptions clarify existing behavior: the backend handoff is marked immediately before send(), including connection setup, rather than after remote acceptance. Re-read at v0.9.19: the same nine tokens, 19 ErrorClass values and 25 reserved HTTP metric labels remain; no token-mapped phase is added. Transcribed connection_failure statuses widen from 502 to 502/504/503: connect timeouts answer 504 (Edge #6770), and pooled-transport DestinationRule maxConnections refusals answer 503 (Edge #6771), retaining their pre-wire class and token. The TLS meaning also includes typed setup errors without an underlying rustls source. Re-read at v0.9.20: the same nine tokens, 19 ErrorClass values, 25 reserved HTTP metric labels, class-to-token mapping and transcribed dispatch-failure statuses remain; src/retry.rs and http_backend_failure_status_and_body are unchanged from v0.9.19. The HTTP/1.1 parse-layer 400 contract now says duplicate Host and combined Content-Length + Transfer-Encoding that reach the handler keep their JSON 400 for ordinary HTTP requests and WebSocket handshakes, while native gRPC and gRPC-Web receive the handler's framed INVALID_ARGUMENT refusal (Edge #6965, issue #6943). A gRPC backend failure, a CANCEL reset included, that the gateway observes at or after the client RPC deadline is settled as that deadline (DEADLINE_EXCEEDED, health-neutral) instead of being charged to the backend; one observed before the deadline keeps its class (Edge #6973 and #6979, issues #6022 and #6976). The connection_timeout transaction-summary example now records 504, matching the status that shipped in v0.9.19. Re-read at v0.9.21: the same nine tokens, 19 ErrorClass values, 25 reserved HTTP metric labels, class-to-token mapping and transcribed dispatch-failure statuses remain. token_for_rejection_phase drops the circuit_breaker alias (Edge #7158): HTTP/3 now logs circuit_breaker_open, so circuit_breaker_open has only rejection phase circuit_breaker_open. Post-connect classification is phase-gated in the boxed-error substring fallback, the tungstenite Io arm and classify_body_error, so pre-wire classes (connection_timeout, connection_refused, tls_error, port_exhaustion) are not issued after connect, and UDP session failures classify from typed io::Error (Edge #7213). StreamSetupKind adds L4RouteRefused (dispatch_policy_rejected) and BackendFirstBytesForward (post-wire io class, fallback request_error; Edge #7185). Eight raw diagnostic_ref phases are added with no token mapping: invalid_backend_path, websocket_upgrade_unavailable, mesh_transport_dispatch_required, request_body_refused_before_{authenticate,authorize,before_proxy,dispatch}, and grpc_post_required (Edge #7156, #7157, #7163, #7411). On HTTP/1.1 and HTTP/2, gRPC-Web receives framed HTTP 200 trailer-frame refusals for route-protocol admission, circuit-breaker-open (keeping X-Gateway-Error: circuit_breaker_open) and remaining native-gRPC branch refusals (Edge #7155), and in all mode gRPC-Web rejections resolve with status 200 (Edge #7411). A backend's 3xx-5xx answer to a WebSocket upgrade is relayed without X-Gateway-Error or error_class instead of a 502 backend_error (Edge #7414). H3AttemptHandoff decides H3 connection_error (Edge #7023), and TCP relay idle-window and half-close-cap endings settle the breaker as a success (Edge #7084)."
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "docs/size_limits.md",
       "sections": [
         "gRPC and gRPC-Web framing of pre-routing refusals"
       ],
-      "note": "Transcribed the pre-routing refusal framing that ships in v0.9.20 (Edge #6965 and #6969, issue #6943). HTTP/1.1 and HTTP/2 frame these refusals as HTTP/3 already did: native gRPC gets HTTP 200 Trailers-Only grpc-status and gRPC-Web a status in its body trailer frame, except that gRPC-Web keeps the JSON 431 for the header limits and the plain HTTP answer at the hop limit and at the connection-level admission fences (overload, stale configuration, withdrawn client-certificate trust). A WebSocket Upgrade or Extended CONNECT carrying a gRPC or gRPC-Web Content-Type keeps its HTTP refusal, and every other CONNECT keeps its HTTP status and JSON body whatever its Content-Type. The framed HTTP 200 refusals carry no X-Gateway-Error token; the plain HTTP answers keep theirs (loop_detected on the hop-limit 508, config_stale and overload on the stale-configuration and overload 503s), including for gRPC-Web and WebSocket clients, and loop_detected keeps its HTTP 508 / native-gRPC FAILED_PRECONDITION meaning. No ErrorClass value, token, metric label or class-to-token mapping changes."
+      "note": "Transcribed the pre-routing refusal framing that ships in v0.9.20 (Edge #6965 and #6969, issue #6943), unchanged in v0.9.21. HTTP/1.1 and HTTP/2 frame these refusals as HTTP/3 already did: native gRPC gets HTTP 200 Trailers-Only grpc-status and gRPC-Web a status in its body trailer frame, except that gRPC-Web keeps the JSON 431 for the header limits and the plain HTTP answer at the hop limit and at the connection-level admission fences (overload, stale configuration, withdrawn client-certificate trust). A WebSocket Upgrade or Extended CONNECT carrying a gRPC or gRPC-Web Content-Type keeps its HTTP refusal, and every other CONNECT keeps its HTTP status and JSON body whatever its Content-Type. The framed HTTP 200 refusals carry no X-Gateway-Error token; the plain HTTP answers keep theirs (loop_detected on the hop-limit 508, config_stale and overload on the stale-configuration and overload 503s), including for gRPC-Web and WebSocket clients, and loop_detected keeps its HTTP 508 / native-gRPC FAILED_PRECONDITION meaning. No ErrorClass value, token, metric label or class-to-token mapping changes."
     },
     {
       "repo": "ferrum-edge/ferrum-edge",
-      "ref": "v0.9.20",
-      "commit": "e4a606a00352674daaef08636e3e359e6c48ba18",
+      "ref": "v0.9.21",
+      "commit": "f9915358c8032214f4034a17c28cdf72d14006c3",
       "path": "src/proxy/mod.rs",
       "symbols": [
         "http_backend_failure_status_and_body"
@@ -288,8 +288,7 @@
       ],
       "metric_label_without_error_class": true,
       "rejection_phases": [
-        "circuit_breaker_open",
-        "circuit_breaker"
+        "circuit_breaker_open"
       ],
       "meaning": "The circuit breaker for the backend was open; the request never reached a backend."
     },

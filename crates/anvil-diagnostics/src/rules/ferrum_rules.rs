@@ -1167,7 +1167,8 @@ mod tests {
                 && !text.contains("0.9.11")
                 && !text.contains("0.9.14")
                 && !text.contains("0.9.15")
-                && !text.contains("0.9.20"),
+                && !text.contains("0.9.20")
+                && !text.contains("0.9.21"),
             "no release-specific claim for an unaudited release: {text}"
         );
         // A token outside the shared vocabulary stays unknown.
@@ -1212,6 +1213,7 @@ mod tests {
             ("ferrum-edge-0.9.14", "Ferrum Edge 0.9.14"),
             ("ferrum-edge-0.9.15", "Ferrum Edge 0.9.15"),
             ("ferrum-edge-0.9.20", "Ferrum Edge 0.9.20"),
+            ("ferrum-edge-0.9.21", "Ferrum Edge 0.9.21"),
         ] {
             let r = response(504, "application/json", &[("x-gateway-error", "request_timeout")]);
             let f = diagnose_as(Protocol::Http, &r, body, compat);
@@ -1338,6 +1340,7 @@ mod tests {
             "ferrum-edge-0.9.14",
             "ferrum-edge-0.9.15",
             "ferrum-edge-0.9.20",
+            "ferrum-edge-0.9.21",
         ];
         for id in supported {
             assert_eq!(crate::catalog_version_for(&t(id)), format!("findings:{v} ferrum:{id}"));
