@@ -1,0 +1,82 @@
+# JMeter adapter round trip (failure-matrix LOAD-012): exported Anvil plans
+# run in a real, pinned and checksum-verified Apache JMeter release against
+# the loopback fixture server, and the result files are imported back.
+# No approval, merge, release or advisory action.
+name: JMeter round trip
+
+on:
+  pull_request:
+    paths:
+      - "crates/anvil-jmeter/**"
+      - "crates/anvil-load/**"
+      - "crates/anvil-engine/src/prepare.rs"
+      - "crates/anvil-engine/src/vars.rs"
+      - "crates/anvil-fixtures/src/http.rs"
+      - "Cargo.lock"
+      - ".github/workflows/jmeter.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/anvil-jmeter/**"
+      - "crates/anvil-load/**"
+      - "crates/anvil-engine/src/prepare.rs"
+      - "crates/anvil-engine/src/vars.rs"
+      - "crates/anvil-fixtures/src/http.rs"
+      - "Cargo.lock"
+      - ".github/workflows/jmeter.yml"
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jmeter-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # Apache JMeter 5.6.3 (the adapter's JMETER_VERSION). The SHA-512 is the
+  # one Apache publishes beside the release (apache-jmeter-5.6.3.tgz.sha512
+  # on downloads.apache.org and archive.apache.org; checked 2026-11-27).
+  JMETER_VERSION: "5.6.3"
+  JMETER_SHA512: "5978a1a35edb5a7d428e270564ff49d2b1b257a65e17a759d259a9283fc17093e522fe46f474a043864aea6910683486340706d745fcdf3db1505fd71e689083"
+
+jobs:
+  roundtrip:
+    name: JMeter round trip · ubuntu-26.04
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tauri-deps: "false"
+          node: "false"
+          cache-key: jmeter
+      - name: Java (Temurin 21.0.13+9)
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "21.0.13+9"
+      - name: Install Apache JMeter (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSfL --retry 3 -o jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz"
+          echo "${JMETER_SHA512}  jmeter.tgz" | sha512sum -c -
+          tar -xzf jmeter.tgz
+          rm jmeter.tgz
+          echo "ANVIL_JMETER_HOME=$RUNNER_TEMP/apache-jmeter-${JMETER_VERSION}" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/apache-jmeter-${JMETER_VERSION}/bin/jmeter" --version
+      - name: Build the round-trip tests
+        run: cargo test --locked -p anvil-jmeter --test jmeter_roundtrip --no-run
+      - name: Round trip (export → jmeter -n → import)
+        run: cargo test --locked -p anvil-jmeter --test jmeter_roundtrip -- --ignored --test-threads=1 --nocapture

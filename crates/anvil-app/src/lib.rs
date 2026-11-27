@@ -9,6 +9,7 @@ pub mod drift;
 pub mod exec;
 pub mod file_grants;
 pub mod identity;
+pub mod jmeter;
 pub mod linked_files;
 pub mod load;
 pub mod logging;

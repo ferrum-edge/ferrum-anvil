@@ -1,0 +1,36 @@
+[package]
+name = "anvil-jmeter"
+description = "Apache JMeter adapter: exports the supported subset of an Anvil HTTP load plan as a JMeter test plan (.jmx) and imports JMeter result files (CSV and XML JTL) into Anvil load reports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anvil-domain.workspace = true
+anvil-engine.workspace = true
+anvil-load.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+csv.workspace = true
+hdrhistogram.workspace = true
+# Streaming (pull) XML reader for XML JTL files, which can be gigabytes: the
+# workspace's DOM parser (roxmltree) needs the whole document in memory.
+# Already in the dependency graph (through plist); no default features.
+quick-xml.workspace = true
+sha2.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+anvil-fixtures = { path = "../anvil-fixtures" }
+anvil-transport.workspace = true
+roxmltree.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

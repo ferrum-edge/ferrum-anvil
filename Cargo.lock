@@ -157,6 +157,7 @@ dependencies = [
  "anvil-fixtures",
  "anvil-identity",
  "anvil-import",
+ "anvil-jmeter",
  "anvil-load",
  "anvil-portability",
  "anvil-runner",
@@ -226,6 +227,7 @@ dependencies = [
  "anvil-engine",
  "anvil-fixtures",
  "anvil-import",
+ "anvil-jmeter",
  "anvil-load",
  "anvil-portability",
  "anvil-runner",
@@ -450,6 +452,30 @@ dependencies = [
  "thiserror 2.0.21",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "anvil-jmeter"
+version = "0.1.9"
+dependencies = [
+ "anvil-domain",
+ "anvil-engine",
+ "anvil-fixtures",
+ "anvil-load",
+ "anvil-transport",
+ "csv",
+ "hdrhistogram",
+ "hex",
+ "quick-xml",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "zeroize",
 ]
 
 [[package]]

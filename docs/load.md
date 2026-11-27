@@ -4,7 +4,8 @@ The load engine runs open, closed and iteration workloads in a separate worker
 process, through the same engine as a manual Send. It counts one **load unit**
 per send, keeps balanced ledgers, merges HDR histograms, and writes JSON, CSV
 and HTML reports. Test coverage per failure-matrix case (LOAD-001…LOAD-014) is
-listed at the [end of this page](#matrix-coverage).
+listed at the [end of this page](#matrix-coverage). The optional Apache JMeter
+adapter is described in [JMeter adapter](#jmeter-adapter-load-012).
 
 ## Parity with manual Send
 
@@ -593,7 +594,12 @@ anvil load preflight <workspace> <plan>   # destinations and planned load; nothi
 anvil load run <workspace> <plan> --i-am-authorized [--json FILE] [--html FILE] [--csv FILE]
 anvil load list <workspace>
 anvil load reports <workspace>
+anvil load export-jmx <workspace> <plan> --out plan.jmx [--secrets-file FILE] [--report FILE]
+anvil load import-jtl <workspace> --file results.jtl [--plan <plan>] [--jmeter-version V] [--warmup SECS] [--json FILE] [--html FILE]
 ```
+
+`export-jmx` and `import-jtl` are the [JMeter adapter](#jmeter-adapter-load-012):
+`export-jmx` exits 3 when the plan is refused, and nothing is written then.
 
 `--vus` and `--rate` hold the target for `--duration` (default 30 s) from the
 start, with no ramp: the plan is a zero-duration step to the target followed by
@@ -665,9 +671,152 @@ Observations that shaped the implementation:
 | Job size / controller message size | 256 MiB / 64 MiB |
 | Drain windows | graceful stop 5 s, cancel drain 2 s, hard-cancel grace 2 s, controller kill margin 5 s |
 
+## JMeter adapter (LOAD-012)
+
+`anvil-jmeter` exports a plan to Apache JMeter and imports JMeter's results.
+The native engine stays the default. The adapter exports a declared subset
+for teams that run JMeter, and every setting outside that subset is refused
+or listed.
+
+### Export (`anvil load export-jmx`, desktop **Export to JMeter…**)
+
+The export writes a JMeter 5.x test plan (`.jmx`, targeted and tested with
+Apache JMeter 5.6.3) for `jmeter -n`. Each step is prepared the way a load run
+prepares it: `anvil_engine::prepare::prepare_http` with the step's frozen
+context. So the method, the URL with its query encoding, the headers
+(including the inferred `Content-Type`, `User-Agent: Ferrum-Anvil/…`,
+`Accept` and `Accept-Encoding`) and the body bytes come from Anvil. Some values
+change on every iteration: dataset cells, values extracted by an earlier chain
+step, `{{anvil.iteration}}`, `{{anvil.vu}}` and dynamic helpers. Those values,
+and secrets, are replaced by alphanumeric markers before preparation (no
+encoder changes them). In the prepared request each marker becomes a JMeter
+expression. Inside a query parameter or a form body the expression is wrapped
+in `${__urlencode(…)}`, because Anvil encodes values there. Literal text that
+contains `$` or `\` is escaped for JMeter's function parser.
+
+| Anvil | JMeter element |
+|---|---|
+| HTTP request (HTTP/1.1) | HTTP Request sampler (HttpClient4): method, protocol, host, port, path with query, raw body |
+| headers (configured and inferred) | HTTP Header Manager under the sampler |
+| Basic auth | HTTP Authorization Manager under the sampler (scoped to its origin; JMeter sends Basic preemptively) |
+| Bearer auth, header or cookie API key | the header in the sampler's Header Manager |
+| query API key | a query parameter in the sampler's path (`${__urlencode()}`) |
+| closed workload (virtual users, stages) | one Thread Group per increase of virtual users: its threads, ramp-up, start delay and duration to the end of the schedule |
+| think time | Flow Control Action (pause) at the end of each iteration |
+| open workload (arrival rate, stages) | Open Model Thread Group: `rate(0/s)`, then `even_arrivals(D s) rate(R/s)` per stage, then `pause(5 s)` (Anvil's graceful stop) |
+| iteration workload | Thread Group with min(concurrency, iterations) threads and loops; a shared `__counter` gate stops the iterations beyond the count |
+| sequential chain | samplers in order. Each later sampler sits in an If Controller that runs only when the previous sample got an HTTP status (Anvil stops a chain at a transport failure or timeout) |
+| weighted mix | Random Variable (1 to the total weight, per iteration, seeded with the plan seed) and one If Controller per request |
+| dataset | CSV Data Set Config (`<name>.dataset.csv` next to the plan, every cell quoted, shared by all threads, recycled) |
+| `{{anvil.iteration}}` / `{{anvil.vu}}` | a Counter shared by all threads, from 0 / `${__intSum(${__threadNum},offset)}` |
+| `{{$uuid}}`, `{{$timestamp}}`, `{{$timestampMs}}`, `{{$randomInt a b}}` | `${__UUID()}`, `${__time(/1000,)}`, `${__time(,)}`, `${__Random(a,b,)}` |
+| status assertions (equals, not equals, in) | Response Assertion on the response code |
+| header assertions (exists, not exists, equals, contains) | Response Assertion on the response headers (a pattern; header names case-insensitive) |
+| body assertions (contains, not contains, equals, not equals; ASCII) | Response Assertion on the response text (substring or equality) |
+| JSONPath assertions (exists, not exists, equals) on a simple path (`$` with `.name`, `['name']`, `[index]`) | JSON Assertion |
+| latency assertion | Duration Assertion |
+| JSONPath (simple path), header and status extractions | JSON Extractor; Regular Expression Extractor on the headers or the response code |
+| cookie jar per virtual user | HTTP Cookie Manager per thread, kept across iterations |
+| redirects | Follow Redirects, with `-Jhttpsampler.max_redirects=<n>` in the printed command |
+| timeouts | the sampler's connect timeout, and its response timeout set to the larger of Anvil's response-headers and body-idle timeouts |
+| secrets | `${__P(anvil.secret.<name>,)}` properties; a setUp thread group stops the test before any traffic when one is not set (`__isPropDefined`, so a value is never read into an expression) |
+
+**Refused**: the export lists every reason, writes nothing and exits 3.
+
+| Code | Why |
+|---|---|
+| `strict_tls` | An `https` request that Anvil sends with certificate and host-name verification (the default, or a TLS profile that verifies). JMeter's HTTP samplers accept any certificate, trusted or not. A JMeter run would silently accept an untrusted certificate that Anvil refuses. Only a TLS profile that already turns verification off (the same behaviour) is exported, and the export report says so. The hosted round trip demonstrates both halves. |
+| `tls_setting` | A client certificate (JMeter has a JVM-wide keystore only), TLS 1.3 minimum, a server-name override or a SPIFFE identity. |
+| `http_version` | HTTP/2, h2c or HTTP/3, and the automatic policy over `https` (it negotiates HTTP/2). JMeter's HttpClient 4 speaks HTTP/1.1 only. |
+| `unsupported_protocol` | WebSocket, gRPC, SSE, TCP, UDP/DTLS and MCP units. JMeter's core samplers have no equivalent. |
+| `load_refusal` | Any plan a native run refuses (LOAD-013 refusals such as early data). |
+| `proxy`, `dns`, `retries`, `proxy_protocol` | A proxy profile, DNS overrides or a custom resolver or IP preference, automatic retries, a PROXY protocol header. |
+| `body` | GraphQL and SOAP bodies: Anvil judges their outcome from the response body, JMeter judges by status. Multipart and binary bodies, whose attachments stay in encrypted storage. A body on GET, HEAD, OPTIONS or TRACE. |
+| `auth` | JWT, OAuth 2, HMAC, DPoP, WS-Security, JWT-SVID and multi-auth: Anvil generates them per send, which JMeter core cannot do. |
+| `assertion`, `extraction` | Kinds without an equivalent that judges the same way: patterns (Rust vs Perl 5 regular expressions), XPath, JSON Schema, gRPC, message counts, diagnostics, MCP and JSON-RPC. Comparisons outside the table above. A non-simple JSONPath. |
+| `dynamic_helper` | `{{$isoTimestamp}}` (JMeter formats in local time), `{{$counter}}`, `{{$randomFrom}}`, where a request uses them. |
+| `workload` | A closed workload whose virtual users decrease. JMeter's core thread groups stop all their threads together. |
+| `abort_rule` | An abort rule: JMeter has no equivalent, and dropping it would remove the target's protection. |
+| `redirect_credentials` | A request that follows redirects while it carries credentials in headers or its body. JMeter's Header Manager sends them to every redirect target, and Anvil never forwards them to another origin. Turn off following redirects or allow cross-origin forwarding. |
+| `cookies` | Requests that differ in cookie handling, or a manual `Cookie` header while cookies are on. |
+| `dataset`, `dataset_secret`, `scope` | A dataset row without a value for a column, a cell with a line break, sensitive columns without the secret path, or steps of an unopened import root. |
+| `secret_mixed` | A credential field that mixes literal text with a per-iteration value. |
+| `lint` | A body that fails lint under a blocking lint policy (Anvil never sends it). |
+
+**Listed** in the export report (`--report FILE`, and printed): dataset row
+order, ramp timing (JMeter starts a ramp's first thread at its start), the
+open model's missing in-flight cap and per-stage rounding, weighted-mix
+randomness, `Connection: close` in fresh mode, timeouts and response limits
+JMeter does not enforce, header assertions (any line vs Anvil's first value),
+body evaluation beyond Anvil's 1 MiB load capture, the encoding of
+per-iteration values in queries (`+` vs `%20` for a space), Basic credential
+encoding, empty values for extractions that match nothing, and warmup (JMeter
+records it, and the import excludes it again).
+
+**Secrets.** No secret value is written to the `.jmx`. Vault values, secret
+variables, credential-named variables and fields, and auth credentials become
+`anvil.secret.*` properties, which the report lists by name and purpose,
+never by value. Only `--secrets-file FILE` writes their values: a new
+owner-only properties file (never over an existing file) for `jmeter -q
+FILE`. Credentials then never appear in JMeter's command line. Without it,
+JMeter stops in the setUp thread group before any traffic. A dataset with
+sensitive columns needs the same explicit path, and its CSV is then written
+owner-only.
+
+### Import (`anvil load import-jtl`, desktop **Import JMeter results…**)
+
+A JMeter result file, CSV (with field names, JMeter's default) or XML JTL,
+becomes a saved `LoadReport`. Its engine is `apache-jmeter`, and its engine
+version is `jmeter/<version>+jtl-<format>`. Each top-level sample is one HTTP
+request unit, classified by the unit ledger's rules: a 3-digit status is a
+complete response; 400 or above is an application failure; a failed assertion
+is an assertion failure. `Non HTTP response code: …` is a transport failure,
+or a censored timeout for socket and connect timeouts. Redirect and embedded
+sub-results are not counted. The report has the usual HDR histograms,
+statuses, bounded failure categories and a timeline. Failure examples carry
+only the label, the status or exception class and the assertion name, never a
+failure message (those can quote response bodies). JMeter latencies are whole
+milliseconds; there is no setup time, generator health or connection
+evidence, and the report says so. A result file holds samples, not
+iterations, so the iteration ledger repeats the request ledger. With `--plan`
+the report carries that plan (and excludes its warmup). Comparing it with an
+Anvil run of the plan lists the engine as a blocking difference and withholds
+latency deltas: the two engines' metrics are not automatically comparable as
+identical.
+
+The file is untrusted input. It is streamed twice, never loaded whole, and
+memory stays bounded: histograms, at most 3,600 timeline buckets with a small
+millisecond histogram each, about 30 MiB at most. The limits are 4 GiB,
+50 million samples, 1 MiB per CSV record or XML event (enforced while reading)
+and an XML depth of 32. XML is read with a pull parser that processes no DTD.
+A `DOCTYPE` is refused, only the predefined entities and character references
+are decoded, and any other entity reference is an error. Entity expansion and
+external entities are therefore impossible. Timestamps must be millisecond
+epochs, and non-HTTP samples are refused.
+
+### Hosted round trip
+
+`.github/workflows/jmeter.yml` downloads Apache JMeter 5.6.3 from
+`archive.apache.org`, verifies its SHA-512 against the pin, and runs
+`crates/anvil-jmeter/tests/jmeter_roundtrip.rs` against the loopback fixture
+server:
+
+* `load_012_jmeter_runs_the_exported_chain_and_the_import_matches_anvil`: a
+  two-step chain (dataset, secret bearer token from `-q`, assertions, an
+  extraction feeding step 2, a 404 every other iteration). JMeter's CSV and
+  XML results import as 20 requests (15 × 200, 5 × 404). The fixture received
+  exactly what Anvil prepares (headers, query, the secret, the extracted
+  value), and the native engine counts the same units.
+* `load_012_jmeter_without_the_secret_properties_stops_before_any_traffic`.
+* `load_012_jmeter_accepts_an_untrusted_certificate_so_strict_tls_is_refused`:
+  the native engine refuses the lab CA's certificate, the export refuses the
+  strict plan, and with verification turned off JMeter completes every request
+  against the same untrusted certificate.
+* `load_012_jmeter_runs_closed_open_and_mixed_workloads`.
+
 ## Limitations
 
-* **LOAD-012** (optional JMeter adapter) is not implemented.
+* The JMeter adapter exports HTTP request plans only and refuses the settings listed in [JMeter adapter](#jmeter-adapter-load-012).
 * **Refused protocol combinations**: see the table above. Native
   client-streaming and bidirectional gRPC are supported load units
   (`grpc_client_stream`, `grpc_bidi_stream`). There is no "long-lived
@@ -718,7 +867,7 @@ Observations that shaped the implementation:
 | LOAD-009 | `load_009_worker_crash_…`, `load_009_cancel_through_controller_…`, `load_009_stdin_eof_cancels_worker_…` |
 | LOAD-010 | `load_010_bounded_samples_under_sustained_failures_and_large_bodies`, `metrics::tests::load_010_…` |
 | LOAD-011 | `load_011_report_roundtrip_and_html_escape_response_content`, `report::tests::load_011_…`, `html::tests::load_011_…` |
-| LOAD-012 | not implemented |
+| LOAD-012 | `crates/anvil-jmeter/tests/export.rs` (`load_012_*`: strict TLS refused, unverified TLS listed, unsupported protocols and settings refused with every reason, element mapping, secrets as properties, workloads), `tests/jtl.rs` (`load_012_jtl_*`: CSV/XML import, warmup, DOCTYPE and entities refused, limits), `crates/anvil-cli/tests/cli_jmeter.rs`; hosted round trip with Apache JMeter 5.6.3 (`tests/jmeter_roundtrip.rs`, `.github/workflows/jmeter.yml`) |
 | LOAD-013 | `load_013_udp_sends_more_than_it_receives_and_never_claims_delivery` (lossy, silent, duplicating and closed-port UDP: sent and received separate, silence neither success nor failure, no latency without a response); `load_protocols.rs` (HTTP/3 forced and fallback, unary gRPC codes/missing status/channel reuse over HTTP/2, HTTP/3 and gRPC-Web HTTP/1.1, server streams and deadlines, client-streaming and bidirectional calls (messages sent, codes, channel reuse, deadlines), SSE stop conditions, WebSocket sessions/RTT/rejections/abnormal ends, TCP expectations/partial frames/peer closes, DTLS handshakes, UDP and DTLS through HBONE and UDP through MASQUE (one counted tunnel per exchange, proxy refusals incomplete and nothing reaching the target), typed refusals (incl. mixed tunnels, gRPC calls the engine refuses on every send, MASQUE through a proxy profile), acknowledgement and lock-stops-run through the worker for every protocol, cross-protocol comparison refused, integrity over protocol metrics); `cli_load.rs` (CLI parity); `specs_load.rs::load_plan_check_…` (app preflight), `specs_load.rs::load_preflight_warns_…`, `specs_load.rs::load_preflight_uses_transport_dns_overrides_for_loopback_judgments`, `specs_load.rs::load_preflight_checks_oauth_urls_with_per_run_values` and `specs_load.rs::load_preflight_judges_every_proxy_profile_after_no_proxy` and `load_preflight_security.rs` (fixed-address locality, changing and silent DNS, escaped raw hosts, connector proxy spelling, recording HTTP/SOCKS5/HBONE target and OAuth routes, NO_PROXY, proxy-received HTTP/1.1/h2c authority, cleartext session CONNECT targets, canonical/custom/dataset MASQUE routing with recorded UDP/DTLS CONNECT-UDP paths, and zero token requests for nested OAuth conflicts); `LoadView.test.tsx` (renderer); lab `LOAD-013-grpc`, `LOAD-013-ws`, `LOAD-013-udp` (streams profile, real gateway) |
 | LOAD-014 | `compare::tests::load_014_incompatible_runs_withhold_latency_deltas` |
 

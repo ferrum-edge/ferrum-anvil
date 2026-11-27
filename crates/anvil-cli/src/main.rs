@@ -21,6 +21,7 @@ mod drift;
 mod env;
 mod gateway;
 mod input;
+mod jmeter;
 mod lint;
 mod reimport;
 mod specs_load;

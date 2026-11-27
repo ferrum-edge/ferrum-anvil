@@ -1,6 +1,6 @@
 # Continuous integration
 
-Ferrum Anvil runs nine GitHub Actions workflows. Every third-party action is
+Ferrum Anvil runs ten GitHub Actions workflows. Every third-party action is
 pinned to a full commit SHA (the version is in a trailing comment) and every
 tool to an exact version. Workflows default to `permissions: contents: read`.
 The release `publish` job gets `actions: read` (to list the test runs for the
@@ -26,6 +26,7 @@ pass.
 | `website-evidence.yml` | every release run (called from `release.yml`, tagged or dry run, beside the build; it does not gate the draft release); manual; PRs and pushes to `main` that change the workflow (e.g. the pin) | Ubuntu 26.04 | The website's JavaScript tests, including its Anvil navigation, download and capability tests (`node --test "tests/**/*.test.js"`, as its own `test.yml` runs them, no live network checks) pass at the pinned `ferrum-edge/ferrumedge` commit; uploads `website-evidence.json` (website SHA, command, counts, Anvil release tag). Failure-matrix REL-006, REL-007, REL-008 |
 | `edge-main-drift.yml` | weekly; manual; PRs touching the workflow or `contracts_adoption.rs` | Ubuntu 26.04 | Early warning, not a required check: Edge `main`'s tokens and error classes (its `src/retry.rs`) and the contract parity tests against the vocabularies, schemas and every fixture on ferrum-contracts `main`, against Anvil. A finding or a check that could not run opens or updates one `edge-main-drift` issue. See [ferrum-contracts.md](ferrum-contracts.md#checking-against-edge-main) |
 | `updater-e2e.yml` | PRs touching the update command (`cmd_update.rs`, `cmd_update/`), the plugin and command registration (`src-tauri/src/lib.rs`), `tauri.conf.json`, the desktop `Cargo.toml`, `apps/desktop/e2e/updater/`, the E2E helpers and driver config (`e2e/helpers.ts`, `wdio.conf.ts`), `scripts/updater-manifest.mjs` or its tests, or the workflow; push to `main` (same paths); weekly; manual | Ubuntu 26.04 (AppImage, under Xvfb), macOS 15 (.app) | REL-003 on built bundles: the E2E-instrumented bundle, built with a test updater key and a loopback endpoint, refuses an update signed by another key, with a corrupted signature or altered after signing through its real `update_install` command, with the bundle, its reported version and the persistent profile files (SQLite's `-shm` aside) unchanged during each refusal, and installs a validly signed one. Also runs `scripts/tests/updater-manifest.test.mjs`. See [release.md](release.md#signed-update-refusal-e2e-rel-003) |
+| `jmeter.yml` | PRs and pushes to `main` touching `crates/anvil-jmeter/`, `crates/anvil-load/`, the engine's request preparation or variable resolution, the HTTP fixture, `Cargo.lock` or the workflow; weekly; manual | Ubuntu 26.04 | LOAD-012 with a real Apache JMeter: downloads the pinned JMeter release, verifies its SHA-512, and runs `crates/anvil-jmeter/tests/jmeter_roundtrip.rs` (`--ignored`): exported plans run with `jmeter -n` against the loopback fixture server, and their CSV and XML result files import with the counts the fixture received and the native engine measures. Also shows that JMeter accepts an untrusted certificate (why strict TLS plans are refused) and that a plan without its secret properties stops before any traffic. See [load.md](load.md#jmeter-adapter-load-012) |
 
 The `ci.yml` jobs are the required checks enforced on `main` by the "Main
 required checks" ruleset. `e2e.yml` only runs for PRs that touch its paths, so
@@ -203,6 +204,9 @@ artifact per OS and release.
 | taiki-e/install-action | v2.90.8 `fe3acb53a98b62c772db35de75ce0e4595e7ca8c` |
 | azure/login | v3.1.0 `a641126d1b8aa4d1fa005f4f92df94a3a4c4c906` (release workflow, Artifact Signing OIDC route only) |
 | Microsoft.ArtifactSigning.Client | 1.0.151, nuget.org SHA-512 pinned in `release.yml` (Artifact Signing routes only) |
+| actions/setup-java | v6.2.0 `77dd5b2ce225ea11469928ac317850245a74ae78` (JMeter round trip only) |
+| Java (Temurin) | 21.0.13+9 (JMeter round trip only) |
+| Apache JMeter | 5.6.3 (`jmeter.yml`; `apache-jmeter-5.6.3.tgz` from archive.apache.org, SHA-512 `5978a1a3…e689083` as Apache publishes it) |
 | Node.js | 22.23.3 |
 | cargo-deny / cargo-cyclonedx | 0.20.2 / 0.5.9 |
 | gitleaks | 8.30.1 (linux x64 SHA-256 `551f6fc8…f2470eb`) |

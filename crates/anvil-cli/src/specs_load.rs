@@ -274,6 +274,48 @@ pub enum LoadCmd {
     },
     /// List saved load reports.
     Reports { workspace: String },
+    /// Export a plan as an Apache JMeter test plan (.jmx) for `jmeter -n`,
+    /// with its dataset as `<name>.dataset.csv` next to it. Settings JMeter
+    /// cannot reproduce are refused (exit 3) or listed; a request Anvil sends
+    /// with certificate verification is refused, because JMeter accepts any
+    /// certificate. Nothing is sent.
+    ExportJmx {
+        workspace: String,
+        plan: String,
+        /// The .jmx file to write.
+        #[arg(long)]
+        out: PathBuf,
+        /// Write the plan's secrets to this new properties file (owner-only)
+        /// for `jmeter -q`. Without it the .jmx names the properties and
+        /// nothing holds their values.
+        #[arg(long)]
+        secrets_file: Option<PathBuf>,
+        /// Also write the export report (mapping, differences, properties) as JSON.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+    /// Import a JMeter result file (CSV or XML JTL) as a load report.
+    ImportJtl {
+        workspace: String,
+        /// The .jtl file JMeter wrote with -l.
+        #[arg(long)]
+        file: PathBuf,
+        /// The load plan the JMeter test plan was exported from (name or id):
+        /// the report then compares with that plan's Anvil runs.
+        #[arg(long)]
+        plan: Option<String>,
+        /// The JMeter version that produced the file (a JTL does not record it).
+        #[arg(long)]
+        jmeter_version: Option<String>,
+        /// Seconds from the first sample excluded from the metrics (default:
+        /// the plan's warmup).
+        #[arg(long)]
+        warmup: Option<u64>,
+        #[arg(long)]
+        json: Option<PathBuf>,
+        #[arg(long)]
+        html: Option<PathBuf>,
+    },
 }
 
 fn find_plan(app: &App, ws: &Id, key: &str) -> Result<LoadPlan> {
@@ -479,6 +521,30 @@ pub async fn load_cmd(app: &App, cmd: &LoadCmd) -> Result<i32> {
             } else {
                 0
             })
+        }
+        LoadCmd::ExportJmx { workspace, plan, out, secrets_file, report } => {
+            let ws = app.find_workspace(workspace)?.meta.id;
+            let p = find_plan(app, &ws, plan)?;
+            crate::jmeter::export_jmx(app, &p, out, secrets_file.as_deref(), report.as_deref())
+        }
+        LoadCmd::ImportJtl { workspace, file, plan, jmeter_version, warmup, json, html } => {
+            let ws = app.find_workspace(workspace)?.meta.id;
+            let plan = match plan {
+                Some(key) => Some(find_plan(app, &ws, key)?),
+                None => None,
+            };
+            crate::jmeter::import_jtl(
+                app,
+                crate::jmeter::ImportArgs {
+                    ws,
+                    file,
+                    plan,
+                    jmeter_version: jmeter_version.clone(),
+                    warmup: *warmup,
+                    json: json.as_deref(),
+                    html: html.as_deref(),
+                },
+            )
         }
         LoadCmd::Reports { workspace } => {
             let ws = app.find_workspace(workspace)?.meta.id;

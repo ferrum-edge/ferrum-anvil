@@ -194,7 +194,7 @@ impl App {
         Ok(())
     }
 
-    fn plan_requests(p: &LoadPlan) -> Vec<Id> {
+    pub(crate) fn plan_requests(p: &LoadPlan) -> Vec<Id> {
         let mut ids: Vec<Id> = p.chain.clone();
         for s in &p.mix {
             if !ids.contains(&s.request_id) {

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 anvil-load.workspace = true
+anvil-jmeter.workspace = true
 anvil-import.workspace = true
 anvil-contract.workspace = true
 anvil-domain.workspace = true
