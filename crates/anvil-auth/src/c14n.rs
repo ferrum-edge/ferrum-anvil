@@ -219,12 +219,12 @@ impl Writer<'_, '_> {
         let mut node = root;
         self.enter(node)?;
         'walk: loop {
-            if node.is_element() {
-                if let Some(child) = node.first_child() {
-                    node = child;
-                    self.enter(node)?;
-                    continue;
-                }
+            if node.is_element()
+                && let Some(child) = node.first_child()
+            {
+                node = child;
+                self.enter(node)?;
+                continue;
             }
             loop {
                 self.leave(node);

@@ -90,10 +90,13 @@ fn invalid(m: impl Into<String>) -> AuthError {
     AuthError::Invalid(m.into())
 }
 
+/// A PEM block's label and DER (zeroized when dropped).
+type PemBlock = (String, Zeroizing<Vec<u8>>);
+
 /// Every PEM block in `text` as (label, DER). The DER of a key is zeroized
 /// when dropped. Any PEM error is reported without its detail, which could
 /// quote a byte of the key.
-fn pem_blocks(text: &str, what: &str) -> Result<Vec<(String, Zeroizing<Vec<u8>>)>, AuthError> {
+fn pem_blocks(text: &str, what: &str) -> Result<Vec<PemBlock>, AuthError> {
     let mut out = Vec::new();
     for block in x509_parser::pem::Pem::iter_from_buffer(text.trim().as_bytes()) {
         let block = block.map_err(|_| invalid(format!("the {what} is not valid PEM")))?;
