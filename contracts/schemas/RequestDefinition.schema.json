@@ -1144,6 +1144,22 @@
               "type": "null"
             }
           ]
+        },
+        "username_token": {
+          "description": "Send a UsernameToken with the username and password. Turn it off for\na header that carries only a Timestamp, a SAML assertion or an X.509\nsignature.",
+          "type": "boolean",
+          "default": true
+        },
+        "signature": {
+          "description": "Sign the SOAP Body, the Timestamp and the UsernameToken with an X.509\nkey (XML-DSig, exclusive canonicalization, SHA-256).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsseSignatureConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1156,6 +1172,83 @@
       "enum": [
         "password_text",
         "password_digest"
+      ]
+    },
+    "WsseSignatureConfig": {
+      "description": "X.509 XML signature of a WS-Security header. The certificate the key\nbelongs to is sent as a BinarySecurityToken (X509v3) referenced from the\nsignature's KeyInfo.",
+      "type": "object",
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/XmlSigningIdentity"
+        },
+        "algorithm": {
+          "$ref": "#/$defs/XmlSignatureAlgorithm",
+          "default": "auto"
+        },
+        "inclusive_prefix_list": {
+          "description": "InclusiveNamespaces PrefixList applied to every signed reference\n(space-separated prefixes, `#default` for the default namespace).\nUsually empty.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity"
+      ]
+    },
+    "XmlSigningIdentity": {
+      "description": "Private key and certificate an XML signature is made with.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string",
+              "const": "pem"
+            },
+            "cert_chain_pem": {
+              "description": "Certificate chain PEM (not secret). The certificate the key\nbelongs to is the one sent.",
+              "type": "string"
+            },
+            "private_key_pem": {
+              "description": "Private key PEM (PKCS#8, PKCS#1 or SEC1), RSA of at least 2048\nbits or EC P-256 (sensitive).",
+              "$ref": "#/$defs/SensitiveValue"
+            }
+          },
+          "required": [
+            "format",
+            "cert_chain_pem",
+            "private_key_pem"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string",
+              "const": "pkcs12"
+            },
+            "bundle_b64": {
+              "description": "Base64 PKCS#12 bundle (sensitive).",
+              "$ref": "#/$defs/SensitiveValue"
+            },
+            "password": {
+              "$ref": "#/$defs/SensitiveValue"
+            }
+          },
+          "required": [
+            "format",
+            "bundle_b64",
+            "password"
+          ]
+        }
+      ]
+    },
+    "XmlSignatureAlgorithm": {
+      "description": "Signature algorithm of an XML signature. `auto` follows the key: RSA\nsigns RSA-SHA256, a P-256 EC key ECDSA-SHA256. SHA-1 is never used.",
+      "type": "string",
+      "enum": [
+        "auto",
+        "rsa_sha256",
+        "ecdsa_p256_sha256"
       ]
     },
     "JwtSvidConfig": {

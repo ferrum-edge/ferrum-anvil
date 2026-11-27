@@ -554,6 +554,8 @@ fn auths_for(user: &str) -> Vec<anvil_domain::auth::AuthConfig> {
                 password_type: WssePasswordType::PasswordText,
                 timestamp_ttl_secs: None,
                 saml_assertion: None,
+                username_token: true,
+                signature: None,
             },
         },
         AuthConfig::Multi {
@@ -767,6 +769,8 @@ async fn a_short_secret_key_name_or_username_is_hidden_where_it_is_written() {
                     password_type: WssePasswordType::PasswordText,
                     timestamp_ttl_secs: None,
                     saml_assertion: None,
+                    username_token: true,
+                    signature: None,
                 },
             };
             let p = engine.preview(&ctx_with(auth, value, secret)).expect("preview");
@@ -948,6 +952,8 @@ async fn a_short_secret_ws_security_username_is_withheld_from_every_body_preview
                     password_type: WssePasswordType::PasswordText,
                     timestamp_ttl_secs: None,
                     saml_assertion: None,
+                    username_token: true,
+                    signature: None,
                 },
             };
             let mut c = ExecutionContext::standalone(spec);
@@ -1001,6 +1007,8 @@ async fn a_hidden_username_crossing_the_body_preview_cut_shows_no_password_prefi
                 password_type: text,
                 timestamp_ttl_secs: None,
                 saml_assertion: None,
+                username_token: true,
+                signature: None,
             },
         };
         let mut c = ExecutionContext::standalone(spec);
@@ -1041,6 +1049,8 @@ async fn a_hidden_username_running_past_the_captured_body_is_withheld() {
                 password_type: WssePasswordType::PasswordText,
                 timestamp_ttl_secs: None,
                 saml_assertion: None,
+                username_token: true,
+                signature: None,
             },
         };
         let mut c = ExecutionContext::standalone(spec);
@@ -1075,6 +1085,8 @@ async fn long_username_preview(engine: &Engine, suffix: &str, pad: usize, secret
             password_type: WssePasswordType::PasswordText,
             timestamp_ttl_secs: None,
             saml_assertion: None,
+            username_token: true,
+            signature: None,
         },
     };
     let mut c = ExecutionContext::standalone(spec);
@@ -1198,6 +1210,8 @@ async fn an_xml_escaped_secret_ws_security_username_is_redacted() {
                 password_type: WssePasswordType::PasswordText,
                 timestamp_ttl_secs: None,
                 saml_assertion: None,
+                username_token: true,
+                signature: None,
             },
         };
         let mut c = ExecutionContext::standalone(spec);

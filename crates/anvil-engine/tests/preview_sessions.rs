@@ -615,6 +615,8 @@ fn wsse() -> AuthConfig {
             password_type: WssePasswordType::PasswordText,
             timestamp_ttl_secs: None,
             saml_assertion: None,
+            username_token: true,
+            signature: None,
         },
     }
 }

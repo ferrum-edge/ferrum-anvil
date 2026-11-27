@@ -48,6 +48,8 @@ async fn preview_shows_the_ws_security_body_as_sent_with_the_password_redacted()
             password_type: WssePasswordType::PasswordText,
             timestamp_ttl_secs: None,
             saml_assertion: None,
+            username_token: true,
+            signature: None,
         },
     };
     let c = ExecutionContext::standalone(s);
@@ -95,6 +97,8 @@ async fn preview_redacts_a_vault_backed_saml_assertion_and_keeps_the_soap_data()
             password_type: WssePasswordType::PasswordDigest,
             timestamp_ttl_secs: None,
             saml_assertion: Some(SensitiveValue::Secret { secret: vault.clone() }),
+            username_token: true,
+            signature: None,
         },
     };
     let mut c = ExecutionContext::standalone(s);
@@ -147,6 +151,8 @@ async fn a_password_digest_and_its_nonce_are_redacted_in_the_preview_and_the_rec
             password_type: WssePasswordType::PasswordDigest,
             timestamp_ttl_secs: Some(300),
             saml_assertion: None,
+            username_token: true,
+            signature: None,
         },
     };
     let c = ExecutionContext::standalone(s);

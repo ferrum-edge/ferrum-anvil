@@ -19,7 +19,7 @@ use crate::LoadError;
 use crate::dataset::{Dataset, DatasetFormat};
 use crate::executor::{LoadJob, RunOptions};
 use anvil_domain::Id;
-use anvil_domain::auth::AuthConfig;
+use anvil_domain::auth::{AuthConfig, XmlSigningIdentity};
 use anvil_domain::integration::{IntegrationKind, IntegrationProfile};
 use anvil_domain::load::LoadPlan;
 use anvil_domain::request::{AttachmentRef, Body, GrpcSchemaSource, MultipartContent, Protocol, RequestSpec};
@@ -196,6 +196,14 @@ fn walk_auth(a: &AuthConfig, out: &mut Vec<SecretRef>) {
             push_secret(&config.password, out);
             if let Some(s) = &config.saml_assertion {
                 push_secret(s, out);
+            }
+            match config.signature.as_ref().map(|s| &s.identity) {
+                Some(XmlSigningIdentity::Pem { private_key_pem, .. }) => push_secret(private_key_pem, out),
+                Some(XmlSigningIdentity::Pkcs12 { bundle_b64, password }) => {
+                    push_secret(bundle_b64, out);
+                    push_secret(password, out);
+                }
+                None => {}
             }
         }
         AuthConfig::JwtSvid { config } => {
@@ -583,6 +591,9 @@ mod tests {
         "ProxyProfile.password",
         "WsseConfig.password",
         "WsseConfig.saml_assertion",
+        "XmlSigningIdentity.bundle_b64",
+        "XmlSigningIdentity.password",
+        "XmlSigningIdentity.private_key_pem",
     ];
 
     /// The `SensitiveValue` fields the published schemas declare for what a
@@ -672,7 +683,26 @@ mod tests {
                 },
                 {
                     "type": "wsse",
-                    "config": { "username": "u", "password": vault_ref("wsse password"), "saml_assertion": vault_ref("saml assertion") },
+                    "config": {
+                        "username": "u",
+                        "password": vault_ref("wsse password"),
+                        "saml_assertion": vault_ref("saml assertion"),
+                        "signature": { "identity": { "format": "pem", "cert_chain_pem": "", "private_key_pem": vault_ref("wsse signing key") } },
+                    },
+                },
+                {
+                    "type": "wsse",
+                    "config": {
+                        "username": "u",
+                        "password": { "kind": "template", "value": "" },
+                        "signature": {
+                            "identity": {
+                                "format": "pkcs12",
+                                "bundle_b64": vault_ref("wsse signing bundle"),
+                                "password": vault_ref("wsse signing bundle password"),
+                            },
+                        },
+                    },
                 },
                 {
                     "type": "jwt_svid",

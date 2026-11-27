@@ -56,11 +56,13 @@ fn dpop() -> ResolvedAuth {
 
 fn wsse() -> ResolvedAuth {
     ResolvedAuth::Wsse {
+        username_token: true,
         username: "alice".into(),
         password: Zeroizing::new("secret123".into()),
         password_type: WssePasswordType::PasswordText,
         timestamp_ttl_secs: None,
         saml_assertion: None,
+        signature: None,
     }
 }
 

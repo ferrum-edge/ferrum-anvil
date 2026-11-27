@@ -30,7 +30,7 @@ import type {
   Variable,
   Workspace,
 } from "./generated/contracts";
-import { PemFromFile } from "./AuthEditor";
+import { P12Picker, PemFromFile } from "./AuthEditor";
 import { SpecImport } from "./SpecImport";
 import { ListText, Modal, SecretField, Tabs, humanize, uid } from "./ui";
 import { useConfirm } from "./Confirm";
@@ -730,46 +730,6 @@ export function TlsForm({ p, onChange }: { p: TlsProfile; onChange: (p: TlsProfi
         )}
         {id && (p.bindings ?? []).length === 0 && <div className="warn-box">This certificate will be offered to any server a request using this profile connects to, including redirect targets.</div>}
       </fieldset>
-    </div>
-  );
-}
-
-function P12Picker(props: { workspaceId: string | null; onSecret: (v: { kind: "secret"; secret: { id: string; label: string } }) => void; current: string | null }) {
-  const [err, setErr] = useState<string | null>(null);
-  return (
-    <div className="row">
-      {props.current && (
-        <span className="badge accent">
-          <Icon name="key" size={12} />
-          {props.current}
-        </span>
-      )}
-      <button
-        className="btn small"
-        disabled={!props.workspaceId}
-        title={props.workspaceId ? undefined : "Open a workspace to keep values in its vault"}
-        onClick={async () => {
-          const workspaceId = props.workspaceId;
-          if (!workspaceId) return;
-          setErr(null);
-          try {
-            const file = await api.chooseFile("pkcs12_file", { filters: [{ name: "PKCS#12", extensions: ["p12", "pfx"] }] });
-            if (!file) return;
-            // The bundle goes straight into the vault as base64; only a reference returns.
-            const secret = await api.importPkcs12File(
-              file.token,
-              workspaceId,
-              file.file_name || "client.p12",
-            );
-            props.onSecret({ kind: "secret", secret });
-          } catch (e) {
-            setErr(String((e as Error).message));
-          }
-        }}
-      >
-        Choose .p12 / .pfx…
-      </button>
-      {err && <span className="bad-text">{err}</span>}
     </div>
   );
 }

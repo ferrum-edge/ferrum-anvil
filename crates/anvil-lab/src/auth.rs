@@ -28,7 +28,7 @@ use crate::tls::{absent_scope, integration, op_lines, record_excludes, send};
 use anvil_auth::{HmacParams, SignableRequest};
 use anvil_domain::auth::{
     AuthConfig, BodyDigestHeader, DpopConfig, HmacAlgorithm, HmacConfig, HmacProfile, JwtAlgorithm, JwtClaims, KeyLocation, OAuth2Config,
-    OAuthClientAuth, OAuthGrant, WsseConfig, WssePasswordType,
+    OAuthClientAuth, OAuthGrant, WsseConfig, WssePasswordType, WsseSignatureConfig, XmlSignatureAlgorithm, XmlSigningIdentity,
 };
 use anvil_domain::diagnostics::{Confidence, SourceScope};
 use anvil_domain::execution::Phase;
@@ -1272,6 +1272,8 @@ fn wsse(password: &str, ptype: WssePasswordType, ttl: Option<u32>, saml: Option<
             password_type: ptype,
             timestamp_ttl_secs: ttl,
             saml_assertion: saml.map(tv),
+            username_token: true,
+            signature: None,
         },
     }
 }
@@ -1417,47 +1419,103 @@ fn auth029_expired(env: &Env) -> Fut<'_> {
     })
 }
 
-/// Whether the host can produce the signed-XML fixtures (reason otherwise).
+/// Whether the host can issue the lab's signed SAML assertions (reason otherwise).
 fn soap_signing_unavailable(env: &Env) -> Option<String> {
     env.fx.soap.tools.signing_unavailable()
 }
 
-fn signed(env: &Env, signer: &Signer, payload: &str) -> String {
-    env.fx.soap.signed_envelope(signer, payload, anvil_domain::Timestamp::now(), 60).expect("lab signed envelope")
+/// Anvil's WS-Security profile signing with `signer`'s key and certificate
+/// (PEM pasted as a user would), no UsernameToken, a 60 s Timestamp: the
+/// Body and the Timestamp are signed.
+fn x509_wsse(signer: &Signer) -> (AuthConfig, String) {
+    let (key, cert) = signer.pem().expect("lab signer PEM");
+    let auth = AuthConfig::Wsse {
+        config: WsseConfig {
+            username: String::new(),
+            password: tv(""),
+            password_type: WssePasswordType::PasswordText,
+            timestamp_ttl_secs: Some(60),
+            saml_assertion: None,
+            username_token: false,
+            signature: Some(WsseSignatureConfig {
+                identity: XmlSigningIdentity::Pem { cert_chain_pem: cert, private_key_pem: tv(&key) },
+                algorithm: XmlSignatureAlgorithm::Auto,
+                inclusive_prefix_list: String::new(),
+            }),
+        },
+    };
+    (auth, key)
+}
+
+/// An envelope Anvil's signer produced for one send, with `payload` in the
+/// Body (captured to be altered after signing and sent back raw).
+fn anvil_signed(signer: &Signer, payload: &str) -> String {
+    let (key, cert) = signer.pem().expect("lab signer PEM");
+    let identity = anvil_auth::xmldsig::SigningIdentity::from_pem(&cert, &key, XmlSignatureAlgorithm::Auto).expect("lab signing identity");
+    let spec = anvil_auth::wsse::HeaderSpec {
+        username_token: None,
+        timestamp_ttl_secs: Some(60),
+        saml: None,
+        signature: Some(anvil_auth::wsse::SignatureSpec { identity: &identity, inclusive_prefixes: &[] }),
+    };
+    let envelope = SOAP_ENVELOPE.replace("anvil-lab-ping", payload);
+    let inserted = anvil_auth::wsse::insert(envelope.as_bytes(), &spec, anvil_domain::Timestamp::now()).expect("Anvil signs the envelope");
+    String::from_utf8(inserted.body).expect("utf-8 envelope")
 }
 
 fn auth030(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let soap = &env.fx.soap;
-        let envelope = signed(env, &soap.soap_signer, "order-42");
+        let (signed, key) = x509_wsse(&soap.soap_signer);
+        // Accepted: Anvil signs the envelope at send time with the trusted key.
         let before = env.fx.echo.log.count_requests();
-        let ok = go(env, &soap_ctx(env, "/soap/x509/echo", AuthConfig::None, &envelope)).await;
+        let ok = go(env, &soap_ctx(env, "/soap/x509/echo", signed.clone(), SOAP_ENVELOPE)).await;
         c.success(CheckKind::Diagnosis, &ok);
+        let received = echoed_body(&ok);
         c.add(
-            CheckKind::Diagnosis,
-            "Anvil sent the signed envelope byte for byte (no re-serialization)",
-            ok.record.prepared.body_sha256.as_deref() == Some(&hex::encode(sha2::Sha256::digest(envelope.as_bytes()))),
+            CheckKind::GroundTruth,
+            "the backend received the envelope Anvil signed (the recorded body hash is that of the bytes received)",
+            ok.record.prepared.body_sha256.as_deref() == Some(&hex::encode(sha2::Sha256::digest(received.as_bytes()))),
             "",
         );
-        c.add(CheckKind::GroundTruth, "the backend received exactly the signed bytes", echoed_body(&ok) == envelope, "");
+        c.add(
+            CheckKind::GroundTruth,
+            "the envelope carries Anvil's BinarySecurityToken and an RSA-SHA256 XML signature over Body and Timestamp",
+            received.contains("<wsse:BinarySecurityToken")
+                && received.contains(anvil_auth::xmldsig::RSA_SHA256)
+                && received.matches("<ds:Reference URI=").count() == 2,
+            "",
+        );
+        c.add(
+            CheckKind::Diagnosis,
+            "the record names the signature algorithm and the signed references",
+            ok.record.prepared.inferred.iter().any(|l| l.contains("wsse.signature.algorithm: RSA-SHA256"))
+                && ok.record.prepared.inferred.iter().any(|l| l.contains("wsse.signature.references: TS-")),
+            format!("{:?}", ok.record.prepared.inferred),
+        );
+        record_excludes(&mut c, &ok, &key, "the signing private key");
         backend_reached(&mut c, env, before);
-        // Tampered signed element: the Body changes after signing.
-        let tampered = signed(env, &soap.soap_signer, "order-42").replace("order-42", "order-99");
+        // Tampered signed element: an Anvil-signed Body changed after signing.
+        let tampered = anvil_signed(&soap.soap_signer, "order-42").replace("order-42", "order-99");
         let before = env.fx.echo.log.count_requests();
         let o = go(env, &soap_ctx(env, "/soap/x509/echo", AuthConfig::None, &tampered)).await;
         soap_rejection(&mut c, env, &o, "WS-Security: Reference digest mismatch");
         backend_untouched(&mut c, env, before);
-        // Untrusted key: a valid signature by a certificate the route does not trust.
-        let rogue = go(env, &soap_ctx(env, "/soap/x509/echo", AuthConfig::None, &signed(env, &soap.rogue, "order-42"))).await;
-        soap_rejection(&mut c, env, &rogue, "WS-Security: signing certificate is not trusted");
-        // Recovery: a freshly signed, untouched envelope.
-        let r = go(env, &soap_ctx(env, "/soap/x509/echo", AuthConfig::None, &signed(env, &soap.soap_signer, "order-43"))).await;
+        // Untrusted key: Anvil signs correctly with a certificate the route does not trust.
+        let (rogue, rogue_key) = x509_wsse(&soap.rogue);
+        let before = env.fx.echo.log.count_requests();
+        let untrusted = go(env, &soap_ctx(env, "/soap/x509/echo", rogue, SOAP_ENVELOPE)).await;
+        soap_rejection(&mut c, env, &untrusted, "WS-Security: signing certificate is not trusted");
+        record_excludes(&mut c, &untrusted, &rogue_key, "the untrusted signing private key");
+        backend_untouched(&mut c, env, before);
+        // Recovery: Anvil signs a fresh envelope with the trusted key.
+        let r = go(env, &soap_ctx(env, "/soap/x509/echo", signed, SOAP_ENVELOPE)).await;
         c.success(CheckKind::Recovery, &r);
         let log = vec![format!(
-            "lab signer: {}; route trusts {} (per-run throwaway RSA-2048)",
-            soap.tools.versions,
-            soap.soap_signer.cert_path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
+            "Anvil signed every envelope (exclusive C14N, RSA-SHA256, BinarySecurityToken); route trusts {} (per-run throwaway RSA-2048 from {})",
+            soap.soap_signer.cert_path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+            soap.tools.openssl
         )];
         Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: log }
     })
@@ -1747,7 +1805,7 @@ pub fn all() -> Vec<Def> {
         Def { id: "AUTH-029", title: "SOAP UsernameToken digest: accepted, wrong password, replayed nonce", run: auth029 },
         Def { id: "AUTH-029.text", title: "SOAP UsernameToken PasswordText; profile-mismatch lookalike", run: auth029_text },
         Def { id: "AUTH-029.expired", title: "SOAP Timestamp expired before it reached the gateway", run: auth029_expired },
-        Def { id: "AUTH-030", title: "SOAP X.509 signature: verbatim signed envelope, tampered body, untrusted key", run: auth030 },
+        Def { id: "AUTH-030", title: "SOAP X.509 signature: Anvil-signed envelope, tampered body, untrusted key", run: auth030 },
         Def { id: "AUTH-031", title: "SOAP SAML assertion: replay, audience, expiry, issuer and key trust", run: auth031 },
         Def { id: "AUTH-017", title: "OIDC browser session is not Anvil's session", run: auth017 },
         Def {
@@ -1758,8 +1816,9 @@ pub fn all() -> Vec<Def> {
     ]
 }
 
-/// Scenarios that need the lab's XML signer (xmllint + openssl).
-const SIGNED_XML: &[&str] = &["AUTH-030", "AUTH-031"];
+/// Scenarios that need the lab's SAML identity provider (xmllint + openssl).
+/// AUTH-030 needs neither: Anvil signs its envelopes.
+const SIGNED_XML: &[&str] = &["AUTH-031"];
 
 fn skips() -> Vec<(&'static str, &'static str, &'static str)> {
     let client_only = "client-side OAuth flow with no gateway leg (external browser, loopback redirect, state/PKCE, refresh single-flight); covered by anvil-auth unit tests and the anvil-identity fixture-IdP tests (tests/api_oauth.rs), not a live-gateway scenario";
@@ -1813,7 +1872,7 @@ async fn start() -> anyhow::Result<Env> {
 async fn run(args: RunArgs) -> anyhow::Result<Vec<ScenarioResult>> {
     let ctx = RunCtx::new("auth")?;
     let mut env = start().await?;
-    // Signed-XML fixtures need an audited canonicalizer on the host.
+    // The lab's SAML identity provider needs an audited canonicalizer on the host.
     let unsigned = soap_signing_unavailable(&env);
     let defs: Vec<Def> = all().into_iter().filter(|d| unsigned.is_none() || !SIGNED_XML.contains(&d.id)).collect();
     let mut results = match harness::run_defs(&ctx, &mut env, defs, &args.only, args.untrusted_pass).await {

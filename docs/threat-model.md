@@ -179,7 +179,13 @@ against it).
     PasswordDigest UsernameToken's digest and nonce (together they can be
     replayed against a service that keeps no nonce cache or Timestamp
     limit), so neither the effective-request preview of the body it
-    rewrites nor the record shows them.
+    rewrites nor the record shows them. A WS-Security X.509 signing key (PEM,
+    or a PKCS#12 bundle and its password) is registered the same way (a PEM
+    key before it is parsed); it is resolved from the vault per send, parsed by AWS-LC
+    into a key that is never formatted (its `Debug` shows only the
+    algorithm and certificate hash), and refusals are fixed sentences that
+    never quote PEM or DER bytes. Only the certificate, the signature value
+    and the digests reach the wire or the record.
   - URL path segments, query names and values, and fragments are compared
     after percent-decoding, and a component that hides a secret is replaced
     whole, so no reversible encoding of it is kept. A URL that still reveals

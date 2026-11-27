@@ -1,0 +1,63 @@
+# WS-Security XML signature interop: Anvil's Exclusive XML Canonicalization
+# against libxml2 (xmllint --exc-c14n and lxml's exclusive C14N with
+# InclusiveNamespaces prefix lists), and envelopes Anvil signs (RSA-SHA256,
+# ECDSA-P256-SHA256) verified by xmlsec1, with tampered envelopes refused.
+# The tests are #[ignore]d in the workspace run because they need these
+# tools; here a missing tool fails the job (crates/anvil-auth/tests/xmldsig_interop.rs).
+name: XML signature interop
+
+on:
+  pull_request:
+    paths:
+      - "crates/anvil-auth/**"
+      - "crates/anvil-domain/src/auth.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/xmldsig-interop.yml"
+      - ".github/actions/setup/**"
+  push:
+    branches: [main]
+    paths:
+      - "crates/anvil-auth/**"
+      - "crates/anvil-domain/src/auth.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/xmldsig-interop.yml"
+      - ".github/actions/setup/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xmldsig-interop-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  interop:
+    name: XML-DSig interop (libxml2, xmlsec1)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tauri-deps: "false"
+          node: "false"
+          cache-key: xmldsig-interop
+      - name: libxml2-utils, python3-lxml, xmlsec1 and OpenSSL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxml2-utils python3-lxml xmlsec1 openssl
+          xmllint --version
+          xmlsec1 --version
+          python3 -c 'import lxml.etree as e; print("lxml", e.LXML_VERSION, "libxml2", e.LIBXML_VERSION)'
+          openssl version
+      - name: Canonicalization and signature interop tests
+        run: cargo test --locked -p anvil-auth --test xmldsig_interop -- --ignored --nocapture

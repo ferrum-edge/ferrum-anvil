@@ -1,15 +1,18 @@
-//! LAB-ONLY signed SOAP fixtures (AUTH-030 X.509 signature, AUTH-031 SAML).
+//! LAB-ONLY SOAP signing material: the X.509 identities AUTH-030 signs with
+//! (through Anvil's own WS-Security signer) and the lab's SAML identity
+//! provider for AUTH-031.
 //!
-//! Anvil does not sign XML: an XML-DSig signer needs an audited
-//! canonicalization implementation, and Anvil ships none (the WS-Security
-//! editor offers UsernameToken and a *user-supplied* SAML assertion only).
-//! The lab therefore plays the external signer and the SAML identity
-//! provider, using two audited tools already present on the host — never a
-//! hand-written canonicalizer:
+//! AUTH-030 envelopes are signed by Anvil (`anvil_auth::wsse`, exclusive
+//! canonicalization and RSA-SHA256 over Body and Timestamp) with the
+//! throwaway `soap-signer` key the gateway route trusts, or the `soap-rogue`
+//! key it does not; the gateway's own, independent canonicalizer and
+//! verifier is the cross-check. Only the SAML assertions of AUTH-031 are
+//! still signed here, playing the identity provider, with two audited tools
+//! already present on the host:
 //!
 //! * `xmllint --exc-c14n` (libxml2's Exclusive XML Canonicalization 1.0,
-//!   the same implementation xmlsec1 uses) canonicalizes every signed
-//!   element and every `SignedInfo`;
+//!   the same implementation xmlsec1 uses) canonicalizes the assertion and
+//!   its `SignedInfo`;
 //! * `openssl` generates throwaway RSA-2048 keys with self-signed
 //!   certificates and computes RSA-SHA256 signatures.
 //!
@@ -17,10 +20,9 @@
 //! directory at every lab start and are never trusted outside the lab.
 //! Each referenced element is written in a standalone form that declares
 //! exactly the namespaces it visibly uses, so its exclusive canonical form is
-//! identical to the in-context one the gateway computes; the gateway's own
-//! (independent) canonicalizer accepting the result is the cross-check.
+//! identical to the in-context one the gateway computes.
 
-use anvil_domain::{SecondsFormat, TimeDelta, Timestamp};
+use anvil_domain::{SecondsFormat, Timestamp};
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use sha2::Digest;
@@ -28,9 +30,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const SOAP11_NS: &str = "http://schemas.xmlsoap.org/soap/envelope/";
-pub const WSSE_NS: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd";
-pub const WSU_NS: &str = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd";
 const DS_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
 const EXC_C14N: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
 const RSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
@@ -39,10 +38,10 @@ const ENVELOPED: &str = "http://www.w3.org/2000/09/xmldsig#enveloped-signature";
 pub const SAML_NS: &str = "urn:oasis:names:tc:SAML:2.0:assertion";
 const BEARER: &str = "urn:oasis:names:tc:SAML:2.0:cm:bearer";
 
-/// The external tools the signer uses, with the versions they reported.
-/// `openssl` is required (it creates the certificates the gateway config
-/// references); without `xmllint` nothing can be signed and the signed-XML
-/// scenarios are skipped with that reason.
+/// The external tools the lab uses, with the versions they reported.
+/// `openssl` is required (it creates the keys and certificates the gateway
+/// config references); without `xmllint` the lab cannot issue SAML
+/// assertions and AUTH-031 is skipped with that reason.
 #[derive(Clone, Debug)]
 pub struct SignerTools {
     pub xmllint: Option<String>,
@@ -79,10 +78,11 @@ impl SignerTools {
         Ok(SignerTools { xmllint, openssl, versions })
     }
 
-    /// Why XML cannot be signed on this host, if it cannot.
+    /// Why the lab cannot issue signed SAML assertions on this host, if it
+    /// cannot.
     pub fn signing_unavailable(&self) -> Option<String> {
         self.xmllint.is_none().then(|| {
-            "xmllint (libxml2 Exclusive XML Canonicalization, the audited canonicalizer the lab signer needs) is not installed on this host; Anvil itself never signs XML".to_string()
+            "xmllint (libxml2 Exclusive XML Canonicalization, the audited canonicalizer the lab's SAML identity provider needs) is not installed on this host".to_string()
         })
     }
 
@@ -137,6 +137,12 @@ impl Signer {
         Ok(Signer { key_path, cert_path, cert_b64 })
     }
 
+    /// The private key and the certificate as PEM, as a user would paste
+    /// them into Anvil's WS-Security signature settings.
+    pub fn pem(&self) -> Result<(String, String)> {
+        Ok((std::fs::read_to_string(&self.key_path)?, std::fs::read_to_string(&self.cert_path)?))
+    }
+
     /// RSA PKCS#1 v1.5 SHA-256 signature (base64).
     fn sign(&self, tools: &SignerTools, dir: &Path, data: &str) -> Result<String> {
         static N: AtomicU64 = AtomicU64::new(0);
@@ -187,7 +193,7 @@ fn signed_info(references: &str) -> (String, String) {
 pub struct SoapSigning {
     pub tools: SignerTools,
     pub dir: PathBuf,
-    /// Trusted by the X.509 route.
+    /// Trusted by the X.509 route (AUTH-030 signs with it through Anvil).
     pub soap_signer: Signer,
     /// Trusted by the SAML route (the lab's SAML identity provider).
     pub saml_idp: Signer,
@@ -206,31 +212,6 @@ impl SoapSigning {
             dir: dir.to_path_buf(),
             tools,
         })
-    }
-
-    /// A SOAP 1.1 envelope whose Body and Timestamp are signed (exclusive
-    /// C14N, RSA-SHA256) by `signer`, certificate in `KeyInfo/X509Data`.
-    pub fn signed_envelope(&self, signer: &Signer, payload: &str, now: Timestamp, ttl_secs: i64) -> Result<String> {
-        let (created, expires) = (ts(now), ts(now + TimeDelta::seconds(ttl_secs)));
-        let ts_inner = format!(r#"<wsu:Created>{created}</wsu:Created><wsu:Expires>{expires}</wsu:Expires>"#);
-        let body_inner = format!(r#"<m:Ping xmlns:m="urn:anvil:lab:soap">{payload}</m:Ping>"#);
-        // In-context forms (namespaces inherited from Envelope) and their
-        // standalone equivalents for canonicalization.
-        let ts_ctx = format!(r#"<wsu:Timestamp wsu:Id="TS-1">{ts_inner}</wsu:Timestamp>"#);
-        let ts_alone = format!(r#"<wsu:Timestamp xmlns:wsu="{WSU_NS}" wsu:Id="TS-1">{ts_inner}</wsu:Timestamp>"#);
-        let body_ctx = format!(r#"<soap:Body wsu:Id="Body-1">{body_inner}</soap:Body>"#);
-        let body_alone = format!(r#"<soap:Body xmlns:soap="{SOAP11_NS}" xmlns:wsu="{WSU_NS}" wsu:Id="Body-1">{body_inner}</soap:Body>"#);
-        let d_ts = b64_sha256(&self.tools.exc_c14n(&self.dir, &ts_alone)?);
-        let d_body = b64_sha256(&self.tools.exc_c14n(&self.dir, &body_alone)?);
-        let (si_ctx, si_alone) = signed_info(&format!("{}{}", reference("TS-1", false, &d_ts), reference("Body-1", false, &d_body)));
-        let sig_value = signer.sign(&self.tools, &self.dir, &self.tools.exc_c14n(&self.dir, &si_alone)?)?;
-        let signature = format!(
-            r#"<ds:Signature xmlns:ds="{DS_NS}">{si_ctx}<ds:SignatureValue>{sig_value}</ds:SignatureValue><ds:KeyInfo><ds:X509Data><ds:X509Certificate>{}</ds:X509Certificate></ds:X509Data></ds:KeyInfo></ds:Signature>"#,
-            signer.cert_b64
-        );
-        Ok(format!(
-            r#"<soap:Envelope xmlns:soap="{SOAP11_NS}" xmlns:wsu="{WSU_NS}"><soap:Header><wsse:Security xmlns:wsse="{WSSE_NS}">{ts_ctx}{signature}</wsse:Security></soap:Header>{body_ctx}</soap:Envelope>"#
-        ))
     }
 
     /// A signed SAML 2.0 bearer assertion (enveloped signature over the

@@ -1,7 +1,7 @@
 // API auth editor (identity presented to the API — not the app login).
 import { useEffect, useState } from "react";
 import { api, onOAuthFlow, type FlowEvent, type JwtInspection, type SendInput, type TokenSummary } from "./api";
-import type { AuthConfig, DpopConfig, HmacConfig, JwtAlgorithm, OAuth2Config, SensitiveValue, WsseConfig } from "./generated/contracts";
+import type { AuthConfig, DpopConfig, HmacConfig, JwtAlgorithm, OAuth2Config, SensitiveValue, WsseConfig, WsseSignatureConfig, XmlSigningIdentity } from "./generated/contracts";
 import { Modal, SecretField } from "./ui";
 import { Icon } from "./icons";
 import { JwtSvidFields, defaultJwtSvid } from "./WorkloadApi";
@@ -17,7 +17,7 @@ const TYPES: { id: AuthConfig["type"]; label: string }[] = [
   { id: "oauth2", label: "OAuth 2.0" },
   { id: "hmac", label: "HMAC signature (Ferrum)" },
   { id: "dpop", label: "DPoP (RFC 9449)" },
-  { id: "wsse", label: "WS-Security UsernameToken" },
+  { id: "wsse", label: "WS-Security (UsernameToken, X.509 signature)" },
   { id: "multi", label: "Multiple (all applied)" },
 ];
 
@@ -45,7 +45,7 @@ function defaults(t: AuthConfig["type"]): AuthConfig {
     case "dpop":
       return { type: "dpop", config: { access_token: EMPTY, private_key_pem: EMPTY, dpop_scheme: true, handle_nonce_challenge: true } };
     case "wsse":
-      return { type: "wsse", config: { username: "", password: EMPTY, password_type: "password_digest", timestamp_ttl_secs: 300 } };
+      return { type: "wsse", config: { username: "", password: EMPTY, password_type: "password_digest", timestamp_ttl_secs: 300, username_token: true } };
     case "multi":
       return { type: "multi", profiles: [] };
   }
@@ -509,23 +509,173 @@ function DpopFields({ c, onChange, workspaceId }: { c: DpopConfig; onChange: (c:
 }
 
 function WsseFields({ c, onChange, workspaceId }: { c: WsseConfig; onChange: (c: WsseConfig) => void; workspaceId: string | null }) {
+  const usernameToken = c.username_token !== false;
   return (
     <>
-      <Text label="Username" value={c.username} onChange={(username) => onChange({ ...c, username: username ?? "" })} />
-      <SecretField label="Password" value={c.password} onChange={(password) => onChange({ ...c, password })} workspaceId={workspaceId} />
+      <label className="check">
+        <input type="checkbox" checked={usernameToken} onChange={(e) => onChange({ ...c, username_token: e.target.checked })} />
+        Send a UsernameToken
+      </label>
+      {usernameToken && (
+        <>
+          <Text label="Username" value={c.username} onChange={(username) => onChange({ ...c, username: username ?? "" })} />
+          <SecretField label="Password" value={c.password} onChange={(password) => onChange({ ...c, password })} workspaceId={workspaceId} />
+        </>
+      )}
       <div className="fields">
-        <label className="lbl">
-          Password type
-          <select className="field" value={c.password_type ?? "password_digest"} onChange={(e) => onChange({ ...c, password_type: e.target.value as WsseConfig["password_type"] })}>
-            <option value="password_digest">PasswordDigest</option>
-            <option value="password_text">PasswordText</option>
-          </select>
-        </label>
+        {usernameToken && (
+          <label className="lbl">
+            Password type
+            <select className="field" value={c.password_type ?? "password_digest"} onChange={(e) => onChange({ ...c, password_type: e.target.value as WsseConfig["password_type"] })}>
+              <option value="password_digest">PasswordDigest</option>
+              <option value="password_text">PasswordText</option>
+            </select>
+          </label>
+        )}
         <Num label="Timestamp lifetime (s)" value={c.timestamp_ttl_secs} onChange={(timestamp_ttl_secs) => onChange({ ...c, timestamp_ttl_secs })} />
       </div>
       <SecretField label="Signed SAML assertion XML (optional, embedded verbatim)" multiline value={c.saml_assertion ?? undefined} onChange={(saml_assertion) => onChange({ ...c, saml_assertion })} workspaceId={workspaceId} />
+      <XmlSignatureFields c={c} onChange={onChange} workspaceId={workspaceId} />
       <p className="hint">The security header is inserted into the SOAP envelope at send time. Anvil never mints SAML assertions.</p>
     </>
+  );
+}
+
+const NEW_SIGNATURE: WsseSignatureConfig = { identity: { format: "pem", cert_chain_pem: "", private_key_pem: EMPTY }, algorithm: "auto" };
+
+/** X.509 XML signature (XML-DSig) of a WS-Security header. */
+function XmlSignatureFields({ c, onChange, workspaceId }: { c: WsseConfig; onChange: (c: WsseConfig) => void; workspaceId: string | null }) {
+  const [certErr, setCertErr] = useState<string | null>(null);
+  const sig = c.signature ?? null;
+  const setSig = (signature: WsseSignatureConfig | null) => onChange({ ...c, signature });
+  const setId = (identity: XmlSigningIdentity) => {
+    if (sig) setSig({ ...sig, identity });
+  };
+  const id = sig?.identity;
+  return (
+    <fieldset>
+      <legend>X.509 signature (XML-DSig)</legend>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={sig !== null}
+          onChange={(e) =>
+            e.target.checked
+              ? onChange({ ...c, signature: NEW_SIGNATURE, timestamp_ttl_secs: c.timestamp_ttl_secs ?? 300 })
+              : setSig(null)
+          }
+        />
+        Sign the Body, the Timestamp and the UsernameToken
+      </label>
+      {sig && id && (
+        <div className="col">
+          <div className="fields">
+            <label className="lbl">
+              Signing key
+              <select
+                className="field"
+                aria-label="Signing key format"
+                value={id.format}
+                onChange={(e) =>
+                  setId(e.target.value === "pem" ? { format: "pem", cert_chain_pem: "", private_key_pem: EMPTY } : { format: "pkcs12", bundle_b64: EMPTY, password: EMPTY })
+                }
+              >
+                <option value="pem">PEM certificate + key</option>
+                <option value="pkcs12">PKCS#12 (.p12 / .pfx)</option>
+              </select>
+            </label>
+            <label className="lbl">
+              Algorithm
+              <select className="field" value={sig.algorithm ?? "auto"} onChange={(e) => setSig({ ...sig, algorithm: e.target.value as WsseSignatureConfig["algorithm"] })}>
+                <option value="auto">Follow the key</option>
+                <option value="rsa_sha256">RSA-SHA256</option>
+                <option value="ecdsa_p256_sha256">ECDSA P-256 SHA-256</option>
+              </select>
+            </label>
+          </div>
+          {id.format === "pem" && (
+            <>
+              <label className="lbl">
+                Certificate chain (PEM)
+                <textarea className="field mono" rows={4} value={id.cert_chain_pem} onChange={(e) => setId({ ...id, cert_chain_pem: e.target.value })} />
+              </label>
+              <button
+                className="btn small start"
+                onClick={async () => {
+                  setCertErr(null);
+                  try {
+                    const file = await api.chooseCertificateFile();
+                    if (file) setId({ ...id, cert_chain_pem: await api.readCertificateFile(file.token) });
+                  } catch (e) {
+                    setCertErr(`The certificate was not loaded: ${String((e as Error).message)}`);
+                  }
+                }}
+              >
+                <Icon name="file" size={13} />
+                Load certificate file…
+              </button>
+              {certErr && <span className="bad-text">{certErr}</span>}
+              <SecretField label="Private key (PEM: RSA of at least 2048 bits, or EC P-256)" multiline value={id.private_key_pem} workspaceId={workspaceId} onChange={(v) => setId({ ...id, private_key_pem: v as typeof id.private_key_pem })} />
+              <PemFromFile label="Load private key file into the vault" workspaceId={workspaceId} onSecret={(v) => setId({ ...id, private_key_pem: v as typeof id.private_key_pem })} />
+            </>
+          )}
+          {id.format === "pkcs12" && (
+            <>
+              <P12Picker workspaceId={workspaceId} onSecret={(v) => setId({ ...id, bundle_b64: v })} current={id.bundle_b64.kind === "secret" ? id.bundle_b64.secret.label : null} />
+              <SecretField label="Bundle password" value={id.password} workspaceId={workspaceId} onChange={(v) => setId({ ...id, password: v })} />
+            </>
+          )}
+          <label className="lbl">
+            InclusiveNamespaces PrefixList (optional)
+            <input className="field mono" value={sig.inclusive_prefix_list ?? ""} placeholder="e.g. xsi #default" onChange={(e) => setSig({ ...sig, inclusive_prefix_list: e.target.value })} />
+          </label>
+          <p className="hint">
+            Signed per send with exclusive canonicalization and SHA-256; the certificate travels as a BinarySecurityToken. SHA-1 and RSA keys under 2048 bits are refused.
+          </p>
+        </div>
+      )}
+    </fieldset>
+  );
+}
+
+/** Pick a .p12/.pfx file; it goes straight into the vault and only a reference returns. */
+export function P12Picker(props: { workspaceId: string | null; onSecret: (v: { kind: "secret"; secret: { id: string; label: string } }) => void; current: string | null }) {
+  const [err, setErr] = useState<string | null>(null);
+  return (
+    <div className="row">
+      {props.current && (
+        <span className="badge accent">
+          <Icon name="key" size={12} />
+          {props.current}
+        </span>
+      )}
+      <button
+        className="btn small"
+        disabled={!props.workspaceId}
+        title={props.workspaceId ? undefined : "Open a workspace to keep values in its vault"}
+        onClick={async () => {
+          const workspaceId = props.workspaceId;
+          if (!workspaceId) return;
+          setErr(null);
+          try {
+            const file = await api.chooseFile("pkcs12_file", { filters: [{ name: "PKCS#12", extensions: ["p12", "pfx"] }] });
+            if (!file) return;
+            // The bundle goes straight into the vault as base64; only a reference returns.
+            const secret = await api.importPkcs12File(
+              file.token,
+              workspaceId,
+              file.file_name || "client.p12",
+            );
+            props.onSecret({ kind: "secret", secret });
+          } catch (e) {
+            setErr(String((e as Error).message));
+          }
+        }}
+      >
+        Choose .p12 / .pfx…
+      </button>
+      {err && <span className="bad-text">{err}</span>}
+    </div>
   );
 }
 

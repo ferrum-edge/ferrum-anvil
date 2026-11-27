@@ -1,6 +1,6 @@
 [package]
 name = "anvil-auth"
-description = "Credential generation applied after final request serialization: API key, Basic, Bearer, JWT, OAuth2, Ferrum HMAC v2, DPoP, WS-Security UsernameToken"
+description = "Credential generation applied after final request serialization: API key, Basic, Bearer, JWT, OAuth2, Ferrum HMAC v2, DPoP, WS-Security UsernameToken and X.509 XML signatures"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,8 +21,9 @@ hex.workspace = true
 rand.workspace = true
 httpdate.workspace = true
 jsonwebtoken.workspace = true
-# Not called directly: enables `aws-lc-rs/prebuilt-nasm` for jsonwebtoken's
-# AWS-LC backend when this crate is built on its own (see the workspace entry).
+# jsonwebtoken's AWS-LC backend (also enables `aws-lc-rs/prebuilt-nasm` when
+# this crate is built on its own, see the workspace entry), and the RSA /
+# ECDSA P-256 signer of WS-Security XML signatures (xmldsig.rs).
 aws-lc-rs.workspace = true
 p256.workspace = true
 zeroize.workspace = true
@@ -33,9 +34,13 @@ percent-encoding.workspace = true
 uuid.workspace = true
 
 roxmltree.workspace = true
+# Reads the signing certificate of a WS-Security XML signature (and PEM).
+x509-parser.workspace = true
 
 [dev-dependencies]
 anvil-xml-limits = { workspace = true, features = ["test-support"] }
+# Self-signed certificates for the XML signature tests.
+rcgen.workspace = true
 
 [lints]
 workspace = true

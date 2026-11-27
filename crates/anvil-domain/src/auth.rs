@@ -178,6 +178,60 @@ pub struct WsseConfig {
     /// mints assertions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saml_assertion: Option<SensitiveValue>,
+    /// Send a UsernameToken with the username and password. Turn it off for
+    /// a header that carries only a Timestamp, a SAML assertion or an X.509
+    /// signature.
+    #[serde(default = "crate::request::default_true")]
+    pub username_token: bool,
+    /// Sign the SOAP Body, the Timestamp and the UsernameToken with an X.509
+    /// key (XML-DSig, exclusive canonicalization, SHA-256).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<WsseSignatureConfig>,
+}
+
+/// X.509 XML signature of a WS-Security header. The certificate the key
+/// belongs to is sent as a BinarySecurityToken (X509v3) referenced from the
+/// signature's KeyInfo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WsseSignatureConfig {
+    pub identity: XmlSigningIdentity,
+    #[serde(default)]
+    pub algorithm: XmlSignatureAlgorithm,
+    /// InclusiveNamespaces PrefixList applied to every signed reference
+    /// (space-separated prefixes, `#default` for the default namespace).
+    /// Usually empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub inclusive_prefix_list: String,
+}
+
+/// Signature algorithm of an XML signature. `auto` follows the key: RSA
+/// signs RSA-SHA256, a P-256 EC key ECDSA-SHA256. SHA-1 is never used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum XmlSignatureAlgorithm {
+    #[default]
+    Auto,
+    RsaSha256,
+    EcdsaP256Sha256,
+}
+
+/// Private key and certificate an XML signature is made with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "format", rename_all = "snake_case")]
+pub enum XmlSigningIdentity {
+    Pem {
+        /// Certificate chain PEM (not secret). The certificate the key
+        /// belongs to is the one sent.
+        cert_chain_pem: String,
+        /// Private key PEM (PKCS#8, PKCS#1 or SEC1), RSA of at least 2048
+        /// bits or EC P-256 (sensitive).
+        private_key_pem: SensitiveValue,
+    },
+    Pkcs12 {
+        /// Base64 PKCS#12 bundle (sensitive).
+        bundle_b64: SensitiveValue,
+        password: SensitiveValue,
+    },
 }
 
 /// Auth configuration. Applied after interpolation, content-type inference
