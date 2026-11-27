@@ -1,6 +1,9 @@
 // Tests of scripts/release-notes.mjs, run in hosted CI with `node --test`.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -83,7 +86,7 @@ Compatibility release: Anvil adopts a gateway.
 function evidence(overrides = {}) {
   return {
     format: "anvil-release-evidence",
-    version: 1,
+    version: 2,
     release: { version: "1.2.0", tag: "anvil-v1.2.0", publication: "draft" },
     source: { repository: "ferrum-edge/ferrum-anvil", commit: COMMIT, ref: "refs/tags/anvil-v1.2.0" },
     build: { workflow: "Release", run_id: 37859968362, run_attempt: 1, run_url: RUN_URL },
@@ -352,4 +355,80 @@ test("the release job's signing-status check matches the notes' first lines", ()
     assert.equal(lines[0], "> [!WARNING]");
     assert.ok(lines[1].startsWith("> **Unsigned installers.** "));
   }
+});
+
+test("version 1 evidence (releases up to 0.1.9, no platform_signing) still renders as published", () => {
+  // The shape of anvil-v0.1.9's published release-evidence.json.
+  const v1 = (overrides = {}) => {
+    const e = evidence({ version: 1, ...overrides });
+    delete e.platform_signing;
+    return e;
+  };
+  const unsigned = releaseNotes({ changelog, version: "1.2.0", evidence: v1() });
+  assert.ok(unsigned.startsWith("> [!WARNING]\n> **Unsigned installers.** The installers are not code-signed yet (no Apple Developer ID or Windows certificate)"));
+  const signed = releaseNotes({ changelog, version: "1.2.0", evidence: v1({ signed: true, signing: SIGNED }) });
+  assert.ok(signed.startsWith("**Signing:** the installers are code-signed and verified on the build runner. Verify downloads with `SHA256SUMS`."), signed);
+  assert.throws(() => checkEvidence(v1({ signing: PARTIAL }), "1.2.0"), /partial signing needs platform_signing/);
+  // A version 1 record that does carry the field is checked like version 2.
+  assert.throws(() => checkEvidence(evidence({ version: 1, platform_signing: { macos: "maybe" } }), "1.2.0"), /platform_signing has an invalid shape/);
+  assert.throws(() => checkEvidence(evidence({ version: 3 }), "1.2.0"), /format or version/);
+});
+
+test("the vendored NSIS template is Tauri CLI's own, with only the uninstaller signing exit code checked", () => {
+  // Upstream: crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi at
+  // tag @tauri-apps/cli-v2.12.6. Bumping @tauri-apps/cli fails this test until
+  // the template is refreshed from the new tag and the hash below updated.
+  const lock = JSON.parse(readFileSync(join(root, "apps", "desktop", "package-lock.json"), "utf8"));
+  assert.equal(lock.packages["node_modules/@tauri-apps/cli"].version, "2.12.6", "refresh apps/desktop/src-tauri/windows/installer.nsi from the new Tauri CLI tag");
+  const conf = JSON.parse(readFileSync(join(root, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"));
+  assert.equal(conf.bundle.windows.nsis.template, "windows/installer.nsi");
+  const vendored = readFileSync(join(root, "apps", "desktop", "src-tauri", "windows", "installer.nsi"), "utf8");
+  const checked = "  !uninstfinalize '${UNINSTALLERSIGNCOMMAND}' = 0\n";
+  assert.equal(vendored.split(checked).length, 2, "exactly one checked uninstaller signing hook");
+  const upstream = vendored.replace(checked, "  !uninstfinalize '${UNINSTALLERSIGNCOMMAND}'\n");
+  assert.equal(createHash("sha256").update(upstream).digest("hex"), "d00089d3b1a2c4a30d7b6e098079100cb8f25e980f84d4515aca4597b95e967d");
+});
+
+test("signing-route.sh: half-configured routes fail, precedence applies only to complete sets, values are never read", () => {
+  const run = (has, os = "Windows", tag = "anvil-v1.2.0") => {
+    const dir = mkdtempSync(join(tmpdir(), "route-"));
+    const out = join(dir, "out");
+    const env = { PATH: process.env.PATH, TAG: tag, RUNNER_OS: os, TARGET: "t", GITHUB_OUTPUT: out };
+    for (const n of has) env[`HAS_${n}`] = "true";
+    const r = spawnSync("bash", [join(root, "scripts", "release", "signing-route.sh")], { env, encoding: "utf8" });
+    let outputs = {};
+    try {
+      outputs = Object.fromEntries(readFileSync(out, "utf8").trim().split("\n").map((l) => l.split("=")));
+    } catch {}
+    rmSync(dir, { recursive: true, force: true });
+    return { status: r.status, text: r.stdout + r.stderr, outputs };
+  };
+  const ats = ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "ARTIFACT_SIGNING_ENDPOINT", "ARTIFACT_SIGNING_ACCOUNT", "ARTIFACT_SIGNING_CERTIFICATE_PROFILE"];
+  const pfx = ["WINDOWS_CERTIFICATE", "WINDOWS_CERTIFICATE_PASSWORD"];
+  const mac = ["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD"];
+  const api = ["APPLE_API_ISSUER", "APPLE_API_KEY", "APPLE_API_KEY_P8"];
+  const appleId = ["APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID"];
+
+  assert.deepEqual(run([]).outputs, { route: "none", macos: "none", windows: "none" });
+  assert.equal(run(ats).outputs.windows, "artifact-signing-oidc");
+  assert.equal(run([...ats, "AZURE_CLIENT_SECRET"]).outputs.windows, "artifact-signing-secret");
+  assert.equal(run(pfx).outputs.windows, "pfx");
+  assert.equal(run([...ats, ...pfx]).outputs.windows, "artifact-signing-oidc");
+  // A half-set .pfx fails even though Artifact Signing is complete (F8).
+  const half = run([...ats, "WINDOWS_CERTIFICATE"]);
+  assert.equal(half.status, 1);
+  assert.match(half.text, /Windows \.pfx signing is partly configured .*missing: WINDOWS_CERTIFICATE_PASSWORD/);
+  assert.match(run(["AZURE_CLIENT_ID"]).text, /Azure Artifact Signing is partly configured/);
+  // macOS: notarization is required; the API key wins over the Apple ID.
+  assert.equal(run([...mac, ...api], "macOS").outputs.macos, "api-key");
+  assert.equal(run([...mac, ...appleId], "macOS").outputs.macos, "apple-id");
+  assert.equal(run([...mac, ...api, ...appleId], "macOS").outputs.macos, "api-key");
+  assert.match(run(mac, "macOS").text, /needs notarization credentials too/);
+  assert.match(run([...mac, "APPLE_API_KEY"], "macOS").text, /API-key notarization is partly configured/);
+  assert.match(run([...mac, ...api, "APPLE_ID"], "macOS").text, /Apple ID notarization is partly configured/);
+  // Another OS's route never takes effect: credentials gated on it stay unmapped.
+  assert.deepEqual(run([...mac, ...api, ...ats], "Linux").outputs, { route: "none", macos: "none", windows: "none" });
+  assert.deepEqual(run([...mac, ...api, ...ats], "Windows").outputs, { route: "artifact-signing-oidc", macos: "none", windows: "artifact-signing-oidc" });
+  // A dry run reads nothing.
+  assert.deepEqual(run([...mac, ...api, ...ats], "macOS", "").outputs, { route: "none", macos: "none", windows: "none" });
 });

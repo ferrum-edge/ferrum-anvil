@@ -255,7 +255,9 @@ try {
 const allSigned = signingStatus.signed;
 const evidence = {
   format: "anvil-release-evidence",
-  version: 1,
+  // 2: adds platform_signing and targets[].signing_applicable (read by
+  // scripts/release-notes.mjs, which still reads version 1).
+  version: 2,
   generated_at: new Date().toISOString(),
   product: tauriConf.productName,
   release: {

@@ -30,6 +30,8 @@ export const PARTIAL = "partially signed — see platform_signing and targets[].
 // Per-platform signing status in release-evidence.json `platform_signing`.
 // Linux packages have no platform code signing, so Linux is "not applicable".
 export const PLATFORM_STATUS = ["signed", "unsigned", "partial", "not applicable"];
+// release-evidence.json format versions this script reads (release-evidence.mjs writes the last).
+export const EVIDENCE_VERSIONS = [1, 2];
 const PLATFORM_NAMES = { macos: "macOS", windows: "Windows", linux: "Linux" };
 const PLATFORM_OF_OS = { macOS: "macos", Windows: "windows", Linux: "linux" };
 const UNSIGNED_EFFECT = { macos: "macOS Gatekeeper will warn", windows: "Windows SmartScreen will warn" };
@@ -136,7 +138,10 @@ export function checkEvidence(evidence, version) {
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
     throw new Error("release evidence must be a JSON object");
   }
-  if (evidence.format !== "anvil-release-evidence" || evidence.version !== 1) {
+  // Version 2 adds `platform_signing` and `targets[].signing_applicable`;
+  // version 1 (releases up to 0.1.9) has neither and is still read, so the
+  // notes of a published release can be regenerated from its evidence.
+  if (evidence.format !== "anvil-release-evidence" || !EVIDENCE_VERSIONS.includes(evidence.version)) {
     throw new Error("unsupported release evidence format or version");
   }
   if (evidence.release?.version !== version) {
@@ -149,7 +154,9 @@ export function checkEvidence(evidence, version) {
     throw new Error("release evidence signed and signing disagree");
   }
   const platforms = evidence.platform_signing;
-  if (
+  if (evidence.version === 1 && platforms === undefined) {
+    if (evidence.signing === PARTIAL) throw new Error("release evidence partial signing needs platform_signing");
+  } else if (
     !platforms ||
     typeof platforms !== "object" ||
     Array.isArray(platforms) ||
@@ -159,8 +166,8 @@ export function checkEvidence(evidence, version) {
     throw new Error("release evidence platform_signing has an invalid shape");
   }
   // The platform statuses must say what `signing` says.
-  const statuses = Object.values(platforms).filter((v) => v !== "not applicable");
-  const expected = statuses.length > 0 && statuses.every((v) => v === "signed") ? SIGNED : statuses.some((v) => v === "signed" || v === "partial") ? PARTIAL : UNSIGNED;
+  const statuses = platforms === undefined ? null : Object.values(platforms).filter((v) => v !== "not applicable");
+  const expected = statuses === null ? evidence.signing : statuses.length > 0 && statuses.every((v) => v === "signed") ? SIGNED : statuses.some((v) => v === "signed" || v === "partial") ? PARTIAL : UNSIGNED;
   if (evidence.signing !== expected) {
     throw new Error("release evidence signing and platform_signing disagree");
   }
@@ -235,11 +242,16 @@ export function releaseNotes({ changelog, version, tag, evidence }) {
     : "In-app updates are not signed for this release: the app links to this release page instead.";
 
   const out = [];
-  const platforms = evidence.platform_signing;
+  // Version 1 evidence (no platform_signing) keeps the wording those
+  // releases were published with.
+  const platforms = evidence.platform_signing ?? {};
+  const legacy = evidence.platform_signing === undefined;
   const named = (status) => Object.keys(PLATFORM_NAMES).filter((p) => platforms[p] === status);
   const list = (ps) => ps.map((p) => PLATFORM_NAMES[p]).join(" and ");
   const linux = platforms.linux === "not applicable" ? " Linux packages (`.deb`, `.rpm`, AppImage) have no platform code signing." : "";
-  if (evidence.signed) {
+  if (evidence.signed && legacy) {
+    out.push(`**Signing:** the installers are code-signed and verified on the build runner. Verify downloads with \`SHA256SUMS\`. ${updater}`, "");
+  } else if (evidence.signed) {
     out.push(`**Signing:** the ${list(named("signed"))} installers are code-signed and verified on the build runner.${linux} Verify downloads with \`SHA256SUMS\`. ${updater}`, "");
   } else if (evidence.signing === UNSIGNED) {
     out.push(
