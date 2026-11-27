@@ -47,11 +47,13 @@ on:
 permissions: {}
 
 env:
-  # Pin by full commit SHA, never a branch. 4e3caa5 is ferrumedge main after
-  # ferrum-edge/ferrumedge#144 (the site moves to the published anvil-v0.1.9,
-  # with the capability evidence re-recorded at that tag).
+  # Pin by full commit SHA, never a branch. 5acfcd4 is ferrumedge main after
+  # ferrum-edge/ferrumedge#148 (the 1.0.0 candidates section, with no Anvil
+  # row) and #147 (the compatibility matrix, security and 404 pages, and
+  # corrected licence and contracts facts); the Anvil pages still describe the
+  # published anvil-v0.1.9.
   FERRUMEDGE_REPOSITORY: ferrum-edge/ferrumedge
-  FERRUMEDGE_SHA: 4e3caa5d4b6e72c1d8d495e8606066a0df30f594
+  FERRUMEDGE_SHA: 5acfcd4fdf1f415968104e276f859b04f346140d
   TEST_COMMAND: node --test --test-reporter=tap "tests/**/*.test.js"
 
 jobs:
