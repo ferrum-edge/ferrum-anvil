@@ -114,6 +114,18 @@ pub struct Inserted {
     pub signed: Option<Signed>,
 }
 
+/// Shows sizes and the signature facts only: the body and the token secrets
+/// can hold credentials.
+impl std::fmt::Debug for Inserted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inserted")
+            .field("body_bytes", &self.body.len())
+            .field("token_secrets", &self.token_secrets.len())
+            .field("signed", &self.signed)
+            .finish()
+    }
+}
+
 /// Non-secret facts about an X.509 signature, for evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signed {
