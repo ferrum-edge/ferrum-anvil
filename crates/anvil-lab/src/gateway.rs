@@ -162,8 +162,32 @@ pub fn compatibility_id() -> String {
     current_lock().catalog_compatibility_id().unwrap_or_else(|e| panic!("trusted lab profile: {e:#}"))
 }
 
-fn release_order(tag: &str) -> Vec<u64> {
-    tag.trim().trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect()
+/// One SemVer pre-release identifier: numeric ones sort before alphanumeric
+/// ones, numerically; alphanumeric ones in ASCII order.
+type PreId = (bool, u64, String);
+
+/// SemVer precedence of a release tag: `v0.9.10` after `v0.9.9`, and a
+/// pre-release before its release (`v1.0.0-rc.1` < `v1.0.0-rc.2` <
+/// `v1.0.0-rc.10` < `v1.0.0`). Build metadata is ignored.
+fn release_order(tag: &str) -> (Vec<u64>, bool, Vec<PreId>) {
+    let tag = tag.trim().trim_start_matches('v');
+    let tag = tag.split_once('+').map_or(tag, |(version, _)| version);
+    let (core, pre) = match tag.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (tag, None),
+    };
+    let core = core.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+    let ids = pre
+        .map(|pre| {
+            pre.split('.')
+                .map(|id| match id.parse::<u64>() {
+                    Ok(n) => (false, n, String::new()),
+                    Err(_) => (true, 0, id.to_string()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (core, pre.is_none(), ids)
 }
 
 /// `Ferrum Edge 0.9.10`-style name of the release under test, for skip reasons.
@@ -559,6 +583,19 @@ mod tests {
         // Lock files sort as text ("v0.9.10" before "v0.9.5"); the list is in release order.
         let releases = available_releases();
         assert!(releases.windows(2).all(|w| release_order(&w[0]) < release_order(&w[1])), "{releases:?}");
+    }
+
+    #[test]
+    fn a_pre_release_orders_before_its_release() {
+        assert!(release_order("v1.0.0-rc.1") > release_order("v0.9.21"));
+        assert!(release_order("v1.0.0") > release_order("v1.0.0-rc.1"));
+        assert!(release_order("v1.0.0-rc.2") > release_order("v1.0.0-rc.1"));
+        assert!(release_order("v1.0.0-rc.10") > release_order("v1.0.0-rc.2"));
+        assert!(release_order("v1.0.0-rc.1") > release_order("v1.0.0-beta.2"));
+        assert!(release_order("v1.0.0-rc.1.1") > release_order("v1.0.0-rc.1"));
+        assert!(release_order("v1.0.0-rc.a") > release_order("v1.0.0-rc.9"));
+        assert_eq!(release_order("v1.0.0+build.7"), release_order("v1.0.0"));
+        assert!(release_order("v1.0.1-rc.1") > release_order("v1.0.0"));
     }
 
     #[test]
