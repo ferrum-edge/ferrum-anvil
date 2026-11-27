@@ -1473,10 +1473,13 @@ fn auth030(env: &Env) -> Fut<'_> {
         let ok = go(env, &soap_ctx(env, "/soap/x509/echo", signed.clone(), SOAP_ENVELOPE)).await;
         c.success(CheckKind::Diagnosis, &ok);
         let received = echoed_body(&ok);
+        // The record's body hash is of the request before auth rewrote it, so
+        // the ground truth is what the backend received.
         c.add(
             CheckKind::GroundTruth,
-            "the backend received the envelope Anvil signed (the recorded body hash is that of the bytes received)",
-            ok.record.prepared.body_sha256.as_deref() == Some(&hex::encode(sha2::Sha256::digest(received.as_bytes()))),
+            "the backend received the Body Anvil signed, unchanged",
+            received.contains(r#"<soap:Body xmlns:wsu="#)
+                && received.contains(r#"<m:Ping xmlns:m="urn:anvil:lab:soap">anvil-lab-ping</m:Ping></soap:Body>"#),
             "",
         );
         c.add(
