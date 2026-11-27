@@ -112,9 +112,10 @@ fn whole_documents_match_xmllint_exc_c14n() {
     }
 }
 
-/// lxml looks each PrefixList entry up in the document's string dictionary
-/// and silently drops the ones it does not find, `#default` among them, so
-/// lxml cannot express `#default`. That case is checked by xmlsec1 instead:
+/// lxml does not pass `#default` through to libxml2 (observed on CI: with
+/// `#default` listed, lxml's output equals the output with no PrefixList,
+/// apparently because lxml keeps only prefixes found in the document's
+/// string dictionary). That case is checked by xmlsec1 instead:
 /// `signed_envelopes_verify_with_xmlsec1_and_tampering_fails` signs with the
 /// PrefixList `#default`, which libxml2 must canonicalize as Anvil does.
 const LXML_C14N: &str = r#"
