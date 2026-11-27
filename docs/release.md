@@ -96,12 +96,12 @@ Each build job (bundle-windows and check-windows for Windows):
    it (never into a Linux or Windows step), and the Windows credentials exist
    only in bundle-windows (a `.pfx` imported and removed afterwards, or the
    Artifact Signing sign command written and, for OIDC, the Azure login made
-   and ended). This is defense in depth, not isolation: both steps share the runner, and bundling
-   itself runs third-party tools (the AppImage bundler downloads unpinned
-   `linuxdeploy` plugins and its `AppRun` while the key is present). Signing
-   the updater artifacts in a separate job with `tauri signer sign` would be
-   stronger. With the owner's updater key a tagged release also writes signed
-   updater artifacts (see [In-app updates](#in-app-updates)).
+   and ended). This is defense in depth, not isolation: both steps share the
+   runner, and bundling itself runs third-party tools (the AppImage bundler
+   downloads unpinned `linuxdeploy` plugins and its `AppRun`). The updater key
+   is not among those credentials: the bundle step gets only the updater's
+   public key and creates no updater artifact; the separate **sign-updater**
+   job signs the updater files afterwards (see [In-app updates](#in-app-updates)).
 
    On Linux, `linuxdeploy` itself is pinned: Tauri CLI 2.12 bundles with the
    `linuxdeploy-07333c6` build, which it picks by release tag only and
@@ -131,6 +131,11 @@ Each build job (bundle-windows and check-windows for Windows):
    versions, signing status).
 5. CycloneDX 1.5 SBOMs for `anvil-desktop` and `anvil-cli` for that target
    (`cargo cyclonedx`, build job); the job fails if the desktop SBOM lists the WebDriver plugin.
+
+**sign-updater** (Ubuntu, the `release` environment for a tag): with the
+owner's updater key, signs every updater file the build jobs uploaded and
+uploads the signatures as `updater-signatures`; it runs no bundler (see
+[In-app updates](#in-app-updates)). Without the key, it signs nothing.
 
 **Publish** (Ubuntu): an npm SBOM of the UI's production dependencies
 (`@cyclonedx/cyclonedx-npm`), `license-report.json`, the list of GitHub Actions
@@ -619,10 +624,11 @@ route is only for an older certificate you already have.
       credentials themselves.
 - [ ] **First signed release**: push the `anvil-vX.Y.Z` tag as in
       [Cutting a release](#cutting-a-release). The run asks for approval of
-      the `release` environment twice: once for the four build jobs, and
-      again, after the Windows build, for `bundle-windows` (approve it within
-      30 days, while the compiled Windows artifact is kept; `check-windows`
-      needs no approval). Each **Signing
+      the `release` environment three times: for the four build jobs; after
+      the Windows build, for `bundle-windows` (approve it within 30 days, while
+      the compiled Windows artifact is kept); and, once every target is built
+      and checked, for `sign-updater`. `check-windows` and publish need no
+      approval. Each **Signing
       route** step logs the route chosen per platform within minutes; a
       missing or half-set value fails it there. `bundle-windows` prints its
       OIDC subject before logging in to Azure; if the login fails, compare it
@@ -678,15 +684,22 @@ read again on 2026-11-27):
   `anvil-v*`.
 
 Only a tagged release with both the private key and `ANVIL_UPDATER_PUBKEY`
-passes `bundle.createUpdaterArtifacts: true` and `plugins.updater.pubkey` as an
-extra `--config` (to the build, which compiles the key into the app, and to
-the bundle step); one without the other logs a warning and builds exactly as
-without a key. As defense in depth, the private key is in the environment of
-`tauri bundle` only, not of the compile step (build scripts, proc macros,
-`beforeBuildCommand`); both share the runner, so this narrows exposure rather
-than isolating the key. The job that bundles each target checks that the public key is in the
-built app binary and `build-info.json` records it (`updater.embedded`). Tauri then signs
-(minisign), recording the version in each signature's trusted comment:
+passes `plugins.updater.pubkey` as an extra `--config` (to the build, which
+compiles the key into the app, and to the bundle step); one without the other
+logs a warning and builds exactly as without a key. **The private key never
+reaches a job that compiles or bundles.** The bundle step creates no updater
+artifact; on macOS the collect step archives the `.app` as
+`<Product>_<version>_<arch>.app.tar.gz` the way Tauri's bundler does (the
+`.app` as the archive's one top-level folder, symlinks kept, no macOS
+metadata). The job that bundles each target checks that the public key is in
+the built app binary and `build-info.json` records it (`updater.embedded`).
+Then the **sign-updater** job, which installs only the Tauri CLI (`npm ci
+--ignore-scripts`) and runs no bundler, compiler or bundler plugin, signs
+each updater file with `tauri signer sign --app-version <version>`
+(`scripts/release/sign-updater.sh`; minisign, recording the version in each
+signature's trusted comment), checks each signature against the compiled-in
+public key and the version, and uploads the `.sig` files, which the publish
+job places beside the files they sign:
 
 | Target | Updater file | `latest.json` keys |
 | --- | --- | --- |

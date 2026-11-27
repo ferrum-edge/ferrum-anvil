@@ -544,3 +544,20 @@ test("every job after preflight checks out github.sha, never a preflight output"
   }
   assert.ok(checkouts >= 4, "build, bundle-windows, check-windows and publish check out the code");
 });
+
+test("the updater private key reaches only sign-updater, which runs no bundler", () => {
+  const jobs = workflowJobs();
+  const holders = Object.entries(jobs)
+    .filter(([, text]) => /secrets\.TAURI_SIGNING_PRIVATE_KEY(?!\s*!=)/.test(text))
+    .map(([name]) => name);
+  assert.deepEqual(holders, ["sign-updater"], "only sign-updater maps the updater key's value; others test only whether it exists");
+  const signer = jobs["sign-updater"];
+  assert.ok(!/tauri (build|bundle)|cargo |\.\/\.github\/actions\/setup/.test(signer), "sign-updater compiles and bundles nothing");
+  assert.match(signer, /npm ci --ignore-scripts/);
+  assert.match(signer, /bash scripts\/release\/sign-updater\.sh dist sigs/);
+  assert.match(jobs.publish, /needs: \[preflight, build, check-windows, sign-updater\]/);
+  assert.match(jobs.publish, /pattern: updater-signatures/);
+  // The updater config gives the bundler the public key only.
+  const config = readFileSync(join(root, "scripts", "release", "updater-config.sh"), "utf8");
+  assert.ok(!config.includes("createUpdaterArtifacts"), "the bundler creates no updater artifact");
+});

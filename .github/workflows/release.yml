@@ -325,11 +325,9 @@ jobs:
           APPLE_API_ISSUER: ${{ steps.route.outputs.macos == 'api-key' && secrets.APPLE_API_ISSUER || '' }}
           APPLE_API_KEY: ${{ steps.route.outputs.macos == 'api-key' && secrets.APPLE_API_KEY || '' }}
           APPLE_API_KEY_P8: ${{ steps.route.outputs.macos == 'api-key' && secrets.APPLE_API_KEY_P8 || '' }}
+          # The updater public key only: the bundler creates no updater
+          # artifact and never sees the private key (sign-updater signs).
           UPDATER_CONFIG: ${{ steps.updater.outputs.config }}
-          # Only a tagged release with the owner's updater key (in the
-          # `release` environment) receives it; a dry run never does.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.updater.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ steps.updater.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           BUNDLES: ${{ matrix.bundles }}
           # The AppImage leaves libwayland-client to the host, like libEGL and
           # the rest of the graphics stack (AppImageCommunity excludelist; Mesa
@@ -346,7 +344,7 @@ jobs:
           fi
           unset APPLE_API_KEY_P8
           # Unset empty credentials so Tauri never attempts a half-configured signing.
-          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_ISSUER APPLE_API_KEY TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_ISSUER APPLE_API_KEY; do
             [ -n "${!v:-}" ] || unset "$v"
           done
           # The same --config values as the build (Tauri merges them in order).
@@ -389,6 +387,8 @@ jobs:
         if: ${{ !matrix.split }}
         id: collect
         shell: bash
+        env:
+          UPDATER: ${{ steps.updater.outputs.updater }}
         run: bash scripts/release/collect.sh
 
       - name: Release check (no WebDriver server, no test hooks)
@@ -707,11 +707,10 @@ jobs:
           AZURE_CLIENT_ID: ${{ steps.route.outputs.windows == 'artifact-signing-secret' && vars.AZURE_CLIENT_ID || '' }}
           AZURE_CLIENT_SECRET: ${{ steps.route.outputs.windows == 'artifact-signing-secret' && secrets.AZURE_CLIENT_SECRET || '' }}
           WIN_SIGN_CONFIG: ${{ steps.wincert.outputs.config || steps.winats.outputs.config }}
+          # The updater public key only (sign-updater signs the installers).
           UPDATER_CONFIG: ${{ steps.updater.outputs.config }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.updater.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ steps.updater.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: |
-          for v in AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+          for v in AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET; do
             [ -n "${!v:-}" ] || unset "$v"
           done
           # The NSIS template (src-tauri/windows/installer.nsi, set in
@@ -740,6 +739,8 @@ jobs:
       - name: Collect artifacts
         id: collect
         shell: bash
+        env:
+          UPDATER: ${{ steps.updater.outputs.updater }}
         run: bash scripts/release/collect.sh
 
       - name: Verify signatures (records signed only if verified; fails if configured signing did not verify)
@@ -828,9 +829,90 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # Signs the updater files (macOS .app.tar.gz, AppImage, NSIS setup.exe,
+  # MSI) with the owner's updater key, apart from every job that runs a
+  # bundler: the key never shares a runner with linuxdeploy, its plugins, WiX,
+  # NSIS or a compiler. It installs the Tauri CLI only (`npm ci
+  # --ignore-scripts`), runs `tauri signer sign --app-version <version>` on the
+  # files the build jobs uploaded, checks each signature against the public
+  # key compiled into the app, and uploads the .sig files as
+  # `updater-signatures`, laid out like the release-* artifacts. Without the
+  # key (a dry run, or no key configured) it signs nothing.
+  sign-updater:
+    name: Sign updater artifacts
+    needs: [preflight, build, check-windows]
+    environment: ${{ needs.preflight.outputs.tag != '' && 'release' || '' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The run's own immutable commit (preflight asserted HEAD == github.sha
+          # and that it is the tag's commit); verified again below.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Checked out the preflight commit
+        shell: bash
+        env:
+          COMMIT: ${{ needs.preflight.outputs.commit }}
+        run: '[ "$(git rev-parse HEAD)" = "$COMMIT" ] || { echo "::error::HEAD $(git rev-parse HEAD) is not the preflight commit $COMMIT"; exit 1; }'
+      - name: Updater config (tagged release with the owner's updater key only)
+        id: updater
+        shell: bash
+        env:
+          ANVIL_UPDATER_PUBKEY: ${{ vars.ANVIL_UPDATER_PUBKEY }}
+          HAS_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: bash scripts/release/updater-config.sh
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.23.3
+      - name: npm ci (Tauri CLI; no install scripts)
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+      # Without the owner's key (every dry run), the same script signs copies
+      # of this run's updater files with a key made for the run and verifies
+      # them, so a dry run proves the signing path; nothing is uploaded.
+      - name: Self-test of the signing script with a throwaway key (no owner key)
+        if: steps.updater.outputs.updater != 'true'
+        run: |
+          work="$RUNNER_TEMP/sign-selftest"
+          mkdir -p "$work"
+          pw="$(openssl rand -hex 16)"
+          echo "::add-mask::$pw"
+          (cd apps/desktop && npx tauri signer generate --ci -p "$pw" -w "$work/selftest.key" -f > /dev/null)
+          cp -R dist "$work/dist"
+          TAURI_SIGNING_PRIVATE_KEY="$(cat "$work/selftest.key")" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$pw" \
+            PUBKEY="$(tr -d '[:space:]' < "$work/selftest.key.pub")" \
+            bash scripts/release/sign-updater.sh "$work/dist" "$work/sigs"
+          find "$work/sigs" -type f | sort
+      - name: Sign the updater files
+        if: steps.updater.outputs.updater == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.updater.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ steps.updater.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          PUBKEY: ${{ steps.updater.outputs.pubkey }}
+        run: bash scripts/release/sign-updater.sh dist sigs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.updater.outputs.updater == 'true'
+        with:
+          # Outside the release-* pattern; publish merges it into the targets.
+          name: updater-signatures
+          path: sigs/
+          if-no-files-found: error
+          retention-days: 30
+
   publish:
     name: Assemble release evidence
-    needs: [preflight, build, check-windows]
+    needs: [preflight, build, check-windows, sign-updater]
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -862,6 +944,14 @@ jobs:
         with:
           pattern: release-*
           path: dist
+      # The updater signatures, beside the files they sign (only when
+      # sign-updater signed; release-evidence.mjs fails a build that recorded
+      # the updater key but has no signatures, and signatures without it).
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: updater-signatures
+          path: dist
+          merge-multiple: true
       - name: npm SBOM (UI production dependencies)
         working-directory: apps/desktop
         run: npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --omit dev --output-format JSON --spec-version 1.5 --output-reproducible --output-file "../../dist/anvil-desktop-ui-npm-$VERSION.cdx.json"
