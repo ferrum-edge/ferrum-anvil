@@ -62,8 +62,9 @@ build produced:
 - The Windows **build** job compiles the app and the CLI and makes the SBOMs.
   It records the two binaries' SHA-256 digests and its `rustc -V` / `cargo -V`
   as job outputs, and uploads the binaries and SBOMs as the
-  `compiled-x86_64-pc-windows-msvc` artifact (kept 30 days, the longest
-  GitHub lets a deployment wait for approval).
+  `compiled-x86_64-pc-windows-msvc` artifact (kept 35 days, like every build
+  artifact of the release workflow: longer than GitHub lets a deployment
+  wait for approval, 30 days, and as long as a workflow run can last).
 - **bundle-windows** (Windows 2025, the `release` environment for a tag) is
   the only job with `id-token: write`, which Azure Artifact Signing's OIDC
   route needs. It checks out the same commit and installs only the toolchain
@@ -75,7 +76,7 @@ build produced:
   and passed to SignTool, never executed) and step 4 (signature
   verification; `build-info.json` records the build job's toolchain). It
   uploads the result as `bundled-x86_64-pc-windows-msvc`. If the compiled
-  artifact is gone (an approval that waited over 30 days, or a deletion), it
+  artifact is gone (expired, or deleted), it
   fails and says to re-run all jobs, not only the failed ones.
 - **check-windows** (no environment, no credential, no OIDC permission) runs
   step 3, the release check whose runtime probe launches the app, on the
@@ -132,10 +133,24 @@ Each build job (bundle-windows and check-windows for Windows):
 5. CycloneDX 1.5 SBOMs for `anvil-desktop` and `anvil-cli` for that target
    (`cargo cyclonedx`, build job); the job fails if the desktop SBOM lists the WebDriver plugin.
 
-**sign-updater** (Ubuntu, the `release` environment for a tag): with the
-owner's updater key, signs every updater file the build jobs uploaded and
-uploads the signatures as `updater-signatures`; it runs no bundler (see
-[In-app updates](#in-app-updates)). Without the key, it signs nothing.
+**sign-updater** (Ubuntu, the `release` environment for a tag) first
+requires all four build targets' artifacts (`scripts/release/check-targets.sh`;
+publish checks the same). With the owner's updater key it signs every updater
+file the build jobs uploaded and uploads the signatures as
+`updater-signatures`; it runs no bundler (see [In-app updates](#in-app-updates)).
+Without the key (every dry run) it runs the same signing on copies of the
+files with a key generated for the run, builds `latest.json` from them and
+requires all seven platform entries, and uploads those throwaway signatures
+as `updater-signatures-selftest`; publish checks that each lands beside its
+file's target folder, then discards them. Nothing of the self-test reaches
+`dist/` or a release, and the throwaway key never leaves the job.
+
+**If sign-updater's approval is delayed or denied.** Its inputs, like every
+build artifact, are kept 35 days. A missing input fails it (and publish) with
+the instruction to re-run all jobs, never a release without that platform. A
+denied or failed sign-updater job skips publish and the release job: no
+draft is created, and nothing is half-published. Approve it, or re-run all
+jobs once the reason is fixed.
 
 **Publish** (Ubuntu): an npm SBOM of the UI's production dependencies
 (`@cyclonedx/cyclonedx-npm`), `license-report.json`, the list of GitHub Actions
@@ -625,9 +640,9 @@ route is only for an older certificate you already have.
 - [ ] **First signed release**: push the `anvil-vX.Y.Z` tag as in
       [Cutting a release](#cutting-a-release). The run asks for approval of
       the `release` environment three times: for the four build jobs; after
-      the Windows build, for `bundle-windows` (approve it within 30 days, while
-      the compiled Windows artifact is kept); and, once every target is built
-      and checked, for `sign-updater`. `check-windows` and publish need no
+      the Windows build, for `bundle-windows`; and, once every target is built
+      and checked, for `sign-updater`. Approve each within the 35 days the
+      build artifacts are kept; otherwise re-run all jobs. `check-windows` and publish need no
       approval. Each **Signing
       route** step logs the route chosen per platform within minutes; a
       missing or half-set value fails it there. `bundle-windows` prints its
@@ -689,12 +704,17 @@ compiles the key into the app, and to the bundle step); one without the other
 logs a warning and builds exactly as without a key. **The private key never
 reaches a job that compiles or bundles.** The bundle step creates no updater
 artifact; on macOS the collect step archives the `.app` as
-`<Product>_<version>_<arch>.app.tar.gz` the way Tauri's bundler does (the
+`<Product>_<version>_<arch>.app.tar.gz` with
+`scripts/release/macos-updater-archive.sh`, the way Tauri's bundler does (the
 `.app` as the archive's one top-level folder, symlinks kept, no macOS
-metadata). The job that bundles each target checks that the public key is in
+metadata), with the updater key and in every dry run. The macOS updater E2E
+installs an archive made by the same script and signed by `tauri signer
+sign`, so the format releases ship is the one tested. The job that bundles each target checks that the public key is in
 the built app binary and `build-info.json` records it (`updater.embedded`).
-Then the **sign-updater** job, which installs only the Tauri CLI (`npm ci
---ignore-scripts`) and runs no bundler, compiler or bundler plugin, signs
+Then the **sign-updater** job, which installs the desktop package's locked
+npm dependencies with `npm ci --ignore-scripts` (no lifecycle script runs;
+the Tauri CLI is the one it executes, for `tauri signer generate` in a dry run
+and `tauri signer sign`) and runs no bundler, compiler or bundler plugin, signs
 each updater file with `tauri signer sign --app-version <version>`
 (`scripts/release/sign-updater.sh`; minisign, recording the version in each
 signature's trusted comment), checks each signature against the compiled-in

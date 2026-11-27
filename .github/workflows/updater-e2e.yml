@@ -27,6 +27,8 @@ on:
       - "apps/desktop/e2e/helpers.ts"
       - "apps/desktop/wdio.conf.ts"
       - "scripts/updater-manifest.mjs"
+      # The macOS updater archive releases ship (used by the macOS job).
+      - "scripts/release/macos-updater-archive.sh"
       - "scripts/tests/updater-manifest.test.mjs"
       - ".github/workflows/updater-e2e.yml"
   push:
@@ -42,6 +44,8 @@ on:
       - "apps/desktop/e2e/helpers.ts"
       - "apps/desktop/wdio.conf.ts"
       - "scripts/updater-manifest.mjs"
+      # The macOS updater archive releases ship (used by the macOS job).
+      - "scripts/release/macos-updater-archive.sh"
       - "scripts/tests/updater-manifest.test.mjs"
       - ".github/workflows/updater-e2e.yml"
   # Weekly, so Cargo.lock bumps of tauri-plugin-updater are covered too.
@@ -170,6 +174,15 @@ jobs:
           [ -f "${found[0]}.sig" ] || { echo "::error::${found[0]} has no signature"; exit 1; }
           cp "${found[0]}" "$REL003/fixtures/update.bin"
           cp "${found[0]}.sig" "$REL003/fixtures/update.sig"
+          if [ "$RUNNER_OS" = macOS ]; then
+            # Releases ship the archive scripts/release/macos-updater-archive.sh
+            # makes (release.yml's collect step), signed by tauri signer sign in
+            # the sign-updater job: install exactly that, not the bundler's own.
+            bash ../../scripts/release/macos-updater-archive.sh "${apps[0]}" "$REL003/fixtures/update.bin"
+            rm -f "$REL003/fixtures/update.sig"
+            npx tauri signer sign -f "$REL003/keys/updater.key" -p "$REL003_KEY_PASSWORD" --app-version "$OFFERED" "$REL003/fixtures/update.bin" > /dev/null
+            mv "$REL003/fixtures/update.bin.sig" "$REL003/fixtures/update.sig"
+          fi
           ls -la "$REL003/fixtures"
 
       - name: Signatures for the refusal cases

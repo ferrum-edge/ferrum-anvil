@@ -4,8 +4,8 @@
 #   TARGET=<triple> VERSION=<x.y.z> scripts/release/collect.sh
 #
 # Copies the installers from target/<triple>/release/bundle and packages the
-# CLI with the license files. With the owner's updater key (UPDATER=true) on
-# macOS it also makes the updater archive, "<Product>_<version>_<arch>.app.tar.gz":
+# CLI with the license files. On macOS, with the owner's updater key
+# (UPDATER=true) or in a dry run (TAG empty), it also makes the updater archive, "<Product>_<version>_<arch>.app.tar.gz":
 # the .app in a gzipped tar, as Tauri's bundler makes it (the .app as the
 # archive's one top-level folder, symlinks kept). The updater files are signed
 # later, by the sign-updater job. Writes app=<path of the raw desktop binary>
@@ -20,14 +20,15 @@ for f in "$b"/dmg/*.dmg "$b"/deb/*.deb "$b"/rpm/*.rpm "$b"/appimage/*.AppImage "
   name="$(basename "$f" | tr ' ' '-')"
   cp "$f" "$out/$name"
 done
-# The macOS updater archive (only with the updater key). Both macOS targets
+# The macOS updater archive: with the updater key, and in every dry run (no
+# TAG) so the dry run's signing self-test covers it. Both macOS targets
 # produce "<Product>.app"; name the archive like the DMGs.
-if [ "${UPDATER:-false}" = "true" ] && [ "$RUNNER_OS" = "macOS" ]; then
+if [ "$RUNNER_OS" = "macOS" ] && { [ "${UPDATER:-false}" = "true" ] || [ -z "${TAG:-}" ]; }; then
   apps=("$b"/macos/*.app)
   [ "${#apps[@]}" = 1 ] || { echo "::error::expected one .app under $b/macos, found ${#apps[@]}"; exit 1; }
   arch="${TARGET%%-*}"; [ "$arch" = "x86_64" ] && arch=x64
   name="$(basename "${apps[0]}" .app | tr ' ' '-')_${VERSION}_${arch}.app.tar.gz"
-  COPYFILE_DISABLE=1 tar --no-mac-metadata -czf "$out/$name" -C "$b/macos" "$(basename "${apps[0]}")"
+  bash "$(dirname "$0")/macos-updater-archive.sh" "${apps[0]}" "$out/$name"
 fi
 stage="$RUNNER_TEMP/anvil-cli-$VERSION-$TARGET"
 mkdir -p "$stage"

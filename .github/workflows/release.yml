@@ -389,6 +389,7 @@ jobs:
         shell: bash
         env:
           UPDATER: ${{ steps.updater.outputs.updater }}
+          TAG: ${{ needs.preflight.outputs.tag }}
         run: bash scripts/release/collect.sh
 
       - name: Release check (no WebDriver server, no test hooks)
@@ -446,7 +447,7 @@ jobs:
           if-no-files-found: error
           # bundle-windows waits for a second `release` approval, which GitHub
           # allows for up to 30 days; the artifact must outlive that wait.
-          retention-days: 30
+          retention-days: 35
 
       - name: Upload build
         if: ${{ !matrix.split }}
@@ -455,7 +456,7 @@ jobs:
           name: release-${{ matrix.target }}
           path: dist/${{ matrix.target }}/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 35
 
   # The Windows installers are bundled and signed here, from the binaries the
   # build job compiled. This is the only job with `id-token: write`: Azure
@@ -741,6 +742,7 @@ jobs:
         shell: bash
         env:
           UPDATER: ${{ steps.updater.outputs.updater }}
+          TAG: ${{ needs.preflight.outputs.tag }}
         run: bash scripts/release/collect.sh
 
       - name: Verify signatures (records signed only if verified; fails if configured signing did not verify)
@@ -766,7 +768,7 @@ jobs:
           name: bundled-x86_64-pc-windows-msvc
           path: dist/x86_64-pc-windows-msvc/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 35
 
   # The release check of the Windows installers, CLI archive and app binary,
   # including the runtime probe that launches the app. It executes build
@@ -827,7 +829,7 @@ jobs:
           name: release-x86_64-pc-windows-msvc
           path: dist/x86_64-pc-windows-msvc/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 35
 
   # Signs the updater files (macOS .app.tar.gz, AppImage, NSIS setup.exe,
   # MSI) with the owner's updater key, apart from every job that runs a
@@ -878,10 +880,16 @@ jobs:
         with:
           pattern: release-*
           path: dist
+      - name: All four build targets are present
+        run: bash scripts/release/check-targets.sh dist
       # Without the owner's key (every dry run), the same script signs copies
-      # of this run's updater files with a key made for the run and verifies
-      # them, so a dry run proves the signing path; nothing is uploaded.
-      - name: Self-test of the signing script with a throwaway key (no owner key)
+      # of this run's updater files (macOS .app.tar.gz, AppImage, NSIS, MSI)
+      # with a key made for the run (it never leaves this job), builds
+      # latest.json from them with scripts/updater-manifest.mjs and requires
+      # all seven platform entries. The signatures are uploaded as
+      # updater-signatures-selftest so publish checks the handoff layout; they
+      # never reach dist/ or a release.
+      - name: Self-test of signing and latest.json with a throwaway key (no owner key)
         if: steps.updater.outputs.updater != 'true'
         run: |
           work="$RUNNER_TEMP/sign-selftest"
@@ -889,11 +897,40 @@ jobs:
           pw="$(openssl rand -hex 16)"
           echo "::add-mask::$pw"
           (cd apps/desktop && npx tauri signer generate --ci -p "$pw" -w "$work/selftest.key" -f > /dev/null)
+          pubkey="$(tr -d '[:space:]' < "$work/selftest.key.pub")"
           cp -R dist "$work/dist"
           TAURI_SIGNING_PRIVATE_KEY="$(cat "$work/selftest.key")" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$pw" \
-            PUBKEY="$(tr -d '[:space:]' < "$work/selftest.key.pub")" \
-            bash scripts/release/sign-updater.sh "$work/dist" "$work/sigs"
-          find "$work/sigs" -type f | sort
+            PUBKEY="$pubkey" bash scripts/release/sign-updater.sh "$work/dist" "$work/sigs"
+          # Stage what publish would see with an updater key: the signatures
+          # beside their files and build-info.json recording that key.
+          cp -R "$work/sigs/." "$work/dist/"
+          PUBKEY="$pubkey" node -e '
+            const fs = require("node:fs"), path = require("node:path");
+            for (const d of fs.readdirSync(process.argv[1])) {
+              const f = path.join(process.argv[1], d, "build-info.json");
+              if (!fs.existsSync(f)) continue;
+              const info = JSON.parse(fs.readFileSync(f, "utf8"));
+              info.updater = { configured: true, pubkey: process.env.PUBKEY, embedded: true };
+              fs.writeFileSync(f, JSON.stringify(info, null, 2) + "\n");
+            }
+          ' "$work/dist"
+          node scripts/updater-manifest.mjs --dist "$work/dist" --repo "$GITHUB_REPOSITORY" --tag "anvil-v$VERSION" --version "$VERSION"
+          # shellcheck disable=SC2016 # JavaScript source, not shell
+          node -e '
+            const m = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+            const want = ["darwin-aarch64", "darwin-aarch64-app", "darwin-x86_64", "darwin-x86_64-app", "linux-x86_64-appimage", "windows-x86_64-msi", "windows-x86_64-nsis"];
+            const got = Object.keys(m.platforms ?? {}).sort();
+            if (JSON.stringify(got) !== JSON.stringify(want)) { console.error(`latest.json platforms ${got.join(", ")}, not ${want.join(", ")}`); process.exit(1); }
+            console.log(`self-test latest.json: ${got.length} platform entries, version ${m.version}`);
+          ' "$work/dist/latest.json"
+          rm -rf "$work/dist" "$work/selftest.key"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.updater.outputs.updater != 'true'
+        with:
+          name: updater-signatures-selftest
+          path: ${{ runner.temp }}/sign-selftest/sigs/
+          if-no-files-found: error
+          retention-days: 7
       - name: Sign the updater files
         if: steps.updater.outputs.updater == 'true'
         env:
@@ -908,7 +945,7 @@ jobs:
           name: updater-signatures
           path: sigs/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 35
 
   publish:
     name: Assemble release evidence
@@ -952,6 +989,31 @@ jobs:
           pattern: updater-signatures
           path: dist
           merge-multiple: true
+      - name: All four build targets are present
+        run: bash scripts/release/check-targets.sh dist
+      # Dry run: the self-test signatures went through the same upload and
+      # download as the owner's would; each must land beside its file's
+      # target folder, one per updater file. They are then discarded.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.preflight.outputs.tag == ''
+        with:
+          name: updater-signatures-selftest
+          path: ${{ runner.temp }}/sig-handoff
+      - name: Signature handoff layout (dry run)
+        if: needs.preflight.outputs.tag == ''
+        run: |
+          handoff="$RUNNER_TEMP/sig-handoff"
+          shopt -s nullglob
+          want=0
+          for f in dist/release-*/*.app.tar.gz dist/release-*/*.AppImage dist/release-*/*-setup.exe dist/release-*/*.msi; do
+            rel="${f#dist/}"
+            [ -s "$handoff/$rel.sig" ] || { echo "::error::no handed-off signature for $rel at $handoff/$rel.sig"; exit 1; }
+            want=$((want + 1))
+          done
+          got="$(find "$handoff" -name '*.sig' | wc -l | tr -d ' ')"
+          [ "$want" -gt 0 ] && [ "$got" = "$want" ] || { echo "::error::$got handed-off signatures for $want updater files"; exit 1; }
+          echo "signature handoff: $got signatures, each beside its updater file's target folder"
+          rm -rf "$handoff"
       - name: npm SBOM (UI production dependencies)
         working-directory: apps/desktop
         run: npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --omit dev --output-format JSON --spec-version 1.5 --output-reproducible --output-file "../../dist/anvil-desktop-ui-npm-$VERSION.cdx.json"

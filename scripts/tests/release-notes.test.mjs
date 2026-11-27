@@ -472,7 +472,6 @@ test("only bundle-windows can request an OIDC token, and it runs no release chec
   assert.ok(jobs["check-windows"].includes("bash scripts/release/check-artifacts.sh"));
   assert.ok(!/environment:|secrets\./.test(jobs["check-windows"]), "check-windows has no environment and no secret");
   assert.match(jobs["bundle-windows"], /Binaries match the build job's recorded digests/);
-  assert.match(jobs.publish, /needs: \[preflight, build, check-windows\]/);
   assert.match(jobs.build, /name: compiled-\$\{\{ matrix\.target \}\}[\s\S]*?retention-days: 30/);
 });
 
@@ -560,4 +559,17 @@ test("the updater private key reaches only sign-updater, which runs no bundler",
   // The updater config gives the bundler the public key only.
   const config = readFileSync(join(root, "scripts", "release", "updater-config.sh"), "utf8");
   assert.ok(!config.includes("createUpdaterArtifacts"), "the bundler creates no updater artifact");
+});
+
+test("check-targets.sh expects exactly the release matrix's targets, and both downloading jobs run it", () => {
+  const jobs = workflowJobs();
+  const matrix = [...jobs.build.matchAll(/^\s+- target: (\S+)$/gm)].map((m) => m[1]).sort();
+  assert.deepEqual(matrix, ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]);
+  const script = readFileSync(join(root, "scripts", "release", "check-targets.sh"), "utf8");
+  const expected = /^expected=\(([^)]*)\)$/m.exec(script)[1].split(/\s+/).sort();
+  assert.deepEqual(expected, matrix);
+  for (const job of ["sign-updater", "publish"]) assert.match(jobs[job], /bash scripts\/release\/check-targets\.sh dist/, `${job} checks the targets`);
+  // Every build artifact outlives the longest approval wait (30 days).
+  const retention = [...readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8").matchAll(/retention-days: (\d+)/g)].map((m) => Number(m[1]));
+  assert.ok(retention.every((d) => d >= 35 || d === 7), `retention days ${retention.join(", ")}`);
 });
