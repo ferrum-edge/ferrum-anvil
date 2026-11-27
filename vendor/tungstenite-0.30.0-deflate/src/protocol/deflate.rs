@@ -44,10 +44,13 @@ pub struct DeflateConfig {
     /// Reset the compressor after every message (no context takeover).
     pub compress_no_context_takeover: bool,
     /// Reset the decompressor after every message (the peer does not use
-    /// context takeover). The decompressor always keeps a 2^15-byte window,
-    /// so it decodes any window the peer may use; it does not check that the
-    /// peer stays within a smaller window it agreed to.
+    /// context takeover).
     pub decompress_no_context_takeover: bool,
+    /// LZ77 window the peer agreed to compress within, as a base-2 logarithm
+    /// (8–15). The decompressor keeps only that window, so data referring
+    /// further back fails as an invalid compressed message. zlib cannot keep
+    /// a 256-byte window, so 8 is checked as 9 (512 bytes).
+    pub decompress_window_bits: u8,
     /// DEFLATE compression level (0–9).
     pub level: u32,
 }
@@ -59,6 +62,7 @@ impl Default for DeflateConfig {
             compress_window_bits: 15,
             compress_no_context_takeover: false,
             decompress_no_context_takeover: false,
+            decompress_window_bits: 15,
             level: 6,
         }
     }
@@ -92,7 +96,7 @@ impl DeflateCodec {
         DeflateCodec {
             config,
             compressor,
-            decompressor: Decompress::new(false),
+            decompressor: Decompress::new_with_window_bits(false, config.decompress_window_bits.clamp(9, 15)),
             receiving: false,
             received_compressed: 0,
             stream_ended: false,

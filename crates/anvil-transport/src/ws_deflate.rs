@@ -270,6 +270,9 @@ pub fn negotiate(offer: Option<&DeflateOffer>, answer: &[&str], raw_offer: bool)
             compress_window_bits: bits.max(9),
             compress_no_context_takeover: client_nct,
             decompress_no_context_takeover: server_nct,
+            // The server compresses within the window it agreed to; data
+            // referring further back is refused.
+            decompress_window_bits: server_bits.unwrap_or(15),
             level: 6,
         },
     }))

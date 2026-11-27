@@ -173,13 +173,15 @@ adds an RFC 7692 `permessage-deflate` codec behind a new, off-by-default
 
 * `src/protocol/deflate.rs` (new): the per-message codec for parameters that
   were already negotiated (`DeflateConfig`: compress or not, the compressor's
-  window, context takeover each way). Outgoing Text/Binary messages are
+  window, the peer's agreed window, context takeover each way). Outgoing Text/Binary messages are
   compressed with a sync flush and the `0x00 0x00 0xff 0xff` tail removed;
   an empty message becomes the single `0x00` octet (§7.2.3.6). Incoming
   compressed messages are inflated fragment by fragment with the tail
   appended; `max_message_size` limits the *decompressed* size, and inflation
   stops as soon as it is passed. A BFINAL block ends the stream for that
-  message. The decompressor keeps a 2^15 window (it decodes any peer window).
+  message. The decompressor keeps only the window the peer agreed to
+  (`decompress_window_bits`; 8 is kept as 9, zlib's smallest), so data
+  referring further back fails as an invalid compressed message.
 * `src/protocol/mod.rs`: `WebSocketConfig::deflate` (default `None`); RSV1 is
   accepted only on the first frame of a data message when a codec is
   configured, as RFC 7692 §6 requires (RSV1 on a control or continuation

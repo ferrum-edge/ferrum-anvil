@@ -307,3 +307,32 @@ fn outgoing_data_stays_uncompressed_when_compression_is_off_or_impossible() {
         assert_eq!(ws.read().unwrap(), Message::Text("Hello".into()));
     }
 }
+
+/// A peer that agreed to a 512-byte window (server_max_window_bits=9) but
+/// refers 1000 bytes back is refused; the same data within the default
+/// 2^15 window decodes.
+#[test]
+fn a_peer_outside_its_agreed_window_is_refused() {
+    // 1000 bytes with no repeat inside 512 bytes, then the same 1000 again:
+    // the second copy is one back-reference 1000 bytes away.
+    let mut x: u32 = 0x1234_5678;
+    let block: Vec<u8> = (0..1000)
+        .map(|_| {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (x >> 24) as u8
+        })
+        .collect();
+    let text: Vec<u8> = block.iter().chain(block.iter()).map(|b| b'a' + b % 26).collect();
+    let mut c = Compress::new(Compression::default(), false);
+    let mut deflated = Vec::with_capacity(4096);
+    c.compress_vec(&text, &mut deflated, FlushCompress::Sync).unwrap();
+    assert!(deflated.ends_with(&[0x00, 0x00, 0xff, 0xff]));
+    deflated.truncate(deflated.len() - 4);
+    let wire = frame(0xc1, &deflated);
+    let expected = String::from_utf8(text).unwrap();
+    let mut ws = client(wire.clone(), negotiated(), 1 << 16);
+    assert_eq!(ws.read().unwrap(), Message::Text(expected.into()));
+    let small = DeflateConfig { decompress_window_bits: 9, ..DeflateConfig::default() };
+    let mut ws = client(wire, Some(small), 1 << 16);
+    assert!(matches!(ws.read(), Err(Error::Protocol(ProtocolError::InvalidCompressedMessage(_)))));
+}

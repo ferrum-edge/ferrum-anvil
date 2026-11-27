@@ -1,5 +1,5 @@
 {
-  "version": "2026.11.17-1",
+  "version": "2026.11.27-1",
   "locale": "en",
   "note": "User-facing wording for diagnostic finding codes. Classification lives in anvil-diagnostics rules; this file never decides confidence. Placeholders use {name}.",
   "findings": {
@@ -2259,6 +2259,46 @@
       ],
       "does_not_prove": [
         "Which datagrams were lost."
+      ],
+      "remediation": [],
+      "confirm_with": []
+    },
+    "grpc.reflection_unavailable": {
+      "title": "Server reflection did not provide a schema",
+      "explanation": "{problem} The method was not called. This concerns schema discovery only; the service may work normally with a local schema.",
+      "alternatives": [],
+      "does_not_prove": [
+        "That the service or method itself is unavailable — only schema discovery by reflection failed."
+      ],
+      "remediation": [
+        {
+          "text": "{fix}",
+          "owner": "caller"
+        }
+      ],
+      "confirm_with": []
+    },
+    "udp.icmp_port_unreachable": {
+      "title": "The destination reported the UDP port unreachable",
+      "explanation": "The operating system received an ICMP port-unreachable for this destination, which usually means nothing is listening on that UDP port.",
+      "alternatives": [
+        "A firewall or gateway generated the ICMP message on behalf of the destination."
+      ],
+      "does_not_prove": [
+        "That the destination host is down."
+      ],
+      "remediation": [],
+      "confirm_with": []
+    },
+    "udp.repeated_payloads": {
+      "title": "Some received datagrams repeated earlier payloads",
+      "explanation": "{count} received datagram(s) were byte-identical to an earlier received datagram. Anvil counts this as an observation, not as proof of duplicate delivery.",
+      "alternatives": [
+        "The network duplicated datagrams.",
+        "The peer sent identical replies on purpose."
+      ],
+      "does_not_prove": [
+        "Which datagrams were duplicated — UDP has no sequence numbers unless the application protocol adds them."
       ],
       "remediation": [],
       "confirm_with": []
