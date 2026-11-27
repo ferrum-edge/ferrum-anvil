@@ -2,9 +2,10 @@
 //! for what an `h2` server cannot be told to do: refuse a request it read
 //! whole without processing it (RFC 9113 §8.7). On its first connection it
 //! answers the first request `200`, then refuses the second one, which
-//! reuses the connection, as [`Refusal`] says. Every other request is
-//! answered `200`. Header blocks are not decoded; a response is one HEADERS
-//! frame, `:status: 200`, with no body.
+//! reuses the connection, as [`Refusal`] says, or sends one `GOAWAY` while
+//! several requests are in flight. Every other request is answered `200`.
+//! Header blocks are not decoded; a response is one HEADERS frame,
+//! `:status: 200`, with no body.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -24,7 +25,26 @@ pub enum Refusal {
     /// request's stream, so the second one is above it. The connection stays
     /// open until the client closes it.
     GoAway,
+    /// [`IN_FLIGHT`] requests in flight at once, after the first request was
+    /// answered: once all of them arrived whole, one graceful `GOAWAY`
+    /// (`NO_ERROR`) whose last-stream-id is the second-highest of their
+    /// streams. Those at or below it are then answered `200` (the origin
+    /// processed them); the one above it never is. The connection stays open
+    /// until the client closes it.
+    GoAwayAmidStreams,
+    /// The same requests in flight and the same `GOAWAY`, after which the
+    /// origin closes the connection without answering any of them: those at
+    /// or below the last-stream-id may have been processed, the one above it
+    /// was not. The origin reads what the client still sends until the client
+    /// closes, so the close is a FIN, never a reset that could discard the
+    /// `GOAWAY` before the client read it.
+    GoAwayAmidStreamsThenClose,
 }
+
+/// Requests a [`Refusal::GoAwayAmidStreams`] or
+/// [`Refusal::GoAwayAmidStreamsThenClose`] origin holds in flight on its
+/// first connection before it sends the `GOAWAY`.
+pub const IN_FLIGHT: usize = 3;
 
 pub struct RefusingOrigin {
     pub addr: SocketAddr,
@@ -127,7 +147,8 @@ async fn write_frame(sock: &mut TcpStream, kind: u8, flags: u8, stream: u32, pay
 }
 
 /// Serve one connection until the client closes it, refusing its second
-/// request when `refusal` is given.
+/// request, or the requests in flight after its first, when `refusal` is
+/// given.
 async fn connection(mut sock: TcpStream, refusal: Option<Refusal>, requests: &AtomicUsize) -> std::io::Result<()> {
     let mut preface = [0u8; 24];
     sock.read_exact(&mut preface).await?;
@@ -139,6 +160,9 @@ async fn connection(mut sock: TcpStream, refusal: Option<Refusal>, requests: &At
     let mut partial: HashMap<u32, (bool, bool)> = HashMap::new();
     let mut whole = 0usize;
     let mut first_stream = 0u32;
+    // Streams of the requests held in flight, for the `GoAwayAmid*` refusals.
+    let mut held: Vec<u32> = Vec::new();
+    let amid = matches!(refusal, Some(Refusal::GoAwayAmidStreams | Refusal::GoAwayAmidStreamsThenClose));
     loop {
         let f = read_frame(&mut sock).await?;
         match f.kind {
@@ -160,6 +184,32 @@ async fn connection(mut sock: TcpStream, refusal: Option<Refusal>, requests: &At
                 whole += 1;
                 if whole == 1 {
                     first_stream = f.stream;
+                }
+                if amid && whole > 1 {
+                    if held.len() == IN_FLIGHT {
+                        // After the GOAWAY: never answered.
+                        continue;
+                    }
+                    held.push(f.stream);
+                    if held.len() < IN_FLIGHT {
+                        continue;
+                    }
+                    held.sort_unstable();
+                    let last = held[IN_FLIGHT - 2];
+                    let mut goaway = last.to_be_bytes().to_vec();
+                    goaway.extend_from_slice(&NO_ERROR.to_be_bytes());
+                    write_frame(&mut sock, GOAWAY, 0, 0, &goaway).await?;
+                    if refusal == Some(Refusal::GoAwayAmidStreamsThenClose) {
+                        sock.shutdown().await?;
+                        let mut sink = [0u8; 4096];
+                        let drain = async { while matches!(sock.read(&mut sink).await, Ok(n) if n > 0) {} };
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), drain).await;
+                        return Ok(());
+                    }
+                    for &stream in held.iter().filter(|&&stream| stream <= last) {
+                        write_frame(&mut sock, HEADERS, END_HEADERS | END_STREAM_OR_ACK, stream, &[STATUS_200]).await?;
+                    }
+                    continue;
                 }
                 match refusal {
                     Some(Refusal::RefusedStream) if whole == 2 => {

@@ -5234,7 +5234,7 @@
     }
    ],
    "lab": null,
-   "note": "HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM). Live h2c fixtures cover a GOAWAY while one stream is in flight (crates/anvil-engine/tests/matrix_local_tls.rs: the POST is not replayed, an idempotent GET is retried on a new connection) and a stream above a graceful GOAWAY's last-stream-id on a reused pooled connection (crates/anvil-transport/tests/h2_refused_resend.rs: left to the caller to send again, a POST included). No fixture holds several streams in flight when the GOAWAY arrives."
+   "note": "HTTP/2 GOAWAY and REFUSED_STREAM are typed (exchange.h2_goaway / exchange.h2_refused_stream, dispatch derived from REFUSED_STREAM). Live h2c fixtures cover a GOAWAY while one stream is in flight (crates/anvil-engine/tests/matrix_local_tls.rs: the POST is not replayed, an idempotent GET is retried on a new connection), a stream above a graceful GOAWAY's last-stream-id on a reused pooled connection (crates/anvil-transport/tests/h2_refused_resend.rs: left to the caller to send again, a POST included), and three POSTs in flight on one pooled connection when one graceful GOAWAY arrives with the middle stream as its last-stream-id (h2_refused_resend.rs, proto_004_*): when the origin then answers the streams at or below it, those two succeed and only the one above it is reported unprocessed (NotDispatched, H2GoAway) and left to the caller, whose resend takes a new connection; when the origin instead closes without answering, the two at or below the last-stream-id stay possibly processed (never NotDispatched, never sent again) while the one above it is still the only unprocessed one."
   },
   {
    "id": "PROTO-005",
