@@ -55,10 +55,10 @@
 # at v0.9.21). v0.9.21 also requires `scope` on every native PeerAuthentication (#7243); the mesh
 # JSON documents (not linted here) carry it. See docs/audit/gateway-0.9.21-delta.md.
 #
-# Ferrum Edge 1.0.0 (prepared on Edge main at f1b4d3739d, not yet published) removes the passive
-# health-check keys gateway_error_codes and split_external_local_origin_errors, which v0.9.21 still
-# accepts as no-ops, and refuses unknown keys in every nested proxy and upstream object. They are
-# left out of PASSIVE so profiles keep loading on 1.0.0; no profile sets them.
+# The Edge candidate commit f1b4d3739d (prepared as 1.0.0) removes the passive health-check keys
+# gateway_error_codes and split_external_local_origin_errors, which v0.9.21 still accepts as no-ops,
+# and refuses unknown keys in every nested proxy and upstream object. They are left out of PASSIVE so
+# profiles keep loading on that release; no profile sets them.
 #
 # Usage: ruby lab/gateway/lint-profiles.rb [profile.yaml ...]   (default: all *.yaml here)
 # Exit status 1 on any finding. `{{TOKEN}}` placeholders are tolerated.
@@ -393,7 +393,7 @@ rescue Psych::Exception => e
 end
 
 # Self-check, every run: keys v0.9.21 refuses (and v0.9.20 still accepted) are reported, and so
-# are the passive health-check keys Ferrum Edge 1.0.0 removes.
+# are the passive health-check keys the Edge candidate commit f1b4d3739d (prepared as 1.0.0) removes.
 RETIRED = <<~YAML
   version: "1"
   proxies:
