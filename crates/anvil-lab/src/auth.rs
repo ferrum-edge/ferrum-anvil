@@ -520,6 +520,10 @@ async fn query_alias(env: &Env, route: &str, recovery: String) -> Outcome {
     }
     let r = go(env, &ctx(env, "GET", &format!("{route}/echo?token={recovery}"), AuthConfig::None)).await;
     c.success(CheckKind::Recovery, &r);
+    // The plugin strips the accepted token before forwarding: the echo
+    // backend never sees it, so it cannot reflect it into recorded output.
+    let echoed = crate::fixtures_policy::body_text(&r);
+    c.add(CheckKind::Recovery, "the accepted token was not forwarded to the backend", !echoed.contains(&recovery), "");
     Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
 }
 

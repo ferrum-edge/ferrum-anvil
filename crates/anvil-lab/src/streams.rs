@@ -401,6 +401,12 @@ const E21_DEDUP_MSG: &str = "Missing required idempotency header: idempotency-ke
 /// Trusted: the response matched exactly `outcome` in the release's catalog,
 /// at most `likely`. Untrusted: the harness asserts no `ferrum.outcome*`.
 fn e21_catalog(c: &mut Checks, env: &Env, o: &ExecutionOutput, outcome: &str) {
+    if !env.trusted {
+        // The harness checks the scenario's main output; every other leg gets
+        // the same checks here.
+        c.absent_prefix(o, "ferrum.token");
+        c.absent_prefix(o, "ferrum.outcome");
+    }
     if env.trusted {
         let got = crate::fixtures_policy::catalog_outcome(o);
         c.add(
@@ -426,6 +432,7 @@ fn e21_grpcweb_assert(env: &Env) -> Fut<'_> {
         let url = format!("grpc://{HTTP}/e21-grpcweb-assert");
         let o = send(env, &web_ctx(env, &url, "Unary", GrpcMode::Unary, r#"{"message":"a"}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto))
             .await;
+        e21_trailer_only_body(&mut c, &o);
         let (http, st, src, msg) = grpc_status(&o);
         c.add(
             CheckKind::GroundTruth,
@@ -453,7 +460,16 @@ fn e21_grpcweb_relabel(env: &Env) -> Fut<'_> {
         let o = send(env, &http_ctx(env, "GET", &format!("http://{HTTP}/e21-grpcweb-relabel/echo"), None)).await;
         let body = crate::fixtures_policy::body_text(&o);
         c.status_in(&o, &[415]);
-        c.add(CheckKind::GroundTruth, "the gateway's relabel refusal body", body.contains(E21_ASSERT_MSG), body.clone());
+        let error = serde_json::from_str::<serde_json::Value>(body.trim())
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from));
+        let media = header(&o, "content-type");
+        c.add(
+            CheckKind::GroundTruth,
+            "the gateway's JSON relabel refusal: application/json, error = the assertion-route message",
+            error.as_deref() == Some(E21_ASSERT_MSG) && media.iter().any(|m| m.starts_with("application/json")),
+            format!("{media:?} {body}"),
+        );
         c.add(CheckKind::GroundTruth, "the backend received nothing", requests_since(&env.fx.echo.log, before).is_empty(), "");
         e21_catalog(&mut c, env, &o, "gateway.routing.grpc_web_relabelled_on_assertion_route");
         let ops = op_log(env, from, "e21-grpcweb-relabel").await;
@@ -467,6 +483,9 @@ fn e21_grpcweb_relabel(env: &Env) -> Fut<'_> {
 /// Trailers-Only, gRPC-Web (HTTP/1.1 here) as HTTP 200 with one body trailer
 /// frame (#7155), each carrying `code` and `message`.
 fn e21_grpc_refusal(c: &mut Checks, o: &ExecutionOutput, web: bool, code: i32, message: &str) {
+    if web {
+        e21_trailer_only_body(c, o);
+    }
     let (http, st, src, msg) = grpc_status(o);
     let (want, what) = if web {
         (GrpcStatusSource::TrailerFrame, "gRPC-Web: HTTP 200 with a body trailer frame")
@@ -478,6 +497,24 @@ fn e21_grpc_refusal(c: &mut Checks, o: &ExecutionOutput, web: bool, code: i32, m
         format!("{what}, grpc-status {code} and the gateway's message"),
         http == Some(200) && src == Some(want) && st == Some(code) && msg == message,
         format!("{http:?} {st:?} {src:?} {msg}"),
+    );
+}
+
+/// A gRPC-Web refusal's body is exactly one trailer frame: it ended cleanly
+/// at that frame, with no message before it and no transport failure.
+fn e21_trailer_only_body(c: &mut Checks, o: &ExecutionOutput) {
+    let web = o.session_facts.as_ref().and_then(|f| f.grpc_web.as_ref());
+    let complete = web.is_some_and(|w| w.trailer_frame && w.body_complete);
+    let messages = o.record.stream.as_ref().map_or(0, |t| t.received_count);
+    let transport = o.record.outcome.transport;
+    c.add(
+        CheckKind::GroundTruth,
+        "the gRPC-Web body is one complete trailer frame (no message, no framing or transport failure)",
+        complete
+            && messages == 0
+            && transport == TransportState::Completed
+            && o.session_facts.as_ref().is_none_or(|f| f.grpc_framing_error.is_none()),
+        format!("{web:?} messages {messages} transport {transport:?}"),
     );
 }
 
@@ -511,6 +548,10 @@ fn e21_grpc_admission(env: &Env) -> Fut<'_> {
         e21_catalog(&mut c, env, &o, "gateway.routing.protocol_not_permitted.grpc");
         let web = send(env, &e21_call(env, &url, true)).await;
         e21_grpc_refusal(&mut c, &web, true, 3, E21_DEDUP_MSG);
+        if !env.trusted {
+            c.absent_prefix(&web, "ferrum.token");
+            c.absent_prefix(&web, "ferrum.outcome");
+        }
         if env.trusted {
             let matched = crate::fixtures_policy::catalog_ids(&web);
             c.add(
@@ -611,8 +652,13 @@ fn e21_ws_relay(env: &Env) -> Fut<'_> {
             format!("{handshake:?} {:?}", header(&o, "x-gateway-error")),
         );
         c.add(CheckKind::GroundTruth, "the backend received the upgrade", !requests_since(&env.fx.echo.log, before).is_empty(), "");
-        let got = crate::fixtures_policy::body_text(&o);
-        c.add(CheckKind::GroundTruth, "the backend's body was relayed byte for byte", got.trim() == body, got.clone());
+        let raw = o.decoded_body.as_ref().unwrap_or(&o.body);
+        c.add(
+            CheckKind::GroundTruth,
+            "the backend's body was relayed byte for byte",
+            raw.as_ref() == body.as_bytes(),
+            String::from_utf8_lossy(raw).into_owned(),
+        );
         if env.trusted {
             // The relayed body is the gateway's own connection-ceiling text: the
             // catalog outcome is matched, but only as a candidate.

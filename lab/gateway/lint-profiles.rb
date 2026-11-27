@@ -121,7 +121,7 @@ PLUGIN_KEYS = {
   'key_auth' => %w[key_location hide_credentials],                                    # key_auth.rs:55-66
   'basic_auth' => %w[hide_credentials],                                               # basic_auth.rs:72-93
   'jwt_auth' => %w[token_lookup consumer_claim_field require_exp require_nbf expected_issuer
-                   expected_issuers audiences leeway_secs],                           # jwt_auth.rs:170-187
+                   expected_issuers audiences leeway_secs hide_credentials],                           # jwt_auth.rs:170-187
   'hmac_auth' => %w[clock_skew_seconds signing_profile replay_scope
                     replay_max_entries] + REDIS,                                      # hmac_auth.rs:177-183 (allow_unsafe_replayable_v1 removed after v0.9.20)
   'jwks_auth' => %w[providers scope_claim role_claim consumer_identity_claim consumer_header_claim

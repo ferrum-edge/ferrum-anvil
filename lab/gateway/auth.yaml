@@ -387,6 +387,9 @@ plugin_configs:
       token_lookup: "query:token"
       consumer_claim_field: anvil_consumer
       require_exp: true
+      # The recovery's valid token is not forwarded (the echo backend would
+      # reflect it into the Lab's recorded output).
+      hide_credentials: true
 
   - id: e21-jwks-query
     plugin_name: jwks_auth
@@ -399,6 +402,7 @@ plugin_configs:
           issuer: "https://idp.anvil-lab.invalid"
           audiences: [anvil-lab-api]
           from_params: [token]
+          forward_original_token: false
 
   - id: e21-introspect-query
     plugin_name: oauth2_introspection
@@ -416,6 +420,7 @@ plugin_configs:
           negative_cache_ttl_secs: 0
           request_timeout_ms: 2000
           from_params: [token]
+          forward_original_token: false
 
   - id: auth008-jwks
     plugin_name: jwks_auth

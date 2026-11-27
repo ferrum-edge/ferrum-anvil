@@ -205,7 +205,8 @@ async fn connection(mut sock: TcpStream, refusal: Option<Refusal>, truth: &Truth
             SETTINGS if f.flags & END_STREAM_OR_ACK == 0 => write_frame(&mut sock, SETTINGS, END_STREAM_OR_ACK, 0, &[]).await?,
             PING if f.flags & END_STREAM_OR_ACK == 0 => write_frame(&mut sock, PING, END_STREAM_OR_ACK, 0, &f.payload).await?,
             HEADERS | CONTINUATION | DATA if f.stream != 0 => {
-                if f.kind == DATA {
+                // Bodies are kept only while the held requests are being read.
+                if amid && f.kind == DATA && held.len() < IN_FLIGHT {
                     bodies.entry(f.stream).or_default().extend_from_slice(&f.payload);
                 }
                 let state = partial.entry(f.stream).or_insert((false, false));
@@ -219,6 +220,7 @@ async fn connection(mut sock: TcpStream, refusal: Option<Refusal>, truth: &Truth
                     continue;
                 }
                 partial.remove(&f.stream);
+                let body = bodies.remove(&f.stream).unwrap_or_default();
                 truth.requests.fetch_add(1, Ordering::SeqCst);
                 whole += 1;
                 if whole == 1 {
@@ -230,7 +232,7 @@ async fn connection(mut sock: TcpStream, refusal: Option<Refusal>, truth: &Truth
                         continue;
                     }
                     held.push(f.stream);
-                    truth.held.lock().push(HeldRequest { stream: f.stream, body: bodies.remove(&f.stream).unwrap_or_default() });
+                    truth.held.lock().push(HeldRequest { stream: f.stream, body });
                     if held.len() < IN_FLIGHT {
                         continue;
                     }

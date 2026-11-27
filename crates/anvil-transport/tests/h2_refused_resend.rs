@@ -250,7 +250,10 @@ async fn proto_004_a_goaway_amid_streams_then_close_keeps_the_streams_at_or_belo
         let f = a.observation.failure.as_ref().expect("the close failed this POST");
         // The close after the GOAWAY cuts these streams short: an I/O end,
         // never the GOAWAY's own error (which would call them unprocessed).
-        assert!(!matches!(f.kind, FailureKind::H2GoAway | FailureKind::H2RefusedStream), "{f:?}");
+        // A FIN-ended close is "closed before response"; where the platform
+        // turns the close into a TCP reset, "reset before response". Never a
+        // timeout: the close reaches every stream.
+        assert!(matches!(f.kind, FailureKind::ClosedBeforeResponse | FailureKind::ResetBeforeResponse), "{f:?}");
         assert_eq!(e.resend_on_new_connection, None, "a POST the origin may have processed is never sent again");
     }
     let (post, e) = refused[0];

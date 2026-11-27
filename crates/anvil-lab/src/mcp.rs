@@ -162,13 +162,17 @@ fn e21_mcp_bridge(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
         let before = env.upstream.state.calls().len();
-        let o = send(env, &as_mcp(request(&TARGET, env.trusted, "POST", "/e21-bridge/mcp"), call("br.ping", "{}"), vec![])).await;
-        let body = String::from_utf8_lossy(o.decoded_body.as_ref().unwrap_or(&o.body)).into_owned();
+        let checks = vec![AssertionKind::JsonRpcError { code: -32603 }];
+        let o = send(env, &as_mcp(request(&TARGET, env.trusted, "POST", "/e21-bridge/mcp"), call("br.ping", "{}"), checks)).await;
+        c.status_in(&o, &[200]);
+        assertions_pass(&mut c, &o);
+        let message = anvil_engine::mcp::operation_response(&o)
+            .and_then(|v| v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).map(String::from));
         c.add(
             CheckKind::GroundTruth,
-            "JSON-RPC -32603 with the bridge confinement message",
-            body.contains("-32603") && body.contains("OpenAPI bridge operation path is outside this proxy's route"),
-            body.chars().take(300).collect::<String>(),
+            "the JSON-RPC error's message is the bridge confinement message",
+            message.as_deref() == Some("OpenAPI bridge operation path is outside this proxy's route"),
+            format!("{message:?}"),
         );
         let n = env.upstream.state.calls().len().saturating_sub(before);
         c.add(CheckKind::GroundTruth, "the server behind the gateway saw no new call", n == 0, format!("{n} call(s)"));
