@@ -22,36 +22,48 @@ change it, which is how a new pin is tried.
 
 ## Current pin
 
-`4e3caa5d4b6e72c1d8d495e8606066a0df30f594`: ferrumedge `main` after ferrum-edge/ferrumedge#144. That commit moves
-the site to the published `anvil-v0.1.9` and re-records the capability evidence from ferrum-anvil at that tag.
+`5acfcd4fdf1f415968104e276f859b04f346140d`: ferrumedge `main` after ferrum-edge/ferrumedge#148. The Anvil pages
+still describe the published `anvil-v0.1.9`.
 
 | Run | Event | Anvil commit | Result |
 |---|---|---|---|
-| [45098664403](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/45098664403) | workflow_dispatch, 2026-11-23 | `50624e69` (the pin change) | `pass`: 532 tests, 530 pass, 0 fail, 0 cancelled, 2 skipped |
-| [45099361622](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/45099361622) | pull_request, 2026-11-23 | `72f2e30e` (the pull request's test merge of the pin change into `main`) | `pass`: 532 tests, 530 pass, 0 fail, 0 cancelled, 2 skipped |
+| [46023775311](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/46023775311) | pull_request, 2026-11-27 | `01e9259d` (the pull request's test merge of the pin change into `main`) | `pass`: 594 tests, 592 pass, 0 fail, 0 cancelled, 2 skipped |
 
 The 2 skipped tests are the live highlight.js CDN checks in `tests/components.test.js`
-(`skip: RUN_LIVE_ASSET_CHECKS !== '1'`), which do not concern Anvil.
+(`skip: RUN_LIVE_ASSET_CHECKS !== '1'`, the only two skips in the suite), which do not concern Anvil.
 
-Between `f8b206a` and this pin, the only website change is #144, and the test count stays at 532. For Anvil:
-- `tests/fixtures/release-audit.json` re-records the Anvil entry from the published `anvil-v0.1.9`: 35 assets with
-  GitHub's digests (checked 2026-11-23), the 33 `SHA256SUMS` lines and the `release-evidence.json` targets. The
-  open-advisory entry for GHSA-7p29-5g2w-wwq4 is removed, and `releaseAdvisories` records the two published
-  advisories 0.1.9 fixes, GHSA-7p29-5g2w-wwq4 and GHSA-qxwm-425v-8xgf;
-- `tests/fixtures/anvil-capabilities.json` is re-recorded from ferrum-anvil at `anvil-v0.1.9` (`2331979e`): the
-  matrix coverage blob changes with every case status unchanged, `export.dataset-attachments` now rests on #602's
-  code and docs (sensitive dataset data sealed in an encrypted transfer's vault or left out of a share-safe
-  bundle), the upgrade note is 0.1.9's, `redaction` records the 4-byte minimum of exact-value redaction, and `dtls`
-  reads its values from `docs/protocols.md`; `tests/fixtures/anvil-vocabulary.json` is regenerated;
-- in `tests/anvil.test.js` and `tests/anvil-capabilities.test.js` the pinned values follow the release (version,
-  date, the upgrade-guide anchor and the security-release wording), and the release-table test also requires both
-  fixed advisories to be linked. The tests REL-006, REL-007 and REL-008 cite keep their names, and all ten Anvil and
-  shared pages still carry `nav-container` and `footer-container` and load `components.js` at their depth.
+Between `4e3caa5` and this pin the website merged #140, #145, #146, #147 and #148, and the test count rose from
+532 to 594. For Anvil:
+- #140 (benchmark pages rebuilt from CI, accuracy audit): `guides/anvil-getting-started` now builds the desktop UI
+  (`npm ci && npm run build` in `apps/desktop`) before `cargo build --workspace`; shared pages, guides,
+  `download.html` and `releases.html` were edited, and `tests/fixtures/anvil-vocabulary.json` gained one word;
+- #145 (the deploy waits for the Pages artifact) changes no Anvil content; #146 adds a Ferrum Migration page and
+  a Migration entry to the shared navigation;
+- #147 (corrected licence and contracts facts; compatibility matrix, security and 404 pages): `anvil.html` links to
+  the compatibility matrix (`releases#compatibility`), whose Anvil row reads Edge v0.9.20 and
+  `contracts-edge-0.9.20` from `lab/gateway/RELEASE.lock` and `contracts/ferrum-contracts/PIN` at `anvil-v0.1.9`
+  (a new `release.contracts` fact in `tests/fixtures/anvil-capabilities.json`). The claim check also reads the
+  Anvil blocks on `why-ferrum.html`, `about.html`, `licensing.html` and `security.html` (`BLOCK_PAGES` in
+  `tests/anvil-claims.js`), and `tests/anvil.test.js` accepts the organization's private vulnerability reporting
+  link (`/security/advisories/new`);
+- #148 adds the 1.0.0 candidates section (`releases.html#v1-candidates`), which deliberately has no Anvil row.
 
-At this pin, the claim check reads 832 claim elements in 17 regions (`node tests/anvil-claims.js --counts`, run on a
-checkout of `4e3caa5`).
+The Anvil entry of `tests/fixtures/release-audit.json` (assets, digests and `release-evidence.json` targets,
+checked 2026-11-23) is unchanged. The tests REL-006, REL-007 and REL-008 cite keep their names, and all fourteen
+Anvil and shared pages with Anvil content (the six Anvil pages and `index`, `guides/index`, `releases`,
+`download`, `why-ferrum`, `about`, `licensing` and `security`) carry `nav-container` and `footer-container` and load
+`components.js` at their depth.
+
+At this pin, the claim check reads 845 claim elements in 21 regions (`node tests/anvil-claims.js --counts`, run on a
+`git archive` extract of `5acfcd4`; the same command on `4e3caa5` reproduces the recorded 832 in 17).
 
 ## Previous pins
+
+`4e3caa5d4b6e72c1d8d495e8606066a0df30f594` (ferrumedge `main` after #144), which moved the site to the published
+`anvil-v0.1.9`. 530 of 532 tests passed, with 0 failed and the same 2 skipped, in workflow_dispatch run
+[45098664403](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/45098664403) on `50624e69` (the pin change)
+and pull_request run [45099361622](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/45099361622), 2026-11-23.
+At that pin the claim check read 832 claim elements in 17 regions.
 
 `f8b206ace58ea0587ef19a817bb64cafda784ede` (ferrumedge `main` after #143), which described `anvil-v0.1.8`. 530 of
 532 tests passed, with 0 failed and the same 2 skipped, in workflow_dispatch run
