@@ -22,9 +22,9 @@
 version: "1"
 
 resource_counts:
-  proxies: 21
+  proxies: 22
   consumers: 2
-  plugin_configs: 23
+  plugin_configs: 24
   upstreams: 0
 
 proxies:
@@ -74,6 +74,18 @@ proxies:
     pool_enable_http2: false
     plugins:
       - plugin_config_id: auth007-jwt
+
+  # EXT-E21-QUERY-ALIAS: jwt_auth reads its token from the `token` query parameter. v0.9.21
+  # refuses the parameter behind a `;` sub-parameter (#7464, GHSA-c259-vchc-3vgr).
+  - id: e21-jwt-query
+    listen_path: /auth/e21-jwt-query
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19101
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: e21-jwt-query
 
   # AUTH-008/009/010: JWKS-validated ES256 tokens from the lab identity provider.
   - id: auth008-jwks
@@ -341,6 +353,16 @@ plugin_configs:
     enabled: true
     config:
       token_lookup: "header:Authorization"
+      consumer_claim_field: anvil_consumer
+      require_exp: true
+
+  - id: e21-jwt-query
+    plugin_name: jwt_auth
+    scope: proxy
+    proxy_id: e21-jwt-query
+    enabled: true
+    config:
+      token_lookup: "query:token"
       consumer_claim_field: anvil_consumer
       require_exp: true
 

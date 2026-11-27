@@ -18,9 +18,9 @@
 version: "1"
 
 resource_counts:
-  proxies: 1
+  proxies: 2
   consumers: 0
-  plugin_configs: 2
+  plugin_configs: 3
   upstreams: 0
 
 proxies:
@@ -35,6 +35,19 @@ proxies:
     pool_enable_http2: false
     plugins:
       - plugin_config_id: mcp-gateway
+
+  # EXT-E21-MCP-BRIDGE: an OpenAPI bridge served from a regex route. v0.9.21 confines bridged
+  # calls to a literal listen prefix, so every bridged call here is refused with JSON-RPC
+  # -32603 (#7410, GHSA-26x8-8jq5-f73p); the backend (17101) is never called.
+  - id: e21-mcp-bridge
+    listen_path: "~^/e21-bridge(/|$)"
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 17101
+    strip_listen_path: false
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: e21-mcp-bridge
 
 plugin_configs:
   - id: mcp-gateway
@@ -67,3 +80,23 @@ plugin_configs:
     scope: global
     enabled: true
     config: {}
+
+  - id: e21-mcp-bridge
+    plugin_name: mcp_gateway
+    scope: proxy
+    proxy_id: e21-mcp-bridge
+    enabled: true
+    config:
+      mode: aggregate_router
+      endpoint:
+        path: /e21-bridge/mcp
+      servers:
+        br:
+          namespace: br
+          openapi:
+            operations:
+              - name: ping
+                method: GET
+                path: /e21-bridge/ping
+      policy:
+        default_action: allow

@@ -389,6 +389,189 @@ fn connections(log: &anvil_fixtures::GroundTruthLog) -> usize {
     log.entries().iter().filter(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. })).count()
 }
 
+// ------------------------------------------- Ferrum Edge v0.9.21 refusals ---
+
+const E21_ASSERT_MSG: &str = "gRPC-Web must be translated on a route with gateway-asserted headers";
+const E21_ADMISSION_MSG: &str = "Request protocol not permitted on this route";
+const E21_BREAKER_MSG: &str = "Service temporarily unavailable (circuit breaker open)";
+
+/// Trusted: the response matched exactly `outcome` in the release's catalog,
+/// at most `likely`. Untrusted: the harness asserts no `ferrum.outcome*`.
+fn e21_catalog(c: &mut Checks, env: &Env, o: &ExecutionOutput, outcome: &str) {
+    if env.trusted {
+        let got = crate::fixtures_policy::catalog_outcome(o);
+        c.add(
+            CheckKind::Diagnosis,
+            format!("catalog outcome {outcome}"),
+            got.as_deref() == Some(outcome),
+            format!("{got:?} {:?}", codes(o)),
+        );
+        c.max_confidence(o, "ferrum.outcome", Confidence::Likely);
+    }
+}
+
+/// EXT-E21-GRPCWEB-ASSERT: an untranslated gRPC-Web call on a route whose
+/// OPA instance owns a decision request header. v0.9.21 refuses it before
+/// any before_proxy hook (#7064) and renders the plugin's 415 in gRPC-Web
+/// framing: HTTP 200, grpc-status 13 and the refusal as grpc-message.
+fn e21_grpcweb_assert(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        fresh_connections(env);
+        let from = op_from(env);
+        let before = env.fx.grpc.log.entries().len();
+        let url = format!("grpc://{HTTP}/e21-grpcweb-assert");
+        let o = send(env, &web_ctx(env, &url, "Unary", GrpcMode::Unary, r#"{"message":"a"}"#, GrpcWire::GrpcWeb, HttpVersionPolicy::Auto))
+            .await;
+        let (http, st, _, msg) = grpc_status(&o);
+        c.add(
+            CheckKind::GroundTruth,
+            "HTTP 200 trailer frame with grpc-status 13 and the assertion-route message",
+            http == Some(200) && st == Some(13) && msg == E21_ASSERT_MSG,
+            format!("{http:?} {st:?} {msg}"),
+        );
+        c.add(CheckKind::GroundTruth, "the backend received nothing", requests_since(&env.fx.grpc.log, before).is_empty(), "");
+        e21_catalog(&mut c, env, &o, "gateway.routing.grpc_web_untranslated_on_assertion_route");
+        let ops = op_log(env, from, "e21-grpcweb-assert").await;
+        let r = grpc_recovery(env, &mut c).await;
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+    })
+}
+
+/// EXT-E21-GRPCWEB-RELABEL: a plain HTTP request that a request_transformer
+/// labels with a content-type listing a gRPC-Web type, on a route whose OPA
+/// instance owns a decision header. The client is not gRPC-Web, so v0.9.21
+/// answers the JSON 415 at the end of the before_proxy pass (#7064).
+fn e21_grpcweb_relabel(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let before = env.fx.echo.log.entries().len();
+        let o = send(env, &http_ctx(env, "GET", &format!("http://{HTTP}/e21-grpcweb-relabel/echo"), None)).await;
+        let body = crate::fixtures_policy::body_text(&o);
+        c.status_in(&o, &[415]);
+        c.add(CheckKind::GroundTruth, "the gateway's relabel refusal body", body.contains(E21_ASSERT_MSG), body.clone());
+        c.add(CheckKind::GroundTruth, "the backend received nothing", requests_since(&env.fx.echo.log, before).is_empty(), "");
+        e21_catalog(&mut c, env, &o, "gateway.routing.grpc_web_relabelled_on_assertion_route");
+        let ops = op_log(env, from, "e21-grpcweb-relabel").await;
+        let r = send(env, &http_ctx(env, "GET", &format!("http://{HTTP}/proto/http/echo"), None)).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+    })
+}
+
+/// EXT-E21-GRPC-ADMISSION: a native gRPC call on a route whose HTTP-only
+/// admission policy (request_deduplication enforce_required) its gRPC view
+/// omits: refused before any plugin runs, as HTTP 200 Trailers-Only
+/// grpc-status 7 with the route-admission message.
+fn e21_grpc_admission(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let before = env.fx.grpc.log.entries().len();
+        let url = format!("grpc://{HTTP}/e21-grpc-admission");
+        let o = send(env, &grpc_ctx(env, &url, "Unary", GrpcMode::Unary, &[r#"{"message":"a"}"#], None)).await;
+        let (http, st, src, msg) = grpc_status(&o);
+        c.add(
+            CheckKind::GroundTruth,
+            "HTTP 200 with grpc-status 7 and the route-admission message",
+            http == Some(200) && st == Some(7) && msg == E21_ADMISSION_MSG,
+            format!("{http:?} {st:?} {src:?} {msg}"),
+        );
+        c.add(CheckKind::GroundTruth, "the backend received nothing", requests_since(&env.fx.grpc.log, before).is_empty(), "");
+        e21_catalog(&mut c, env, &o, "gateway.routing.protocol_not_permitted.grpc");
+        let ops = op_log(env, from, "e21-grpc-admission").await;
+        let r = grpc_recovery(env, &mut c).await;
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+    })
+}
+
+/// EXT-E21-GRPC-BREAKER: native gRPC calls to an unbound backend behind a
+/// breaker that opens on one connection failure. The breaker's refusal is
+/// HTTP 200 Trailers-Only grpc-status 14 with the breaker message.
+fn e21_grpc_breaker(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = op_from(env);
+        let url = format!("grpc://{HTTP}/e21-grpc-breaker");
+        let mut last = None;
+        let mut opened = false;
+        for _ in 0..4 {
+            let o = send(env, &grpc_ctx(env, &url, "Unary", GrpcMode::Unary, &[r#"{"message":"a"}"#], None)).await;
+            let (_, st, _, msg) = grpc_status(&o);
+            opened = st == Some(14) && msg == E21_BREAKER_MSG;
+            last = Some(o);
+            if opened {
+                break;
+            }
+        }
+        let o = last.expect("at least one call");
+        let (http, st, src, msg) = grpc_status(&o);
+        c.add(
+            CheckKind::GroundTruth,
+            "within four calls: HTTP 200 with grpc-status 14 and the breaker message",
+            opened && http == Some(200),
+            format!("{http:?} {st:?} {src:?} {msg}"),
+        );
+        let marker = header(&o, "x-gateway-error");
+        c.add(CheckKind::GroundTruth, "the breaker refusal's X-Gateway-Error (recorded)", true, format!("{marker:?}"));
+        let ops = op_log(env, from, "e21-grpc-breaker").await;
+        c.add(
+            CheckKind::GroundTruth,
+            "the operator log records the circuit_breaker_open rejection",
+            ops.iter().any(|l| l.contains("circuit_breaker_open")),
+            format!("{} lines", ops.len()),
+        );
+        e21_catalog(&mut c, env, &o, "gateway.admission.circuit_open.grpc");
+        let r = grpc_recovery(env, &mut c).await;
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+    })
+}
+
+/// EXT-E21-WS-RELAY: a WebSocket upgrade that the backend itself answers with
+/// 503 and the body of the gateway's own WebSocket connection-ceiling
+/// refusal. v0.9.21 relays it unchanged without X-Gateway-Error (#7414), so
+/// a trusted diagnosis may not attribute it to the gateway: the catalog
+/// outcome stays at unknown confidence with the relayed-backend alternative.
+fn e21_ws_relay(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let body = r#"{"error":"Backend connection limit exceeded"}"#;
+        let before = env.fx.echo.log.entries().len();
+        let url = format!("ws://{HTTP}/e21-ws-relay/status/503?body={}", crate::fixtures_policy::enc(body));
+        let o = send(env, &ws_ctx(env, &url, WsBootstrap::Http1Upgrade, &["x"], 1_000)).await;
+        let (handshake, _, _) = ws_status(&o);
+        c.add(
+            CheckKind::GroundTruth,
+            "the backend's 503 reached the client without X-Gateway-Error",
+            handshake == Some(503) && header(&o, "x-gateway-error").is_empty(),
+            format!("{handshake:?} {:?}", header(&o, "x-gateway-error")),
+        );
+        c.add(CheckKind::GroundTruth, "the backend received the upgrade", !requests_since(&env.fx.echo.log, before).is_empty(), "");
+        let relayed_body = crate::fixtures_policy::body_text(&o).trim() == body;
+        c.add(CheckKind::GroundTruth, "the backend's body was relayed (recorded)", true, format!("{relayed_body}"));
+        if env.trusted {
+            let f = o.record.findings.iter().find(|f| f.code == "ferrum.outcome");
+            let ok = if relayed_body {
+                f.is_some_and(|f| {
+                    f.confidence == Confidence::Unknown && f.alternatives.iter().any(|a| a.contains("relayed its answer unchanged"))
+                })
+            } else {
+                f.is_none_or(|f| f.confidence <= Confidence::Unknown)
+            };
+            c.add(
+                CheckKind::Diagnosis,
+                "a gateway outcome for the relayed refusal is only a candidate (unknown, relayed-backend alternative)",
+                ok,
+                format!("{:?}", codes(&o)),
+            );
+        }
+        let r = send(env, &ws_ctx(env, &format!("ws://{HTTP}/ws?close_after=1"), WsBootstrap::Http1Upgrade, &["recover"], 3_000)).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+    })
+}
+
 // ------------------------------------------------------------ recoveries ---
 
 async fn grpc_recovery(env: &Env, c: &mut Checks) -> ExecutionOutput {
@@ -3006,6 +3189,27 @@ pub fn all() -> Vec<Def> {
         Def { id: "LOAD-013-grpc", title: "Unary gRPC load through the gateway: status codes vs the operator log", run: load013_grpc },
         Def { id: "LOAD-013-ws", title: "WebSocket session load through the gateway: sessions and messages", run: load013_ws },
         Def { id: "LOAD-013-udp", title: "UDP load through the gateway: sent ≠ received, no delivery inferred", run: load013_udp },
+        Def {
+            id: "EXT-E21-GRPCWEB-ASSERT",
+            title: "Untranslated gRPC-Web on an assertion route: framed refusal (v0.9.21)",
+            run: e21_grpcweb_assert,
+        },
+        Def {
+            id: "EXT-E21-GRPCWEB-RELABEL",
+            title: "Request relabelled as gRPC-Web on an assertion route: JSON 415 (v0.9.21)",
+            run: e21_grpcweb_relabel,
+        },
+        Def {
+            id: "EXT-E21-GRPC-ADMISSION",
+            title: "Native gRPC refused by route protocol admission: Trailers-Only 7",
+            run: e21_grpc_admission,
+        },
+        Def { id: "EXT-E21-GRPC-BREAKER", title: "Native gRPC refused by an open breaker: Trailers-Only 14", run: e21_grpc_breaker },
+        Def {
+            id: "EXT-E21-WS-RELAY",
+            title: "Backend's own WebSocket refusal relayed (v0.9.21): no gateway attribution",
+            run: e21_ws_relay,
+        },
     ]
 }
 
