@@ -394,6 +394,9 @@ fn connections(log: &anvil_fixtures::GroundTruthLog) -> usize {
 const E21_ASSERT_MSG: &str = "gRPC-Web must be translated on a route with gateway-asserted headers";
 const E21_ADMISSION_MSG: &str = "Request protocol not permitted on this route";
 const E21_BREAKER_MSG: &str = "Service temporarily unavailable (circuit breaker open)";
+/// request_deduplication's refusal of a request without its required key,
+/// as the gRPC-Web trailer frame carries it.
+const E21_DEDUP_MSG: &str = "Missing required idempotency header: idempotency-key";
 
 /// Trusted: the response matched exactly `outcome` in the release's catalog,
 /// at most `likely`. Untrusted: the harness asserts no `ferrum.outcome*`.
@@ -487,11 +490,16 @@ fn e21_call(env: &Env, url: &str, web: bool) -> ExecutionContext {
     }
 }
 
-/// EXT-E21-GRPC-ADMISSION: a native gRPC call, then a gRPC-Web one, on a
-/// route whose HTTP-only admission policy (request_deduplication
-/// enforce_required) its gRPC view omits: each refused before any plugin
-/// runs with grpc-status 7 and the route-admission message, in its wire's
-/// rendering (#7155).
+/// EXT-E21-GRPC-ADMISSION: a native gRPC call on a route whose HTTP-only
+/// admission policy (request_deduplication enforce_required) its gRPC view
+/// omits: refused before any plugin runs, as HTTP 200 Trailers-Only
+/// grpc-status 7 with the route-admission message. A gRPC-Web call is not
+/// refused this way: its view keeps every HTTP plugin, and route admission
+/// refuses gRPC-Web only for a gRPC-only gating plugin other than the exempt
+/// grpc_method_router and grpc_deadline (no other built-in exists). The HTTP
+/// plugin itself refuses it, in the gRPC-Web body trailer frame (#7155):
+/// grpc-status 3 with request_deduplication's message. A trusted diagnosis
+/// must not call that a route-admission refusal.
 fn e21_grpc_admission(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -502,12 +510,20 @@ fn e21_grpc_admission(env: &Env) -> Fut<'_> {
         e21_grpc_refusal(&mut c, &o, false, 7, E21_ADMISSION_MSG);
         e21_catalog(&mut c, env, &o, "gateway.routing.protocol_not_permitted.grpc");
         let web = send(env, &e21_call(env, &url, true)).await;
-        e21_grpc_refusal(&mut c, &web, true, 7, E21_ADMISSION_MSG);
-        e21_catalog(&mut c, env, &web, "gateway.routing.protocol_not_permitted.grpc");
+        e21_grpc_refusal(&mut c, &web, true, 3, E21_DEDUP_MSG);
+        if env.trusted {
+            let matched = crate::fixtures_policy::catalog_ids(&web);
+            c.add(
+                CheckKind::Diagnosis,
+                "the gRPC-Web plugin refusal is not explained as a route-admission refusal",
+                !matched.iter().any(|m| m.starts_with("gateway.routing.protocol_not_permitted")),
+                format!("{matched:?}"),
+            );
+        }
         c.add(CheckKind::GroundTruth, "the backend received nothing", requests_since(&env.fx.grpc.log, before).is_empty(), "");
         let ops = op_log(env, from, "e21-grpc-admission").await;
         let r = grpc_recovery(env, &mut c).await;
-        Outcome { main: Some(web), recovery: Some(r), checks: c, operator_log: ops }
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
     })
 }
 

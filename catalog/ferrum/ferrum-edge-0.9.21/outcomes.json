@@ -34685,7 +34685,7 @@
       "remediation": "Gateway operator: serve this gRPC traffic from a route whose plugins support the flavor, or add a plugin that does.",
       "owner": "gateway_operator",
       "fixture_ids": [],
-      "notes": "The JSON 403 HTTP and WebSocket form is gateway.routing.protocol_not_permitted. v0.9.21 (#7155): gRPC-Web on HTTP/1.1 and HTTP/2 gets the framed refusal instead of the native-gRPC header-only status it could not read; with FERRUM_DIAGNOSTIC_REFS=all its reference resolves with status 200 (#7407). The transaction log keeps 403."
+      "notes": "The JSON 403 HTTP and WebSocket form is gateway.routing.protocol_not_permitted. v0.9.21 (#7155): gRPC-Web on HTTP/1.1 and HTTP/2 gets the framed refusal instead of the native-gRPC header-only status it could not read; with FERRUM_DIAGNOSTIC_REFS=all its reference resolves with status 200 (#7407). The transaction log keeps 403. With built-in plugins gRPC-Web is never refused this way: route admission refuses gRPC-Web only for a gRPC-only gating plugin other than grpc_method_router and grpc_deadline, the only built-in gRPC-only plugins, which are exempt (src/plugin_cache.rs:6751, :6702); the framed form needs a custom plugin. Lab-observed on v0.9.21 (EXT-E21-GRPC-ADMISSION): native gRPC gets the Trailers-Only grpc-status 7; a gRPC-Web call on the same route reached request_deduplication, which refused it in a trailer frame with grpc-status 3."
     },
     {
       "id": "gateway.admission.circuit_open.grpc",

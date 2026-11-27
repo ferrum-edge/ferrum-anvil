@@ -192,7 +192,12 @@ On HTTP/1.1 and HTTP/2, gRPC-Web clients get a framed HTTP 200 trailer-frame ref
 native-gRPC header-only status:
 
 - route protocol admission: grpc-status 7, grpc-message `Request protocol not permitted on this
-  route` (`src/proxy/mod.rs:38026`);
+  route` (`src/proxy/mod.rs:38026`). With built-in plugins this is unreachable for gRPC-Web: the
+  gRPC-Web view keeps every HTTP plugin, and route admission refuses gRPC-Web only for a gRPC-only
+  gating plugin other than `grpc_method_router` and `grpc_deadline` (`src/plugin_cache.rs:6751`,
+  exemptions at `:6702`), which are the only built-in gRPC-only plugins. It needs a custom plugin.
+  EXT-E21-GRPC-ADMISSION observed this live: a gRPC-Web call on its route reached
+  `request_deduplication`, which refused it in a trailer frame with grpc-status 3;
 - an open circuit breaker: grpc-status 14, grpc-message `Service temporarily unavailable (circuit
   breaker open)`, keeping `X-Gateway-Error: circuit_breaker_open` (`src/proxy/mod.rs:40678`).
 
@@ -464,7 +469,7 @@ failure-matrix seeds only, so it stays empty for these outcomes. Evidence: hoste
 [46069656125](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/46069656125), head `59859d06`:
 Ubuntu 26.04 **578 passed / 0 failed / 21 skipped**, macOS 15 **582 / 0 / 19** (24 more passes than
 run 45974458935: each of the twelve scenarios then passes trusted and untrusted). After review, the
-gRPC-Web renderings of the admission and breaker refusals, the jwks_auth and oauth2_introspection
+gRPC-Web legs of the admission and breaker scenarios, the jwks_auth and oauth2_introspection
 query-token routes, and stricter body and source checks were added: run RUN_REVIEW (below).
 
 | Outcome or signal | Scenario | What the real gateway sent |
@@ -475,7 +480,7 @@ query-token routes, and stricter body and source checks were added: run RUN_REVI
 | `gateway.routing.grpc_web_untranslated_on_assertion_route` | EXT-E21-GRPCWEB-ASSERT | HTTP 200 with the status in the body trailer frame (status source checked), grpc-status 13, grpc-message from the JSON error |
 | `gateway.routing.grpc_web_relabelled_on_assertion_route` | EXT-E21-GRPCWEB-RELABEL | the JSON 415 for a plain request relabelled by a transformer (a list-valued content-type that publication admits) |
 | `plugin.mcp_gateway.openapi_bridge_outside_route` | EXT-E21-MCP-BRIDGE | JSON-RPC -32603 for a bridge served from a regex route; backend never called |
-| `gateway.routing.protocol_not_permitted.grpc` | EXT-E21-GRPC-ADMISSION | grpc-status 7, `Request protocol not permitted on this route`: native gRPC Trailers-Only, and gRPC-Web over HTTP/1.1 in a body trailer frame (#7155) |
+| `gateway.routing.protocol_not_permitted.grpc` | EXT-E21-GRPC-ADMISSION | native gRPC: Trailers-Only grpc-status 7, `Request protocol not permitted on this route`. gRPC-Web is not refused by route admission with built-in plugins (the framed form of #7155 needs a custom gRPC-only gating plugin): the gRPC-Web call reached `request_deduplication`, which refused it in a body trailer frame with grpc-status 3, and Anvil did not call it a route-admission refusal |
 | `gateway.admission.circuit_open.grpc` | EXT-E21-GRPC-BREAKER | grpc-status 14 with the breaker message and `X-Gateway-Error: circuit_breaker_open`: native Trailers-Only, and gRPC-Web in a body trailer frame (#7155); operator log `rejection_phase` `circuit_breaker_open` |
 | `plugin.ai_prompt_shield.uninspectable` (duplicate members) | EXT-E21-SHIELD-DUP | 400 with the duplicate-member message |
 | `plugin.body_validator.response_validation_failed` (fixed detail) | EXT-E21-BODYVAL-RESP | 502 `backend_error` with `Response body is missing a required field` |
