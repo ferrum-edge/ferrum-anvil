@@ -341,16 +341,27 @@ mod tests {
 
     #[tokio::test]
     async fn serve_keeps_an_explicit_port() {
-        // A port free over UDP may still be taken over TCP (or excluded on Windows): try a few.
-        for _ in 0..16 {
-            let port = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-            let requested = SocketAddr::from(([127, 0, 0, 1], port));
-            if let Ok(fixture) = serve(&requested.to_string(), DnsMode::NxDomain).await {
-                assert_eq!(fixture.addr, requested);
-                return;
+        // The port is one this host just bound over UDP and TCP at once (the fixture's own pair
+        // bind), so it is known to be free over both, including outside a Windows TCP excluded
+        // range; a port free over UDP alone proves nothing about TCP (#625). Releasing it leaves
+        // only an ordinary race with another process, which a fresh pair absorbs.
+        let mut last_error = None;
+        for _ in 0..3 {
+            let (udp, tcp) = bind_ephemeral_pair_with("127.0.0.1:0", bind_udp_future, |addr| Box::pin(TcpListener::bind(addr)))
+                .await
+                .expect("a UDP/TCP pair on one port");
+            let requested = udp.local_addr().unwrap();
+            assert_eq!(requested.port(), tcp.local_addr().unwrap().port());
+            drop((udp, tcp));
+            match serve(&requested.to_string(), DnsMode::NxDomain).await {
+                Ok(fixture) => {
+                    assert_eq!(fixture.addr, requested);
+                    return;
+                }
+                Err(error) => last_error = Some(error),
             }
         }
-        panic!("no free port over both UDP and TCP in 16 tries");
+        panic!("a port just bound over UDP and TCP could not be served three times: {last_error:?}");
     }
 
     #[tokio::test]
