@@ -32,7 +32,7 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "
 import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { UNSIGNED, signingSummary } from "./release-notes.mjs";
-import { builtPubkey, checkSignedVersion, decodePublicKey, unpairedSignatures, updaterArtifacts, verifyUpdaterSignature } from "./updater-manifest.mjs";
+import { builtPubkey, checkSignedVersion, decodePublicKey, platformSetProblems, unpairedSignatures, updaterArtifacts, verifyUpdaterSignature } from "./updater-manifest.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const arg = (name) => {
@@ -219,6 +219,7 @@ if (manifest) {
     }
   }
   for (const f of signedFiles.keys()) if (!listed.has(f)) updaterProblems.push(`${f}: signed but not in latest.json`);
+  updaterProblems.push(...platformSetProblems(Object.keys(manifest.platforms ?? {})));
 }
 problems.push(...updaterProblems.map((p) => `updater: ${p}`));
 const updaterSigned = Boolean(manifest && pubkey && keyId && signedFiles.size > 0 && updaterProblems.length === 0);

@@ -136,21 +136,30 @@ Each build job (bundle-windows and check-windows for Windows):
 **sign-updater** (Ubuntu, the `release` environment for a tag) first
 requires all four build targets' artifacts (`scripts/release/check-targets.sh`;
 publish checks the same). With the owner's updater key it signs every updater
-file the build jobs uploaded and uploads the signatures as
-`updater-signatures`; it runs no bundler (see [In-app updates](#in-app-updates)).
-Without the key (every dry run) it runs the same signing on copies of the
-files with a key generated for the run, builds `latest.json` from them and
-requires all seven platform entries, and uploads those throwaway signatures
+file the build jobs uploaded, requires exactly one of each (both macOS
+archives, the AppImage, the NSIS installer and the MSI), and uploads the
+signatures as `updater-signatures`; it runs no bundler (see
+[In-app updates](#in-app-updates)). Publish writes `latest.json` only with all
+seven platform entries, so a release can never leave an install format
+without an update. In every dry run it runs the same signing on copies of the
+files with a key generated for the run, builds `latest.json` from them
+(again requiring all seven entries), and uploads those throwaway signatures
 as `updater-signatures-selftest`; publish checks that each lands beside its
 file's target folder, then discards them. Nothing of the self-test reaches
-`dist/` or a release, and the throwaway key never leaves the job.
+`dist/` or a release, and the throwaway key never leaves the job. A tagged
+run without the owner's updater key signs nothing (the job logs a warning):
+its draft has no `latest.json`, and the app's Upgrade button opens the
+release page.
 
-**If sign-updater's approval is delayed or denied.** Its inputs, like every
-build artifact, are kept 35 days. A missing input fails it (and publish) with
-the instruction to re-run all jobs, never a release without that platform. A
-denied or failed sign-updater job skips publish and the release job: no
-draft is created, and nothing is half-published. Approve it, or re-run all
-jobs once the reason is fixed.
+**If sign-updater's approval is delayed or denied.** GitHub lets a
+deployment wait at most 30 days for approval, and lets a run's jobs be re-run
+only within 30 days of the run's start; the build artifacts it signs are kept
+35 days. A missing input fails it (and publish) with the instruction to re-run
+all jobs, never a release without that platform. A denied, failed or expired
+sign-updater job skips publish and the release job: no draft is created, and
+nothing is half-published. Within 30 days of the run's start, approve it or
+re-run all jobs once the reason is fixed; after that the run cannot be re-run:
+start a fresh full release run from the same tag (Run workflow → *Use workflow from* → Tags → the tag, `dry_run` off, `tag` set to it), which builds, signs and checks every target again.
 
 **Publish** (Ubuntu): an npm SBOM of the UI's production dependencies
 (`@cyclonedx/cyclonedx-npm`), `license-report.json`, the list of GitHub Actions
@@ -641,8 +650,9 @@ route is only for an older certificate you already have.
       [Cutting a release](#cutting-a-release). The run asks for approval of
       the `release` environment three times: for the four build jobs; after
       the Windows build, for `bundle-windows`; and, once every target is built
-      and checked, for `sign-updater`. Approve each within the 35 days the
-      build artifacts are kept; otherwise re-run all jobs. `check-windows` and publish need no
+      and checked, for `sign-updater`. Approve each within 30 days of the
+      run's start (GitHub's limit for a pending approval and for re-running a
+      run's jobs). After that, start a fresh full release run from the same tag (Run workflow → *Use workflow from* → Tags → the tag, `dry_run` off, `tag` set to it), which builds, signs and checks every target again. `check-windows` and publish need no
       approval. Each **Signing
       route** step logs the route chosen per platform within minutes; a
       missing or half-set value fails it there. `bundle-windows` prints its

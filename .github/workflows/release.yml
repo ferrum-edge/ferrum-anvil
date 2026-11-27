@@ -518,7 +518,7 @@ jobs:
         if: steps.compiled.outcome != 'success'
         shell: bash
         run: |
-          echo "::error::the compiled-x86_64-pc-windows-msvc artifact could not be downloaded (it is kept 30 days; an approval that waited longer, or a deleted artifact, leaves nothing to sign). Re-run the whole workflow (Re-run all jobs), not only the failed jobs: the Windows build job must compile again."
+          echo "::error::the compiled-x86_64-pc-windows-msvc artifact could not be downloaded (it is kept 35 days; an expired or deleted artifact leaves nothing to sign). Within 30 days of the run's start, re-run the whole workflow (Re-run all jobs), not only the failed jobs: the Windows build job must compile again. After that, start a fresh full release run from the same tag (Run workflow from the tag, dry_run off, tag set)."
           exit 1
       - name: Binaries match the build job's recorded digests
         shell: bash
@@ -882,15 +882,17 @@ jobs:
           path: dist
       - name: All four build targets are present
         run: bash scripts/release/check-targets.sh dist
-      # Without the owner's key (every dry run), the same script signs copies
-      # of this run's updater files (macOS .app.tar.gz, AppImage, NSIS, MSI)
-      # with a key made for the run (it never leaves this job), builds
-      # latest.json from them with scripts/updater-manifest.mjs and requires
-      # all seven platform entries. The signatures are uploaded as
-      # updater-signatures-selftest so publish checks the handoff layout; they
-      # never reach dist/ or a release.
-      - name: Self-test of signing and latest.json with a throwaway key (no owner key)
-        if: steps.updater.outputs.updater != 'true'
+      # Dry run (no tag): the same script signs copies of this run's updater
+      # files (macOS .app.tar.gz, AppImage, NSIS, MSI) with a key made for the
+      # run (it never leaves this job) and builds latest.json from them with
+      # scripts/updater-manifest.mjs, which requires all seven platform
+      # entries. The signatures are uploaded as updater-signatures-selftest so
+      # publish checks the handoff layout; they never reach dist/ or a release.
+      # A tagged run without the owner's updater key has no macOS updater
+      # archive (collect.sh) and signs nothing: its draft offers the release
+      # page instead of an in-app update.
+      - name: Self-test of signing and latest.json with a throwaway key (dry run)
+        if: needs.preflight.outputs.tag == ''
         run: |
           work="$RUNNER_TEMP/sign-selftest"
           mkdir -p "$work"
@@ -914,23 +916,19 @@ jobs:
               fs.writeFileSync(f, JSON.stringify(info, null, 2) + "\n");
             }
           ' "$work/dist"
+          # Exits 1 unless latest.json gets all seven platform entries, as in a tagged release.
           node scripts/updater-manifest.mjs --dist "$work/dist" --repo "$GITHUB_REPOSITORY" --tag "anvil-v$VERSION" --version "$VERSION"
-          # shellcheck disable=SC2016 # JavaScript source, not shell
-          node -e '
-            const m = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
-            const want = ["darwin-aarch64", "darwin-aarch64-app", "darwin-x86_64", "darwin-x86_64-app", "linux-x86_64-appimage", "windows-x86_64-msi", "windows-x86_64-nsis"];
-            const got = Object.keys(m.platforms ?? {}).sort();
-            if (JSON.stringify(got) !== JSON.stringify(want)) { console.error(`latest.json platforms ${got.join(", ")}, not ${want.join(", ")}`); process.exit(1); }
-            console.log(`self-test latest.json: ${got.length} platform entries, version ${m.version}`);
-          ' "$work/dist/latest.json"
           rm -rf "$work/dist" "$work/selftest.key"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: steps.updater.outputs.updater != 'true'
+        if: needs.preflight.outputs.tag == ''
         with:
           name: updater-signatures-selftest
           path: ${{ runner.temp }}/sign-selftest/sigs/
           if-no-files-found: error
           retention-days: 7
+      - name: No updater key (tagged release)
+        if: needs.preflight.outputs.tag != '' && steps.updater.outputs.updater != 'true'
+        run: echo "::warning::no owner updater key (TAURI_SIGNING_PRIVATE_KEY and ANVIL_UPDATER_PUBKEY); the release has no signed updater artifacts and no latest.json, and the app offers the release page"
       - name: Sign the updater files
         if: steps.updater.outputs.updater == 'true'
         env:

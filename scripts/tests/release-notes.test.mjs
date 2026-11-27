@@ -561,6 +561,39 @@ test("the updater private key reaches only sign-updater, which runs no bundler",
   assert.ok(!config.includes("createUpdaterArtifacts"), "the bundler creates no updater artifact");
 });
 
+test("sign-updater signs or self-tests only when it can: a tagged run without the updater key still reaches the draft", () => {
+  const steps = jobSteps(workflowJobs()["sign-updater"]);
+  const cond = (s) => /\n        if: (.*)\n/.exec(s)?.[1] ?? "";
+  // Each step's condition for the three kinds of run.
+  const runs = { dryRun: { tag: "", updater: "false" }, taggedWithKey: { tag: "anvil-v1.2.3", updater: "true" }, taggedWithoutKey: { tag: "anvil-v1.2.3", updater: "false" } };
+  const evaluate = (expr, run) => {
+    if (!expr) return true;
+    return expr.split(" && ").every((part) => {
+      const m = /^(needs\.preflight\.outputs\.tag|steps\.updater\.outputs\.updater) (==|!=) '([^']*)'$/.exec(part.trim());
+      assert.ok(m, `unexpected condition ${part}`);
+      const value = m[1].endsWith("tag") ? run.tag : run.updater;
+      return m[2] === "==" ? value === m[3] : value !== m[3];
+    });
+  };
+  const ran = (run) => steps.filter((s) => evaluate(cond(s), run));
+  const signs = (s) => /sign-updater\.sh|updater-manifest\.mjs|upload-artifact/.test(s);
+  // A tagged run without the key signs nothing, builds no manifest, uploads
+  // nothing and fails no step: publish and the draft release follow.
+  assert.deepEqual(ran(runs.taggedWithoutKey).filter(signs), []);
+  assert.ok(ran(runs.taggedWithoutKey).some((s) => s.includes("::warning::no owner updater key")));
+  // The self-test (throwaway key, all seven entries) runs in every dry run and only there.
+  const selfTest = steps.filter((s) => s.includes("Self-test of signing"));
+  assert.equal(selfTest.length, 1);
+  assert.deepEqual(Object.entries(runs).filter(([, r]) => evaluate(cond(selfTest[0]), r)).map(([n]) => n), ["dryRun"]);
+  // The owner's key signs in a tagged run with the key only.
+  const owner = steps.filter((s) => s.includes("bash scripts/release/sign-updater.sh dist sigs"));
+  assert.equal(owner.length, 1);
+  assert.deepEqual(Object.entries(runs).filter(([, r]) => evaluate(cond(owner[0]), r)).map(([n]) => n), ["taggedWithKey"]);
+  // collect.sh makes the macOS updater archive in the same two cases only.
+  const collect = readFileSync(join(root, "scripts", "release", "collect.sh"), "utf8");
+  assert.match(collect, /\[ "\$\{UPDATER:-false\}" = "true" \] \|\| \[ -z "\$\{TAG:-\}" \]/);
+});
+
 test("check-targets.sh expects exactly the release matrix's targets, and both downloading jobs run it", () => {
   const jobs = workflowJobs();
   const matrix = [...jobs.build.matchAll(/^\s+- target: (\S+)$/gm)].map((m) => m[1]).sort();

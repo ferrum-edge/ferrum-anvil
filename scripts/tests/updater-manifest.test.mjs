@@ -5,9 +5,13 @@
 // updater plugin (apps/desktop/src-tauri/src/cmd_update/signed_update_tests.rs
 // and .github/workflows/updater-e2e.yml).
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { checkSignedVersion, decodePublicKey, signedVersion, verifyUpdaterSignature } from "../updater-manifest.mjs";
+import { RELEASE_PLATFORMS, checkSignedVersion, decodePublicKey, platformSetProblems, signedVersion, verifyUpdaterSignature } from "../updater-manifest.mjs";
 
 const b64 = (b) => Buffer.from(b).toString("base64");
 
@@ -81,4 +85,59 @@ test("checkSignedVersion refuses a signature for another version or with none", 
   assert.throws(() => checkSignedVersion(trusted, "1.2.3"), /signed for version 1\.2\.2, not 1\.2\.3/);
   const legacy = verifyUpdaterSignature(artifact, signFile(key, artifact, { trusted: "timestamp:1790000000\tfile:app.AppImage" }), key.pubkey);
   assert.throws(() => checkSignedVersion(legacy, "1.2.3"), /records no version/);
+});
+
+// The release's updater files per target, as sign-updater leaves them for publish.
+const RELEASE_FILES = {
+  "aarch64-apple-darwin": ["Ferrum-Anvil_1.2.3_aarch64.app.tar.gz"],
+  "x86_64-apple-darwin": ["Ferrum-Anvil_1.2.3_x64.app.tar.gz"],
+  "x86_64-unknown-linux-gnu": ["Ferrum-Anvil_1.2.3_amd64.AppImage"],
+  "x86_64-pc-windows-msvc": ["Ferrum-Anvil_1.2.3_x64-setup.exe", "Ferrum-Anvil_1.2.3_x64_en-US.msi"],
+};
+
+/** Run updater-manifest.mjs over a dist folder holding RELEASE_FILES, signed, minus `omit`. */
+function writeManifest(omit = []) {
+  const dist = mkdtempSync(join(tmpdir(), "updater-manifest-"));
+  try {
+    for (const [target, files] of Object.entries(RELEASE_FILES)) {
+      const dir = join(dist, `release-${target}`);
+      mkdirSync(dir);
+      writeFileSync(join(dir, "build-info.json"), JSON.stringify({ target, updater: { configured: true, pubkey: key.pubkey, embedded: true } }));
+      for (const name of files.filter((f) => !omit.includes(f))) {
+        const data = randomBytes(256);
+        writeFileSync(join(dir, name), data);
+        writeFileSync(join(dir, `${name}.sig`), signFile(key, data));
+      }
+    }
+    const script = new URL("../updater-manifest.mjs", import.meta.url).pathname;
+    const r = spawnSync(process.execPath, [script, "--dist", dist, "--repo", "ferrum-edge/ferrum-anvil", "--tag", "anvil-v1.2.3", "--version", "1.2.3"], { encoding: "utf8" });
+    let manifest = null;
+    try {
+      manifest = JSON.parse(readFileSync(join(dist, "latest.json"), "utf8"));
+    } catch {
+      // not written
+    }
+    return { status: r.status, output: r.stdout + r.stderr, manifest };
+  } finally {
+    rmSync(dist, { recursive: true, force: true });
+  }
+}
+
+test("a signed release's latest.json lists exactly the seven platform keys", () => {
+  const full = writeManifest();
+  assert.equal(full.status, 0, full.output);
+  assert.deepEqual(Object.keys(full.manifest.platforms).sort(), [...RELEASE_PLATFORMS].sort());
+  assert.deepEqual(platformSetProblems(RELEASE_PLATFORMS), []);
+});
+
+test("a signed release missing one updater file gets no latest.json", () => {
+  // The Windows target still has its NSIS installer, so only the platform set notices.
+  const noMsi = writeManifest(["Ferrum-Anvil_1.2.3_x64_en-US.msi"]);
+  assert.equal(noMsi.status, 1, noMsi.output);
+  assert.match(noMsi.output, /latest\.json has no entry for windows-x86_64-msi/);
+  assert.equal(noMsi.manifest, null);
+  const noIntelMac = writeManifest(["Ferrum-Anvil_1.2.3_x64.app.tar.gz"]);
+  assert.equal(noIntelMac.status, 1, noIntelMac.output);
+  assert.equal(noIntelMac.manifest, null);
+  assert.deepEqual(platformSetProblems([...RELEASE_PLATFORMS, "linux-x86_64"]), ["latest.json lists unexpected platforms linux-x86_64"]);
 });

@@ -27,7 +27,7 @@ for f in "${found[@]}"; do
 done
 if [ "${#problems[@]}" -gt 0 ]; then
   for p in "${problems[@]}"; do echo "::error::$p"; done
-  echo "::error::the build artifacts are incomplete (an artifact expires after 35 days or can be deleted). Re-run all jobs of this workflow run; re-running only the failed jobs reuses the missing inputs."
+  echo "::error::the build artifacts are incomplete (an artifact expires after 35 days or can be deleted). Within 30 days of the run's start, re-run all jobs of this workflow run (re-running only the failed jobs reuses the missing inputs); after that, start a fresh full release run from the same tag (Run workflow from the tag, dry_run off, tag set)."
   exit 1
 fi
 echo "all four release targets present: ${expected[*]}"

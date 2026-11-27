@@ -11,6 +11,8 @@
 # signature's trusted comment, which the app's requireSignedVersion checks),
 # the signature is verified against PUBKEY (the key compiled into the app) and
 # must record VERSION, and it is written to <out>/release-<target>/<file>.sig.
+# Each target must yield exactly its updater files (one macOS archive per
+# macOS target, the AppImage, the NSIS installer and the MSI), or it exits 1.
 # Run by the release workflow's sign-updater job, which runs no bundler.
 set -euo pipefail
 
@@ -43,4 +45,19 @@ for dir in "$dist"/release-*/; do
   done
 done
 [ "$count" -gt 0 ] || { echo "::error::no updater files under $dist/release-*"; exit 1; }
+# Exactly one updater file of each format every release ships (the seven
+# latest.json keys, RELEASE_PLATFORMS in scripts/updater-manifest.mjs): a
+# missing one would leave that install format without an update.
+missing=0
+one() { # <what> <matching signatures...>
+  local what="$1"
+  shift
+  [ "$#" = 1 ] || { echo "::error::$what: $# signatures, expected exactly one"; missing=1; }
+}
+one "aarch64-apple-darwin .app.tar.gz" "$out"/release-aarch64-apple-darwin/*.app.tar.gz.sig
+one "x86_64-apple-darwin .app.tar.gz" "$out"/release-x86_64-apple-darwin/*.app.tar.gz.sig
+one "x86_64-unknown-linux-gnu AppImage" "$out"/release-x86_64-unknown-linux-gnu/*.AppImage.sig
+one "x86_64-pc-windows-msvc NSIS installer" "$out"/release-x86_64-pc-windows-msvc/*-setup.exe.sig
+one "x86_64-pc-windows-msvc MSI" "$out"/release-x86_64-pc-windows-msvc/*.msi.sig
+[ "$missing" = 0 ] || exit 1
 echo "$count updater files signed"
