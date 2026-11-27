@@ -472,7 +472,7 @@ test("only bundle-windows can request an OIDC token, and it runs no release chec
   assert.ok(jobs["check-windows"].includes("bash scripts/release/check-artifacts.sh"));
   assert.ok(!/environment:|secrets\./.test(jobs["check-windows"]), "check-windows has no environment and no secret");
   assert.match(jobs["bundle-windows"], /Binaries match the build job's recorded digests/);
-  assert.match(jobs.build, /name: compiled-\$\{\{ matrix\.target \}\}[\s\S]*?retention-days: 30/);
+  assert.match(jobs.build, /name: compiled-\$\{\{ matrix\.target \}\}[\s\S]*?retention-days: 35/);
 });
 
 // release.yml's top-level jobs, each with its text, and a job's steps.
