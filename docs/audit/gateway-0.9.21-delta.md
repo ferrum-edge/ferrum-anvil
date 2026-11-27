@@ -7,7 +7,7 @@
 | Contracts | Published `contracts-edge-0.9.21`, `92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f` |
 | Catalog | [`ferrum-edge-0.9.21/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.21/outcomes.json), 626 outcome IDs: the 620 of 0.9.20 − 1 removed + 7 new |
 | Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.21.lock`; the only supported release. v0.9.20 was retired with this adoption ([why](#v0920-is-retired)) |
-| Hosted qualification | See [Qualification status](#qualification-status) |
+| Hosted qualification | All-profile Lab run 45974458935 on the adoption branch at `db543c01`: Ubuntu 554/0/21, macOS 558/0/19 ([details](#qualification-status)) |
 | Audit date | 2026-11-27 |
 
 The [immutable comparison][compare] spans 837 commits. v0.9.21 follows published v0.9.20 directly,
@@ -394,17 +394,28 @@ The 0.9.20 catalog keeps its historical mapping to `contracts-edge-0.9.20`.
 
 ## Qualification status
 
-**Pending.** The catalog is source-audited, not yet live-qualified. Two hosted Lab runs check
-this adoption against the v0.9.21 binary:
+Hosted all-profile Lab evidence on v0.9.21 is recorded below. Both runs are `workflow_dispatch`
+with `profile=all` and `release=v0.9.21` on the adoption branch `claude/v1-adopt-0921`
+(PR #621). The binary was fetched and verified against `releases/v0.9.21.lock` on both operating
+systems.
 
-- the PR's own `lab.yml` run (all profiles on Ubuntu, core on macOS);
-- a `workflow_dispatch` all-profile run on the adoption branch,
-  [45972426825](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/45972426825)
-  (`profile=all`, `release=v0.9.21`, head `c1e3061a`).
+- **Run [45972426825](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/45972426825),
+  head `c1e3061a`.**
+  - Ubuntu 26.04: 550 passed / 4 failed / 21 skipped. macOS 15: 554 / 4 / 19.
+  - The only failures were PP-004 and PP-008, trusted and untrusted, on both systems. Their
+    operator-log ground truth missed the sampled warning
+    ([fix](#lab-scenario-impacts-fixed-here), item 4).
+- **Run [45974458935](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/45974458935),
+  head `db543c01`, with that fix.**
+  - Ubuntu 26.04: **554 passed / 0 failed / 21 skipped**. macOS 15: **558 passed / 0 failed / 19
+    skipped**. These are the same counts as the v0.9.20 qualification.
+  - Ubuntu's two extra skips are again AUTH-030 and AUTH-031, whose lab XML signer needs
+    `xmllint`, which that runner lacks.
 
-Their results are recorded here once they finish, and on `main` after merge. No physical-device
-native acceptance, platform signing, OAuth, provider-account or broader performance acceptance is
-claimed.
+The catalog's new v0.9.21 outcomes have no Lab scenario of their own (`fixture_ids` empty); they
+are source-audited only. Carried outcomes keep their Lab fixtures, and the run above exercises them
+against v0.9.21. No physical-device native acceptance, platform signing, OAuth, provider-account or
+broader performance acceptance is claimed.
 
 [compare]: https://github.com/ferrum-edge/ferrum-edge/compare/e4a606a00352674daaef08636e3e359e6c48ba18...f9915358c8032214f4034a17c28cdf72d14006c3
 [changelog]: https://github.com/ferrum-edge/ferrum-edge/blob/f9915358c8032214f4034a17c28cdf72d14006c3/CHANGELOG.md
