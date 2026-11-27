@@ -42,15 +42,18 @@ pub fn log_to_file(dir: &Path, default: LevelFilter) -> io::Result<()> {
     Ok(())
 }
 
-/// Log a desktop startup milestone at INFO, with the time since the process
-/// started, as `startup milestone milestone="<name>" startup_ms=<ms>` under the
-/// `anvil_desktop` target. The desktop shell logs `renderer_ready` once, when
-/// its window's UI makes its first backend request (`app_status`); the
-/// performance workflow (`.github/workflows/perf.yml`) times cold starts by it.
-/// It names a phase and a duration only.
+/// Log a desktop startup milestone at INFO, with the emitting process id and
+/// the time since the process started, as
+/// `startup milestone milestone="<name>" pid=<pid> startup_ms=<ms>` under the
+/// `anvil_desktop` target. The desktop shell logs `ui_ready` once, when its
+/// UI has shown its first usable screen (the lock screen's form, or the
+/// workbench); the performance workflow (`.github/workflows/perf.yml`) times
+/// launches by it, matching the pid of the process it started. It names a
+/// phase, a process id and a duration only.
 pub fn startup_milestone(milestone: &str, since_start: std::time::Duration) {
     let startup_ms = u64::try_from(since_start.as_millis()).unwrap_or(u64::MAX);
-    tracing::info!(target: "anvil_desktop", milestone, startup_ms, "startup milestone");
+    let pid = std::process::id();
+    tracing::info!(target: "anvil_desktop", milestone, pid, startup_ms, "startup milestone");
 }
 
 /// The level [`LOG_ENV`] sets, or `default` when it is unset or not a level.

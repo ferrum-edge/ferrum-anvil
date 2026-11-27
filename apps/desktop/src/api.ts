@@ -719,6 +719,8 @@ export interface UpdateCheck {
 
 export const api = {
   status: () => call<Status>("app_status"),
+  /** The first usable screen is shown (logged once as the ui_ready startup milestone). Never fails. */
+  uiReady: () => call<null>("app_ui_ready").catch(() => null),
   systemInfo: () => call<SystemInfo>("system_info"),
   /** The launch check: `null` unless the setting is on; once per launch, later calls repeat its result. */
   updateCheckOnLaunch: () => call<UpdateCheck | null>("update_check_on_launch"),

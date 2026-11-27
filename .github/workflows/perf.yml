@@ -5,9 +5,11 @@
 # build    compiles the app once per OS (macOS as the .app bundle)
 # measure  two independent runners per OS each start it six times with a
 #          fresh data directory (scripts/perf/measure_desktop.py): time until
-#          the UI's first backend request, then the resident memory of the app
-#          and of its webview helper processes after 10 s at the first-run
-#          screen
+#          the UI reports its first usable screen (the first-run form; the
+#          app's ui_ready log line with the started pid), then the resident
+#          memory of the app and of its webview processes (identified by name
+#          and owner) after 10 s at that screen. Launch 1 follows the
+#          artifact's extraction, so its file cache state is not controlled
 # summary  one table over all jobs, including the spread across runners
 #
 # The numbers are a run artifact (perf-summary) and the run summary. Nothing
@@ -142,11 +144,14 @@ jobs:
           path: results/
           merge-multiple: true
       - name: Summarize
+        shell: bash
         run: |
           shopt -s nullglob
           files=(results/perf-*.json)
           [ "${#files[@]}" -gt 0 ] || { echo "::error::no measurement results"; exit 1; }
-          python3 -I scripts/perf/summarize.py "${files[@]}" | tee results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          # To a file first: the job summary only gets a table the parser finished.
+          python3 -I scripts/perf/summarize.py "${files[@]}" > results/summary.md
+          cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: perf-summary

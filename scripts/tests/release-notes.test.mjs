@@ -544,3 +544,24 @@ test("every job after preflight checks out github.sha, never a preflight output"
   }
   assert.ok(checkouts >= 4, "build, bundle-windows, check-windows and publish check out the code");
 });
+
+test("the performance harness takes only its own app's ui_ready line, and buckets launches by index", () => {
+  const script = `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("m", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+log = ('2026-11-27T10:00:00.000Z INFO anvil_desktop: startup milestone milestone="ui_ready" pid=111 startup_ms=500\\n'
+       '2026-11-27T10:00:01.000Z INFO anvil_desktop: startup milestone milestone="ui_ready" pid=222 startup_ms=900\\n')
+runs = [{"run": 1, "error": "timeout"}, {"run": 2, "ready_ms": 10, "attribution": "a"}, {"run": 3, "ready_ms": 30, "attribution": "b"}]
+s = m.summarize(runs)
+print(json.dumps({"own": m.ready_in(log, 222), "other": m.ready_in(log, 333), "first": s["first_run"], "warm": s["warm_runs"]["ready_ms"], "atts": s["warm_attributions"]}))
+`;
+  const r = spawnSync("python3", ["-I", "-c", script, join(root, "scripts", "perf", "measure_desktop.py")], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.own, 900, "the line of the started pid");
+  assert.equal(out.other, null, "another instance's line never counts");
+  assert.deepEqual(out.first, {}, "a failed launch 1 leaves the first-launch column empty");
+  assert.deepEqual(out.warm, { median: 20, min: 10, max: 30, n: 2 }, "every valid later launch is in the later median");
+  assert.deepEqual(out.atts, ["a", "b"]);
+});

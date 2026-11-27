@@ -60,12 +60,10 @@ fn a_stored_object_that_does_not_decode_is_named_in_the_log_file() {
         .unwrap();
     assert!(pinned, "cleanup released or unpinned the blocked request attachment");
     // The startup milestone the performance workflow reads.
-    anvil_app::logging::startup_milestone("renderer_ready", std::time::Duration::from_millis(842));
+    anvil_app::logging::startup_milestone("ui_ready", std::time::Duration::from_millis(842));
     let log = std::fs::read_to_string(logs.join(LOG_FILE)).unwrap();
-    assert!(
-        log.lines().any(|line| line.ends_with(" INFO anvil_desktop: startup milestone milestone=\"renderer_ready\" startup_ms=842")),
-        "startup milestone line: {log}"
-    );
+    let expected = format!(" INFO anvil_desktop: startup milestone milestone=\"ui_ready\" pid={} startup_ms=842", std::process::id());
+    assert!(log.lines().any(|line| line.ends_with(&expected)), "startup milestone line: {log}");
     let has_warning = |kind: &str, id: &str| {
         log.lines().any(|line| {
             line.contains(" WARN anvil_app::")

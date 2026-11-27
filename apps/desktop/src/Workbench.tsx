@@ -84,6 +84,11 @@ function storedLayout(): Layout {
 const NOT_FOUND = /not.?found/i;
 
 export function Workbench(props: { onLock: () => void; profileName: string }) {
+  // The workbench is a usable first screen too (an unlocked launch): the
+  // backend logs only the first report of a process.
+  useEffect(() => {
+    void api.uiReady();
+  }, []);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [ws, setWs] = useState<Workspace | null>(null);
   const [envs, setEnvs] = useState<Environment[]>([]);

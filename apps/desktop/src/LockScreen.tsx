@@ -193,6 +193,18 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: LockReason 
     });
   }, []);
 
+  // Once the profiles are read and a form is on screen (not the launch-time
+  // auto-open of a single keychain profile, which goes on to the workbench),
+  // the UI is usable: report it once (the backend logs the ui_ready startup
+  // milestone the performance workflow times; docs/performance.md).
+  const readyReported = useRef(false);
+  useEffect(() => {
+    if (readyReported.current || profiles === null || screen.kind !== "form") return;
+    if (!props.reason && profiles.length === 1 && profiles[0].protection === "os_keychain") return;
+    readyReported.current = true;
+    void api.uiReady();
+  }, [profiles, screen.kind, props.reason]);
+
   // Any lock that lands while this screen shows (counted by App, since two in a
   // row may share a reason) leaves the screens only an unlocked backend backs.
   const locksSeen = useRef(props.locks ?? 0);

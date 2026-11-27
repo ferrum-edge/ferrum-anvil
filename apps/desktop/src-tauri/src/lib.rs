@@ -161,6 +161,7 @@ pub fn run() {
         .invoke_handler(commands::with_execution_commands(tauri::generate_handler![
             cmd_diagnostic_import::diagnostic_import_preview,
             commands::app_status,
+            commands::app_ui_ready,
             commands::profiles_list,
             commands::profile_create,
             commands::profile_unlock,

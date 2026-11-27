@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the desktop app's cold start and webview helper memory.
+"""Measure the desktop app's launch time and webview helper memory.
 
     python3 -I scripts/perf/measure_desktop.py --app <binary> --runs 5 --idle 10 --out result.json
 
@@ -9,25 +9,35 @@ no test hooks). Each run:
 
 1. starts the app with a fresh, empty ANVIL_DATA_DIR (the first-run screen);
 2. times, from just before the process is started, until the app's log file
-   gains its `startup milestone milestone="renderer_ready"` line, which the
-   shell writes once, when the UI's first backend request (`app_status`)
-   arrives: the window has loaded its UI and the UI is running. The line's own
+   gains a `startup milestone milestone="ui_ready" pid=<pid>` line carrying
+   the pid of the process it started (another instance's line never counts).
+   The UI reports ready once its first usable screen is shown: here, the
+   first-run form, after the profile list was read. The line's own
    `startup_ms` (measured inside the process from its start) is recorded too;
 3. waits --idle seconds at that screen, then reads the resident memory of the
-   app process and of its webview helper processes:
-   - Linux: WebKitGTK's processes, descendants of the app;
-   - Windows: WebView2's msedgewebview2.exe processes, descendants of the app
+   app process and of its webview processes, identified by name and owner:
+   - Linux: WebKitWebProcess, WebKitNetworkProcess and WebKitGPUProcess that
+     descend from the app (sandbox wrappers such as bwrap are not counted);
+   - Windows: msedgewebview2.exe processes that descend from the app
      (working set, and private bytes);
    - macOS: WebKit's com.apple.WebKit.* XPC services, started by launchd, so
-     attributed by `launchctl procinfo`'s "responsible pid"; if procinfo gives
-     none, the services that were not running before the launch (recorded as a
-     weaker attribution);
-4. stops the app and its helpers and waits until they are gone.
+     attributed by `launchctl procinfo`'s "responsible pid". If procinfo gives
+     no responsible pid for any of them, the services not running before the
+     launch are taken (recorded as the weaker "pid delta" attribution), never
+     one that procinfo names another owner for.
+   A launch whose app process or webview content process (WebKitWebProcess,
+   com.apple.WebKit.WebContent, msedgewebview2.exe) cannot be found records an
+   error, not a number;
+4. stops the app and its attributed processes and waits until they are gone.
+   A process that outlives the wait is stopped by force only if it is the
+   app's own (attributed above); the launch then records an error, and if
+   any of them is still running no further launch starts.
 
-The first run of a job is the coldest (nothing of the app in the file cache);
-later runs are warm. Resident sizes count shared pages in every process that
-maps them, so a total over processes overstates what the system as a whole
-uses.
+The first launch of a job follows the artifact's extraction on the same VM,
+so its file cache state is not controlled: it is reported as the first
+launch, not as a cold-cache start. Resident sizes count shared pages in every
+process that maps them, so a total over processes overstates what the system
+as a whole uses.
 """
 
 from __future__ import annotations
@@ -48,7 +58,11 @@ from pathlib import Path
 
 IDENTIFIER = "com.ferrumedge.anvil"
 LOG_FILE = "anvil.log"
-READY_RE = re.compile(r'startup milestone milestone="renderer_ready" startup_ms=(\d+)')
+READY_RE = re.compile(r'startup milestone milestone="ui_ready" pid=(\d+) startup_ms=(\d+)')
+# Webview processes per OS (process image names; Linux comm is cut at 15 bytes, so
+# the full argv[0] is used).
+LINUX_WEBVIEW = {"WebKitWebProcess", "WebKitNetworkProcess", "WebKitGPUProcess"}
+CONTENT = {"Linux": "WebKitWebProcess", "Windows": "msedgewebview2.exe", "Darwin": "com.apple.WebKit.WebContent"}
 SYSTEM = platform.system()
 MIB = 1024 * 1024
 
@@ -73,8 +87,16 @@ def log_size() -> dict[Path, int]:
     return sizes
 
 
-def ready_line(start_sizes: dict[Path, int]) -> int | None:
-    """startup_ms of a renderer_ready line written since start_sizes, if any."""
+def ready_in(text: str, pid: int) -> int | None:
+    """startup_ms of the ui_ready line `pid` wrote in `text`, if any."""
+    for m in READY_RE.finditer(text):
+        if int(m.group(1)) == pid:
+            return int(m.group(2))
+    return None
+
+
+def ready_line(start_sizes: dict[Path, int], pid: int) -> int | None:
+    """startup_ms of a ui_ready line by `pid` written since start_sizes, if any."""
     for p, offset in start_sizes.items():
         if not p.exists():
             continue
@@ -83,9 +105,9 @@ def ready_line(start_sizes: dict[Path, int]) -> int | None:
             offset = 0
         with open(p, "rb") as f:
             f.seek(offset)
-            m = READY_RE.search(f.read().decode("utf-8", "replace"))
-        if m:
-            return int(m.group(1))
+            found = ready_in(f.read().decode("utf-8", "replace"), pid)
+        if found is not None:
+            return found
     return None
 
 
@@ -109,13 +131,15 @@ def processes() -> list[dict]:
             }
             for r in rows
         ]
-    out = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,comm="], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,args="], capture_output=True, text=True, check=True).stdout
     rows = []
     for line in out.splitlines():
         parts = line.split(None, 3)
         if len(parts) < 4:
             continue
-        rows.append({"pid": int(parts[0]), "ppid": int(parts[1]), "rss": int(parts[2]) * 1024, "name": os.path.basename(parts[3].strip())})
+        # The image name: argv[0]'s basename (comm is truncated on Linux).
+        argv0 = parts[3].strip().split(" ")[0]
+        rows.append({"pid": int(parts[0]), "ppid": int(parts[1]), "rss": int(parts[2]) * 1024, "name": os.path.basename(argv0)})
     return rows
 
 
@@ -146,15 +170,22 @@ def is_mac_webkit(name: str) -> bool:
 
 
 def helpers(rows: list[dict], app_pid: int, before: set[int]) -> tuple[list[dict], str]:
-    """The app's webview helper processes and how they were attributed."""
+    """The app's webview processes and how they were attributed."""
     if SYSTEM == "Darwin":
         webkit = [r for r in rows if is_mac_webkit(r["name"])]
-        attributed = [r for r in webkit if responsible_pid(r["pid"]) == app_pid]
+        owners = {r["pid"]: responsible_pid(r["pid"]) for r in webkit}
+        attributed = [r for r in webkit if owners[r["pid"]] == app_pid]
         if attributed:
-            return attributed + [d for d in descendants(rows, app_pid) if d not in attributed], "launchctl procinfo responsible pid"
-        new = [r for r in webkit if r["pid"] not in before]
-        return new + descendants(rows, app_pid), "pid delta (WebKit services not running before the launch; weaker)"
-    return descendants(rows, app_pid), "process tree (descendants of the app)"
+            return attributed, "launchctl procinfo responsible pid"
+        if any(o is not None for o in owners.values()):
+            # procinfo works here but names no WebKit service of this app.
+            return [], "launchctl procinfo responsible pid"
+        # procinfo gives no owner on this runner: new services, never one with another owner.
+        return [r for r in webkit if r["pid"] not in before], "pid delta (WebKit services not running before the launch; weaker)"
+    tree = descendants(rows, app_pid)
+    if SYSTEM == "Windows":
+        return [r for r in tree if r["name"].lower() == "msedgewebview2.exe"], "process tree (msedgewebview2.exe descendants of the app)"
+    return [r for r in tree if r["name"] in LINUX_WEBVIEW], "process tree (WebKitGTK processes descending from the app)"
 
 
 def stop(proc: subprocess.Popen) -> None:
@@ -176,14 +207,29 @@ def stop(proc: subprocess.Popen) -> None:
         proc.wait(timeout=15)
 
 
+def alive(pids: set[int]) -> set[int]:
+    return {r["pid"] for r in processes()} & pids
+
+
 def wait_gone(pids: set[int], timeout: float = 30) -> bool:
     end = time.monotonic() + timeout
     while time.monotonic() < end:
-        alive = {r["pid"] for r in processes()} & pids
-        if not alive:
+        if not alive(pids):
             return True
         time.sleep(0.5)
     return False
+
+
+def force_stop(pids: set[int]) -> None:
+    """Stop processes this launch owns (the app and its attributed webview processes)."""
+    for pid in pids:
+        try:
+            if SYSTEM == "Windows":
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 # ------------------------------------------------------------- runs
@@ -200,16 +246,17 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
     t0 = time.monotonic()
     proc = subprocess.Popen([app], **kwargs)
     result: dict = {"run": index, "pid": proc.pid}
+    owned: set[int] = {proc.pid}
     try:
         startup_ms = None
         while time.monotonic() - t0 < timeout:
-            startup_ms = ready_line(sizes)
+            startup_ms = ready_line(sizes, proc.pid)
             if startup_ms is not None or proc.poll() is not None:
                 break
             time.sleep(0.02)
         ready_s = time.monotonic() - t0
         if startup_ms is None:
-            result["error"] = "the app exited before its UI was ready" if proc.poll() is not None else f"no renderer_ready line within {timeout:.0f} s"
+            result["error"] = "the app exited before its UI was ready" if proc.poll() is not None else f"no ui_ready line from pid {proc.pid} within {timeout:.0f} s"
             return result
         result["ready_ms"] = round(ready_s * 1000)
         result["startup_ms_in_process"] = startup_ms
@@ -220,26 +267,42 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
         rows = processes()
         app_row = next((r for r in rows if r["pid"] == proc.pid), None)
         found, method = helpers(rows, proc.pid, before)
-        result["app_rss_mib"] = round((app_row or {}).get("rss", 0) / MIB, 1)
+        owned |= {h["pid"] for h in found}
+        result["attribution"] = method
+        if app_row is None:
+            result["error"] = "the app process was not found in the process list"
+            return result
+        if not any(h["name"] == CONTENT[SYSTEM] for h in found):
+            result["error"] = f"no {CONTENT[SYSTEM]} process could be attributed to the app ({method}); memory not reported"
+            return result
+        result["app_rss_mib"] = round(app_row["rss"] / MIB, 1)
         result["helpers"] = [{"name": h["name"], "pid": h["pid"], "rss_mib": round(h["rss"] / MIB, 1), **({"private_mib": round(h["private"] / MIB, 1)} if "private" in h else {})} for h in found]
         result["helpers_rss_mib"] = round(sum(h["rss"] for h in found) / MIB, 1)
         if SYSTEM == "Windows":
             result["app_private_mib"] = round((app_row or {}).get("private", 0) / MIB, 1)
             result["helpers_private_mib"] = round(sum(h.get("private", 0) for h in found) / MIB, 1)
-        result["attribution"] = method
         result["total_rss_mib"] = round(result["app_rss_mib"] + result["helpers_rss_mib"], 1)
-        result["_tree"] = {proc.pid, *(h["pid"] for h in found)}
         return result
     finally:
-        tree = result.pop("_tree", {proc.pid})
+        # Webview processes that appeared after the sample are the app's too
+        # if they descend from it (Linux, Windows) or name it as owner (macOS).
+        if proc.poll() is None:
+            later, _ = helpers(processes(), proc.pid, before)
+            owned |= {h["pid"] for h in later}
         stop(proc)
-        result["stopped_cleanly"] = wait_gone(tree)
+        result["stopped_cleanly"] = wait_gone(owned)
+        if not result["stopped_cleanly"]:
+            left = alive(owned)
+            force_stop(left)
+            result["error"] = result.get("error") or f"processes {sorted(left)} outlived the app's stop (stopped by force)"
+            result["left_running"] = sorted(alive(owned)) if not wait_gone(owned, 15) else []
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
 def summarize(runs: list[dict]) -> dict:
     ok = [r for r in runs if "error" not in r]
-    warm = ok[1:]
+    first = next((r for r in ok if r["run"] == 1), None)
+    warm = [r for r in ok if r["run"] > 1]
 
     def stat(key: str, rs: list[dict]) -> dict | None:
         vals = [r[key] for r in rs if key in r]
@@ -251,8 +314,11 @@ def summarize(runs: list[dict]) -> dict:
     return {
         "runs_ok": len(ok),
         "runs_failed": len(runs) - len(ok),
-        "first_run": {k: ok[0][k] for k in keys if ok and k in ok[0]},
+        # Launch 1 only (empty if it failed), then every valid later launch.
+        "first_run": {k: first[k] for k in keys if first and k in first},
+        "first_run_attribution": (first or {}).get("attribution"),
         "warm_runs": {k: s for k in keys if (s := stat(k, warm))},
+        "warm_attributions": sorted({r["attribution"] for r in warm if r.get("attribution")}),
         "all_runs": {k: s for k in keys if (s := stat(k, ok))},
     }
 
@@ -271,6 +337,10 @@ def main() -> int:
         r = one_run(args.app, args.idle, args.timeout, i)
         print(json.dumps(r), flush=True)
         runs.append(r)
+        if r.get("left_running"):
+            # A process of this launch still runs: a further launch would share it.
+            print(f"stopping: processes {r['left_running']} of launch {i} are still running", flush=True)
+            break
     result = {
         "format": "anvil-desktop-perf",
         "version": 1,

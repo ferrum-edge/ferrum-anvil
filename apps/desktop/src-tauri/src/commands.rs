@@ -99,12 +99,18 @@ pub struct Status {
     pub version: &'static str,
 }
 
+/// The UI reports that it has shown its first usable screen (the lock
+/// screen's form once the profiles are read, or the workbench). The first
+/// report is logged as the `ui_ready` startup milestone (see
+/// docs/performance.md); later ones do nothing.
+#[tauri::command]
+pub fn app_ui_ready() {
+    static UI_READY: std::sync::Once = std::sync::Once::new();
+    UI_READY.call_once(|| anvil_app::logging::startup_milestone("ui_ready", crate::since_start()));
+}
+
 #[tauri::command]
 pub fn app_status(st: State<'_, DesktopState>) -> Status {
-    // The UI asks for the status as soon as it has loaded: its first request
-    // marks the window as ready (see docs/performance.md).
-    static RENDERER_READY: std::sync::Once = std::sync::Once::new();
-    RENDERER_READY.call_once(|| anvil_app::logging::startup_milestone("renderer_ready", crate::since_start()));
     let g = st.app.read();
     match g.as_ref() {
         Some(a) => Status {
