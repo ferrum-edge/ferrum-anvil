@@ -80,7 +80,8 @@ v0.9.21).
 
 ## Lab-scenario impacts fixed here
 
-No scenario expectation changed. Three lab inputs would have stopped v0.9.21 from loading:
+No scenario expectation changed. Three lab inputs would have stopped v0.9.21 from loading, and one
+ground-truth source changed:
 
 1. **PeerAuthentication `scope` is required** (#7243; `src/modes/mesh/config.rs:3230`,
    `scope: PolicyScope` is no longer optional). `mesh-sidecar.json`, `mesh-ambient.json` and
@@ -92,6 +93,14 @@ No scenario expectation changed. Three lab inputs would have stopped v0.9.21 fro
 3. **`pool_max_requests_per_connection` is removed** (#7218). No profile set it. `lint-profiles.rb`
    drops it from the proxy keys, and its self-check now requires it, `discovery.hide_denied_items`
    and the three keys #7114 retired to be reported.
+4. **The invalid-PROXY-header warning is sampled.** `warn_invalid_proxy_header`
+   (`src/proxy/proxy_protocol.rs:617`) now uses `warn_sampled!`: at most one warn line per 10 s per
+   call site, and a debug line for every event. The first hosted run on v0.9.21 failed PP-004 and
+   PP-008 (trusted and untrusted, both operating systems). Their operator-log ground truth found no
+   line, because PP-003 had logged the sampled warning a few seconds earlier. The client-visible
+   behaviour (an immediate close) and Anvil's diagnoses were correct. `proxyproto.conf` now sets
+   `FERRUM_LOG_LEVEL = info,ferrum_edge::proxy::proxy_protocol=debug`, so every event is logged; the
+   scenario code is unchanged.
 
 The other refusals in the upgrade guide were checked against the profiles. None applies:
 
