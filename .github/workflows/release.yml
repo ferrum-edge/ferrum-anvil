@@ -65,7 +65,6 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
-      ref: ${{ steps.version.outputs.ref }}
       commit: ${{ steps.version.outputs.commit }}
       epoch: ${{ steps.version.outputs.epoch }}
     steps:
@@ -75,6 +74,12 @@ jobs:
           # a branch of the same name if one exists.
           ref: ${{ github.ref }}
           persist-credentials: false
+      # Every later job checks out github.sha, the commit this run was started
+      # for, and compares it with the `commit` output below. The ref checked
+      # out here must still point at that commit (a branch that moved after
+      # the run started fails here instead of building another commit).
+      - name: Checked out the run's own commit
+        run: '[ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ] || { echo "::error::$GITHUB_REF is now at $(git rev-parse HEAD), not at $GITHUB_SHA, the commit this run was started for; start a new run"; exit 1; }'
       - name: Resolve version, tag and commit
         id: version
         env:
@@ -110,8 +115,8 @@ jobs:
           {
             echo "version=$version"
             echo "tag=$tag"
-            # Build and publish check out this exact commit, never a name.
-            echo "ref=$(git rev-parse HEAD)"
+            # Later jobs check out github.sha (this commit, asserted above),
+            # never a name, and verify it against this output.
             echo "commit=$(git rev-parse HEAD)"
             echo "epoch=$(git log -1 --format=%ct)"
           } >> "$GITHUB_OUTPUT"
@@ -201,7 +206,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.preflight.outputs.ref }}
+          # The run's own immutable commit (preflight asserted HEAD == github.sha
+          # and that it is the tag's commit); verified again below.
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Checked out the preflight commit
         shell: bash
@@ -478,7 +485,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.preflight.outputs.ref }}
+          # The run's own immutable commit (preflight asserted HEAD == github.sha
+          # and that it is the tag's commit); verified again below.
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Checked out the preflight commit
         shell: bash
@@ -775,7 +784,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.preflight.outputs.ref }}
+          # The run's own immutable commit (preflight asserted HEAD == github.sha
+          # and that it is the tag's commit); verified again below.
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Checked out the preflight commit
         shell: bash
@@ -832,7 +843,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.preflight.outputs.ref }}
+          # The run's own immutable commit (preflight asserted HEAD == github.sha
+          # and that it is the tag's commit); verified again below.
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Checked out the preflight commit
         shell: bash

@@ -26,9 +26,11 @@ the [after-publishing checks](#after-publishing) follow publication.
    the same tag as input for a full release. Manual dispatch defaults to
    `dry_run: true`, including when started from a tag.
    Preflight refuses an input that is not the tag the run started from, a tag
-   that does not exist, or a checkout whose commit is not the tag's; build and
-   publish then check out that exact commit (never a branch or tag name, which
-   a same-named branch could shadow). A dry run builds and checks everything,
+   that does not exist, a checkout whose commit is not the tag's, or a ref that
+   has moved away from `github.sha`, the commit the run was started for. Every
+   later job (build, bundle-windows, check-windows, publish) checks out
+   `github.sha` itself, never a branch or tag name (which a same-named branch
+   could shadow), and fails unless it equals preflight's `commit` output. A dry run builds and checks everything,
    then uploads evidence to the workflow run for inspection. It does not sign
    artifacts, create a GitHub release, or publish release assets. Setting
    `dry_run: false` requires running from a valid release tag.

@@ -475,3 +475,72 @@ test("only bundle-windows can request an OIDC token, and it runs no release chec
   assert.match(jobs.publish, /needs: \[preflight, build, check-windows\]/);
   assert.match(jobs.build, /name: compiled-\$\{\{ matrix\.target \}\}[\s\S]*?retention-days: 30/);
 });
+
+// release.yml's top-level jobs, each with its text, and a job's steps.
+function workflowJobs() {
+  const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
+  const jobsText = workflow.slice(workflow.indexOf("\njobs:\n"));
+  return Object.fromEntries(
+    jobsText
+      .split(/\n(?=  [a-z][a-z0-9-]*:\n)/)
+      .slice(1)
+      .map((block) => [block.match(/^  ([a-z][a-z0-9-]*):/)[1], block]),
+  );
+}
+const jobSteps = (jobText) => jobText.split(/\n(?=      - )/).slice(1);
+const MOVED_REF_GUARD = "      - name: Checked out the run's own commit";
+
+test("preflight stops a run whose ref moved away from github.sha before any checked-out code runs", () => {
+  const steps = jobSteps(workflowJobs().preflight);
+  const checkout = steps.findIndex((s) => s.includes("uses: actions/checkout@"));
+  const guard = steps.findIndex((s) => s.startsWith(MOVED_REF_GUARD));
+  assert.ok(checkout >= 0 && guard === checkout + 1, "the guard is the step right after preflight's checkout");
+  const firstCode = steps.findIndex((s, i) => i > checkout && /scripts\/|uses: \.\/\.github\/actions\//.test(s));
+  assert.ok(firstCode > guard, "no step runs code from the checkout before the guard");
+});
+
+test("the moved-ref guard's own script passes on github.sha and fails on another commit", () => {
+  const step = jobSteps(workflowJobs().preflight).find((s) => s.startsWith(MOVED_REF_GUARD));
+  const quoted = step.match(/\n        run: '((?:[^']|'')*)'(?:\n|$)/);
+  assert.ok(quoted, "the guard's run script is one single-quoted YAML scalar");
+  const script = quoted[1].replaceAll("''", "'");
+  assert.match(script, /"\$\(git rev-parse HEAD\)" = "\$GITHUB_SHA"/);
+  assert.match(script, /exit 1/);
+
+  const dir = mkdtempSync(join(tmpdir(), "moved-ref-"));
+  try {
+    const git = (...args) => {
+      const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: dir, encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      return r.stdout.trim();
+    };
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "started");
+    const started = git("rev-parse", "HEAD");
+    git("commit", "-q", "--allow-empty", "-m", "moved");
+    const moved = git("rev-parse", "HEAD");
+    const guard = (sha) =>
+      spawnSync("bash", ["-e", "-c", script], { cwd: dir, encoding: "utf8", env: { PATH: process.env.PATH, GITHUB_SHA: sha, GITHUB_REF: "refs/heads/main" } });
+    const same = guard(moved);
+    assert.equal(same.status, 0, same.stdout + same.stderr);
+    const other = guard(started);
+    assert.notEqual(other.status, 0, "a HEAD that is not github.sha must fail the job");
+    assert.match(other.stdout, /::error::refs\/heads\/main is now at [0-9a-f]{40}, not at [0-9a-f]{40}/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("every job after preflight checks out github.sha, never a preflight output", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
+  assert.ok(!/ref: \$\{\{ needs\.preflight\.outputs\./.test(workflow), "no checkout of a needs.preflight output");
+  let checkouts = 0;
+  for (const [name, text] of Object.entries(workflowJobs())) {
+    if (name === "preflight") continue;
+    for (const step of jobSteps(text).filter((s) => s.includes("uses: actions/checkout@"))) {
+      checkouts++;
+      assert.match(step, /\n          ref: \$\{\{ github\.sha \}\}\n/, `${name}: checkout of github.sha`);
+    }
+  }
+  assert.ok(checkouts >= 4, "build, bundle-windows, check-windows and publish check out the code");
+});
