@@ -1,5 +1,7 @@
 # Ferrum Anvil — implementing agent instructions
 
+> **Historical:** the September 2026 implementation plan, kept as written. It is not a description of current Anvil; see the [README](../../README.md) and [docs](../).
+
 Build **Ferrum Anvil — “Put your APIs to the test”** using the accompanying `FERRUM_ANVIL_BUILD_PLAN.md` as the product specification and `FERRUM_ANVIL_FAILURE_MATRIX.json` as a seed acceptance catalog. These files are requirements, not evidence of completed implementation or passing tests.
 
 ## Mission

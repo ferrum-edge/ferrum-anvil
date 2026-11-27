@@ -1,5 +1,7 @@
 # Ferrum Anvil implementation handoff
 
+> **Historical:** the September 2026 implementation plan, kept as written. It is not a description of current Anvil; see the [README](../../README.md) and [docs](../).
+
 **Ferrum Anvil — Put your APIs to the test**  
 Prepared September 25, 2026.
 

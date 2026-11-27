@@ -811,5 +811,9 @@ and [storage-and-recovery.md](storage-and-recovery.md#export-and-import).
   it is received, with no redactor available there, and every
   redact-before-cut bound looks only 64 KiB past the cut, so a longer
   secret form that crosses a cut keeps its prefix.
-- Unsigned development builds cannot prove provenance; release signing is
-  blocked on owner credentials (see [release.md](release.md)).
+- Unsigned builds cannot prove provenance to the operating system.
+  Development builds are never signed, and released installers stay
+  unsigned until the owner configures the platform signing credentials the
+  release workflow already supports; until then integrity rests on
+  `SHA256SUMS` and `release-evidence.json` (see
+  [release.md](release.md#signing-and-what-unsigned-means)).
