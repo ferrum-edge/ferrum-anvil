@@ -57,11 +57,7 @@ export function decodePublicKey(pubkey) {
   };
 }
 
-/**
- * Verify the contents of a Tauri `.sig` file (base64 of a minisign signature)
- * over `data`, the way tauri-plugin-updater does. Returns the trusted comment.
- */
-export function verifyUpdaterSignature(data, sigFileText, pubkey) {
+function parseSignature(sigFileText, pubkey) {
   const pk = decodePublicKey(pubkey);
   const sig = lines(b64(sigFileText).toString("utf8"));
   if (sig.length < 4 || !sig[0].startsWith("untrusted comment:") || !sig[2].startsWith("trusted comment:")) throw new Error("malformed minisign signature");
@@ -71,11 +67,79 @@ export function verifyUpdaterSignature(data, sigFileText, pubkey) {
   if (alg !== "Ed" && alg !== "ED") throw new Error(`unsupported minisign algorithm ${alg}`);
   if (raw.subarray(2, 10).toString("hex") !== pk.keyId) throw new Error("signed with a different key than the one compiled into the app");
   const signature = raw.subarray(10);
-  const message = alg === "ED" ? createHash("blake2b512").update(data).digest() : data;
-  if (!verify(null, message, pk.key, signature)) throw new Error("signature does not verify");
   const trusted = sig[2].slice("trusted comment:".length).trim();
   if (!verify(null, Buffer.concat([signature, Buffer.from(trusted, "utf8")]), pk.key, b64(sig[3]))) throw new Error("trusted comment signature does not verify");
+  return { pk, alg, signature, trusted };
+}
+
+/**
+ * Verify the contents of a Tauri `.sig` file (base64 of a minisign signature)
+ * over `data`, the way tauri-plugin-updater does. Returns the trusted comment.
+ */
+export function verifyUpdaterSignature(data, sigFileText, pubkey) {
+  const { pk, alg, signature, trusted } = parseSignature(sigFileText, pubkey);
+  const message = alg === "ED" ? createHash("blake2b512").update(data).digest() : data;
+  if (!verify(null, message, pk.key, signature)) throw new Error("signature does not verify");
   return trusted;
+}
+
+/**
+ * Verify a `.sig`'s key and trusted comment without the file it signs: the
+ * minisign global signature covers the file signature and the trusted comment,
+ * so this proves who signed it and for which version. Returns the comment.
+ */
+export function verifyTrustedComment(sigFileText, pubkey) {
+  return parseSignature(sigFileText, pubkey).trusted;
+}
+
+/** The platform keys every Anvil release's latest.json carries (see UPDATER_RULES). */
+export const PUBLISHED_PLATFORMS = [
+  "darwin-aarch64",
+  "darwin-aarch64-app",
+  "darwin-x86_64",
+  "darwin-x86_64-app",
+  "linux-x86_64-appimage",
+  "windows-x86_64-msi",
+  "windows-x86_64-nsis",
+];
+const ASSET_FOR = { app: /\.app\.tar\.gz$/, appimage: /\.AppImage$/, nsis: /-setup\.exe$/, msi: /\.msi$/ };
+const PLATFORM_KEY = /^(darwin|linux|windows)-(x86_64|aarch64)(?:-(app|appimage|nsis|msi))?$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+
+/**
+ * Check a published latest.json (Tauri static format) as the app's updater
+ * reads it: `version`, a `pub_date` and `notes`, exactly the platform keys
+ * Anvil publishes, each with an https URL to that platform's asset of `tag`
+ * in `repo`, and a signature by `pubkey` whose trusted comment records
+ * `version`. The signed files are not downloaded; release-evidence.mjs
+ * verified them over their bytes when the release was built. Returns the
+ * platform keys.
+ */
+export function checkPublishedManifest(manifest, { repo, tag, version, pubkey }) {
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) throw new Error("latest.json is not a JSON object");
+  if (manifest.version !== version) throw new Error(`latest.json version ${JSON.stringify(manifest.version)} is not ${version}`);
+  if (typeof manifest.pub_date !== "string" || !ISO_DATE.test(manifest.pub_date)) throw new Error("latest.json pub_date is not an RFC 3339 UTC time");
+  if (typeof manifest.notes !== "string") throw new Error("latest.json notes is not a string");
+  const platforms = manifest.platforms;
+  if (!platforms || typeof platforms !== "object" || Array.isArray(platforms)) throw new Error("latest.json platforms is not an object");
+  const keys = Object.keys(platforms).sort();
+  if (JSON.stringify(keys) !== JSON.stringify([...PUBLISHED_PLATFORMS].sort())) throw new Error(`latest.json platforms are ${keys.join(", ")}, not ${PUBLISHED_PLATFORMS.join(", ")}`);
+  const prefix = `https://github.com/${repo}/releases/download/${encodeURIComponent(tag)}/`;
+  for (const key of keys) {
+    const [, os, , installer] = PLATFORM_KEY.exec(key) ?? [];
+    const entry = platforms[key];
+    if (!entry || typeof entry.url !== "string" || typeof entry.signature !== "string") throw new Error(`latest.json ${key}: needs url and signature strings`);
+    if (!entry.url.startsWith(prefix)) throw new Error(`latest.json ${key}: ${entry.url} is not an asset of ${tag}`);
+    const asset = decodeURIComponent(entry.url.slice(prefix.length));
+    const wanted = ASSET_FOR[installer ?? (os === "darwin" ? "app" : "")];
+    if (!wanted || !wanted.test(asset)) throw new Error(`latest.json ${key}: ${asset} is not that platform's updater file`);
+    try {
+      checkSignedVersion(verifyTrustedComment(entry.signature, pubkey), version);
+    } catch (e) {
+      throw new Error(`latest.json ${key}: ${e.message}`);
+    }
+  }
+  return keys;
 }
 
 /** The `version:` field Tauri writes into the trusted comment, if any. */

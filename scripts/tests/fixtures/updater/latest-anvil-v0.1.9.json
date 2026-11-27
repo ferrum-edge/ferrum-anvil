@@ -1,0 +1,35 @@
+{
+  "version": "0.1.9",
+  "notes": "Ferrum Anvil 0.1.9. Release notes: https://github.com/ferrum-edge/ferrum-anvil/releases/tag/anvil-v0.1.9",
+  "pub_date": "2026-11-23T01:27:22Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSYTVzRCtGSVhndnkza2NJdkVyQmxCQXd0SUxEY01tNnlvRVE3KzhXSm13RUtPWDNRRVBScGpudHl4Zk9iWU5IdEE4UHVIQURmcHE2Y0hDQ1h1ZlNiQ204MExuYVVUeEFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1Mzk1NzY2CWZpbGU6RmVycnVtIEFudmlsLmFwcC50YXIuZ3oJdmVyc2lvbjowLjEuOQo3YkFiUk82UjJpWjFtV3dNLzU3TFYyRW0yZTFxY2k1REpPcVNiU1g3c0VKUXVSa3VzS1J4QjB5aDNlOHQrdU9OTHhjUFRwZVI1cFVic3JNaU4xa2NBZz09Cg==",
+      "url": "https://github.com/ferrum-edge/ferrum-anvil/releases/download/anvil-v0.1.9/Ferrum-Anvil_0.1.9_aarch64.app.tar.gz"
+    },
+    "darwin-aarch64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSYTVzRCtGSVhndnkza2NJdkVyQmxCQXd0SUxEY01tNnlvRVE3KzhXSm13RUtPWDNRRVBScGpudHl4Zk9iWU5IdEE4UHVIQURmcHE2Y0hDQ1h1ZlNiQ204MExuYVVUeEFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1Mzk1NzY2CWZpbGU6RmVycnVtIEFudmlsLmFwcC50YXIuZ3oJdmVyc2lvbjowLjEuOQo3YkFiUk82UjJpWjFtV3dNLzU3TFYyRW0yZTFxY2k1REpPcVNiU1g3c0VKUXVSa3VzS1J4QjB5aDNlOHQrdU9OTHhjUFRwZVI1cFVic3JNaU4xa2NBZz09Cg==",
+      "url": "https://github.com/ferrum-edge/ferrum-anvil/releases/download/anvil-v0.1.9/Ferrum-Anvil_0.1.9_aarch64.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSYTVzRCtGSVhndjg1aXhZSWE3eUQrRTJGQkVwbzNvL0VGVHJMM295Ym95R3dnTDQ4dEhWR3U5QmFXQjQ2TWN0SDdzQjEzT1BIYlJHcUtsQUphT2tBSy9lRmxqOVU2YVE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1Mzk2NzAzCWZpbGU6RmVycnVtIEFudmlsLmFwcC50YXIuZ3oJdmVyc2lvbjowLjEuOQp4S1RsZWpMTHJpeFQrREhPSGRmczNmTmFFZU9nODFQNCs5bS80ZHZYYi9XdmdESkRsMTI1RWNBbk5Eb2JoYzB0M2VDQjh4MHNCdDMrTjF1YTNzQS9Ddz09Cg==",
+      "url": "https://github.com/ferrum-edge/ferrum-anvil/releases/download/anvil-v0.1.9/Ferrum-Anvil_0.1.9_x64.app.tar.gz"
+    },
+    "darwin-x86_64-app": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSYTVzRCtGSVhndjg1aXhZSWE3eUQrRTJGQkVwbzNvL0VGVHJMM295Ym95R3dnTDQ4dEhWR3U5QmFXQjQ2TWN0SDdzQjEzT1BIYlJHcUtsQUphT2tBSy9lRmxqOVU2YVE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1Mzk2NzAzCWZpbGU6RmVycnVtIEFudmlsLmFwcC50YXIuZ3oJdmVyc2lvbjowLjEuOQp4S1RsZWpMTHJpeFQrREhPSGRmczNmTmFFZU9nODFQNCs5bS80ZHZYYi9XdmdESkRsMTI1RWNBbk5Eb2JoYzB0M2VDQjh4MHNCdDMrTjF1YTNzQS9Ddz09Cg==",
+      "url": "https://github.com/ferrum-edge/ferrum-anvil/releases/download/anvil-v0.1.9/Ferrum-Anvil_0.1.9_x64.app.tar.gz"
+    },
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSYTVzRCtGSVhndjhhaFl2RDdLVzc3dU1vTndPU3VrY0gwUzFZTUZlOGZiaDN3bHRueVRYbW9YcjZJa095N2hWSTlOYTF0SHoxbGVKUnBwRGNpK1ZVaE5qRkFzVGh0UmdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1Mzk1NjQxCWZpbGU6RmVycnVtIEFudmlsXzAuMS45X2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xLjkKY1dORlo0dHZCK0tHWEdWT04yUk0yWUNINEZqdUhsRnJCMlFwS3hybTlxYmVBS05kditnaXphN1VHRytKcnRiOCtJVnBZb0dzVWl3VytZQW9lT1N2QWc9PQo=",
+      "url": "https://github.com/ferrum-edge/ferrum-anvil/releases/download/anvil-v0.1.9/Ferrum-Anvil_0.1.9_amd64.AppImage"
+    },
+    "windows-x86_64-msi": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSYTVzRCtGSVhndjY4cmtXSEpUOG9jb3JpREtCWTE2QWtHQVZGTEU0RXNXSk9Id1p6bENKUS8ybVp4U0xJOG9LbE4rdEp0QjZHN0t0UHFYTHh5aEtVTm9JNW1nY0RwVEFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1Mzk1NjI1CWZpbGU6RmVycnVtIEFudmlsXzAuMS45X3g2NF9lbi1VUy5tc2kJdmVyc2lvbjowLjEuOQpqTW5yNW1TNENYVk1kVTk4VHJTblh6cVNKNi9jajlpa0srUXhiV2pmM2FjRkV5dEdNdjRPbFNGWWlvZHp2RWlkcW9kekN1R0dvK2QzQjNndWQxVzVEZz09Cg==",
+      "url": "https://github.com/ferrum-edge/ferrum-anvil/releases/download/anvil-v0.1.9/Ferrum-Anvil_0.1.9_x64_en-US.msi"
+    },
+    "windows-x86_64-nsis": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSYTVzRCtGSVhndjJsdFhIcXV4d29qTXZVUk5xZ2EzYjlkUnRKN1hYRFRVMUpjbW1ucTdYZXdRMW5pMzdReVNrOHk5YnBRdThFN2Z0Wlo1MHBIRTJkcHR3WnAxWGZqMWdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1Mzk1NjI1CWZpbGU6RmVycnVtIEFudmlsXzAuMS45X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjEuOQpUb1FOdFA4TEorTWhFWjlvdGdJTlBHaEtBckZlNVlHRFNhcnVCbGoySjBEU2FWdXdOdjFSRFZ2RnVscGtsRFBkcktZQlBsVlZGazhGMUVoYjdvSlVDZz09Cg==",
+      "url": "https://github.com/ferrum-edge/ferrum-anvil/releases/download/anvil-v0.1.9/Ferrum-Anvil_0.1.9_x64-setup.exe"
+    }
+  }
+}
