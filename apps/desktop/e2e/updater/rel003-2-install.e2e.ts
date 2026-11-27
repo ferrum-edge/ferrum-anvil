@@ -17,6 +17,7 @@ import {
   contents,
   fixture,
   fixturePath,
+  forgetEndedSession,
   installed,
   installedExeVersion,
   notShm,
@@ -56,12 +57,16 @@ describe("REL-003: after the refusals, the relaunched bundle is unchanged and a 
         const profileBefore = contents(required("ANVIL_DATA_DIR"), notShm);
         server.offer(fixture("update.sig").toString("utf8").trim(), fixture("update.bin"));
         // update_install never answers on Windows (the app exits once the
-        // installer is started), so it is started without waiting for it.
-        await browser.execute((v: string) => {
-          const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
-          void internals.invoke("update_install", { version: v }).catch(() => {});
-        }, OFFERED);
+        // installer is started), so it is started without waiting for it. The
+        // app may end before this WebDriver call itself answers; whether the
+        // update was installed is checked from outside below.
         started = true;
+        await browser
+          .execute((v: string) => {
+            const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+            void internals.invoke("update_install", { version: v }).catch(() => {});
+          }, OFFERED)
+          .catch((e: Error) => console.log(`REL-003: starting update_install did not answer: ${e.message}`));
         await until("the update to be downloaded", () => server.requests.includes("/update"), 120_000);
         await until(`the installed executable to report ${OFFERED}`, () => installedExeVersion() === OFFERED, 300_000);
         await until("the update installer to finish", () => runningInstallers().length === 0, 300_000);
@@ -79,11 +84,10 @@ describe("REL-003: after the refusals, the relaunched bundle is unchanged and a 
           // Once update_install was started, the updater ends the app this
           // session drove (by design), whatever the checks above found:
           // nothing answers its WebDriver session any more. Forget the session
-          // so the runner does not try to delete it (wdio-runner endSession
-          // skips a browser without a sessionId) and a failed check is
+          // so the runner does not try to delete it and a failed check is
           // reported as itself. Every other test keeps the ordinary teardown.
           stopInstalledApps();
-          (browser as unknown as { sessionId?: string }).sessionId = undefined;
+          forgetEndedSession();
         }
       }
       return;
