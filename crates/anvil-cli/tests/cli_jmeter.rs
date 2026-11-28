@@ -189,7 +189,13 @@ fn load_012_cli_exports_a_plan_refuses_strict_tls_and_imports_results() {
             5 + i
         );
     }
-    std::fs::write(&jtl, csv).unwrap();
+    std::fs::write(&jtl, &csv).unwrap();
+    // Refusing --json or --html that aliases --file protects the source JTL from overwrite.
+    for flag in ["--json", "--html"] {
+        let o = anvil(data, &["load", "import-jtl", "Shop", "--file", jtl.to_str().unwrap(), flag, jtl.to_str().unwrap()]);
+        assert!(!o.status.success() && text(&o).contains("same path"), "{}", text(&o));
+        assert_eq!(std::fs::read_to_string(&jtl).unwrap(), csv, "{flag} must not overwrite --file");
+    }
     let json = out.path().join("imported.json");
     let o = anvil(
         data,

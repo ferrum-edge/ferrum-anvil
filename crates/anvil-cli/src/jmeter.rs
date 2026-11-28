@@ -317,6 +317,24 @@ pub struct ImportArgs<'a> {
 
 /// Import a JMeter result file as a saved load report.
 pub fn import_jtl(app: &App, a: ImportArgs<'_>) -> Result<i32> {
+    let source_key = destination_key(a.file);
+    let mut output_keys: Vec<(&str, PathBuf)> = Vec::new();
+    for (label, path) in [("--json", a.json), ("--html", a.html)] {
+        let Some(p) = path else { continue };
+        refuse_symlink(label, p)?;
+        let key = destination_key(p);
+        if key == source_key {
+            bail!(
+                "{label} ({}) resolves to the same path as --file ({}); refusing to overwrite the source JTL. Nothing was imported",
+                p.display(),
+                a.file.display()
+            );
+        }
+        if let Some((prev, _)) = output_keys.iter().find(|(_, k)| *k == key) {
+            bail!("{label} and {prev} resolve to the same path ({}); nothing was imported", p.display());
+        }
+        output_keys.push((label, key));
+    }
     let (file, _) = anvil_app::file_grants::open_regular_file(a.file)
         .with_context(|| format!("opening {}", a.file.display()))?
         .ok_or_else(|| anyhow!("{} is not a regular file; nothing was imported", a.file.display()))?;
@@ -330,10 +348,10 @@ pub fn import_jtl(app: &App, a: ImportArgs<'_>) -> Result<i32> {
     };
     let report = app.import_jtl(&a.ws, file, opts)?;
     if let Some(f) = a.json {
-        std::fs::write(f, anvil_load::report::to_json(&report))?;
+        stage_file("--json", f, anvil_load::report::to_json(&report).as_bytes(), false, false)?.publish()?;
     }
     if let Some(f) = a.html {
-        std::fs::write(f, anvil_load::html::to_html(&report))?;
+        stage_file("--html", f, anvil_load::html::to_html(&report).as_bytes(), false, false)?.publish()?;
     }
     let q = &report.requests;
     println!(

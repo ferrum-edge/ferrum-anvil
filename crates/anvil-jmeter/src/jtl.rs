@@ -112,21 +112,27 @@ pub enum JtlError {
 enum Hit {
     Total,
     Record,
+    HeaderRecord,
+    CsvRecord(u64),
 }
 
 /// A reader that stops at the total size limit and at the per-record limit
-/// (bytes read since the parser last called [`Guard::reset`]).
+/// (bytes read since the parser last called [`Guard::reset`], plus exact
+/// RFC 4180 physical record byte tracking in CSV mode).
 struct Guard<R> {
     inner: R,
     total: u64,
     since_reset: u64,
     max_total: u64,
     max_record: u64,
+    exact_max_record: u64,
     hit: Option<Hit>,
-    header_done: bool,
-    header_in_quotes: bool,
-    header_saw_cr: bool,
-    header_bytes: u64,
+    track_csv_records: bool,
+    csv_in_quotes: bool,
+    csv_saw_cr: bool,
+    csv_record_idx: u64,
+    csv_record_start: u64,
+    csv_record_bytes: u64,
 }
 
 impl<R> Guard<R> {
@@ -138,50 +144,79 @@ impl<R> Guard<R> {
             since_reset: 0,
             max_total: limits.max_bytes,
             max_record: limits.max_record_bytes + 64 * 1024,
+            exact_max_record: limits.max_record_bytes,
             hit: None,
-            header_done: false,
-            header_in_quotes: false,
-            header_saw_cr: false,
-            header_bytes: 0,
+            track_csv_records: false,
+            csv_in_quotes: false,
+            csv_saw_cr: false,
+            csv_record_idx: 0,
+            csv_record_start: 0,
+            csv_record_bytes: 0,
         }
+    }
+
+    fn new_csv(inner: R, limits: &JtlLimits) -> Self {
+        let mut g = Self::new(inner, limits);
+        g.track_csv_records = true;
+        g
     }
 
     fn reset(&mut self) {
         self.since_reset = 0;
     }
+
+    fn record_csv_hit(&mut self) -> std::io::Error {
+        self.hit = Some(if self.csv_record_idx == 0 { Hit::HeaderRecord } else { Hit::CsvRecord(self.csv_record_start) });
+        std::io::Error::other("record size limit")
+    }
 }
 
 impl<R: Read> Read for Guard<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let before = self.total;
         let n = self.inner.read(buf)?;
         self.total += n as u64;
         self.since_reset += n as u64;
-        if !self.header_done {
-            for &b in &buf[..n] {
-                if self.header_saw_cr {
-                    self.header_saw_cr = false;
-                    if b == b'\n' {
-                        self.header_bytes += 1;
-                    }
-                    self.header_done = true;
-                    break;
-                }
-                self.header_bytes += 1;
-                if b == b'"' {
-                    self.header_in_quotes = !self.header_in_quotes;
-                } else if !self.header_in_quotes {
-                    if b == b'\n' {
-                        self.header_done = true;
-                        break;
-                    } else if b == b'\r' {
-                        self.header_saw_cr = true;
-                    }
-                }
-            }
-        }
         if self.total > self.max_total {
             self.hit = Some(Hit::Total);
             return Err(std::io::Error::other("result file size limit"));
+        }
+        if self.track_csv_records {
+            for (i, &b) in buf[..n].iter().enumerate() {
+                let offset = before + i as u64;
+                if self.csv_saw_cr {
+                    self.csv_saw_cr = false;
+                    if b == b'\n' {
+                        self.csv_record_bytes += 1;
+                        if self.csv_record_bytes > self.exact_max_record {
+                            return Err(self.record_csv_hit());
+                        }
+                        self.csv_record_idx += 1;
+                        self.csv_record_start = offset + 1;
+                        self.csv_record_bytes = 0;
+                        continue;
+                    }
+                    // Bare CR ended the previous record; `b` is byte 0 of the next record.
+                    self.csv_record_idx += 1;
+                    self.csv_record_start = offset;
+                    self.csv_record_bytes = 0;
+                }
+                self.csv_record_bytes += 1;
+                if self.csv_record_bytes > self.exact_max_record {
+                    return Err(self.record_csv_hit());
+                }
+                if b == b'"' {
+                    self.csv_in_quotes = !self.csv_in_quotes;
+                } else if !self.csv_in_quotes {
+                    if b == b'\n' {
+                        self.csv_record_idx += 1;
+                        self.csv_record_start = offset + 1;
+                        self.csv_record_bytes = 0;
+                    } else if b == b'\r' {
+                        self.csv_saw_cr = true;
+                    }
+                }
+            }
         }
         if self.since_reset > self.max_record {
             self.hit = Some(Hit::Record);
@@ -195,6 +230,8 @@ fn limit_error<R>(g: &Guard<R>, limits: &JtlLimits, what: &'static str) -> Optio
     match g.hit? {
         Hit::Total => Some(JtlError::TooLarge { limit: limits.max_bytes }),
         Hit::Record => Some(JtlError::RecordTooLong { what, limit: limits.max_record_bytes, position: g.total }),
+        Hit::HeaderRecord => Some(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 }),
+        Hit::CsvRecord(position) => Some(JtlError::RecordTooLong { what: "a CSV record", limit: limits.max_record_bytes, position }),
     }
 }
 
@@ -292,7 +329,7 @@ struct Stats {
 }
 
 fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> Result<(), JtlError>) -> Result<Stats, JtlError> {
-    let mut rdr = csv::ReaderBuilder::new().has_headers(true).flexible(false).from_reader(Guard::new(r, limits));
+    let mut rdr = csv::ReaderBuilder::new().has_headers(true).flexible(false).from_reader(Guard::new_csv(r, limits));
     let headers = match rdr.headers().cloned() {
         Ok(h) => h,
         Err(e) => {
@@ -300,10 +337,6 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
                 .unwrap_or_else(|| JtlError::Invalid(format!("the CSV header row: {e}"))));
         }
     };
-    let header_bytes = rdr.get_ref().header_bytes.max(rdr.position().byte());
-    if header_bytes > limits.max_record_bytes {
-        return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
-    }
     let col = |name: &str| headers.iter().position(|h| h.trim() == name);
     let required = |name: &str| {
         col(name).ok_or_else(|| {
@@ -324,33 +357,12 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
     let (c_failure, c_bytes, c_sent, c_threads) = (col("failureMessage"), col("bytes"), col("sentBytes"), col("allThreads"));
     let mut record = csv::StringRecord::new();
     let mut line = 1u64;
-    let mut first_record = true;
     loop {
         rdr.get_mut().reset();
-        let is_first = first_record;
         match rdr.read_record(&mut record) {
-            Ok(false) => {
-                // For CRLF headers, `csv::Reader::headers()` stops at `\r` and
-                // consumes the trailing `\n` on the first `read_record` call
-                // (including when `\r` and `\n` are split across reads).
-                if first_record && rdr.get_ref().header_bytes.max(rdr.position().byte()) > limits.max_record_bytes {
-                    return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
-                }
-                break;
-            }
-            Ok(true) => {
-                if first_record
-                    && (rdr.get_ref().header_bytes > limits.max_record_bytes
-                        || record.position().is_some_and(|p| p.byte() > limits.max_record_bytes))
-                {
-                    return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
-                }
-                first_record = false;
-            }
+            Ok(false) => break,
+            Ok(true) => {}
             Err(e) => {
-                if first_record && rdr.get_ref().header_bytes > limits.max_record_bytes {
-                    return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
-                }
                 return Err(limit_error(rdr.get_ref(), limits, "a CSV record").unwrap_or_else(|| match e.kind() {
                     csv::ErrorKind::Utf8 { .. } => JtlError::Invalid(format!("the CSV record after line {line} is not UTF-8")),
                     csv::ErrorKind::UnequalLengths { .. } => {
@@ -361,17 +373,6 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
             }
         }
         line = record.position().map(|p| p.line()).unwrap_or(line + 1);
-        // The record's exact size (the guard allows for read-ahead).
-        // After a CRLF header, `csv::Reader` places the first data record's
-        // position at the header's trailing `\n` (`header_bytes - 1`); clamp
-        // `start` up to `header_bytes` so that byte is not charged to the row.
-        let mut start = record.position().map(|p| p.byte()).unwrap_or(0);
-        if is_first {
-            start = start.max(rdr.get_ref().header_bytes);
-        }
-        if rdr.position().byte().saturating_sub(start) > limits.max_record_bytes {
-            return Err(JtlError::RecordTooLong { what: "a CSV record", limit: limits.max_record_bytes, position: start });
-        }
         let at = format!("CSV line {line}");
         let get = |c: Option<usize>| c.and_then(|c| record.get(c)).unwrap_or("");
         let url = get(Some(c_url));
@@ -836,7 +837,7 @@ pub fn import_jtl<R: Read + Seek>(mut r: R, opts: &JtlOptions) -> Result<LoadRep
     r.seek(SeekFrom::Start(0))?;
     let warmup_secs = opts.warmup_secs.or(opts.plan.as_ref().map(|p| p.warmup_secs)).unwrap_or(0);
     let t0 = span.first_ts;
-    let warmup_end = t0.saturating_add((warmup_secs as i64).saturating_mul(1000));
+    let warmup_end = i64::try_from(i128::from(t0) + i128::from(warmup_secs) * 1000).unwrap_or(i64::MAX);
     let span_secs = ((span.last_end - t0).max(1) as u64).div_ceil(1000);
     let width = span_secs.div_ceil(MAX_TIMELINE_BUCKETS).max(1);
     let n_buckets = span_secs.div_ceil(width).max(1) as usize;
@@ -974,7 +975,7 @@ fn assemble(
         })
         .collect();
     let measured_from = warmup_end.max(span.first_ts);
-    let measured_duration_secs = ((span.last_end - measured_from).max(0)) as f64 / 1000.0;
+    let measured_duration_secs = span.last_end.saturating_sub(measured_from).max(0) as f64 / 1000.0;
     let rate = if measured_duration_secs > 0.0 { req.started as f64 / measured_duration_secs } else { 0.0 };
     let counts = LoadCounts {
         scheduled: req.started,

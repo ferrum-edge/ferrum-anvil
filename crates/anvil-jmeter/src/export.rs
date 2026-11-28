@@ -1565,11 +1565,25 @@ fn translate_step(
         ));
     }
     if follow {
-        if matches!(spec.auth, AuthConfig::ApiKey { location: KeyLocation::Query, .. }) {
+        if matches!(auth, AuthConfig::ApiKey { location: KeyLocation::Query, .. }) {
             rs.push(reason(
                 rq,
                 "redirect_query_auth",
                 "the request follows redirects and sends its API key in the query string; Anvil reapplies query authentication on same-origin redirect hops, whereas JMeter follows the Location URL without re-appending the key. Turn off following redirects for this request to export it",
+            ));
+        }
+        if headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("host")) {
+            rs.push(reason(
+                rq,
+                "redirect_host_header",
+                "the request follows redirects and sets an explicit Host header; Anvil clears Host on every redirect hop, whereas JMeter's header manager sends it to every redirect target. Remove the Host header or turn off following redirects for this request to export it",
+            ));
+        }
+        if headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("mcp-session-id")) {
+            rs.push(reason(
+                rq,
+                "redirect_mcp_session",
+                "the request follows redirects and sets an Mcp-Session-Id header; Anvil withholds Mcp-Session-Id on cross-origin redirects even when credential forwarding is enabled, whereas JMeter's header manager sends it to every redirect target. Turn off following redirects for this request to export it",
             ));
         }
         // JMeter 5.6.3 turns every redirected method except HEAD into GET

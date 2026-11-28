@@ -572,6 +572,47 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     with_tls_profile(&mut c, false);
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "qauth")], None)), ["redirect_query_auth"]);
 
+    // Same query API key with follow=false exports cleanly.
+    let mut no_follow = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    no_follow.auth = AuthConfig::ApiKey { name: "api_key".into(), value: SensitiveValue::template("k"), location: KeyLocation::Query };
+    no_follow.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_nf, c_nf) = step(no_follow);
+    assert!(Fx::new(iterations(1, 1), vec![(id_nf, c_nf, "qauth-nf")], None).export(&ExportOptions::default()).is_ok());
+
+    // Inherited workspace/folder query API key is also refused when redirects are followed.
+    let mut inherited = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    inherited.auth = AuthConfig::Inherit;
+    inherited.settings.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
+    inherited.settings.http_version = Some(HttpVersionPolicy::Http1Only);
+    let (id_inh, mut c_inh) = step(inherited);
+    c_inh.auth_layers.insert(
+        0,
+        (
+            "workspace".into(),
+            AuthConfig::ApiKey { name: "api_key".into(), value: SensitiveValue::template("k"), location: KeyLocation::Query },
+        ),
+    );
+    with_tls_profile(&mut c_inh, false);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_inh, c_inh, "qauth-inh")], None)), ["redirect_query_auth"]);
+
+    // Explicit Host and Mcp-Session-Id headers are stripped by Anvil on redirect hops
+    // (Host on every hop, Mcp-Session-Id on cross-origin hops even with credential forwarding).
+    let mut host_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    host_redir.headers.push(KeyValue::new("Host", "api.example.test"));
+    host_redir.settings.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
+    host_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
+    let (id_host, mut c_host) = step(host_redir);
+    with_tls_profile(&mut c_host, false);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_host, c_host, "host-redir")], None)), ["redirect_host_header"]);
+
+    let mut mcp_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/mcp");
+    mcp_redir.headers.push(KeyValue::new("Mcp-Session-Id", "sess-123"));
+    mcp_redir.settings.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
+    mcp_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
+    let (id_mcp, mut c_mcp) = step(mcp_redir);
+    with_tls_profile(&mut c_mcp, false);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_mcp, c_mcp, "mcp-redir")], None)), ["redirect_mcp_session"]);
+
     // Weighted mix whose total weight exceeds i32::MAX (JMeter RandomVariableConfig limit) is refused.
     let mut a = RequestSpec::http("GET", "http://127.0.0.1:8080/a");
     a.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });

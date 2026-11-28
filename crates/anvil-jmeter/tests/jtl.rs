@@ -323,8 +323,24 @@ fn load_012_jtl_record_limit_is_exact() {
         import(&format!("{crlf_hdr}{exact_row}x"), &exact).unwrap_err(),
         JtlError::RecordTooLong { what: "a CSV record", .. }
     ));
+    // A CRLF-terminated first data row 1 byte over the limit must be rejected (not deferred past EOF),
+    // and an exact-limit unterminated second data row after a CRLF-terminated first row must succeed.
+    let crlf_row_over = format!("{T0},1,{},200,true,http://h/\r\n", "x".repeat(crlf_hdr.len() - 36));
+    assert_eq!(crlf_row_over.len(), crlf_hdr.len() + 1);
+    assert!(matches!(
+        import(&format!("{crlf_hdr}{crlf_row_over}"), &exact).unwrap_err(),
+        JtlError::RecordTooLong { what: "a CSV record", .. }
+    ));
+    let crlf_row_exact = format!("{T0},1,{},200,true,http://h/\r\n", "x".repeat(crlf_hdr.len() - 37));
+    assert_eq!(crlf_row_exact.len(), crlf_hdr.len());
+    assert!(import(&format!("{crlf_hdr}{crlf_row_exact}{exact_row}"), &exact).is_ok());
+    assert!(matches!(
+        import(&format!("{crlf_hdr}{crlf_row_exact}{exact_row}x"), &exact).unwrap_err(),
+        JtlError::RecordTooLong { what: "a CSV record", .. }
+    ));
 
-    // Warmup override on import is recorded on the report's plan metadata for comparisons.
+    // Warmup override on import is recorded on the report's plan metadata for comparisons,
+    // and large overrides (e.g. u64::MAX) saturate without wrapping into a negative cutoff.
     let mut w_opts = opts();
     let now = anvil_domain::Timestamp::now();
     w_opts.plan = Some(anvil_domain::load::LoadPlan {
@@ -347,6 +363,12 @@ fn load_012_jtl_record_limit_is_exact() {
     w_opts.warmup_secs = Some(0);
     let r = import(&crlf_csv, &w_opts).unwrap();
     assert_eq!(r.plan.warmup_secs, 0);
+    assert_eq!(r.requests.started, 1);
+
+    w_opts.warmup_secs = Some(u64::MAX);
+    let r_huge = import(&crlf_csv, &w_opts).unwrap();
+    assert_eq!(r_huge.plan.warmup_secs, u64::MAX);
+    assert_eq!(r_huge.requests.started, 0);
 }
 
 #[test]
