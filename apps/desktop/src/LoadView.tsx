@@ -214,6 +214,7 @@ export function LoadView(props: {
     discarded.current.clear();
     setSel(null);
     setFresh(null);
+    setJtlDlg(false);
     setPlans([]);
     setReports([]);
     setDatasets([]);
@@ -380,14 +381,16 @@ export function LoadView(props: {
       </aside>
       {jtlDlg && (
         <JtlImportDialog
+          key={props.workspaceId}
           workspaceId={props.workspaceId}
           plans={plans}
           onClose={() => setJtlDlg(false)}
-          onImported={async (runId) => {
+          onImported={async (ws, runId) => {
+            if (ws !== wsRef.current) return;
             setJtlDlg(false);
             props.notify("JMeter results imported as a report.");
             const r = await reload();
-            if (r?.some((x) => x.run_id === runId)) select({ kind: "report", id: runId });
+            if (ws === wsRef.current && r?.some((x) => x.run_id === runId)) select({ kind: "report", id: runId });
           }}
         />
       )}
@@ -1177,7 +1180,10 @@ export function jmeterCommand(
 ): string {
   const quote = shell === "powershell" ? quotePowerShell : quotePosix;
   const r = o.report;
-  let cmd = `jmeter -n -t ${quote(o.written[0] ?? "plan.jmx")} -l ${quote(resultsFile)}`;
+  // On Windows, invoke java with ApacheJMeter.jar directly so jmeter.bat never
+  // re-parses single-quoted filenames through cmd.exe.
+  const bin = shell === "powershell" ? "& java -jar (Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar')" : "jmeter";
+  let cmd = `${bin} -n -t ${quote(o.written[0] ?? "plan.jmx")} -l ${quote(resultsFile)}`;
   if (r?.secrets_written && o.written.length > 1) cmd += ` -q ${quote(`<full path of ${o.written[o.written.length - 1]}>`)}`;
   for (const [k, v] of r?.jmeter_properties ?? []) cmd += ` ${quote(`-J${k}=${v}`)}`;
   return cmd;
@@ -1316,22 +1322,32 @@ export function JmeterExportDialog(props: { planName: string; save: () => Promis
 }
 
 /** Import JMeter results… (LOAD-012): a JTL file becomes a report of the workspace, optionally of the plan it was exported from. */
-export function JtlImportDialog(props: { workspaceId: string; plans: LoadPlan[]; onClose: () => void; onImported: (runId: string) => void }) {
+export function JtlImportDialog(props: {
+  workspaceId: string;
+  plans: LoadPlan[];
+  onClose: () => void;
+  onImported: (workspaceId: string, runId: string) => void;
+}) {
   const [planId, setPlanId] = useState("");
   const [version, setVersion] = useState(JMETER_VERSION);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const activeWs = useRef(props.workspaceId);
+  activeWs.current = props.workspaceId;
   const choose = async () => {
+    const ws = props.workspaceId;
     setErr(null);
     setBusy(true);
     try {
       const f = await api.chooseFile("jtl_import", { filters: [{ name: "JMeter results", extensions: ["jtl", "csv", "xml"] }] });
-      if (!f) return;
-      props.onImported(await api.importJtl(props.workspaceId, f.token, planId || null, version.trim() || null));
+      if (!f || activeWs.current !== ws) return;
+      const runId = await api.importJtl(ws, f.token, planId || null, version.trim() || null);
+      if (activeWs.current !== ws) return;
+      props.onImported(ws, runId);
     } catch (e) {
-      setErr(String((e as Error).message));
+      if (activeWs.current === ws) setErr(String((e as Error).message));
     } finally {
-      setBusy(false);
+      if (activeWs.current === ws) setBusy(false);
     }
   };
   return (

@@ -231,6 +231,35 @@ async fn load_012_jmeter_runs_the_exported_chain_and_the_import_matches_anvil() 
     assert_eq!(one_got[0].0, "/echo?user=alice", "SetupThreadGroup must not consume CSV row 0");
     assert_eq!(header(&one_got[0].1, "x-iter"), Some("0"), "SetupThreadGroup must not advance anvil.iteration past 0");
 
+    // Leading-space dataset filename + uneven iterations (5 across 3 threads):
+    // proves `./ ` prefix survives JMeter's `.trim()` and discarded iterations
+    // never consume CSV rows.
+    let mut gated_req = RequestSpec::http("GET", &f.url("/echo"));
+    gated_req.params.push(KeyValue::new("user", "{{user}}"));
+    gated_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    let (gd_id, gd_c) = step(gated_req);
+    let gd_fx = Fx::new(iterations(5, 3), vec![(gd_id, gd_c, "gated")], Some(dataset("user\nalice\nbob\n")));
+    let leading_csv_name = " leading space.dataset.csv";
+    let gd_out = gd_fx.export(&ExportOptions { include_secrets: false, dataset_file: leading_csv_name.into() }).expect("exported");
+    f.log.clear();
+    {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(" leading space.jmx"), &gd_out.jmx).unwrap();
+        std::fs::write(dir.path().join(leading_csv_name), gd_out.dataset_csv.as_ref().unwrap()).unwrap();
+        let mut cmd = tokio::process::Command::new(jmeter());
+        cmd.current_dir(dir.path()).args(["-n", "-t", " leading space.jmx", "-l", "results.jtl", "-j", "jmeter.log"]);
+        for (k, v) in &gd_out.report.jmeter_properties {
+            cmd.arg(format!("-J{k}={v}"));
+        }
+        let output = cmd.output().await.expect("JMeter starts");
+        assert!(output.status.success(), "leading-space dataset run failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    let gd_got = received(&f, "/echo");
+    assert_eq!(gd_got.len(), 5, "exact 5 gated iterations sent: {gd_got:?}");
+    let gd_alice = gd_got.iter().filter(|(p, _)| p == "/echo?user=alice").count();
+    let gd_bob = gd_got.iter().filter(|(p, _)| p == "/echo?user=bob").count();
+    assert_eq!((gd_alice, gd_bob), (3, 2), "uneven gate must not discard CSV rows: {gd_got:?}");
+
     // Different engines: compared, with the difference named and latency deltas withheld.
     let f2 = std::fs::File::open(run_jmeter(&out, "csv", true).await.jtl()).unwrap();
     let jmeter = import_jtl(
@@ -415,12 +444,50 @@ async fn load_012_default_export_properties_do_not_write_url_credentials_to_jtl(
     let plan = Fx::new(iterations(3, 1), vec![(id, c, "url-secret")], None);
     let out = plan.export(&export_opts(true)).expect("exported");
     assert!(!out.jmx.contains("SENSITIVE"), "no secret material in .jmx");
-    // Run JMeter using ONLY the default exported jmeter_properties (XML + url=false + response_message=false + assertion_results=none).
-    let run = run_jmeter(&out, "", true).await;
+    // Run JMeter with a noisy local properties file enabling response/header/samplerData
+    // capture on error, overridden ONLY by our exported default `-J` properties, to
+    // prove none of the echoed credentials or headers leak into results.jtl.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("plan.jmx"), &out.jmx).unwrap();
+    std::fs::write(dir.path().join("secrets.properties"), out.secrets_properties.as_ref().unwrap().as_bytes()).unwrap();
+    std::fs::write(
+        dir.path().join("noisy.properties"),
+        "jmeter.save.saveservice.response_data=true\n\
+         jmeter.save.saveservice.response_data.on_error=true\n\
+         jmeter.save.saveservice.samplerData=true\n\
+         jmeter.save.saveservice.requestHeaders=true\n\
+         jmeter.save.saveservice.responseHeaders=true\n",
+    )
+    .unwrap();
+    let mut cmd = tokio::process::Command::new(jmeter());
+    cmd.current_dir(dir.path()).args([
+        "-n",
+        "-t",
+        "plan.jmx",
+        "-l",
+        "results.jtl",
+        "-j",
+        "jmeter.log",
+        "-q",
+        "noisy.properties",
+        "-q",
+        "secrets.properties",
+    ]);
+    for (k, v) in &out.report.jmeter_properties {
+        cmd.arg(format!("-J{k}={v}"));
+    }
+    let output = cmd.output().await.expect("JMeter starts");
+    let log = std::fs::read_to_string(dir.path().join("jmeter.log")).unwrap_or_default();
+    assert!(output.status.success() && !log.contains("Error in NonGUIDriver"), "JMeter failed: {log}");
+    let run = Run { dir, log };
     let raw_jtl = std::fs::read_to_string(run.jtl()).expect("JMeter wrote results.jtl");
     assert!(!raw_jtl.contains(path_secret), "URL path secret leaked into JTL: {raw_jtl}");
     assert!(!raw_jtl.contains(query_secret), "query API key leaked into JTL: {raw_jtl}");
     assert!(!raw_jtl.contains("<assertionResult>"), "assertion result body leaked into JTL: {raw_jtl}");
+    assert!(!raw_jtl.contains("<responseData"), "response body leaked into JTL: {raw_jtl}");
+    assert!(!raw_jtl.contains("<requestHeader"), "request headers leaked into JTL: {raw_jtl}");
+    assert!(!raw_jtl.contains("<responseHeader"), "response headers leaked into JTL: {raw_jtl}");
+    assert!(!raw_jtl.contains("<samplerData"), "samplerData leaked into JTL: {raw_jtl}");
     assert!(!raw_jtl.contains(" rm="), "response message attribute leaked into JTL: {raw_jtl}");
     let report = import(&run, &plan);
     assert_eq!((report.requests.started, report.requests.completed), (3, 3));

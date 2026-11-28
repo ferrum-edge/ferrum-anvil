@@ -548,6 +548,11 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             ("jmeter.save.saveservice.assertions".into(), "false".into()),
             ("jmeter.save.saveservice.assertion_results".into(), "none".into()),
             ("jmeter.save.saveservice.assertion_results_failure_message".into(), "false".into()),
+            ("jmeter.save.saveservice.response_data".into(), "false".into()),
+            ("jmeter.save.saveservice.response_data.on_error".into(), "false".into()),
+            ("jmeter.save.saveservice.samplerData".into(), "false".into()),
+            ("jmeter.save.saveservice.requestHeaders".into(), "false".into()),
+            ("jmeter.save.saveservice.responseHeaders".into(), "false".into()),
         ],
         contexts: contexts.clone(),
     };
@@ -646,6 +651,17 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
     if let Some(d) = dataset {
         let csv = dataset_to_csv(d);
         let vars: Vec<String> = (0..d.columns.len()).map(|i| format!("anvil_ds_{i}")).collect();
+        // JMeter's CSVDataSet calls `.trim()` on `filename`; prefix relative
+        // paths with `./` so a filename with leading whitespace still resolves
+        // to the exact sidecar Anvil wrote beside the JMX.
+        let jmx_dataset_file = if opts.dataset_file.starts_with("./")
+            || opts.dataset_file.starts_with("../")
+            || std::path::Path::new(&opts.dataset_file).is_absolute()
+        {
+            opts.dataset_file.clone()
+        } else {
+            format!("./{}", opts.dataset_file)
+        };
         dataset_node = Some(Node::new(
             "CSVDataSet",
             "TestBeanGUI",
@@ -653,7 +669,7 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             vec![
                 Prop::s("delimiter", ","),
                 Prop::s("fileEncoding", "UTF-8"),
-                Prop::t("filename", &Text::lit(opts.dataset_file.clone())),
+                Prop::t("filename", &Text::lit(jmx_dataset_file)),
                 Prop::Bool("ignoreFirstLine", true),
                 Prop::Bool("quotedData", true),
                 Prop::Bool("recycle", true),
@@ -698,100 +714,31 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
     let needs_iteration_gate = groups.iter().any(|g| matches!(g.kind, GroupKind::Iterations { gate: Some(_), .. }));
     let uses_vu = used_marks.iter().any(|m| matches!(m, Mark::Vu));
 
-    // Reject any used secret variable whose template expands to a per-iteration
-    // value or dynamic helper (which no static JMeter property can represent).
+    // Recursively validate every used secret property (both variable entries
+    // and whole-field templates, expanding through nested non-literal secret
+    // variables too) so no static JMeter property can silently freeze a
+    // per-iteration value or dynamic helper.
     let mut secret_reasons = Vec::new();
     for i in &used_secrets {
         let p = &t.secrets.props[*i];
-        if let SecretSource::VariableEntry { step, layer, var } = &p.source {
-            let ctx = t.contexts[*step];
-            let entry = &ctx.var_layers[*layer].vars[*var];
-            if ctx.secrets.variable_secret(*layer, *var).is_none() && !entry.literal && entry.value.contains("{{") {
-                let mut probe_markers = Markers::default();
-                let mut probe_layers = Vec::new();
-                for (li, l) in ctx.var_layers.iter().enumerate() {
-                    let mut vars = Vec::new();
-                    for (vi, e) in l.vars.iter().enumerate() {
-                        if e.secret || ctx.secrets.variable_secret(li, vi).is_some() || e.value == DEFERRED_SECRET_VALUE {
-                            vars.push(VarEntry {
-                                name: e.name.clone(),
-                                value: probe_markers.add(Mark::Secret(0)),
-                                secret: false,
-                                literal: true,
-                            });
-                        } else if e.literal {
-                            vars.push(e.clone());
-                        } else {
-                            vars.push(VarEntry {
-                                name: e.name.clone(),
-                                value: mask_helpers(&e.value, &mut probe_markers),
-                                secret: false,
-                                literal: false,
-                            });
-                        }
-                    }
-                    probe_layers.push(VarLayer { label: l.label.clone(), vars });
-                }
-                let stand_in = |name: &str, value: String| VarEntry { name: name.into(), value, secret: false, literal: true };
-                let iter_mark = probe_markers.add(Mark::Var(ITERATION_VAR.into()));
-                let vu_mark = probe_markers.add(Mark::Vu);
-                probe_layers.push(VarLayer {
-                    label: "load".into(),
-                    vars: vec![stand_in("anvil.iteration", iter_mark), stand_in("anvil.vu", vu_mark)],
-                });
-                if let Some(d) = dataset
-                    && ctx.scope.is_none()
-                {
-                    let vars = d
-                        .columns
-                        .iter()
-                        .enumerate()
-                        .map(|(ci, c)| stand_in(c, probe_markers.add(Mark::Var(format!("anvil_ds_{ci}")))))
-                        .collect();
-                    probe_layers.push(VarLayer { label: "dataset".into(), vars });
-                }
-                if chain {
-                    let mut ext_vars = Vec::new();
-                    for earlier in &t.contexts[..*step] {
-                        if earlier.scope == ctx.scope {
-                            for ex in &earlier.spec.extractions {
-                                ext_vars.push(stand_in(&ex.variable, probe_markers.add(Mark::Var(ex.variable.clone()))));
-                            }
-                        }
-                    }
-                    if !ext_vars.is_empty() {
-                        probe_layers.push(VarLayer { label: "iteration (extracted)".into(), vars: ext_vars });
-                    }
-                }
-                let probe = Resolver::new(probe_layers, None);
-                let masked = mask_helpers(&entry.value, &mut probe_markers);
-                match probe.resolve(&masked, "variables") {
-                    Ok(expanded) => {
-                        let has_per_run = probe_markers
-                            .split(&expanded)
-                            .iter()
-                            .any(|part| matches!(part, Part::Mark(mi) if !matches!(probe_markers.list[*mi], Mark::Secret(_))));
-                        if has_per_run {
-                            secret_reasons.push(reason(
-                                None,
-                                "secret_mixed",
-                                format!(
-                                    "{} depends on a per-iteration value or dynamic helper; JMeter cannot represent it as a static property",
-                                    p.purpose
-                                ),
-                            ));
-                        }
-                    }
-                    Err(f) => {
-                        let msg = if entry.secret {
-                            "could not resolve a secret variable; check the vault and active variables".to_string()
-                        } else {
-                            f.message
-                        };
-                        secret_reasons.push(reason(None, "does_not_prepare", format!("{}: {msg}", p.purpose)));
+        match &p.source {
+            SecretSource::VariableEntry { step, layer, var } => {
+                let ctx = t.contexts[*step];
+                let entry = &ctx.var_layers[*layer].vars[*var];
+                if ctx.secrets.variable_secret(*layer, *var).is_none() && !entry.literal && entry.value.contains("{{") {
+                    if let Err(r) =
+                        validate_static_secret_template(&t, *step, &entry.value, &p.purpose, entry.secret, dataset, chain, false)
+                    {
+                        secret_reasons.push(r);
                     }
                 }
             }
+            SecretSource::Template { step, template } if template.contains("{{") => {
+                if let Err(r) = validate_static_secret_template(&t, *step, template, &p.purpose, true, dataset, chain, false) {
+                    secret_reasons.push(r);
+                }
+            }
+            _ => {}
         }
     }
     if !secret_reasons.is_empty() {
@@ -891,14 +838,14 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
         let mut errors = Vec::new();
         for i in &used_secrets {
             let p = &t.secrets.props[*i];
-            match resolve_secret(&t, &p.source) {
+            match resolve_secret(&t, &p.source, &p.purpose, dataset, chain) {
                 Ok(v) => {
                     out.push_str(&p.name);
                     out.push('=');
                     out.push_str(&jmx::properties_value(&v));
                     out.push('\n');
                 }
-                Err(e) => errors.push(reason(None, "secret_unavailable", format!("{}: {e}", p.purpose))),
+                Err(r) => errors.push(r),
             }
         }
         if !errors.is_empty() {
@@ -2573,19 +2520,51 @@ fn thread_group_props(threads: u64, ramp: u64, loops: i64, scheduler: bool, dura
 
 fn thread_group_node(index: usize, g: &Group, body: Vec<Node>, cookies: bool, dataset: Option<Node>) -> Node {
     let mut children = Vec::new();
-    if let Some(ds) = dataset {
-        children.push(ds);
-    }
     if cookies {
         children.push(cookie_manager());
     }
     let mut body = body;
     match &g.kind {
-        GroupKind::Closed { think_ms, .. } if *think_ms > 0 => body.push(test_action("Anvil think time", 1, 0, *think_ms)),
-        GroupKind::Iterations { gate: Some(n), .. } => {
-            body = vec![if_node(format!("Anvil: stop after {n} iterations"), format!("${{__jexl3(${{{ITERATION_VAR}}} < {n})}}"), body)];
+        GroupKind::Closed { think_ms, .. } => {
+            if let Some(ds) = dataset {
+                children.push(ds);
+            }
+            if *think_ms > 0 {
+                body.push(test_action("Anvil think time", 1, 0, *think_ms));
+            }
         }
-        _ => {}
+        GroupKind::Iterations { gate: Some(n), .. } => {
+            // Place CSVDataSet inside a 1-loop LoopController underneath the
+            // iteration gate so discarded excess iterations never advance the
+            // CSV cursor (JMeter attaches CSVDataSet to its enclosing
+            // LoopController).
+            let gated_children = if let Some(ds) = dataset {
+                let mut inner = Vec::with_capacity(body.len() + 1);
+                inner.push(ds);
+                inner.extend(body);
+                vec![
+                    Node::new(
+                        "LoopController",
+                        "LoopControlPanel",
+                        "Anvil gated dataset iteration",
+                        vec![Prop::Bool("LoopController.continue_forever", false), Prop::s("LoopController.loops", "1")],
+                    )
+                    .with_children(inner),
+                ]
+            } else {
+                body
+            };
+            body = vec![if_node(
+                format!("Anvil: stop after {n} iterations"),
+                format!("${{__jexl3(${{{ITERATION_VAR}}} < {n})}}"),
+                gated_children,
+            )];
+        }
+        _ => {
+            if let Some(ds) = dataset {
+                children.push(ds);
+            }
+        }
     }
     children.extend(body);
     let name = format!("Anvil group {}", index + 1);
@@ -2631,7 +2610,130 @@ fn secrets_guard(props: &[SecretProperty]) -> Node {
         .with_children(vec![check])
 }
 
-fn resolve_secret(t: &Translator<'_>, source: &SecretSource) -> Result<Zeroizing<String>, String> {
+/// Probe `template` recursively through `step`'s variable layers (including
+/// nested non-literal secret variables, and optionally decrypted non-literal
+/// vault values during explicit secret export) to verify it depends on no
+/// per-iteration value or dynamic helper before evaluating or exporting it as
+/// a static JMeter property.
+#[allow(clippy::too_many_arguments)]
+fn validate_static_secret_template(
+    t: &Translator<'_>,
+    step: usize,
+    template: &str,
+    purpose: &str,
+    redact_errors: bool,
+    dataset: Option<&anvil_load::Dataset>,
+    chain: bool,
+    expand_vault: bool,
+) -> Result<(), Reason> {
+    let ctx = t.contexts[step];
+    let mut probe_markers = Markers::default();
+    let mut probe_layers = Vec::new();
+    let real_for_vault = expand_vault.then(|| Resolver::new(ctx.var_layers.clone(), None).with_secrets(ctx.secrets.clone()));
+    for (li, l) in ctx.var_layers.iter().enumerate() {
+        let mut vars = Vec::new();
+        for (vi, e) in l.vars.iter().enumerate() {
+            let vault_ref = ctx.secrets.variable_secret(li, vi);
+            if let Some(ref r) = real_for_vault
+                && vault_ref.is_some()
+            {
+                let raw = r.variable_value(li, vi).map_err(|f| reason(None, "secret_unavailable", format!("{purpose}: {}", f.message)))?;
+                if e.literal || !raw.contains("{{") {
+                    vars.push(VarEntry { name: e.name.clone(), value: probe_markers.add(Mark::Secret(0)), secret: false, literal: true });
+                } else {
+                    vars.push(VarEntry {
+                        name: e.name.clone(),
+                        value: mask_helpers(&raw, &mut probe_markers),
+                        secret: false,
+                        literal: false,
+                    });
+                }
+            } else if vault_ref.is_some() || e.value == DEFERRED_SECRET_VALUE || e.literal || !e.value.contains("{{") {
+                vars.push(VarEntry {
+                    name: e.name.clone(),
+                    value: if e.secret || vault_ref.is_some() || e.value == DEFERRED_SECRET_VALUE {
+                        probe_markers.add(Mark::Secret(0))
+                    } else {
+                        e.value.clone()
+                    },
+                    secret: false,
+                    literal: true,
+                });
+            } else {
+                // Non-literal plain or secret variable containing `{{`: expand
+                // recursively with dynamic helpers masked so nested dynamic or
+                // per-iteration dependencies are always caught.
+                vars.push(VarEntry {
+                    name: e.name.clone(),
+                    value: mask_helpers(&e.value, &mut probe_markers),
+                    secret: false,
+                    literal: false,
+                });
+            }
+        }
+        probe_layers.push(VarLayer { label: l.label.clone(), vars });
+    }
+    let stand_in = |name: &str, value: String| VarEntry { name: name.into(), value, secret: false, literal: true };
+    let iter_mark = probe_markers.add(Mark::Var(ITERATION_VAR.into()));
+    let vu_mark = probe_markers.add(Mark::Vu);
+    probe_layers.push(VarLayer { label: "load".into(), vars: vec![stand_in("anvil.iteration", iter_mark), stand_in("anvil.vu", vu_mark)] });
+    if let Some(d) = dataset
+        && ctx.scope.is_none()
+    {
+        let vars =
+            d.columns.iter().enumerate().map(|(ci, c)| stand_in(c, probe_markers.add(Mark::Var(format!("anvil_ds_{ci}"))))).collect();
+        probe_layers.push(VarLayer { label: "dataset".into(), vars });
+    }
+    if chain {
+        let mut ext_vars = Vec::new();
+        for earlier in &t.contexts[..step] {
+            if earlier.scope == ctx.scope {
+                for ex in &earlier.spec.extractions {
+                    ext_vars.push(stand_in(&ex.variable, probe_markers.add(Mark::Var(ex.variable.clone()))));
+                }
+            }
+        }
+        if !ext_vars.is_empty() {
+            probe_layers.push(VarLayer { label: "iteration (extracted)".into(), vars: ext_vars });
+        }
+    }
+    let probe = Resolver::new(probe_layers, None);
+    let masked = mask_helpers(template, &mut probe_markers);
+    match probe.resolve(&masked, "variables") {
+        Ok(expanded) => {
+            let has_per_run = probe_markers
+                .split(&expanded)
+                .iter()
+                .any(|part| matches!(part, Part::Mark(mi) if !matches!(probe_markers.list[*mi], Mark::Secret(_))));
+            if has_per_run {
+                return Err(reason(
+                    None,
+                    "secret_mixed",
+                    format!(
+                        "{purpose} depends on a per-iteration value or dynamic helper; JMeter cannot represent it as a static property"
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        Err(f) => {
+            let msg = if redact_errors {
+                "could not resolve a secret variable; check the vault and active variables".to_string()
+            } else {
+                f.message
+            };
+            Err(reason(None, "does_not_prepare", format!("{purpose}: {msg}")))
+        }
+    }
+}
+
+fn resolve_secret(
+    t: &Translator<'_>,
+    source: &SecretSource,
+    purpose: &str,
+    dataset: Option<&anvil_load::Dataset>,
+    chain: bool,
+) -> Result<Zeroizing<String>, Reason> {
     let real = |ctx: &ExecutionContext| Resolver::new(ctx.var_layers.clone(), None).with_secrets(ctx.secrets.clone());
     match source {
         SecretSource::VariableEntry { step, layer, var } => {
@@ -2639,20 +2741,29 @@ fn resolve_secret(t: &Translator<'_>, source: &SecretSource) -> Result<Zeroizing
             let entry = &ctx.var_layers[*layer].vars[*var];
             let r = real(ctx);
             if !entry.literal {
-                let raw = r.variable_value(*layer, *var).map_err(|f| f.message)?;
-                let mut probe = Markers::default();
-                let masked = mask_helpers(&raw, &mut probe);
-                if probe.has_marks(&masked) {
-                    return Err("references a dynamic helper that JMeter cannot represent as a static property".into());
+                let raw =
+                    r.variable_value(*layer, *var).map_err(|f| reason(None, "secret_unavailable", format!("{purpose}: {}", f.message)))?;
+                if raw.contains("{{") {
+                    validate_static_secret_template(t, *step, &raw, purpose, entry.secret, dataset, chain, true)?;
                 }
             }
-            r.resolve_entry(*layer, *var, "variables").map(Zeroizing::new).map_err(|f| f.message)
+            r.resolve_entry(*layer, *var, "variables")
+                .map(Zeroizing::new)
+                .map_err(|f| reason(None, "secret_unavailable", format!("{purpose}: {}", f.message)))
         }
         SecretSource::Template { step, template } => {
             let ctx = t.contexts[*step];
-            real(ctx).resolve(template, "credential").map(Zeroizing::new).map_err(|f| f.message)
+            if template.contains("{{") {
+                validate_static_secret_template(t, *step, template, purpose, true, dataset, chain, true)?;
+            }
+            real(ctx)
+                .resolve(template, "credential")
+                .map(Zeroizing::new)
+                .map_err(|f| reason(None, "secret_unavailable", format!("{purpose}: {}", f.message)))
         }
-        SecretSource::Vault { step, secret } => t.contexts[*step].secrets.resolve(secret),
+        SecretSource::Vault { step, secret } => {
+            t.contexts[*step].secrets.resolve(secret).map_err(|e| reason(None, "secret_unavailable", format!("{purpose}: {e}")))
+        }
         SecretSource::Literal(value) => Ok(Zeroizing::new(value.clone())),
     }
 }

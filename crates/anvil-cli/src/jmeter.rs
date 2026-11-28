@@ -226,12 +226,16 @@ pub fn export_jmx(
     let mut protected: Vec<anvil_app::file_grants::PinnedFileId> = Vec::new();
     for (label, dest, item, no_clobber) in staged {
         let note = format!("{label} ({})", dest.display());
-        match item.publish_guarded(no_clobber, &protected).with_context(|| format!("publishing {label} ({})", dest.display())) {
+        match item.publish_guarded(no_clobber, &protected) {
             Ok(id) => {
                 protected.push(id);
                 published.push(note);
             }
             Err(err) => {
+                if err.published {
+                    published.push(note);
+                }
+                let err = anyhow::Error::new(err).context(format!("publishing {label} ({})", dest.display()));
                 if published.is_empty() {
                     return Err(err.context("nothing was written"));
                 }
@@ -271,37 +275,52 @@ pub fn export_jmx(
     let results_file = fresh_results_name(out);
     let shell_label = if cfg!(windows) { "PowerShell" } else { "sh" };
     // When the exported plan carries a relative sidecar CSV dataset, launch
-    // JMeter from the JMX's absolute directory (in a subshell / guarded
-    // Push-Location -LiteralPath block so the caller's working directory is
-    // preserved, CDPATH and PowerShell wildcards cannot misdirect it, and a
-    // failed directory change aborts before launching JMeter).
+    // JMeter from the JMX's absolute directory (in a subshell on POSIX so
+    // CDPATH cannot interfere, or a guarded Set-Location try/finally block on
+    // PowerShell without any `\\?\` verbatim prefix). On Windows, invoke
+    // `java` with `ApacheJMeter.jar` directly so `jmeter.bat` never re-parses
+    // filenames through `cmd.exe`.
     let abs_out = std::path::absolute(out).unwrap_or_else(|_| out.to_path_buf());
+    let strip_win_verbatim = |p: &Path| -> String {
+        let s = p.display().to_string();
+        if cfg!(windows) {
+            if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+                return format!(r"\\{unc}");
+            }
+            if let Some(plain) = s.strip_prefix(r"\\?\") {
+                return plain.to_string();
+            }
+        }
+        s
+    };
+    let jmeter_bin = if cfg!(windows) { "& java -jar (Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar')" } else { "jmeter" };
     let (jmx_arg, prefix, suffix, import_results_file, secrets_placeholder) = if r.dataset.is_some() {
         let raw_dir = abs_out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-        let abs_dir = std::fs::canonicalize(raw_dir).unwrap_or_else(|_| raw_dir.to_path_buf());
+        let canon_dir = std::fs::canonicalize(raw_dir).unwrap_or_else(|_| raw_dir.to_path_buf());
+        let dir_str = strip_win_verbatim(&canon_dir);
         let name = abs_out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| abs_out.display().to_string());
-        let import_path = abs_dir.join(&results_file).display().to_string();
+        let import_path = strip_win_verbatim(&canon_dir.join(&results_file));
         if cfg!(windows) {
             (
                 name,
-                format!("Push-Location -LiteralPath {}; if ($?) {{ try {{ ", shell_quote(&abs_dir.display().to_string())),
-                " } finally { Pop-Location } }".to_string(),
+                format!("$__p = Get-Location; try {{ Set-Location -LiteralPath {} -ErrorAction Stop; ", shell_quote(&dir_str)),
+                " } finally { Set-Location -LiteralPath $__p.ProviderPath }".to_string(),
                 import_path,
                 "<absolute path to the --secrets-file you chose>",
             )
         } else {
             (
                 name,
-                format!("(cd -- {} && ", shell_quote(&abs_dir.display().to_string())),
+                format!("(cd -- {} && ", shell_quote(&dir_str)),
                 ")".to_string(),
                 import_path,
                 "<absolute path to the --secrets-file you chose>",
             )
         }
     } else {
-        (out.display().to_string(), String::new(), String::new(), results_file.clone(), "<the --secrets-file you chose>")
+        (strip_win_verbatim(out), String::new(), String::new(), results_file.clone(), "<the --secrets-file you chose>")
     };
-    let mut cmd = format!("{prefix}jmeter -n -t {} -l {}", shell_quote(&jmx_arg), shell_quote(&results_file));
+    let mut cmd = format!("{prefix}{jmeter_bin} -n -t {} -l {}", shell_quote(&jmx_arg), shell_quote(&results_file));
     if written {
         cmd.push_str(&format!(" -q {}", shell_quote(secrets_placeholder)));
     }

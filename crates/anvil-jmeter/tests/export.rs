@@ -135,7 +135,7 @@ fn load_012_chain_maps_to_samplers_with_dataset_assertions_and_extraction() {
     let doc = Doc::parse(&out.jmx);
 
     let csv = doc.first("CSVDataSet");
-    assert_eq!(doc.prop(csv, "filename"), "plan.dataset.csv");
+    assert_eq!(doc.prop(csv, "filename"), "./plan.dataset.csv");
     assert_eq!(doc.prop(csv, "variableNames"), "anvil_ds_0,anvil_ds_1");
     assert_eq!(doc.prop(csv, "shareMode"), "shareMode.all");
     let tg = doc.first("ThreadGroup");
@@ -926,4 +926,50 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     decomp_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
     let (id_dc, c_dc) = step(decomp_req);
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_dc, c_dc, "no-decompress")], None)), ["accept_encoding"]);
+
+    // Nested secret variable referencing another secret variable with `{{$uuid}}` is refused (`secret_mixed`).
+    let mut nested_sec = RequestSpec::http("GET", "http://127.0.0.1:8080/sec");
+    nested_sec.headers.push(KeyValue::new("X-Api-Key", "{{outer}}"));
+    nested_sec.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_ns, mut c_ns) = step(nested_sec);
+    c_ns.var_layers.push(layer("workspace", &[("inner", "tok-{{$uuid}}", true), ("outer", "{{inner}}", true)]));
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_ns, c_ns, "nested-sec")], None)), ["secret_mixed"]);
+
+    // Whole-field credential template referencing a secret variable with `{{$uuid}}` is refused (`secret_mixed`).
+    let mut tmpl_sec = RequestSpec::http("GET", "http://127.0.0.1:8080/sec");
+    tmpl_sec.auth = AuthConfig::Bearer { token: SensitiveValue::template("prefix-{{inner}}"), prefix: "Bearer".into() };
+    tmpl_sec.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_ts, mut c_ts) = step(tmpl_sec);
+    c_ts.var_layers.push(layer("workspace", &[("inner", "dyn-{{$uuid}}", true)]));
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_ts, c_ts, "tmpl-sec")], None)), ["secret_mixed"]);
+
+    // Uneven iterations + dataset places CSVDataSet inside a 1-loop LoopController
+    // underneath the IfController gate so discarded iterations never advance the CSV cursor,
+    // and prefixes leading-space dataset filenames with `./` so JMeter `.trim()` preserves them.
+    let mut gated_ds_req = RequestSpec::http("GET", "http://127.0.0.1:8080/u/{{user}}");
+    gated_ds_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_gd, c_gd) = step(gated_ds_req);
+    let out_gd = Fx::new(iterations(5, 3), vec![(id_gd, c_gd, "gated-ds")], Some(dataset("user\nalice\nbob\n")))
+        .export(&ExportOptions { include_secrets: false, dataset_file: " report.dataset.csv".into() })
+        .expect("exported");
+    let doc_gd = Doc::parse(&out_gd.jmx);
+    let csv_gd = doc_gd.first("CSVDataSet");
+    assert_eq!(doc_gd.prop(csv_gd, "filename"), "./ report.dataset.csv");
+    let csv_gd_parent = csv_gd.parent().and_then(|ht| ht.prev_sibling_element()).map(|el| el.tag_name().name().to_string());
+    assert_eq!(csv_gd_parent.as_deref(), Some("LoopController"), "gated CSVDataSet must live inside the gated 1-loop LoopController");
+
+    // Default jmeter_properties explicitly disable response/header/samplerData/on_error capture.
+    for prop in [
+        "jmeter.save.saveservice.response_data",
+        "jmeter.save.saveservice.response_data.on_error",
+        "jmeter.save.saveservice.samplerData",
+        "jmeter.save.saveservice.requestHeaders",
+        "jmeter.save.saveservice.responseHeaders",
+    ] {
+        assert!(
+            out_gd.report.jmeter_properties.iter().any(|(k, v)| k == prop && v == "false"),
+            "missing default capture-disable property {prop}=false: {:?}",
+            out_gd.report.jmeter_properties
+        );
+    }
 }

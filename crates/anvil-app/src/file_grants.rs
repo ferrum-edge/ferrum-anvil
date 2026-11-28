@@ -1159,7 +1159,7 @@ impl PinnedOutput {
     /// publish it after verifying the leaf is neither a symlink nor any
     /// `protected` file identity.
     pub fn write_atomic_guarded(&self, bytes: &[u8], protected: &[PinnedFileId]) -> std::io::Result<PinnedFileId> {
-        self.stage(bytes, false)?.publish_guarded(false, protected)
+        self.stage(bytes, false)?.publish_guarded(false, protected).map_err(Into::into)
     }
 }
 
@@ -1178,41 +1178,70 @@ impl Drop for StagedPinnedOutput<'_> {
     }
 }
 
+/// Error returned by [`StagedPinnedOutput::publish_guarded`], indicating
+/// whether the staged file already landed at the destination before a
+/// post-publish verification step failed.
+#[derive(Debug)]
+pub struct PublishError {
+    pub published: bool,
+    pub source: std::io::Error,
+}
+
+impl std::fmt::Display for PublishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl std::error::Error for PublishError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl From<PublishError> for std::io::Error {
+    fn from(err: PublishError) -> Self {
+        err.source
+    }
+}
+
 impl StagedPinnedOutput<'_> {
     /// Atomically publish the staged file inside the pinned directory after
     /// checking via no-follow metadata lookup (`entry_identity`) that the leaf
     /// is neither a symlink nor any `protected` file identity. Any metadata
     /// lookup error other than `NotFound` fails closed without publishing.
-    pub fn publish_guarded(mut self, no_clobber: bool, protected: &[PinnedFileId]) -> std::io::Result<PinnedFileId> {
-        match self.output.dir.entry_identity(&self.output.name)? {
+    pub fn publish_guarded(mut self, no_clobber: bool, protected: &[PinnedFileId]) -> Result<PinnedFileId, PublishError> {
+        let pre = |source| PublishError { published: false, source };
+        let post = |source| PublishError { published: true, source };
+        match self.output.dir.entry_identity(&self.output.name).map_err(pre)? {
             None => {}
             Some((true, _)) => {
-                return Err(std::io::Error::new(
+                return Err(pre(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "destination is a symbolic link; refusing to write through or replace a symlink",
-                ));
+                )));
             }
             Some((false, existing_id)) if protected.contains(&PinnedFileId(existing_id)) => {
-                return Err(std::io::Error::new(
+                return Err(pre(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "destination resolves to a protected input or sibling output file; refusing to overwrite",
-                ));
+                )));
             }
             Some((false, _)) => {}
         }
         if no_clobber {
-            self.output.dir.publish_staged_no_clobber(&self.tmp, &self.output.name)?;
+            self.output.dir.publish_staged_no_clobber(&self.tmp, &self.output.name).map_err(pre)?;
         } else {
-            self.output.dir.rename_staged(&self.tmp, &self.output.name)?;
+            self.output.dir.rename_staged(&self.tmp, &self.output.name).map_err(pre)?;
         }
         self.published = true;
         // Re-read the published entry's file identity so filesystems where
         // rename changes FileId (e.g. FAT32/exFAT) still protect the published
         // sibling from subsequent aliasing writes; fail closed if identity
         // verification fails rather than falling back to a potentially stale ID.
-        match self.output.dir.entry_identity(&self.output.name)? {
+        match self.output.dir.entry_identity(&self.output.name).map_err(post)? {
             Some((false, id)) => Ok(PinnedFileId(id)),
-            _ => Err(std::io::Error::other("cannot verify published file identity")),
+            _ => Err(post(std::io::Error::other("cannot verify published file identity"))),
         }
     }
 }
