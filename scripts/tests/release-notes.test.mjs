@@ -565,3 +565,68 @@ print(json.dumps({"own": m.ready_in(log, 222), "other": m.ready_in(log, 333), "f
   assert.deepEqual(out.warm, { median: 20, min: 10, max: 30, n: 2 }, "every valid later launch is in the later median");
   assert.deepEqual(out.atts, ["a", "b"]);
 });
+
+test("the performance harness never force-stops provisional helpers, handles early exit and listing failure, and summarizes missing lanes", () => {
+  const script = `
+import importlib.util, json, os, sys, tempfile
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("m", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+
+# 1. PID reuse does not match alive() or force_stop().
+orig_procs = m.processes
+killed = []
+m.processes = lambda: [{"pid": 500, "ppid": 1, "start": "Sat Nov 28 06:00:00 2026", "name": "unrelated", "rss": 1}]
+assert m.alive({(500, "Sat Nov 28 05:00:00 2026", "WebKitWebProcess")}) == set()
+assert m.alive({(500, "Sat Nov 28 06:00:00 2026", "unrelated")}) == {(500, "Sat Nov 28 06:00:00 2026", "unrelated")}
+
+# 2. macOS shared-responsible-pid and pid-delta helpers are provisional (verified=False).
+m.SYSTEM = "Darwin"
+m.responsible_pid = lambda pid: 99 if pid in (100, 200) else None
+rows = [
+    {"pid": 100, "ppid": 99, "start": "T1", "name": "anvil-desktop", "rss": 10},
+    {"pid": 200, "ppid": 1, "start": "T2", "name": "com.apple.WebKit.WebContent", "rss": 20},
+]
+found, method, verified = m.helpers(rows, 100, set())
+assert len(found) == 1 and verified is False and "provisional" in method
+
+# 3. Teardown still calls stop() on early exit and when processes() raises during cleanup.
+stopped = []
+class DummyProc:
+    pid = 777
+    def poll(self):
+        return 1  # already exited early
+m.SYSTEM = "Linux"
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: None
+call_n = {"n": 0}
+def flaky_procs():
+    call_n["n"] += 1
+    if call_n["n"] == 1:
+        return []
+    raise RuntimeError("ps failed")
+m.processes = flaky_procs
+m.subprocess.Popen = lambda *a, **kw: DummyProc()
+m.stop = lambda p: stopped.append(p.pid)
+r = m.one_run("/bin/true", 0, 0.05, 1)
+assert stopped == [777], f"expected stop() on early exit + listing failure, got {stopped}"
+assert r["stopped_cleanly"] is False and r["cleanup_unconfirmed"] is True
+
+# 4. summarize.py emits explicit missing-lane rows.
+spec2 = importlib.util.spec_from_file_location("s", sys.argv[2])
+s = importlib.util.module_from_spec(spec2); spec2.loader.exec_module(s)
+import io, contextlib
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc = s.main(["--expect", "Darwin:runner 1", "--expect", "Linux:runner 1"])
+assert rc == 0
+out = buf.getvalue()
+assert "Darwin runner 1 | missing (no result uploaded)" in out
+assert "Linux runner 1 | missing (no result uploaded)" in out
+print("OK")
+`;
+  const r = spawnSync("python3", ["-I", "-c", script, join(root, "scripts", "perf", "measure_desktop.py"), join(root, "scripts", "perf", "summarize.py")], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "OK");
+});

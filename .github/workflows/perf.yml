@@ -146,14 +146,28 @@ jobs:
       - name: Summarize
         shell: bash
         run: |
+          mkdir -p results
           shopt -s nullglob
           files=(results/perf-*.json)
-          [ "${#files[@]}" -gt 0 ] || { echo "::error::no measurement results"; exit 1; }
           # To a file first: the job summary only gets a table the parser finished.
-          python3 -I scripts/perf/summarize.py "${files[@]}" > results/summary.md
+          python3 -I scripts/perf/summarize.py \
+            --expect "Darwin:runner 1" \
+            --expect "Darwin:runner 2" \
+            --expect "Linux:runner 1" \
+            --expect "Linux:runner 2" \
+            --expect "Windows:runner 1" \
+            --expect "Windows:runner 2" \
+            "${files[@]}" > results/summary.md
           cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
         with:
           name: perf-summary
           path: results/
           retention-days: 90
+      - name: Require all six measurement lanes
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(results/perf-*.json)
+          [ "${#files[@]}" -eq 6 ] || { echo "::error::expected 6 measurement results, got ${#files[@]}"; exit 1; }

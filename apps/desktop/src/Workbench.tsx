@@ -84,13 +84,18 @@ function storedLayout(): Layout {
 const NOT_FOUND = /not.?found/i;
 
 export function Workbench(props: { onLock: () => void; profileName: string }) {
-  // The workbench is a usable first screen too (an unlocked launch): the
-  // backend logs only the first report of a process.
-  useEffect(() => {
-    void api.uiReady();
-  }, []);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [ws, setWs] = useState<Workspace | null>(null);
+  const [workspacesSettled, setWorkspacesSettled] = useState(false);
+  // The workbench is usable once the initial workspace read (or default
+  // workspace creation) finishes and enables workspace actions: the backend
+  // logs only the first report of a process.
+  const readyReported = useRef(false);
+  useEffect(() => {
+    if (readyReported.current || !workspacesSettled) return;
+    readyReported.current = true;
+    void api.uiReady();
+  }, [workspacesSettled]);
   const [envs, setEnvs] = useState<Environment[]>([]);
   const [tree, setTree] = useState<TreeNode[]>([]);
   // The workspace whose tree is shown: until the selected one's arrives, it is loading.
@@ -170,6 +175,7 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
     if (n !== workspaceReads.current) return;
     setWorkspaces(list);
     setWs((cur) => list.find((w) => w.id === (selectId ?? cur?.id)) ?? list[0]);
+    setWorkspacesSettled(true);
   }, []);
   // A workspace's lists (tree, history, profiles, environments) are shown only
   // from their latest read, and only while that workspace is still selected:
@@ -216,7 +222,10 @@ export function Workbench(props: { onLock: () => void; profileName: string }) {
   }, [ws]);
 
   useEffect(() => {
-    void loadWorkspaces().catch(fail);
+    void loadWorkspaces().catch((e) => {
+      fail(e);
+      setWorkspacesSettled(true);
+    });
     api.systemInfo().then((i) => setCatalog(i.catalog), fail);
     api.settings().then((s) => document.documentElement.setAttribute("data-theme", s.theme), fail);
   }, []);

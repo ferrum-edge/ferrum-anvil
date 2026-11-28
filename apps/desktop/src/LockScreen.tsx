@@ -154,6 +154,7 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: LockReason 
   // Default: start without a password; the data key goes to the OS keychain.
   const [useKeychain, setUseKeychain] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [autoOpenDone, setAutoOpenDone] = useState(false);
   const [enrollmentPass, setEnrollmentPass] = useState("");
   const [enrollmentRepeat, setEnrollmentRepeat] = useState("");
   const fail = (on: Screen["kind"], message: string) => dispatch({ type: "failed", on, message });
@@ -187,23 +188,25 @@ export function LockScreen(props: { onUnlocked: () => void; reason?: LockReason 
         } catch (e) {
           fail("autoOpening", String((e as Error).message));
         } finally {
+          setAutoOpenDone(true);
           dispatch({ type: "autoOpenEnded" });
         }
       }
     });
   }, []);
 
-  // Once the profiles are read and a form is on screen (not the launch-time
-  // auto-open of a single keychain profile, which goes on to the workbench),
+  // Once the profiles are read and a form is on screen (not while the
+  // launch-time auto-open of a single keychain profile is still pending — if
+  // auto-open fails and falls back to the unlock form, report ready then),
   // the UI is usable: report it once (the backend logs the ui_ready startup
   // milestone the performance workflow times; docs/performance.md).
   const readyReported = useRef(false);
   useEffect(() => {
     if (readyReported.current || profiles === null || screen.kind !== "form") return;
-    if (!props.reason && profiles.length === 1 && profiles[0].protection === "os_keychain") return;
+    if (!autoOpenDone && !props.reason && profiles.length === 1 && profiles[0].protection === "os_keychain") return;
     readyReported.current = true;
     void api.uiReady();
-  }, [profiles, screen.kind, props.reason]);
+  }, [profiles, screen.kind, props.reason, autoOpenDone]);
 
   // Any lock that lands while this screen shows (counted by App, since two in a
   // row may share a reason) leaves the screens only an unlocked backend backs.

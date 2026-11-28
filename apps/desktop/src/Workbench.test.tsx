@@ -2218,3 +2218,25 @@ describe("reimporting a changed spec", () => {
     expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("A");
   });
 });
+
+describe("workbench startup milestone", () => {
+  it("reports ui_ready only after the initial workspace read finishes", async () => {
+    let resolveWorkspaces: (list: Workspace[]) => void = () => {};
+    const pending = new Promise<Workspace[]>((resolve) => {
+      resolveWorkspaces = resolve;
+    });
+    backend({
+      workspaces_list: () => pending,
+      app_ui_ready: () => null,
+    });
+    render(<Workbench onLock={vi.fn()} profileName="Local" />);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(invoke).not.toHaveBeenCalledWith("app_ui_ready", undefined);
+
+    await act(async () => {
+      resolveWorkspaces([workspace("A", "One")]);
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("app_ui_ready", undefined));
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "app_ui_ready")).toHaveLength(1);
+  });
+});

@@ -101,6 +101,17 @@ pub fn run() {
                 }
                 Err(err) => eprintln!("no log directory: {err}"),
             }
+            // Build the configured main window here so Windows perf/test runs
+            // can supply a benchmark-owned WebView2 user-data folder via
+            // WEBVIEW2_USER_DATA_FOLDER without sharing the user's session.
+            if let Some(win_cfg) = app.config().app.windows.first() {
+                let mut win = tauri::WebviewWindowBuilder::from_config(app.handle(), win_cfg)?;
+                #[cfg(target_os = "windows")]
+                if let Some(dir) = std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").filter(|v| !v.is_empty()) {
+                    win = win.data_directory(std::path::PathBuf::from(dir));
+                }
+                win.build()?;
+            }
             #[cfg(feature = "e2e")]
             e2e_unlock(&app.state::<DesktopState>());
             let notify = app.handle().clone();

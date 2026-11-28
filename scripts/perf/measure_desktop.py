@@ -7,7 +7,11 @@ Standard library only; run by .github/workflows/perf.yml on macOS, Linux
 (under Xvfb) and Windows against the release-profile app (default features,
 no test hooks). Each run:
 
-1. starts the app with a fresh, empty ANVIL_DATA_DIR (the first-run screen);
+1. starts the app with a fresh, empty ANVIL_DATA_DIR (the first-run screen)
+   and, on Windows, a fresh temporary WEBVIEW2_USER_DATA_FOLDER so each launch
+   owns an isolated WebView2 browser session (later launches do not reuse a
+   warm WebView2 disk cache; on Linux, WebKitGTK retains the runner's normal
+   XDG disk state);
 2. times, from just before the process is started, until the app's log file
    gains a `startup milestone milestone="ui_ready" pid=<pid>` line carrying
    the pid of the process it started (another instance's line never counts).
@@ -17,21 +21,29 @@ no test hooks). Each run:
 3. waits --idle seconds at that screen, then reads the resident memory of the
    app process and of its webview processes, identified by name and owner:
    - Linux: WebKitWebProcess, WebKitNetworkProcess and WebKitGPUProcess that
-     descend from the app (sandbox wrappers such as bwrap are not counted);
+     descend from the app (verified per-launch process tree; sandbox wrappers
+     such as bwrap are not counted);
    - Windows: msedgewebview2.exe processes that descend from the app
-     (working set, and private bytes);
-   - macOS: WebKit's com.apple.WebKit.* XPC services, started by launchd, so
-     attributed by `launchctl procinfo`'s "responsible pid". If procinfo gives
-     no responsible pid for any of them, the services not running before the
-     launch are taken (recorded as the weaker "pid delta" attribution), never
-     one that procinfo names another owner for.
+     (verified per-launch process tree inside the isolated WebView2 session;
+     working set and private bytes);
+   - macOS: WebKit's com.apple.WebKit.* XPC services, started by launchd:
+     first attributed by `launchctl procinfo`'s `responsible pid == app_pid`
+     (verified per-launch ownership). When the binary is spawned directly
+     rather than through LaunchServices, macOS assigns both the app and its
+     XPC helpers the spawning shell/runner as their responsible pid; the
+     harness then falls back to provisional attribution (new WebKit services
+     sharing the app's responsible pid, or pid delta when procinfo returns no
+     owners). Provisional attribution is reported explicitly and is never used
+     to authorize SIGKILL.
    A launch whose app process or webview content process (WebKitWebProcess,
    com.apple.WebKit.WebContent, msedgewebview2.exe) cannot be found records an
    error, not a number;
-4. stops the app and its attributed processes and waits until they are gone.
-   A process that outlives the wait is stopped by force only if it is the
-   app's own (attributed above); the launch then records an error, and if
-   any of them is still running no further launch starts.
+4. stops the app process tree/group (even after an early app exit or a failed
+   process listing) and verifies by (pid, start_time, name) identity that every
+   attributed process exited. Only verified per-launch processes whose identity
+   still matches are ever force-stopped. If cleanup cannot be confirmed (a
+   verified or provisional helper still runs, or process enumeration fails),
+   the launch records an error and no further launch starts.
 
 The first launch of a job follows the artifact's extraction on the same VM,
 so its file cache state is not controlled: it is reported as the first
@@ -65,6 +77,12 @@ LINUX_WEBVIEW = {"WebKitWebProcess", "WebKitNetworkProcess", "WebKitGPUProcess"}
 CONTENT = {"Linux": "WebKitWebProcess", "Windows": "msedgewebview2.exe", "Darwin": "com.apple.WebKit.WebContent"}
 SYSTEM = platform.system()
 MIB = 1024 * 1024
+
+ProcId = tuple[int, str, str]  # (pid, start_time, image_name)
+
+
+def proc_identity(row: dict) -> ProcId:
+    return (int(row["pid"]), str(row.get("start") or ""), str(row.get("name") or ""))
 
 
 def log_dirs() -> list[Path]:
@@ -113,33 +131,40 @@ def ready_line(start_sizes: dict[Path, int], pid: int) -> int | None:
 
 # ------------------------------------------------------------- processes
 def processes() -> list[dict]:
-    """Every process: pid, ppid, name, rss (bytes), and on Windows private bytes."""
+    """Every process: pid, ppid, start, name, rss (bytes), and on Windows private bytes."""
     if SYSTEM == "Windows":
         ps = (
-            "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,WorkingSetSize,PrivatePageCount"
+            "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,"
+            "WorkingSetSize,PrivatePageCount,@{Name='Start';Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')} else {''}}}"
             " | ConvertTo-Json -Compress"
         )
         out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, check=True).stdout
         rows = json.loads(out)
+        if isinstance(rows, dict):
+            rows = [rows]
         return [
             {
                 "pid": int(r["ProcessId"]),
                 "ppid": int(r["ParentProcessId"] or 0),
+                "start": str(r.get("Start") or ""),
                 "name": r["Name"] or "",
                 "rss": int(r["WorkingSetSize"] or 0),
                 "private": int(r["PrivatePageCount"] or 0),
             }
             for r in rows
         ]
-    out = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,args="], capture_output=True, text=True, check=True).stdout
+    env = dict(os.environ, LC_ALL="C")
+    out = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,lstart=,args="], capture_output=True, text=True, check=True, env=env).stdout
     rows = []
     for line in out.splitlines():
-        parts = line.split(None, 3)
-        if len(parts) < 4:
+        parts = line.split(None, 8)
+        if len(parts) < 9:
             continue
+        # lstart is 5 fixed tokens under LC_ALL=C: Dow Mon DD HH:MM:SS YYYY.
+        start = " ".join(parts[3:8])
         # The image name: argv[0]'s basename (comm is truncated on Linux).
-        argv0 = parts[3].strip().split(" ")[0]
-        rows.append({"pid": int(parts[0]), "ppid": int(parts[1]), "rss": int(parts[2]) * 1024, "name": os.path.basename(argv0)})
+        argv0 = parts[8].strip().split(" ")[0]
+        rows.append({"pid": int(parts[0]), "ppid": int(parts[1]), "rss": int(parts[2]) * 1024, "start": start, "name": os.path.basename(argv0)})
     return rows
 
 
@@ -169,70 +194,92 @@ def is_mac_webkit(name: str) -> bool:
     return name.startswith("com.apple.WebKit.")
 
 
-def helpers(rows: list[dict], app_pid: int, before: set[int]) -> tuple[list[dict], str]:
-    """The app's webview processes and how they were attributed."""
+def helpers(rows: list[dict], app_pid: int, before: set[ProcId]) -> tuple[list[dict], str, bool]:
+    """The app's webview processes, attribution label, and whether ownership is verified per-launch."""
     if SYSTEM == "Darwin":
         webkit = [r for r in rows if is_mac_webkit(r["name"])]
         owners = {r["pid"]: responsible_pid(r["pid"]) for r in webkit}
         attributed = [r for r in webkit if owners[r["pid"]] == app_pid]
         if attributed:
-            return attributed, "launchctl procinfo responsible pid"
+            return attributed, "launchctl procinfo responsible pid", True
         app_owner = responsible_pid(app_pid)
         if app_owner is not None and app_owner != app_pid:
             # When the binary is spawned directly (not through LaunchServices),
             # macOS gives both the app and its XPC WebKit helpers the spawning
-            # runner/shell as their responsible pid. Restrict to helpers that
-            # share that responsible pid and were not running before launch so
-            # unrelated WebKit processes stay excluded.
-            shared = [r for r in webkit if owners[r["pid"]] == app_owner and r["pid"] not in before]
+            # runner/shell as their responsible pid. Mark this provisional so it
+            # is never used to authorize SIGKILL.
+            shared = [r for r in webkit if owners[r["pid"]] == app_owner and proc_identity(r) not in before]
             if shared:
-                return shared, "launchctl procinfo shared responsible pid + pid delta"
+                return shared, "launchctl procinfo shared responsible pid + pid delta (provisional)", False
         if any(o is not None for o in owners.values()):
             # procinfo works here but names no WebKit service of this app.
-            return [], "launchctl procinfo responsible pid"
-        # procinfo gives no owner on this runner: new services, never one with another owner.
-        return [r for r in webkit if r["pid"] not in before], "pid delta (WebKit services not running before the launch; weaker)"
+            return [], "launchctl procinfo responsible pid", True
+        # procinfo gives no owner on this runner: provisional pid-delta only, never kill-eligible.
+        return [r for r in webkit if proc_identity(r) not in before], "pid delta (provisional; WebKit services not running before the launch)", False
     tree = descendants(rows, app_pid)
     if SYSTEM == "Windows":
-        return [r for r in tree if r["name"].lower() == "msedgewebview2.exe"], "process tree (msedgewebview2.exe descendants of the app)"
-    return [r for r in tree if r["name"] in LINUX_WEBVIEW], "process tree (WebKitGTK processes descending from the app)"
+        return [r for r in tree if r["name"].lower() == "msedgewebview2.exe"], "process tree (msedgewebview2.exe descendants of the app)", True
+    return [r for r in tree if r["name"] in LINUX_WEBVIEW], "process tree (WebKitGTK processes descending from the app)", True
 
 
 def stop(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
+    """Stop the app and its launch process group/tree, even if the app PID already exited."""
     if SYSTEM == "Windows":
         subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
-    else:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=15)
+        return
     try:
-        proc.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        if SYSTEM != "Windows":
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    if proc.poll() is None:
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.kill()
+            proc.wait(timeout=15)
+    else:
+        # Parent already exited: escalate to SIGKILL on the process group after a brief grace
+        # so surviving Linux session children do not linger.
+        time.sleep(0.2)
+        try:
             os.killpg(proc.pid, signal.SIGKILL)
-        proc.kill()
-        proc.wait(timeout=15)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
-def alive(pids: set[int]) -> set[int]:
-    return {r["pid"] for r in processes()} & pids
+def alive(expected: set[ProcId]) -> set[ProcId]:
+    """Return identities from `expected` that still match a live process by (pid, start, name)."""
+    if not expected:
+        return set()
+    current = {proc_identity(r) for r in processes()}
+    return current & expected
 
 
-def wait_gone(pids: set[int], timeout: float = 30) -> bool:
+def wait_gone(expected: set[ProcId], timeout: float = 30) -> bool:
+    if not expected:
+        return True
     end = time.monotonic() + timeout
     while time.monotonic() < end:
-        if not alive(pids):
+        if not alive(expected):
             return True
         time.sleep(0.5)
     return False
 
 
-def force_stop(pids: set[int]) -> None:
-    """Stop processes this launch owns (the app and its attributed webview processes)."""
-    for pid in pids:
+def force_stop(verified_expected: set[ProcId]) -> None:
+    """Force-stop ONLY verified per-launch processes whose (pid, start, name) still matches."""
+    still_live = alive(verified_expected)
+    for pid, _start, _name in sorted(still_live):
         try:
             if SYSTEM == "Windows":
                 subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
@@ -246,9 +293,11 @@ def force_stop(pids: set[int]) -> None:
 def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
     data_dir = tempfile.mkdtemp(prefix="anvil-perf-")
     env = dict(os.environ, ANVIL_DATA_DIR=data_dir)
-    before = {r["pid"] for r in processes()}
+    if SYSTEM == "Windows":
+        env["WEBVIEW2_USER_DATA_FOLDER"] = os.path.join(data_dir, "webview2")
+    before = {proc_identity(r) for r in processes()}
     sizes = log_size()
-    kwargs = {"env": env, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    kwargs: dict = {"env": env, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if SYSTEM == "Windows":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
@@ -256,10 +305,19 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
     t0 = time.monotonic()
     proc = subprocess.Popen([app], **kwargs)
     result: dict = {"run": index, "pid": proc.pid}
-    owned: set[int] = {proc.pid}
+    verified_owned: set[ProcId] = set()
+    provisional_owned: set[ProcId] = set()
     try:
+        # Capture the app's stable (pid, start, name) as soon as it appears.
         startup_ms = None
         while time.monotonic() - t0 < timeout:
+            if not verified_owned:
+                try:
+                    app_row = next((r for r in processes() if r["pid"] == proc.pid), None)
+                    if app_row is not None:
+                        verified_owned.add(proc_identity(app_row))
+                except Exception:
+                    pass
             startup_ms = ready_line(sizes, proc.pid)
             if startup_ms is not None or proc.poll() is not None:
                 break
@@ -276,9 +334,15 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
             return result
         rows = processes()
         app_row = next((r for r in rows if r["pid"] == proc.pid), None)
-        found, method = helpers(rows, proc.pid, before)
-        owned |= {h["pid"] for h in found}
+        found, method, verified = helpers(rows, proc.pid, before)
+        if app_row is not None:
+            verified_owned.add(proc_identity(app_row))
+        if verified:
+            verified_owned |= {proc_identity(h) for h in found}
+        else:
+            provisional_owned |= {proc_identity(h) for h in found}
         result["attribution"] = method
+        result["attribution_verified"] = verified
         if app_row is None:
             result["error"] = "the app process was not found in the process list"
             return result
@@ -294,18 +358,56 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
         result["total_rss_mib"] = round(result["app_rss_mib"] + result["helpers_rss_mib"], 1)
         return result
     finally:
-        # Webview processes that appeared after the sample are the app's too
-        # if they descend from it (Linux, Windows) or name it as owner (macOS).
-        if proc.poll() is None:
-            later, _ = helpers(processes(), proc.pid, before)
-            owned |= {h["pid"] for h in later}
-        stop(proc)
-        result["stopped_cleanly"] = wait_gone(owned)
-        if not result["stopped_cleanly"]:
-            left = alive(owned)
-            force_stop(left)
-            result["error"] = result.get("error") or f"processes {sorted(left)} outlived the app's stop (stopped by force)"
-            result["left_running"] = sorted(alive(owned)) if not wait_gone(owned, 15) else []
+        cleanup_error = None
+        # Discover any additional helpers before stopping, without letting a
+        # process-listing error block stopping the app.
+        try:
+            pre_stop_rows = processes()
+            app_row = next((r for r in pre_stop_rows if r["pid"] == proc.pid), None)
+            if app_row is not None:
+                verified_owned.add(proc_identity(app_row))
+            later, _method, verified = helpers(pre_stop_rows, proc.pid, before)
+            if verified:
+                verified_owned |= {proc_identity(h) for h in later}
+            else:
+                provisional_owned |= {proc_identity(h) for h in later}
+        except Exception as exc:
+            cleanup_error = f"process listing failed during teardown: {exc}"
+        try:
+            stop(proc)
+        except Exception as exc:
+            cleanup_error = cleanup_error or f"failed to stop app process: {exc}"
+
+        try:
+            verified_gone = wait_gone(verified_owned)
+            provisional_gone = wait_gone(provisional_owned)
+            result["stopped_cleanly"] = verified_gone and provisional_gone and cleanup_error is None
+            if not verified_gone:
+                left_verified = alive(verified_owned)
+                force_stop(left_verified)
+                verified_gone = wait_gone(verified_owned, 15)
+                still_verified = sorted(pid for pid, _, _ in alive(verified_owned)) if not verified_gone else []
+                result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in left_verified)} outlived the app's stop (stopped by force)"
+                if still_verified:
+                    result["left_running"] = still_verified
+            if not provisional_gone:
+                still_provisional = sorted(pid for pid, _, _ in alive(provisional_owned))
+                if still_provisional:
+                    # Never SIGKILL heuristically attributed processes; abort further launches instead.
+                    result["cleanup_unconfirmed"] = True
+                    result["provisional_left_running"] = still_provisional
+                    result["error"] = result.get("error") or (
+                        f"provisional helpers {still_provisional} were still running after stop "
+                        "(not force-stopped; aborting further launches)"
+                    )
+        except Exception as exc:
+            cleanup_error = cleanup_error or f"process listing failed while confirming teardown: {exc}"
+
+        if cleanup_error is not None:
+            result["stopped_cleanly"] = False
+            result["cleanup_unconfirmed"] = True
+            result["cleanup_error"] = cleanup_error
+            result["error"] = result.get("error") or cleanup_error
         shutil.rmtree(data_dir, ignore_errors=True)
 
 
@@ -342,34 +444,46 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--label", default="")
     args = ap.parse_args()
-    runs = []
-    for i in range(1, args.runs + 1):
-        r = one_run(args.app, args.idle, args.timeout, i)
-        print(json.dumps(r), flush=True)
-        runs.append(r)
-        if r.get("left_running"):
-            # A process of this launch still runs: a further launch would share it.
-            print(f"stopping: processes {r['left_running']} of launch {i} are still running", flush=True)
-            break
-    result = {
-        "format": "anvil-desktop-perf",
-        "version": 1,
-        "label": args.label,
-        "os": SYSTEM,
-        "platform": platform.platform(),
-        "machine": platform.machine(),
-        "runner": os.environ.get("RUNNER_NAME"),
-        "image": os.environ.get("ImageOS"),
-        "image_version": os.environ.get("ImageVersion"),
-        "commit": os.environ.get("GITHUB_SHA"),
-        "app": args.app,
-        "idle_seconds": args.idle,
-        "runs": runs,
-        "summary": summarize(runs),
-    }
-    Path(args.out).write_text(json.dumps(result, indent=2) + "\n")
-    print(json.dumps(result["summary"], indent=2))
-    return 0 if result["summary"]["runs_failed"] == 0 else 1
+    runs: list[dict] = []
+    aborted_error: str | None = None
+    try:
+        for i in range(1, args.runs + 1):
+            try:
+                r = one_run(args.app, args.idle, args.timeout, i)
+            except Exception as exc:
+                r = {"run": i, "error": f"unexpected harness error: {exc}", "cleanup_unconfirmed": True}
+                runs.append(r)
+                print(json.dumps(r), flush=True)
+                aborted_error = str(exc)
+                break
+            print(json.dumps(r), flush=True)
+            runs.append(r)
+            if r.get("left_running") or r.get("cleanup_unconfirmed"):
+                # Cleanup could not be confirmed: a further launch could share state or helpers.
+                print(f"stopping: cleanup unconfirmed after launch {i}", flush=True)
+                break
+    finally:
+        result = {
+            "format": "anvil-desktop-perf",
+            "version": 1,
+            "label": args.label,
+            "os": SYSTEM,
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+            "runner": os.environ.get("RUNNER_NAME"),
+            "image": os.environ.get("ImageOS"),
+            "image_version": os.environ.get("ImageVersion"),
+            "commit": os.environ.get("GITHUB_SHA"),
+            "app": args.app,
+            "idle_seconds": args.idle,
+            "runs": runs,
+            "summary": summarize(runs),
+        }
+        if aborted_error is not None:
+            result["aborted_error"] = aborted_error
+        Path(args.out).write_text(json.dumps(result, indent=2) + "\n")
+        print(json.dumps(result["summary"], indent=2))
+    return 0 if result["summary"]["runs_failed"] == 0 and len(runs) == args.runs else 1
 
 
 if __name__ == "__main__":

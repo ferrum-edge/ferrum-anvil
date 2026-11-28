@@ -304,4 +304,17 @@ describe("startup milestone", () => {
     await waitFor(() => expect(onUnlocked).toHaveBeenCalled());
     expect(invoke).not.toHaveBeenCalledWith("app_ui_ready", undefined);
   });
+
+  it("reports ready when launch-time auto-open of a single keychain profile fails and falls back to the unlock form", async () => {
+    backend([{ profile_id: "k1", display_name: "Local", protection: "os_keychain" }], {
+      profile_unlock: () => Promise.reject(new Error("keychain unavailable")),
+      app_ui_ready: () => null,
+    });
+    const onUnlocked = vi.fn();
+    render(<LockScreen onUnlocked={onUnlocked} />);
+    await screen.findByText(/keychain unavailable/);
+    expect(onUnlocked).not.toHaveBeenCalled();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("app_ui_ready", undefined));
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "app_ui_ready")).toHaveLength(1);
+  });
 });
