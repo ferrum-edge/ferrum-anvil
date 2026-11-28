@@ -341,3 +341,131 @@ fn a_peer_outside_its_agreed_window_is_refused() {
     assert_eq!(ws.read().unwrap(), Message::Text("Hello".into()));
     assert!(matches!(ws.read(), Err(Error::Protocol(ProtocolError::InvalidCompressedMessage(_)))));
 }
+
+struct FixedBitWriter {
+    out: Vec<u8>,
+    acc: u64,
+    nbits: u8,
+}
+
+impl FixedBitWriter {
+    fn new() -> Self {
+        Self { out: Vec::new(), acc: 0, nbits: 0 }
+    }
+
+    fn push_lsb(&mut self, val: u64, n: u8) {
+        self.acc |= (val & ((1u64 << n) - 1)) << self.nbits;
+        self.nbits += n;
+        while self.nbits >= 8 {
+            self.out.push((self.acc & 0xff) as u8);
+            self.acc >>= 8;
+            self.nbits -= 8;
+        }
+    }
+
+    fn push_msb(&mut self, val: u16, n: u8) {
+        let rev = (val.reverse_bits() >> (16 - n)) as u64;
+        self.push_lsb(rev, n);
+    }
+
+    fn push_distance(&mut self, dist: usize) {
+        const DIST_BASE: [usize; 30] = [
+            1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289,
+            16385, 24577,
+        ];
+        const DIST_EXTRA: [u8; 30] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+        let sym = DIST_BASE.partition_point(|&b| b <= dist) - 1;
+        self.push_msb(sym as u16, 5);
+        let extra = DIST_EXTRA[sym];
+        if extra > 0 {
+            self.push_lsb((dist - DIST_BASE[sym]) as u64, extra);
+        }
+    }
+
+    fn finish_sync(mut self) -> Vec<u8> {
+        self.push_lsb(0, 3);
+        if self.nbits > 0 {
+            self.out.push((self.acc & 0xff) as u8);
+        }
+        self.out
+    }
+}
+
+/// Fixed-Huffman permessage-deflate payload containing `literals` (ASCII `<= 143`)
+/// followed by a 3-byte match at exact distance `dist` (if `Some`).
+fn fixed_block_with_backref(literals: &[u8], dist: Option<usize>) -> Vec<u8> {
+    let mut w = FixedBitWriter::new();
+    // BFINAL=0, BTYPE=01 (fixed Huffman).
+    w.push_lsb(0b010, 3);
+    for &b in literals {
+        assert!(b <= 143);
+        w.push_msb(48 + b as u16, 8);
+    }
+    if let Some(d) = dist {
+        // Length 3 (symbol 257, 7-bit fixed code 0000001).
+        w.push_msb(1, 7);
+        w.push_distance(d);
+    }
+    // EOB (symbol 256, 7-bit fixed code 0000000).
+    w.push_msb(0, 7);
+    w.finish_sync()
+}
+
+#[test]
+fn window_boundaries_context_takeover_limit_and_bfinal_under_small_windows() {
+    // Exact boundary enforcement for 8-bit (256 allowed, 257 refused) and 9-bit (512 allowed, 513 refused).
+    for (bits, ok_dist, bad_dist) in [(8u8, 256usize, 257usize), (9u8, 512usize, 513usize)] {
+        let cfg = Some(DeflateConfig { decompress_window_bits: bits, ..DeflateConfig::default() });
+        let prefix_ok: Vec<u8> = (0..ok_dist).map(|i| b'a' + (i % 26) as u8).collect();
+        let mut expected_ok = prefix_ok.clone();
+        expected_ok.extend_from_slice(&prefix_ok[..3]);
+        let payload_ok = fixed_block_with_backref(&prefix_ok, Some(ok_dist));
+        // Also split across fragments to exercise streaming state across chunks.
+        let (a, b) = payload_ok.split_at(payload_ok.len() / 2);
+        let mut ws = client(frames(&[&frame(0x41, a), &frame(0x80, b)]), cfg, 1 << 16);
+        assert_eq!(ws.read().unwrap(), Message::Text(String::from_utf8(expected_ok).unwrap().into()));
+
+        let prefix_bad: Vec<u8> = (0..bad_dist).map(|i| b'a' + (i % 26) as u8).collect();
+        let payload_bad = fixed_block_with_backref(&prefix_bad, Some(bad_dist));
+        let mut ws = client(frame(0xc1, &payload_bad), cfg, 1 << 16);
+        assert!(
+            matches!(ws.read(), Err(Error::Protocol(ProtocolError::InvalidCompressedMessage(_)))),
+            "bits={bits} must reject distance {bad_dist}"
+        );
+    }
+
+    // Valid cross-message reference within an 8-bit window succeeds under context takeover
+    // and fails after reset when no_context_takeover is set.
+    let msg1_data: Vec<u8> = (0..200).map(|i| b'a' + (i % 26) as u8).collect();
+    let msg1 = frame(0xc1, &fixed_block_with_backref(&msg1_data, None));
+    let msg2 = frame(0xc1, &fixed_block_with_backref(&[], Some(200)));
+    let msg2_expected = String::from_utf8(msg1_data[..3].to_vec()).unwrap();
+    let w8 = DeflateConfig { decompress_window_bits: 8, ..DeflateConfig::default() };
+    let mut ws = client(frames(&[&msg1, &msg2]), Some(w8), 1 << 16);
+    assert_eq!(ws.read().unwrap(), Message::Text(String::from_utf8(msg1_data.clone()).unwrap().into()));
+    assert_eq!(ws.read().unwrap(), Message::Text(msg2_expected.into()));
+
+    let w8_nct = DeflateConfig { decompress_no_context_takeover: true, ..w8 };
+    let mut ws = client(frames(&[&msg1, &msg2]), Some(w8_nct), 1 << 16);
+    assert_eq!(ws.read().unwrap(), Message::Text(String::from_utf8(msg1_data).unwrap().into()));
+    assert!(matches!(ws.read(), Err(Error::Protocol(ProtocolError::InvalidCompressedMessage(_)))));
+
+    // Cross-message reference beyond an 8-bit window is refused even with context takeover.
+    let far_data: Vec<u8> = (0..300).map(|i| b'a' + (i % 26) as u8).collect();
+    let far1 = frame(0xc1, &fixed_block_with_backref(&far_data, None));
+    let far2 = frame(0xc1, &fixed_block_with_backref(&[], Some(300)));
+    let mut ws = client(frames(&[&far1, &far2]), Some(w8), 1 << 16);
+    assert_eq!(ws.read().unwrap(), Message::Text(String::from_utf8(far_data).unwrap().into()));
+    assert!(matches!(ws.read(), Err(Error::Protocol(ProtocolError::InvalidCompressedMessage(_)))));
+
+    // Decompressed-size limit and BFINAL reset both work under a smaller window.
+    let bomb = deflate_raw(&vec![0u8; 8 << 20], 9);
+    let w9 = Some(DeflateConfig { decompress_window_bits: 9, ..DeflateConfig::default() });
+    let mut ws = client(frame(0xc2, &bomb), w9, 64 * 1024);
+    assert!(matches!(ws.read(), Err(Error::Capacity(CapacityError::DecompressedMessageTooLong { .. }))));
+
+    let bfinal = frames(&[&[0xc1, 0x08, 0xf3, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x00], &[0xc1, 0x07], HELLO]);
+    let mut ws = client(bfinal, w9, 1024);
+    assert_eq!(ws.read().unwrap(), Message::Text("Hello".into()));
+    assert_eq!(ws.read().unwrap(), Message::Text("Hello".into()));
+}
