@@ -177,6 +177,16 @@ def helpers(rows: list[dict], app_pid: int, before: set[int]) -> tuple[list[dict
         attributed = [r for r in webkit if owners[r["pid"]] == app_pid]
         if attributed:
             return attributed, "launchctl procinfo responsible pid"
+        app_owner = responsible_pid(app_pid)
+        if app_owner is not None and app_owner != app_pid:
+            # When the binary is spawned directly (not through LaunchServices),
+            # macOS gives both the app and its XPC WebKit helpers the spawning
+            # runner/shell as their responsible pid. Restrict to helpers that
+            # share that responsible pid and were not running before launch so
+            # unrelated WebKit processes stay excluded.
+            shared = [r for r in webkit if owners[r["pid"]] == app_owner and r["pid"] not in before]
+            if shared:
+                return shared, "launchctl procinfo shared responsible pid + pid delta"
         if any(o is not None for o in owners.values()):
             # procinfo works here but names no WebKit service of this app.
             return [], "launchctl procinfo responsible pid"
