@@ -666,7 +666,18 @@ const MCP_OPERATIONS: { id: McpOperation["kind"]; label: string }[] = [
   { id: "prompts_list", label: "prompts/list" },
   { id: "prompts_get", label: "prompts/get" },
   { id: "raw", label: "Raw JSON-RPC" },
+  { id: "batch", label: "JSON-RPC batch" },
 ];
+
+/** Whether a batch's literal JSON gives a request id 1, the id initialize uses. */
+export function batchReusesInitializeId(messages: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(messages);
+    return Array.isArray(parsed) && parsed.some((m) => typeof m === "object" && m !== null && (m as { id?: unknown }).id === 1);
+  } catch {
+    return false;
+  }
+}
 
 function mcpOperationDefault(kind: McpOperation["kind"]): McpOperation {
   switch (kind) {
@@ -677,6 +688,9 @@ function mcpOperationDefault(kind: McpOperation["kind"]): McpOperation {
       return { kind, uri: "" };
     case "raw":
       return { kind, method: "", params: "" };
+    case "batch":
+      // Not 1, the id initialize uses in the session: a session never reuses a request id.
+      return { kind, messages: '[{"jsonrpc":"2.0","id":11,"method":"ping"},{"jsonrpc":"2.0","id":12,"method":"tools/list"}]' };
     default:
       return { kind };
   }
@@ -719,7 +733,12 @@ function McpEditor(props: {
       };
       if (d.skipped_total > 0) parts.push(`Skipped: ${listed(d.skipped, d.skipped_total)}.`);
       if (d.notes_total > 0) parts.push(`Note: ${listed(d.notes, d.notes_total)}.`);
-      if (d.more) parts.push("The server lists more tools than its first page; only that page was read.");
+      if (d.pages > 1) parts.push(`Read ${d.pages} tools/list pages.`);
+      if (d.stopped) parts.push(`Not every page was read: ${d.stopped.length > 200 ? `${d.stopped.slice(0, 200)}…` : d.stopped}.`);
+      if (d.history_warning)
+        parts.push(
+          `History was not completely recorded: ${d.history_warning.length > 200 ? `${d.history_warning.slice(0, 200)}…` : d.history_warning}.`,
+        );
       setDiscovered(parts.join(" "));
       props.onTreeChanged?.();
     } catch (e) {
@@ -771,6 +790,17 @@ function McpEditor(props: {
           Arguments (JSON object; variables allowed)
           <textarea className="field mono" rows={5} value={op.arguments ?? "{}"} onChange={(e) => setOp({ ...op, arguments: e.target.value })} />
         </label>
+      )}
+      {op.kind === "batch" && (
+        <label className="lbl">
+          Messages (a JSON array of JSON-RPC requests and notifications; variables allowed)
+          <textarea className="field mono" rows={6} value={op.messages} onChange={(e) => setOp({ ...op, messages: e.target.value })} />
+        </label>
+      )}
+      {op.kind === "batch" && m.initialize !== false && batchReusesInitializeId(op.messages) && (
+        <p className="hint" role="note">
+          Request id 1 is the id initialize uses in this session, and a session never reuses a request id: give the batch&apos;s requests other ids.
+        </p>
       )}
       {op.kind === "raw" && (
         <>

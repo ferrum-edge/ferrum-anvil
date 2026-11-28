@@ -4,7 +4,7 @@
 //! auth, TLS, proxy and DNS path as a manual Send — and produces one *unit*
 //! of the plan's [`LoadUnitKind`]: an HTTP request, a unary,
 //! server-streaming, client-streaming or bidirectional gRPC call, an SSE
-//! stream, a WebSocket session, a TCP exchange or a UDP/DTLS exchange. A plan has exactly one unit kind, so
+//! stream, a WebSocket session, a TCP exchange, a UDP/DTLS exchange or an MCP session. A plan has exactly one unit kind, so
 //! every count and latency in its report has a single denominator.
 //!
 //! Client-streaming and bidirectional gRPC calls are units of their own: a
@@ -29,8 +29,12 @@
 //!   engine refuses every exchange);
 //! * SSE with automatic reconnection (one unit would become several
 //!   connections with server-chosen delays);
-//! * a mesh HBONE proxy with persistent connections for HTTP and gRPC
+//! * a mesh HBONE proxy with persistent connections for HTTP, gRPC and MCP
 //!   (tunnels are never pooled, so the mode could not be honoured).
+//!
+//! An MCP request is one session per unit (initialize, the operation, the
+//! close): the engine's MCP execution, whose exchanges are HTTP requests on
+//! the step's connections (pooled in the persistent mode).
 
 use anvil_domain::Id;
 use anvil_domain::execution::TunnelKind;
@@ -61,15 +65,13 @@ pub enum RefusalCode {
     MasqueThroughProxy,
     /// SSE with automatic reconnection enabled.
     SseReconnect,
-    /// A mesh HBONE proxy with the persistent connection mode (HTTP, gRPC).
+    /// A mesh HBONE proxy with the persistent connection mode (HTTP, gRPC,
+    /// MCP).
     HbonePersistent,
     /// The request enables 0-RTT early data.
     EarlyData,
     /// The request lacks what its protocol needs (e.g. a gRPC method).
     IncompleteRequest,
-    /// An MCP request: its load unit (one session's handshake and call) is
-    /// not defined yet.
-    McpUnsupported,
 }
 
 /// A typed refusal, raised before any traffic.
@@ -125,6 +127,7 @@ pub fn label(kind: LoadUnitKind) -> &'static str {
         LoadUnitKind::TcpExchange => "TCP/TLS exchanges",
         LoadUnitKind::UdpExchange => "UDP exchanges",
         LoadUnitKind::DtlsExchange => "DTLS exchanges",
+        LoadUnitKind::McpSession => "MCP sessions",
     }
 }
 
@@ -269,10 +272,16 @@ pub fn classify(id: Option<Id>, ctx: &ExecutionContext, mode: ConnectionMode) ->
             }
             Ok(StepUnit::of(LoadUnitKind::SseStream))
         }
-        Protocol::Mcp => refuse(
-            RefusalCode::McpUnsupported,
-            "MCP requests cannot be load tested yet: one execution is a session (initialize, the call, the close), and there is no MCP load unit to count it as. Load test the endpoint's HTTP requests instead".into(),
-        ),
+        Protocol::Mcp => {
+            if ctx.spec.mcp.is_none() {
+                // The engine refuses this per send; a load run has no unit for it.
+                return refuse(RefusalCode::IncompleteRequest, "the MCP request has no MCP settings (the operation to send)".into());
+            }
+            if hbone_persistent(Protocol::Mcp)? {
+                return refuse(RefusalCode::HbonePersistent, hbone_msg("MCP sessions"));
+            }
+            Ok(StepUnit::of(LoadUnitKind::McpSession))
+        }
         Protocol::WebSocket => Ok(StepUnit {
             ws_expect_messages: ctx.spec.websocket.as_ref().map(|w| w.expect_messages).unwrap_or(0),
             ..StepUnit::of(LoadUnitKind::WebsocketSession)
@@ -468,6 +477,18 @@ pub fn semantics(kind: LoadUnitKind, mode: ConnectionMode) -> UnitSemantics {
                 "Each exchange uses its own socket; the plan's connection mode does not apply to it.".into()
             },
         ),
+        LoadUnitKind::McpSession => s(
+            "session",
+            "sessions",
+            "The session's exchanges completed at the transport level through its last exchange (the closing DELETE when session closing is on, else the operation, or initialize when the handshake failed), each receiving a complete HTTP response (any status). An event stream Anvil stopped reading once the JSON-RPC response had arrived is complete.",
+            "Completed with the operation sent, its JSON-RPC response read with no JSON-RPC error and no tool result marked isError (a notification, or a batch of notifications only, accepted with a 2xx), and every assertion passing. A session whose operation was not sent, ended on a redirect, or whose answer could not be judged (no JSON-RPC response, missing or ambiguous batch replies, or one too large to inspect), is an application failure.",
+            "Session duration: from the start of initialize to the end of the session's last exchange (the DELETE when the session is closed), as the step measured it.",
+            if persistent {
+                "Persistent: each virtual user keeps pooled connections across its sessions (HTTP/1.1 keep-alive, one multiplexed HTTP/2 or HTTP/3 connection per origin), so a session's exchanges reuse them. An HTTP/1.1 event stream Anvil stopped reading early closes its connection.".into()
+            } else {
+                "Fresh: every exchange of every session (initialize, the notification, the operation, the DELETE) opens a new connection (and TLS or QUIC handshake).".into()
+            },
+        ),
     }
 }
 
@@ -495,8 +516,8 @@ pub fn plan_semantics(kind: LoadUnitKind, mode: ConnectionMode, steps: &[StepUni
 /// a crash report whose worker never announced its run).
 pub fn unit_of_spec(spec: &anvil_domain::request::RequestSpec) -> LoadUnitKind {
     match spec.protocol {
-        // An MCP request is refused for load; its exchanges are HTTP requests.
-        Protocol::Http | Protocol::Mcp => LoadUnitKind::HttpRequest,
+        Protocol::Http => LoadUnitKind::HttpRequest,
+        Protocol::Mcp => LoadUnitKind::McpSession,
         Protocol::Grpc => grpc_unit(spec.grpc.as_ref().map(|g| g.mode).unwrap_or_default()),
         Protocol::Sse => LoadUnitKind::SseStream,
         Protocol::WebSocket => LoadUnitKind::WebsocketSession,
@@ -517,6 +538,7 @@ pub fn connection_mode_applies(kind: LoadUnitKind) -> bool {
             | LoadUnitKind::GrpcStream
             | LoadUnitKind::GrpcClientStream
             | LoadUnitKind::GrpcBidiStream
+            | LoadUnitKind::McpSession
     )
 }
 
@@ -524,16 +546,21 @@ pub fn connection_mode_applies(kind: LoadUnitKind) -> bool {
 mod tests {
     use super::*;
 
-    /// MCP load units are a follow-up: a plan with an MCP request is refused
-    /// before any traffic, with its own code.
+    /// An MCP request is one session per unit; without its MCP settings it is
+    /// refused before any traffic.
     #[test]
-    fn an_mcp_request_is_refused_for_load() {
+    fn an_mcp_request_is_one_session_per_unit() {
         let mut spec = anvil_domain::request::RequestSpec::http("POST", "http://127.0.0.1:9/mcp");
         spec.protocol = Protocol::Mcp;
-        let ctx = ExecutionContext::standalone(spec);
+        let ctx = ExecutionContext::standalone(spec.clone());
         let r = classify(None, &ctx, ConnectionMode::Persistent).unwrap_err();
-        assert_eq!(r.code, RefusalCode::McpUnsupported);
-        assert!(r.to_string().contains("(LOAD-013 mcp_unsupported)"), "{r}");
+        assert_eq!(r.code, RefusalCode::IncompleteRequest);
+        assert!(r.to_string().contains("(LOAD-013 incomplete_request)"), "{r}");
+        spec.mcp = Some(serde_json::from_value(serde_json::json!({"operation": {"kind": "tools_list"}})).unwrap());
+        let ctx = ExecutionContext::standalone(spec.clone());
+        assert_eq!(classify(None, &ctx, ConnectionMode::Persistent).unwrap().kind, LoadUnitKind::McpSession);
+        assert_eq!(unit_of_spec(&spec), LoadUnitKind::McpSession);
+        assert!(connection_mode_applies(LoadUnitKind::McpSession));
         assert_eq!(send_schemes(Protocol::Mcp), ["https", "http"]);
     }
 

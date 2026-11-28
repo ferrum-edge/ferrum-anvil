@@ -44,7 +44,7 @@ async fn discovered_tools_are_saved_beside_the_template_and_call_their_tool() {
     let d = app.mcp_discover_tools(&ws, &template.meta.id, opts.clone(), CancellationToken::new()).await.unwrap();
     let names: Vec<&str> = d.created.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(names, ["Echo", "add", "fail", "session", "delete_all", "internal_audit", "new_tool"]);
-    assert!(!d.more && d.skipped.is_empty(), "{:?}", d.skipped);
+    assert!(d.pages == 1 && d.stopped.is_none() && d.skipped.is_empty(), "{:?} {:?}", d.stopped, d.skipped);
     assert!(d.created.iter().all(|r| r.folder_id == Some(folder)), "saved beside the template");
     assert_eq!(f.state.methods(), ["initialize", "notifications/initialized", "tools/list"], "only the list was sent");
 
@@ -66,6 +66,50 @@ async fn discovered_tools_are_saved_beside_the_template_and_call_their_tool() {
     let plain = app.create_request(&ws, None, "plain", RequestSpec::http("GET", &f.url())).unwrap();
     let refused = app.mcp_discover_tools(&ws, &plain.meta.id, opts, CancellationToken::new()).await;
     assert!(refused.is_err(), "only an MCP request discovers tools");
+}
+
+/// A server that lists its tools in pages, each cursor valid only in the
+/// session that issued it: every page is read in one session, following
+/// `nextCursor`, and every tool is saved.
+#[tokio::test]
+async fn every_page_of_tools_is_discovered() {
+    anvil_fixtures::init();
+    let f = mcp::serve("127.0.0.1:0", McpOptions { page_size: Some(3), ..Default::default() }).await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Agents").unwrap().meta.id;
+    let template = app.create_request(&ws, None, "tools", mcp_request(&f.url())).unwrap();
+    let d = app.mcp_discover_tools(&ws, &template.meta.id, SendOptions::default(), CancellationToken::new()).await.unwrap();
+    let names: Vec<&str> = d.created.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["Echo", "add", "fail", "session", "delete_all", "internal_audit", "new_tool"]);
+    assert_eq!((d.pages, d.stopped.as_deref()), (3, None));
+    let lists = f.state.calls().iter().filter(|c| c.method.as_deref() == Some("tools/list")).count();
+    assert_eq!(lists, 3, "one tools/list per page");
+    let sessions: std::collections::BTreeSet<_> = f.state.calls().iter().filter_map(|c| c.session.clone()).collect();
+    assert_eq!(sessions.len(), 1, "every page in one session");
+    assert_eq!(f.state.closed.lock().len(), 1, "the session was ended once, after the last page");
+}
+
+/// Discovery pins every paginated request to the issuing endpoint: a redirect
+/// on a later page is refused rather than forwarding the cursor to another origin.
+#[tokio::test]
+async fn discovery_does_not_follow_redirects_with_pagination_cursor() {
+    anvil_fixtures::init();
+    let other = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let to: &'static str = Box::leak(other.url("/echo").into_boxed_str());
+    let f = mcp::serve("127.0.0.1:0", McpOptions { page_size: Some(3), hostile: Hostile::RedirectPage2(to), ..Default::default() })
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Agents").unwrap().meta.id;
+    let template = app.create_request(&ws, None, "tools", mcp_request(&f.url())).unwrap();
+    let d = app.mcp_discover_tools(&ws, &template.meta.id, SendOptions::default(), CancellationToken::new()).await.unwrap();
+    assert!(other.log.entries().is_empty(), "redirected page must not forward the cursor to another origin");
+    assert_eq!(d.created.len(), 3, "tools from page 1 are kept");
+    assert_eq!(d.pages, 2);
+    assert!(d.stopped.as_deref().is_some_and(|s| s.contains("page 2")), "{:?}", d.stopped);
+    assert!(d.history_warning.is_none());
 }
 
 /// A secret a server echoes in its initialize error is redacted in the

@@ -83,6 +83,7 @@ fn plan(url: &str, method: http::Method, auth: &str) -> HttpPlan {
         display_url: url.into(),
         early_data: EarlyDataIntent::Off,
         fence: None,
+        body_stop: None,
     }
 }
 

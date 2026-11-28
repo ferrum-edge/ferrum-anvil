@@ -972,7 +972,7 @@ fn fail_attempt(
     if let Some(t) = track {
         obs.early_data = Some(t.finish());
     }
-    AttemptOutput { observation: obs, response: None, body: Bytes::new() }
+    AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None }
 }
 
 /// DNS for a QUIC destination (there is no TCP connect phase).
@@ -2045,6 +2045,15 @@ impl H3Transport {
         let mut failure = None;
         let mut completeness = BodyCompleteness::Complete;
         let idle = plan.timeouts.body_idle_ms.map(Duration::from_millis);
+        let mut watch = plan.body_stop.as_ref().and_then(|stop| {
+            stop(&crate::http::BodyStart {
+                request_body: &plan.body,
+                content_type: content_type.as_deref(),
+                content_encoding: content_encoding.as_deref(),
+            })
+        });
+        let mut answer_probe_deadline: Option<tokio::time::Instant> = None;
+        let mut answer_captured_len: Option<usize> = None;
         loop {
             let idle_deadline = idle.map(|d| Instant::now() + d);
             tokio::select! {
@@ -2060,6 +2069,70 @@ impl H3Transport {
                         if wire > plan.limits.max_response_bytes {
                             completeness = BodyCompleteness::StoppedAtLocalLimit;
                             failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::ResponseTooLargeLocal, "stopped reading at the local max_response_bytes limit"));
+                            break;
+                        }
+                        // Once the watched answer has arrived, confirm whether
+                        // the peer ended the stream (or sent trailers) rather
+                        // than relying on Content-Length.
+                        if let Some(w) = watch.as_mut()
+                            && w.feed(&data)
+                        {
+                            answer_captured_len = (wire <= plan.limits.capture_bytes).then_some(captured.len());
+                            let probe_deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+                            answer_probe_deadline = Some(probe_deadline);
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    next = stream.recv_data() => match next {
+                                        Ok(None) => {
+                                            completeness = BodyCompleteness::Complete;
+                                            break;
+                                        }
+                                        Ok(Some(mut more)) => {
+                                            let more_n = more.remaining();
+                                            if more_n == 0 {
+                                                continue;
+                                            }
+                                            wire += more_n as u64;
+                                            let more_bytes = more.copy_to_bytes(more_n);
+                                            let room = (plan.limits.capture_bytes as usize).saturating_sub(captured.len());
+                                            if room > 0 {
+                                                captured.extend_from_slice(&more_bytes[..more_bytes.len().min(room)]);
+                                            }
+                                            if wire > plan.limits.max_response_bytes {
+                                                completeness = BodyCompleteness::StoppedAtLocalLimit;
+                                                failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::ResponseTooLargeLocal, "stopped reading at the local max_response_bytes limit"));
+                                                break;
+                                            }
+                                            completeness = BodyCompleteness::StoppedAfterAnswer;
+                                            break;
+                                        }
+                                        Err(h3::error::StreamError::HeaderTooBig { .. }) => {
+                                            completeness = BodyCompleteness::Incomplete;
+                                            failure = Some(headers_too_large(Phase::ResponseBody, "trailers", &plan.limits));
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            completeness = BodyCompleteness::Incomplete;
+                                            failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyReset, format!("the HTTP/3 response stream ended abnormally: {e}")));
+                                            break;
+                                        }
+                                    },
+                                    _ = tokio::time::sleep_until(probe_deadline) => {
+                                        completeness = BodyCompleteness::StoppedAfterAnswer;
+                                        break;
+                                    }
+                                    _ = sleep_until_opt(total_deadline) => {
+                                        completeness = BodyCompleteness::StoppedAfterAnswer;
+                                        break;
+                                    }
+                                    _ = cancel.cancelled() => {
+                                        completeness = BodyCompleteness::Canceled;
+                                        failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled while reading the body"));
+                                        break;
+                                    }
+                                }
+                            }
                             break;
                         }
                     }
@@ -2095,11 +2168,14 @@ impl H3Transport {
         }
         let mut trailers = Vec::new();
         let mut trailers_received = false;
-        if failure.is_none() {
+        if failure.is_none() && completeness != BodyCompleteness::StoppedAfterAnswer {
             // h3 hands the trailers over only once the stream ends (FIN): that
-            // wait is bounded like the body's.
+            // wait is bounded like the body's (or by the answer-stop probe when
+            // the watched answer already arrived, so trailers without FIN stop
+            // promptly as StoppedAfterAnswer instead of stalling).
             let idle_deadline = idle.map(|d| Instant::now() + d);
             tokio::select! {
+                biased;
                 r = stream.recv_trailers() => match r {
                     Ok(Some(t)) => {
                         trailers_received = true;
@@ -2115,33 +2191,50 @@ impl H3Transport {
                         failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyReset, format!("the HTTP/3 response stream ended abnormally after its trailers: {e}")));
                     }
                 },
+                _ = async {
+                    match answer_probe_deadline {
+                        Some(d) => tokio::time::sleep_until(d).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    completeness = BodyCompleteness::StoppedAfterAnswer;
+                }
                 _ = sleep_until_opt(idle_deadline) => {
-                    completeness = BodyCompleteness::Incomplete;
-                    failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "the HTTP/3 response stream did not end after its trailers").with_deadline(plan.timeouts.body_idle_ms));
+                    if answer_probe_deadline.is_some() {
+                        completeness = BodyCompleteness::StoppedAfterAnswer;
+                    } else {
+                        completeness = BodyCompleteness::Incomplete;
+                        failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "the HTTP/3 response stream did not end after its trailers").with_deadline(plan.timeouts.body_idle_ms));
+                    }
                 }
                 _ = sleep_until_opt(total_deadline) => {
-                    completeness = BodyCompleteness::Incomplete;
-                    failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::TotalTimeout, "total deadline elapsed while waiting for the end of the response").with_deadline(plan.timeouts.total_ms));
+                    if answer_probe_deadline.is_some() {
+                        completeness = BodyCompleteness::StoppedAfterAnswer;
+                    } else {
+                        completeness = BodyCompleteness::Incomplete;
+                        failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::TotalTimeout, "total deadline elapsed while waiting for the end of the response").with_deadline(plan.timeouts.total_ms));
+                    }
                 }
                 _ = cancel.cancelled() => {
                     completeness = BodyCompleteness::Canceled;
                     failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled while waiting for the end of the response"));
                 }
             }
-            // A deadline or a cancel ended the wait for the end of the
-            // stream: trailers h3 already received are still the server's,
-            // so they are recorded rather than dropped.
+            // A deadline, answer probe expiry, or a cancel ended the wait for
+            // the end of the stream: trailers h3 already received are still the
+            // server's, so they are recorded rather than dropped.
             if !trailers_received
-                && failure
-                    .as_ref()
-                    .is_some_and(|f| matches!(f.kind, FailureKind::BodyIdleTimeout | FailureKind::TotalTimeout | FailureKind::Canceled))
+                && (completeness == BodyCompleteness::StoppedAfterAnswer
+                    || failure.as_ref().is_some_and(|f| {
+                        matches!(f.kind, FailureKind::BodyIdleTimeout | FailureKind::TotalTimeout | FailureKind::Canceled)
+                    }))
                 && let Ok(Some(t)) = stream.peek_recv_trailers()
             {
                 trailers_received = true;
                 trailers = header_entries(&t);
             }
         }
-        if failure.as_ref().is_some_and(|f| f.kind != FailureKind::BodyReset) {
+        if completeness == BodyCompleteness::StoppedAfterAnswer || failure.as_ref().is_some_and(|f| f.kind != FailureKind::BodyReset) {
             // Stop the response now: finishing the report never waits for
             // the peer (a dropped stream would be stopped with code 0).
             stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
@@ -2181,7 +2274,7 @@ impl H3Transport {
                 blob_sha256: if captured.is_empty() { None } else { Some(crate::certs::sha256_hex(&captured)) },
             },
         };
-        (AttemptOutput { observation: obs, response: Some(response), body: captured }, None)
+        (AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured_len }, None)
     }
 }
 
@@ -2224,6 +2317,7 @@ mod tests {
             display_url: "https://example.test/".into(),
             early_data: EarlyDataIntent::Off,
             fence: None,
+            body_stop: None,
         };
         let (req, uri) = build_request(&plan).unwrap();
         assert_eq!(uri, "https://example.test/", "the Host is the :authority");

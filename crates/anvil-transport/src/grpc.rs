@@ -1908,7 +1908,7 @@ async fn exchange(
                     r
                 });
                 return SessionOutput::single(
-                    AttemptOutput { observation: obs, response, body: Bytes::new() },
+                    AttemptOutput { observation: obs, response, body: Bytes::new(), answer_captured_len: None },
                     None,
                     ProtocolStatus::None,
                     facts,
@@ -2425,7 +2425,7 @@ async fn exchange(
     };
     let Some(st) = status else {
         return SessionOutput::single(
-            AttemptOutput { observation: obs, response: None, body: Bytes::new() },
+            AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None },
             None,
             ProtocolStatus::None,
             facts,
@@ -2437,7 +2437,12 @@ async fn exchange(
     response.trailers_received = trailers_received;
     let ps =
         ProtocolStatus::Grpc { http_status: Some(st), grpc_status: term.code, grpc_message: term.message.map(redact), source: term.source };
-    SessionOutput::single(AttemptOutput { observation: obs, response: Some(response), body: captured }, Some(tr.finish()), ps, facts)
+    SessionOutput::single(
+        AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured_len: None },
+        Some(tr.finish()),
+        ps,
+        facts,
+    )
 }
 
 #[cfg(test)]

@@ -11,9 +11,17 @@
 //! * Notifications (no `id`) are answered `202 Accepted` with no body.
 //! * Requests are answered with JSON, or with [`McpOptions::sse`] with an
 //!   event stream: a `notifications/message` log event, then the response,
-//!   then the end of the stream.
+//!   then the end of the stream ([`McpOptions::keep_open`] keeps the stream
+//!   open after the response instead).
+//! * A JSON-RPC batch (a JSON array) is refused with 400 and JSON-RPC error
+//!   -32600, as MCP from 2025-06-18 has no batches; [`McpOptions::batches`]
+//!   answers each request of it instead (one JSON array, or one event per
+//!   response).
 //! * `DELETE` ends the session (405 without [`McpOptions::allow_delete`]);
 //!   `GET` is refused with 405 (no server-initiated stream).
+//!
+//! `tools/list` lists every tool at once, or pages of
+//! [`McpOptions::page_size`] tools linked by `nextCursor` (`page-<n>`).
 //!
 //! Tools (`tools/list`, `tools/call`): `echo` (`text`, required; the result
 //! also as `structuredContent`), `add` (`a`, `b`: numbers with defaults),
@@ -64,6 +72,17 @@ type FxBody = BoxBody<Bytes, Infallible>;
 pub struct McpOptions {
     /// Answer requests with an event stream instead of JSON.
     pub sse: bool,
+    /// With `sse`, keep each answer's event stream open after the response
+    /// (a comment every 100 ms, for up to a minute), as a server that goes
+    /// on streaming may.
+    pub keep_open: bool,
+    /// Answer `tools/list` in pages of this many tools.
+    pub page_size: Option<usize>,
+    /// Answer the requests of a JSON-RPC batch instead of refusing it.
+    pub batches: bool,
+    /// gzip-encode event streams (`Content-Encoding: gzip`), each chunk
+    /// flushed so it decodes on its own.
+    pub gzip: bool,
     /// Let clients end their session with `DELETE`.
     pub allow_delete: bool,
     pub hostile: Hostile,
@@ -71,7 +90,15 @@ pub struct McpOptions {
 
 impl Default for McpOptions {
     fn default() -> Self {
-        McpOptions { sse: false, allow_delete: true, hostile: Hostile::None }
+        McpOptions {
+            sse: false,
+            keep_open: false,
+            page_size: None,
+            batches: false,
+            gzip: false,
+            allow_delete: true,
+            hostile: Hostile::None,
+        }
     }
 }
 
@@ -94,6 +121,20 @@ pub enum Hostile {
     RedirectOperation(&'static str),
     /// The initialize request is answered `307` to this URL.
     RedirectInitialize(&'static str),
+    /// A JSON-RPC batch is answered without its last request's response.
+    BatchDropsLast,
+    /// A JSON-RPC batch answer includes an unrelated JSON-RPC error (id 999)
+    /// and a malformed non-RPC object alongside the real replies.
+    BatchExtraUnrelatedAndMalformed,
+    /// A JSON-RPC batch answer contains only an unrelated JSON-RPC error
+    /// (id 999) and a malformed non-RPC object (no reply to any sent id).
+    BatchOnlyUnrelatedAndMalformed,
+    /// A JSON-RPC batch is answered HTTP 200 with an empty body.
+    BatchEmpty200,
+    /// A paginated `tools/list` call with a cursor is answered `307` to this URL.
+    RedirectPage2(&'static str),
+    /// `DELETE` stalls without answering so the session deadline expires on close.
+    StallDelete,
 }
 
 /// One request the fixture received.
@@ -104,6 +145,8 @@ pub struct McpCall {
     pub method: Option<String>,
     /// `params.name` of a `tools/call` or `prompts/get`.
     pub name: Option<String>,
+    /// The messages of a JSON-RPC batch (`None`: not a batch).
+    pub batch: Option<usize>,
     pub session: Option<String>,
     pub protocol_version: Option<String>,
     pub accept: Option<String>,
@@ -168,26 +211,52 @@ fn reply(status: u16, content_type: Option<&str>, body: impl Into<Bytes>) -> Res
 /// An event stream that starts with a log notification and then only sends
 /// comments, until the client goes away (or a minute passes).
 fn endless_stream() -> Response<FxBody> {
+    let first = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{}}\n\n";
+    open_stream(first.to_string())
+}
+
+/// An event stream that sends `first`, then only comments, until the client
+/// goes away (or a minute passes).
+fn open_stream(first: String) -> Response<FxBody> {
+    open_stream_with(first, false)
+}
+
+/// [`open_stream`], gzip-encoded when `gzip` (each chunk sync-flushed, so
+/// what arrived so far decodes).
+fn open_stream_with(first: String, gzip: bool) -> Response<FxBody> {
     let (mut tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, Infallible>>(4);
     tokio::spawn(async move {
         use futures::SinkExt;
-        let first = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{}}\n\n";
-        if tx.send(Ok(Frame::data(Bytes::from_static(first.as_bytes())))).await.is_err() {
+        use std::io::Write;
+        let mut encoder = gzip.then(|| flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default()));
+        let mut encode = |plain: &[u8]| -> Bytes {
+            match encoder.as_mut() {
+                None => Bytes::copy_from_slice(plain),
+                Some(e) => {
+                    let _ = e.write_all(plain);
+                    let _ = e.flush();
+                    Bytes::from(std::mem::take(e.get_mut()))
+                }
+            }
+        };
+        let first = encode(first.as_bytes());
+        if tx.send(Ok(Frame::data(first))).await.is_err() {
             return;
         }
         for _ in 0..600 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            if tx.send(Ok(Frame::data(Bytes::from_static(b": still working\n\n")))).await.is_err() {
+            let chunk = encode(b" still working\n\n: more");
+            if tx.send(Ok(Frame::data(chunk))).await.is_err() {
                 return;
             }
         }
     });
     let body = StreamBody::new(rx).boxed();
-    Response::builder()
-        .status(200)
-        .header("content-type", "text/event-stream")
-        .body(body)
-        .unwrap_or_else(|_| Response::new(Full::new(Bytes::new()).boxed()))
+    let mut b = Response::builder().status(200).header("content-type", "text/event-stream");
+    if gzip {
+        b = b.header("content-encoding", "gzip");
+    }
+    b.body(body).unwrap_or_else(|_| Response::new(Full::new(Bytes::new()).boxed()))
 }
 
 fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
@@ -257,11 +326,37 @@ fn call_tool(params: &Value, session: &str) -> Result<Value, (i64, String)> {
     }
 }
 
+/// A `tools/list` result: every tool, or (with `page_size`) the page its
+/// `cursor` names, with the next page's cursor.
+fn tools_page(params: &Value, page_size: Option<usize>, session: &str) -> Result<Value, (i64, String)> {
+    let all = tools().as_array().cloned().unwrap_or_default();
+    let Some(size) = page_size.filter(|n| *n > 0) else { return Ok(json!({"tools": all})) };
+    let unknown = || (-32602, "Invalid params: unknown cursor".to_string());
+    let start = match params.get("cursor") {
+        None | Some(Value::Null) => 0,
+        // A cursor belongs to the session that issued it (MCP pagination).
+        Some(Value::String(c)) => c
+            .strip_prefix("page-")
+            .and_then(|rest| rest.split_once('@'))
+            .filter(|(_, issued)| *issued == session)
+            .and_then(|(n, _)| n.parse::<usize>().ok())
+            .filter(|n| *n < all.len())
+            .ok_or_else(unknown)?,
+        Some(_) => return Err(unknown()),
+    };
+    let end = (start + size).min(all.len());
+    let mut result = json!({"tools": all[start..end].to_vec()});
+    if end < all.len() {
+        result["nextCursor"] = json!(format!("page-{end}@{session}"));
+    }
+    Ok(result)
+}
+
 /// The result of a request in a session, or its JSON-RPC error.
-fn dispatch(method: &str, params: &Value, session: &str) -> Result<Value, (i64, String)> {
+fn dispatch(method: &str, params: &Value, session: &str, opts: McpOptions) -> Result<Value, (i64, String)> {
     match method {
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools": tools()})),
+        "tools/list" => tools_page(params, opts.page_size, session),
         "tools/call" => call_tool(params, session),
         "resources/list" => Ok(json!({"resources": [{"uri": "fixture://readme", "name": "readme", "mimeType": "text/plain"}]})),
         "resources/templates/list" => Ok(json!({"resourceTemplates": []})),
@@ -280,15 +375,34 @@ fn dispatch(method: &str, params: &Value, session: &str) -> Result<Value, (i64, 
     }
 }
 
+/// An event stream of a log notification, then one event per message.
+fn event_stream(messages: &[Value]) -> String {
+    let log = json!({"jsonrpc": "2.0", "method": "notifications/message", "params": {"level": "info", "data": "fixture: working"}});
+    let mut body = format!("event: message\ndata: {log}\n\n");
+    for (i, m) in messages.iter().enumerate() {
+        body.push_str(&format!("id: {}\nevent: message\ndata: {m}\n\n", i + 1));
+    }
+    body
+}
+
 /// A JSON-RPC answer, as JSON or (with `sse`) as an event stream with a log
 /// notification before it.
 fn answer(opts: McpOptions, status: u16, message: &Value, session: Option<&str>) -> Response<FxBody> {
-    let mut resp = if opts.sse {
-        let log = json!({"jsonrpc": "2.0", "method": "notifications/message", "params": {"level": "info", "data": "fixture: working"}});
-        let body = format!("event: message\ndata: {log}\n\nid: 1\nevent: message\ndata: {message}\n\n");
-        reply(status, Some("text/event-stream"), body)
+    answer_all(opts, status, std::slice::from_ref(message), message.to_string(), session)
+}
+
+/// Answer `messages`: as the JSON text `json`, or (with `sse`) as an event
+/// stream of a log notification and one event per message, left open after
+/// them with `keep_open`.
+fn answer_all(opts: McpOptions, status: u16, messages: &[Value], json: String, session: Option<&str>) -> Response<FxBody> {
+    let mut resp = if opts.sse && opts.keep_open && status == 200 {
+        // The answer's chunk ends inside a comment that a later chunk ends:
+        // the answer is readable before the chunk boundary says so.
+        open_stream_with(format!("{}:", event_stream(messages)), opts.gzip)
+    } else if opts.sse {
+        reply(status, Some("text/event-stream"), event_stream(messages))
     } else {
-        reply(status, Some("application/json"), message.to_string())
+        reply(status, Some("application/json"), json)
     };
     if let Some(s) = session.and_then(|s| http::HeaderValue::from_str(s).ok()) {
         resp.headers_mut().insert("mcp-session-id", s);
@@ -334,6 +448,7 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<McpState>
     log.push(GroundTruth::RequestReceived { method: http_method.to_string(), path: path.clone(), body_bytes: body.len() as u64, headers });
     let parsed: Option<Value> = serde_json::from_slice(&body).ok();
     let method = parsed.as_ref().and_then(|v| v.get("method")).and_then(Value::as_str).map(str::to_string);
+    let batch = parsed.as_ref().and_then(Value::as_array).map(Vec::len);
     let params = parsed.as_ref().and_then(|v| v.get("params")).cloned().unwrap_or(Value::Null);
     let name = params.get("name").and_then(Value::as_str).map(str::to_string);
     let asked = Asked {
@@ -347,10 +462,13 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<McpState>
         content_type: content_type.as_deref(),
         echo: echo.as_deref(),
     };
+    if http_method == Method::DELETE && opts.hostile == Hostile::StallDelete {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
     let resp = handle(&state, opts, addr, &asked);
     let status = resp.status().as_u16();
     log.push(GroundTruth::ResponseStarted { status });
-    let call = McpCall { http_method: http_method.to_string(), method, name, session, protocol_version: version, accept, status };
+    let call = McpCall { http_method: http_method.to_string(), method, name, batch, session, protocol_version: version, accept, status };
     state.calls.lock().push(call);
     resp
 }
@@ -396,6 +514,9 @@ fn handle(state: &McpState, opts: McpOptions, addr: SocketAddr, r: &Asked<'_>) -
     }
     if !(accepts(r.accept, "application/json") && accepts(r.accept, "text/event-stream")) {
         return json_error(406, &Value::Null, "Accept must list application/json and text/event-stream");
+    }
+    if let Some(batch) = r.message.and_then(Value::as_array).filter(|_| opts.batches) {
+        return answer_batch(state, opts, r, batch);
     }
     let Some(message) = r.message.filter(|v| v.is_object()) else {
         return json_error(400, &Value::Null, "Invalid Request");
@@ -458,13 +579,68 @@ fn handle(state: &McpState, opts: McpOptions, addr: SocketAddr, r: &Asked<'_>) -
             }
             return resp;
         }
+        Hostile::RedirectPage2(to) if method == "tools/list" && r.params.get("cursor").is_some_and(|v| !v.is_null()) => {
+            let mut resp = reply(307, None, "");
+            if let Ok(v) = HeaderValue::from_str(to) {
+                resp.headers_mut().insert("location", v);
+            }
+            return resp;
+        }
         _ => {}
     }
-    let answered = match dispatch(method, r.params, session) {
+    let answered = match dispatch(method, r.params, session, opts) {
         Ok(result) => rpc_result(&id, result),
         Err((code, text)) => rpc_error(&id, code, &text),
     };
     answer(opts, 200, &answered, None)
+}
+
+/// A JSON-RPC batch in a session: each request answered in order (a message
+/// that is not a request object gets -32600 with a null id), notifications
+/// unanswered; a batch of notifications only is answered `202`.
+fn answer_batch(state: &McpState, opts: McpOptions, r: &Asked<'_>, batch: &[Value]) -> Response<FxBody> {
+    if batch.is_empty() {
+        return json_error(400, &Value::Null, "Invalid Request: an empty batch");
+    }
+    let Some(session) = r.session else { return json_error(400, &Value::Null, "Missing Mcp-Session-Id header") };
+    if !state.sessions.lock().iter().any(|x| x == session) {
+        return reply(404, None, "");
+    }
+    let mut answers = Vec::new();
+    for m in batch {
+        let Some(method) = m.as_object().and_then(|o| o.get("method")).and_then(Value::as_str) else {
+            answers.push(rpc_error(&Value::Null, -32600, "Invalid Request"));
+            continue;
+        };
+        let Some(id) = m.get("id") else { continue };
+        let params = m.get("params").cloned().unwrap_or(Value::Null);
+        answers.push(match dispatch(method, &params, session, opts) {
+            Ok(result) => rpc_result(id, result),
+            Err((code, text)) => rpc_error(id, code, &text),
+        });
+    }
+    match opts.hostile {
+        Hostile::BatchDropsLast => {
+            answers.pop();
+        }
+        Hostile::BatchExtraUnrelatedAndMalformed => {
+            let mut mixed = vec![rpc_error(&json!(999), -32099, "unrelated request failed"), json!({"not": "jsonrpc"})];
+            mixed.extend(answers);
+            answers = mixed;
+        }
+        Hostile::BatchOnlyUnrelatedAndMalformed => {
+            answers = vec![rpc_error(&json!(999), -32099, "unrelated request failed"), json!({"not": "jsonrpc"})];
+        }
+        Hostile::BatchEmpty200 => {
+            return reply(200, Some("application/json"), "");
+        }
+        _ => {}
+    }
+    if answers.is_empty() {
+        return reply(202, None, "");
+    }
+    let json = Value::Array(answers.clone()).to_string();
+    answer_all(opts, 200, &answers, json, None)
 }
 
 /// Start the fixture. `bind` like `127.0.0.1:0`.
@@ -513,10 +689,23 @@ mod tests {
         assert_eq!(call_tool(&json!({"name": "fail"}), "s").unwrap()["isError"], true);
         assert_eq!(call_tool(&json!({"name": "session"}), "sid-1").unwrap()["content"][0]["text"], "session sid-1");
         assert_eq!(call_tool(&json!({"name": "nope"}), "s").unwrap_err().0, -32602);
-        assert_eq!(dispatch("nope/nope", &Value::Null, "s").unwrap_err().0, -32601);
+        assert_eq!(dispatch("nope/nope", &Value::Null, "s", McpOptions::default()).unwrap_err().0, -32601);
         let tools = tools();
         let names: Vec<&str> = tools.as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(names, ["echo", "add", "fail", "session", "delete_all", "internal_audit", "new_tool"]);
+    }
+
+    #[test]
+    fn tools_list_pages_link_by_cursor() {
+        let first = tools_page(&Value::Null, Some(3), "s1").unwrap();
+        assert_eq!(first["tools"].as_array().map(Vec::len), Some(3));
+        assert_eq!(first["nextCursor"], "page-3@s1");
+        let last = tools_page(&json!({"cursor": "page-6@s1"}), Some(3), "s1").unwrap();
+        assert_eq!(last["tools"][0]["name"], "new_tool");
+        assert!(last.get("nextCursor").is_none());
+        assert_eq!(tools_page(&json!({"cursor": "page-99@s1"}), Some(3), "s1").unwrap_err().0, -32602);
+        assert_eq!(tools_page(&json!({"cursor": "page-3@s1"}), Some(3), "s2").unwrap_err().0, -32602, "another session's cursor");
+        assert_eq!(tools_page(&Value::Null, None, "s1").unwrap()["tools"].as_array().map(Vec::len), Some(7));
     }
 
     #[test]

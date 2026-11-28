@@ -466,3 +466,233 @@ async fn refused_initialize_scrubs_a_newly_issued_session_from_all_metadata() {
     let record = serde_json::to_string(&out.record).unwrap().to_ascii_lowercase();
     assert!(!record.contains("metasession77"), "{record}");
 }
+
+// ---- event streams left open, batches ---------------------------------------
+
+fn batch(messages: &str) -> McpOperation {
+    McpOperation::Batch { messages: messages.into() }
+}
+
+/// A server that keeps each event stream open after its response: Anvil stops
+/// reading once the JSON-RPC response has arrived (initialize's and the
+/// operation's), so the session ends promptly and completes, and says so.
+#[tokio::test]
+async fn an_event_stream_left_open_ends_once_the_response_has_arrived() {
+    init();
+    // The answer's chunk ends inside a comment (readable before a chunk
+    // boundary says so); and again with the stream gzip-encoded.
+    for gzip in [false, true] {
+        left_open_ends_at_the_answer(McpOptions { sse: true, keep_open: true, gzip, ..Default::default() }).await;
+    }
+}
+
+async fn left_open_ends_at_the_answer(opts: McpOptions) {
+    let f = mcp::serve("127.0.0.1:0", opts).await.unwrap();
+    let e = Engine::new();
+    let mut c = mcp_ctx(&f.url(), call("echo", r#"{"text":"hi"}"#));
+    let timeouts = TimeoutOverrides { total_ms: Some(Some(20_000)), ..Default::default() };
+    c.settings_layers.push(("run".into(), SettingsOverrides { timeouts: Some(timeouts), ..Default::default() }));
+    c.spec.assertions = vec![check(AssertionKind::JsonRpcResult)];
+    let started = std::time::Instant::now();
+    let o = run(&e, &c).await;
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(5), "waited for the open streams: {took:?}");
+    assert_eq!(o.record.outcome.transport, anvil_domain::outcome::TransportState::Completed, "{}", o.record.outcome.summary);
+    assert_eq!(o.record.outcome.application, ApplicationState::Success, "{}", o.record.outcome.summary);
+    assert_eq!(o.record.outcome.assertions, AssertionState::Pass, "{:?}", o.record.assertion_results);
+    let body = &o.record.response.as_ref().expect("a response").body;
+    assert_eq!(body.completeness, anvil_domain::execution::BodyCompleteness::StoppedAfterAnswer);
+    let n = notes(&o);
+    assert!(n.contains("MCP tools/call: Anvil stopped reading the event stream once the JSON-RPC response had arrived"), "{n}");
+    assert!(n.contains("MCP initialize: HTTP 200"), "{n}");
+    assert!(n.contains("MCP session closed: DELETE answered HTTP 200"), "{n}");
+    assert_eq!(operation_response(&o).expect("the response")["result"]["structuredContent"]["text"], "hi");
+}
+
+/// A JSON-RPC batch to a server that answers batches: one POST, one response
+/// per request (the notification gets none), each listed in the notes; an
+/// error among them makes the call an application failure.
+#[tokio::test]
+async fn a_json_rpc_batch_is_answered_response_by_response() {
+    init();
+    // Ids other than initialize's 1: a session never reuses a request id.
+    let messages = r#"[{"jsonrpc":"2.0","id":11,"method":"ping"},{"jsonrpc":"2.0","id":12,"method":"nope/nope"},{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}]"#;
+    for sse in [false, true] {
+        let f = mcp::serve("127.0.0.1:0", McpOptions { sse, keep_open: sse, batches: true, ..Default::default() }).await.unwrap();
+        let e = Engine::new();
+        let o = run(&e, &mcp_ctx(&f.url(), batch(messages))).await;
+        let batches: Vec<Option<usize>> = f.state.calls().iter().map(|c| c.batch).filter(Option::is_some).collect();
+        assert_eq!(batches, [Some(3)], "sse {sse}: sent as one POST");
+        assert_eq!(status(&o), Some(200), "sse {sse}: {}", o.record.outcome.summary);
+        let n = notes(&o);
+        assert!(
+            n.contains("MCP JSON-RPC batch: 2 response(s) to 2 request(s): id 11: result; id 12: error -32601 (Method not found)"),
+            "sse {sse}: {n}"
+        );
+        assert!(!n.contains("no response to request id") && !n.contains("reuses request id"), "sse {sse}: {n}");
+        assert_eq!(o.record.outcome.application, ApplicationState::Failure, "sse {sse}: {}", o.record.outcome.summary);
+        assert!(codes(&o).contains(&"app.jsonrpc_error".to_string()), "sse {sse}: {:?}", codes(&o));
+        if sse {
+            let body = &o.record.response.as_ref().expect("a response").body;
+            assert_eq!(body.completeness, anvil_domain::execution::BodyCompleteness::StoppedAfterAnswer, "both responses had arrived");
+        }
+    }
+}
+
+/// A server without batches (MCP from 2025-06-18) refuses the whole batch; a
+/// batch that is not a non-empty JSON array is not sent.
+#[tokio::test]
+async fn a_batch_a_server_refuses_whole_and_an_empty_batch() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", McpOptions::default()).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &mcp_ctx(&f.url(), batch(r#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#))).await;
+    assert_eq!(status(&o), Some(400));
+    let n = notes(&o);
+    assert!(n.contains("MCP JSON-RPC batch: the server refused the whole batch with JSON-RPC error -32600 (Invalid Request)"), "{n}");
+    assert_ne!(o.record.outcome.application, ApplicationState::Success);
+
+    let before = f.state.calls().len();
+    for bad in ["[]", "{}", " "] {
+        let o = run(&e, &mcp_ctx(&f.url(), batch(bad))).await;
+        let failure = o.record.attempts.last().and_then(|a| a.failure.as_ref()).map(|f| (f.kind, f.field.clone()));
+        assert_eq!(failure, Some((FailureKind::BodySerialization, Some("mcp.operation.messages".into()))), "{bad:?}");
+    }
+    assert_eq!(f.state.calls().len(), before, "nothing was sent");
+}
+
+/// A finite event stream whose last chunk carries the answer ends on its own:
+/// it is complete, not stopped, and its connection stays reusable.
+#[tokio::test]
+async fn a_finite_event_stream_is_complete_not_stopped() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", McpOptions { sse: true, ..Default::default() }).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &mcp_ctx(&f.url(), call("echo", r#"{"text":"hi"}"#))).await;
+    let body = &o.record.response.as_ref().expect("a response").body;
+    assert_eq!(body.completeness, anvil_domain::execution::BodyCompleteness::Complete);
+    assert!(!notes(&o).contains("stopped reading"), "{}", notes(&o));
+    let accepted = f.log.entries().iter().filter(|e| matches!(e.event, GroundTruth::ConnectionAccepted { .. })).count();
+    assert_eq!(accepted, 1, "every exchange of the session reused the first connection");
+}
+
+/// A batch whose answer leaves a request without a response is not a
+/// success: the notes name the request, and the outcome is not evaluated.
+#[tokio::test]
+async fn a_batch_answer_missing_a_response_is_not_a_success() {
+    init();
+    let opts = McpOptions { batches: true, hostile: Hostile::BatchDropsLast, ..Default::default() };
+    let f = mcp::serve("127.0.0.1:0", opts).await.unwrap();
+    let e = Engine::new();
+    let o = run(&e, &mcp_ctx(&f.url(), batch(r#"[{"jsonrpc":"2.0","id":11,"method":"ping"},{"jsonrpc":"2.0","id":12,"method":"ping"}]"#)))
+        .await;
+    let n = notes(&o);
+    assert!(n.contains("MCP JSON-RPC batch: no response to request id 12"), "{n}");
+    assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "{}", o.record.outcome.summary);
+    assert!(o.record.outcome.warnings.iter().any(|w| w.message.contains("1 request(s) of the JSON-RPC batch got no response")));
+}
+
+/// A batch's request ids are those actually sent, variables resolved: the
+/// stream left open ends once the resolved id is answered.
+#[tokio::test]
+async fn a_batch_is_matched_on_the_ids_actually_sent() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", McpOptions { sse: true, keep_open: true, batches: true, ..Default::default() }).await.unwrap();
+    let e = Engine::new();
+    let mut c = mcp_ctx(&f.url(), batch(r#"[{"jsonrpc":"2.0","id":"{{rid}}","method":"ping"}]"#));
+    let rid = VarEntry { name: "rid".into(), value: "ping-1".into(), secret: false, literal: false };
+    c.var_layers.push(VarLayer { label: "test".into(), vars: vec![rid] });
+    let timeouts = TimeoutOverrides { total_ms: Some(Some(20_000)), ..Default::default() };
+    c.settings_layers.push(("run".into(), SettingsOverrides { timeouts: Some(timeouts), ..Default::default() }));
+    let started = std::time::Instant::now();
+    let o = run(&e, &c).await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "waited for the open stream");
+    let n = notes(&o);
+    assert!(n.contains("MCP JSON-RPC batch: 1 response(s) to 1 request(s): id \"ping-1\": result"), "{n}");
+    assert_eq!(o.record.outcome.application, ApplicationState::Success, "{}", o.record.outcome.summary);
+}
+
+/// Unrelated JSON-RPC errors and malformed non-RPC elements in a batch reply
+/// do not fail a successful batch or leak into extractions, while raw response
+/// bytes stay preserved as evidence; when only unrelated/malformed elements
+/// arrive on 2xx, the outcome is NotEvaluated (not a false JSON-RPC error).
+#[tokio::test]
+async fn batch_filters_unrelated_and_malformed_elements_in_json_and_sse() {
+    init();
+    let messages = r#"[{"jsonrpc":"2.0","id":11,"method":"ping"}]"#;
+    let e = Engine::new();
+    for sse in [false, true] {
+        let f = mcp::serve(
+            "127.0.0.1:0",
+            McpOptions { sse, batches: true, hostile: Hostile::BatchExtraUnrelatedAndMalformed, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let mut c = mcp_ctx(&f.url(), batch(messages));
+        c.spec.extractions = vec![Extraction {
+            variable: "first_id".into(),
+            source: ExtractionSource::JsonPath { path: "$[0].id".into() },
+            sensitive: false,
+        }];
+        let o = run(&e, &c).await;
+        assert_eq!(o.record.outcome.application, ApplicationState::Success, "sse {sse}: {}", o.record.outcome.summary);
+        assert!(!codes(&o).contains(&"app.jsonrpc_error".to_string()), "sse {sse}: unrelated id 999 leaked: {:?}", codes(&o));
+        assert_eq!(o.extracted, vec![("first_id".to_string(), "11".to_string(), false)], "sse {sse}: extraction picked unrelated reply");
+        assert!(std::str::from_utf8(&o.body).unwrap_or("").contains("999"), "sse {sse}: raw response body must keep server evidence");
+
+        let only_unrelated = mcp::serve(
+            "127.0.0.1:0",
+            McpOptions { sse, batches: true, hostile: Hostile::BatchOnlyUnrelatedAndMalformed, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let o = run(&e, &mcp_ctx(&only_unrelated.url(), batch(messages))).await;
+        assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "sse {sse}: {}", o.record.outcome.summary);
+        assert!(!codes(&o).contains(&"app.jsonrpc_error".to_string()), "sse {sse}: unrelated id 999 leaked: {:?}", codes(&o));
+    }
+}
+
+/// A batch whose template parses as JSON with no `id` until a variable in a
+/// member name resolves to `"id"` still derives response expectations from the
+/// prepared bytes (stopping open SSE early and refusing an empty 200).
+#[tokio::test]
+async fn templated_batch_member_name_derives_expectations_from_prepared_bytes() {
+    init();
+    let e = Engine::new();
+    let template = r#"[{"jsonrpc":"2.0","{{member}}":11,"method":"ping"}]"#;
+    let var = || VarLayer {
+        label: "test".into(),
+        vars: vec![VarEntry { name: "member".into(), value: "id".into(), secret: false, literal: false }],
+    };
+
+    let open = mcp::serve("127.0.0.1:0", McpOptions { sse: true, keep_open: true, batches: true, ..Default::default() }).await.unwrap();
+    let mut c = mcp_ctx(&open.url(), batch(template));
+    c.var_layers.push(var());
+    let timeouts = TimeoutOverrides { total_ms: Some(Some(20_000)), ..Default::default() };
+    c.settings_layers.push(("run".into(), SettingsOverrides { timeouts: Some(timeouts), ..Default::default() }));
+    let started = std::time::Instant::now();
+    let o = run(&e, &c).await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "waited for open stream");
+    assert_eq!(o.record.outcome.application, ApplicationState::Success, "{}", o.record.outcome.summary);
+    assert_eq!(o.record.response.as_ref().unwrap().body.completeness, anvil_domain::execution::BodyCompleteness::StoppedAfterAnswer);
+
+    let empty =
+        mcp::serve("127.0.0.1:0", McpOptions { batches: true, hostile: Hostile::BatchEmpty200, ..Default::default() }).await.unwrap();
+    let mut c = mcp_ctx(&empty.url(), batch(template));
+    c.var_layers.push(var());
+    let o = run(&e, &c).await;
+    assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "empty 200 must not count as notification success");
+}
+
+/// A batch that reuses the same request id is ambiguous and must not be
+/// reported as a complete success.
+#[tokio::test]
+async fn duplicate_request_ids_in_batch_are_not_evaluated_as_success() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", McpOptions { batches: true, ..Default::default() }).await.unwrap();
+    let e = Engine::new();
+    let dup = r#"[{"jsonrpc":"2.0","id":11,"method":"ping"},{"jsonrpc":"2.0","id":11,"method":"ping"}]"#;
+    let o = run(&e, &mcp_ctx(&f.url(), batch(dup))).await;
+    assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "{}", o.record.outcome.summary);
+    assert!(o.record.outcome.warnings.iter().any(|w| w.message.contains("reused a request id")), "{:?}", o.record.outcome.warnings);
+}

@@ -61,6 +61,7 @@ fn plan(url: &str) -> HttpPlan {
         display_url: url.into(),
         early_data: EarlyDataIntent::Off,
         fence: None,
+        body_stop: None,
     }
 }
 

@@ -641,7 +641,12 @@ async fn run_direct(
         ),
         None => (None, ProtocolStatus::None),
     };
-    SessionOutput::single(AttemptOutput { observation: obs, response: None, body: Bytes::new() }, transcript, status, facts)
+    SessionOutput::single(
+        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None },
+        transcript,
+        status,
+        facts,
+    )
 }
 
 /// DTLS inside an RFC 9298 CONNECT-UDP tunnel. A tunnel that never opens
@@ -685,7 +690,12 @@ async fn run_tunneled(
         window_ms: plan.response_window_ms,
         masque: Some(tunnel),
     };
-    SessionOutput::single(AttemptOutput { observation: obs, response: None, body: Bytes::new() }, transcript, status, facts)
+    SessionOutput::single(
+        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None },
+        transcript,
+        status,
+        facts,
+    )
 }
 
 /// DTLS inside a Ferrum Mesh HBONE datagram tunnel. The attempt addresses
@@ -741,7 +751,12 @@ async fn run_hbone(
         Some(s) => (Some(s.transcript), s.sent, s.received),
         None => (None, 0, 0),
     };
-    SessionOutput::single(AttemptOutput { observation: obs, response: None, body: Bytes::new() }, transcript, status(sent, received), facts)
+    SessionOutput::single(
+        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None },
+        transcript,
+        status(sent, received),
+        facts,
+    )
 }
 
 /// An application-data session after a completed handshake.

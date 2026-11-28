@@ -478,7 +478,7 @@ pub fn fail_attempt(
     obs.phases = std::mem::take(&mut rec.phases);
     obs.dispatch = dispatch;
     obs.failure = Some(f);
-    AttemptOutput { observation: obs, response: None, body: Bytes::new() }
+    AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None }
 }
 
 /// Close the attempt normally (the failure, if any, is already set).

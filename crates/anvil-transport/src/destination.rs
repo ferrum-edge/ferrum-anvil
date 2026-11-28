@@ -316,6 +316,7 @@ mod tests {
             proxy_header_withheld: None,
             early_data: EarlyDataIntent::Off,
             fence: None,
+            body_stop: None,
         }
     }
 

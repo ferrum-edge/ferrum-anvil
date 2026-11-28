@@ -306,6 +306,7 @@ impl Lookup<'_> {
             proxy_header_withheld: None,
             early_data: anvil_transport::http::EarlyDataIntent::Off,
             fence: Some(self.epoch.transport()),
+            body_stop: None,
         })
     }
 }
@@ -517,7 +518,7 @@ mod tests {
             inferred: vec![],
             lint_bypassed: None,
             attempts: vec![],
-            last: AttemptOutput { observation: attempt, response: Some(response), body: Bytes::new() },
+            last: AttemptOutput { observation: attempt, response: Some(response), body: Bytes::new(), answer_captured_len: None },
             trust: FerrumTrust::Trusted {
                 profile_name: "lab gateway".into(),
                 compatibility_id: "ferrum-edge-0.9.9".into(),

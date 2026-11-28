@@ -1229,6 +1229,8 @@ mod tests {
                     decoded_body: None,
                     extracted: vec![],
                     session_facts: None,
+                    session_attempts: vec![],
+                    session_auxiliary_outcome: None,
                 };
                 // Barrier at the watcher's finish/history boundary; a lock
                 // can make recording fail, but must never authorize a view.

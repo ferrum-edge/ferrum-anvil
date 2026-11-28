@@ -1190,8 +1190,15 @@ async fn mcp_discover(app: &App, a: &McpDiscoverArgs) -> Result<i32> {
     if d.notes_total > d.notes.len() {
         println!("note: {} more", d.notes_total - d.notes.len());
     }
-    if d.more {
-        println!("the server lists more tools than its first page; only the first page was read");
+    if d.pages > 1 {
+        println!("read {} tools/list pages", d.pages);
+    }
+    if let Some(why) = &d.stopped {
+        // Server text (a JSON-RPC error summary) may be quoted in it.
+        println!("not every page was read: {}", terminal_safe(why));
+    }
+    if let Some(why) = &d.history_warning {
+        println!("history warning: {}", terminal_safe(why));
     }
     Ok(0)
 }

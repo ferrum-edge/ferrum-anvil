@@ -784,8 +784,19 @@ pub enum BodyCompleteness {
     Canceled,
     /// Reading stopped at the local `max_response_bytes` ceiling.
     StoppedAtLocalLimit,
+    /// Reading stopped on purpose once the body held what the request needed (an MCP event stream, after its JSON-RPC response).
+    StoppedAfterAnswer,
     /// No body by protocol (HEAD, 204, 304, 1xx).
     NoBody,
+}
+
+impl BodyCompleteness {
+    /// Whether what was read is the whole answer: the body's framing completed,
+    /// there is no body by protocol, or reading stopped once the body held the
+    /// answer the request needed.
+    pub fn holds_the_answer(self) -> bool {
+        matches!(self, BodyCompleteness::Complete | BodyCompleteness::NoBody | BodyCompleteness::StoppedAfterAnswer)
+    }
 }
 
 /// Outcome of removing the response's content-coding for display,

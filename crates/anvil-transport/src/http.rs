@@ -58,6 +58,28 @@ pub fn authority_host(authority: &str) -> Option<String> {
     authority.parse::<http::uri::Authority>().ok().map(|a| a.host().to_string())
 }
 
+/// What a [`BodyStop`] knows when a response body starts: the exact request
+/// body that was sent and the response's media type and content-coding.
+pub struct BodyStart<'a> {
+    pub request_body: &'a [u8],
+    pub content_type: Option<&'a str>,
+    pub content_encoding: Option<&'a str>,
+}
+
+/// Watches one response body as it arrives.
+pub trait BodyWatch: Send {
+    /// The next body bytes, as received (still content-coded); `true` once
+    /// the body holds what the request needs.
+    fn feed(&mut self, chunk: &[u8]) -> bool;
+}
+
+/// Starts a watch over each response body of the plan (every attempt gets
+/// its own); `None` reads the body to its end. When a watch says the body
+/// holds what the request needs and the body has not ended, reading stops,
+/// recorded as [`BodyCompleteness::StoppedAfterAnswer`]. An MCP exchange stops
+/// an event stream once its JSON-RPC response has arrived.
+pub type BodyStop = Arc<dyn Fn(&BodyStart<'_>) -> Option<Box<dyn BodyWatch>> + Send + Sync>;
+
 /// Fully prepared single-attempt HTTP request (final bytes; auth already applied).
 #[derive(Clone)]
 pub struct HttpPlan {
@@ -98,6 +120,9 @@ pub struct HttpPlan {
     /// no ticket, however many attempts, redirects or retries later it runs.
     /// `None`: taken when the attempt begins.
     pub fence: Option<CacheFence>,
+    /// Stop reading the body once it holds what the request needs (see
+    /// [`BodyStop`]); `None` reads it to its end.
+    pub body_stop: Option<BodyStop>,
 }
 
 /// The generations of one transport's connection pool and ticket cache.
@@ -154,6 +179,13 @@ pub struct AttemptOutput {
     pub observation: AttemptObservation,
     pub response: Option<ResponseRecord>,
     pub body: Bytes,
+    /// When an answer-stop watcher (`BodyStop`) signaled completion while all
+    /// bytes up through the correlated answer were within `capture_bytes`, the
+    /// exact prefix length (`<= body.len()`) containing the complete answer.
+    /// Trailing probe frames may still push `wire_bytes` past `capture_bytes`
+    /// or add decoded bytes past `max_decoded_bytes` without invalidating this
+    /// prefix.
+    pub answer_captured_len: Option<usize>,
 }
 
 // ------------------------------------------------------------------ body ---
@@ -875,7 +907,7 @@ impl HttpTransport {
             obs.phases = std::mem::take(&mut rec.phases);
             obs.dispatch = dispatch;
             obs.failure = Some(f);
-            AttemptOutput { observation: obs, response: None, body: Bytes::new() }
+            AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None }
         };
 
         // Unsupported combinations fail before any traffic.
@@ -1358,6 +1390,18 @@ impl HttpTransport {
         let mut completeness = BodyCompleteness::Complete;
         let mut last_progress = Instant::now();
         let idle = plan.timeouts.body_idle_ms.map(Duration::from_millis);
+        let mut watch = plan
+            .body_stop
+            .as_ref()
+            .and_then(|stop| {
+                stop(&BodyStart {
+                    request_body: &plan.body,
+                    content_type: content_type.as_deref(),
+                    content_encoding: content_encoding.as_deref(),
+                })
+            })
+            .filter(|_| !no_body);
+        let mut answer_captured_len: Option<usize> = None;
         loop {
             let idle_deadline = idle.map(|d| Instant::now() + d);
             tokio::select! {
@@ -1379,6 +1423,87 @@ impl HttpTransport {
                                 completeness = BodyCompleteness::StoppedAtLocalLimit;
                                 failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::ResponseTooLargeLocal,
                                     format!("stopped reading after {} bytes: the local max_response_bytes limit was reached (this is a local limit, not a peer fault)", plan.limits.max_response_bytes)));
+                                break;
+                            }
+                            // A body that has ended is complete, not stopped:
+                            // its connection stays reusable. When end-of-stream
+                            // is not yet set (e.g. a trailing END_STREAM or
+                            // trailers frame right behind the answer), briefly
+                            // confirm whether the peer actually ended it.
+                            if let Some(w) = watch.as_mut()
+                                && w.feed(&data)
+                            {
+                                answer_captured_len = (wire <= plan.limits.capture_bytes).then_some(captured.len());
+                                if body.is_end_stream() {
+                                    break;
+                                }
+                                let probe_deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+                                loop {
+                                    tokio::select! {
+                                        biased;
+                                        next = body.frame() => match next {
+                                            None => {
+                                                completeness = BodyCompleteness::Complete;
+                                                break;
+                                            }
+                                            Some(Ok(next_frame)) => {
+                                                if next_frame.is_data() {
+                                                    let more = next_frame.into_data().unwrap_or_default();
+                                                    if !more.is_empty() {
+                                                        wire += more.len() as u64;
+                                                        let room = (plan.limits.capture_bytes as usize).saturating_sub(captured.len());
+                                                        if room > 0 {
+                                                            captured.extend_from_slice(&more[..more.len().min(room)]);
+                                                        }
+                                                        if wire > plan.limits.max_response_bytes {
+                                                            completeness = BodyCompleteness::StoppedAtLocalLimit;
+                                                            failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::ResponseTooLargeLocal,
+                                                                format!("stopped reading after {} bytes: the local max_response_bytes limit was reached (this is a local limit, not a peer fault)", plan.limits.max_response_bytes)));
+                                                            break;
+                                                        }
+                                                        if body.is_end_stream() {
+                                                            completeness = BodyCompleteness::Complete;
+                                                        } else {
+                                                            completeness = BodyCompleteness::StoppedAfterAnswer;
+                                                        }
+                                                        break;
+                                                    }
+                                                    if body.is_end_stream() {
+                                                        completeness = BodyCompleteness::Complete;
+                                                        break;
+                                                    }
+                                                } else if let Ok(t) = next_frame.into_trailers() {
+                                                    trailers_received = true;
+                                                    trailers = t.iter().map(|(n, v)| HeaderEntry { name: n.as_str().to_string(), value: String::from_utf8_lossy(v.as_bytes()).into_owned() }).collect();
+                                                    if body.is_end_stream() {
+                                                        completeness = BodyCompleteness::Complete;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            Some(Err(e)) => {
+                                                completeness = BodyCompleteness::Incomplete;
+                                                let mut f = classify_hyper(&e, HyperStage::Body);
+                                                apply_tls_tap(&mut f, &conn.stats);
+                                                failure = Some(f);
+                                                break;
+                                            }
+                                        },
+                                        _ = tokio::time::sleep_until(probe_deadline) => {
+                                            completeness = BodyCompleteness::StoppedAfterAnswer;
+                                            break;
+                                        }
+                                        _ = sleep_until_opt(total_deadline) => {
+                                            completeness = BodyCompleteness::StoppedAfterAnswer;
+                                            break;
+                                        }
+                                        _ = cancel.cancelled() => {
+                                            completeness = BodyCompleteness::Canceled;
+                                            failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled while reading the response body"));
+                                            break;
+                                        }
+                                    }
+                                }
                                 break;
                             }
                         } else if let Ok(t) = frame.into_trailers() {
@@ -1444,7 +1569,8 @@ impl HttpTransport {
         let reusable = failure.is_none() && plan.keepalive && !conn_close && !tunneled;
         match &conn.sender {
             Sender::H1(_) => {
-                if reusable {
+                // A body left unread mid-stream leaves the connection unusable.
+                if reusable && completeness != BodyCompleteness::StoppedAfterAnswer {
                     self.pool.checkin(key, conn.clone(), generation);
                 } else if !kept_for_retry {
                     conn.closed.store(true, Ordering::SeqCst);
@@ -1489,7 +1615,7 @@ impl HttpTransport {
         obs.failure = failure;
         obs.duration_us = rec.us();
         obs.phases = std::mem::take(&mut rec.phases);
-        (AttemptOutput { observation: obs, response: Some(response), body: captured }, None)
+        (AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured_len }, None)
     }
 
     /// Set up HTTP/1.1 or HTTP/2 over an established stream. With

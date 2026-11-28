@@ -2890,6 +2890,11 @@
           "const": "stopped_at_local_limit"
         },
         {
+          "description": "Reading stopped on purpose once the body held what the request needed (an MCP event stream, after its JSON-RPC response).",
+          "type": "string",
+          "const": "stopped_after_answer"
+        },
+        {
           "description": "No body by protocol (HEAD, 204, 304, 1xx).",
           "type": "string",
           "const": "no_body"

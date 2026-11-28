@@ -279,6 +279,50 @@ fn origin(url: &str) -> Option<String> {
 pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObservation {
     let rec = &out.record;
     let mut obs = observe_record(rec, wall_us);
+    if step.kind == LoadUnitKind::McpSession {
+        // The record is one exchange of the session; the unit is all of it:
+        // its time, the traffic of its other exchanges, and transport
+        // completion of its closing DELETE exchange when closing is on.
+        obs.latency_us = wall_us;
+        obs.setup_us = 0;
+        count_attempts(&mut obs, &out.session_attempts);
+        if let Some(aux) = &out.session_auxiliary_outcome {
+            let aux_terminal = classify_transport(aux.transport, aux.failure.as_ref());
+            let apply_aux = aux_terminal != Terminal::Completed
+                && match aux.exchange {
+                    anvil_engine::McpAuxiliaryExchange::InitializedNotification => true,
+                    anvil_engine::McpAuxiliaryExchange::SessionClose => {
+                        obs.terminal == Terminal::Completed
+                            && !obs.application_failure
+                            && rec.outcome.application != ApplicationState::NotEvaluated
+                    }
+                };
+            if apply_aux {
+                obs.terminal = aux_terminal;
+                obs.application_failure = false;
+                obs.assertion_failure = false;
+                obs.deadline_ms = if aux_terminal == Terminal::Timeout { aux.failure.as_ref().and_then(|f| f.deadline_ms) } else { None };
+                if obs.is_failure() {
+                    let class = if aux_terminal == Terminal::Timeout { "timeout" } else { "transport_failure" };
+                    let (stage, method_label, fallback_kind, fallback_detail) = match aux.exchange {
+                        anvil_engine::McpAuxiliaryExchange::InitializedNotification => (
+                            "mcp_initialized",
+                            "POST (notifications/initialized)",
+                            "initialized_notification",
+                            "MCP notifications/initialized did not complete",
+                        ),
+                        anvil_engine::McpAuxiliaryExchange::SessionClose => {
+                            ("mcp_close", "DELETE", "session_close", "MCP session close did not complete")
+                        }
+                    };
+                    let kind = aux.failure.as_ref().map(|f| snake(&f.kind)).unwrap_or_else(|| fallback_kind.into());
+                    obs.category = Some(truncate_chars(&format!("{class}: {stage}.{kind}"), 120));
+                    let detail = aux.failure.as_ref().map(|f| format!("{kind}: {}", f.message)).unwrap_or_else(|| fallback_detail.into());
+                    obs.example = Some(truncate_chars(&format!("{method_label} {} → {detail}", rec.prepared.url), MAX_EXAMPLE_CHARS));
+                }
+            }
+        }
+    }
     obs.proto = protocol_obs(out, step, obs.terminal);
     // A datagram exchange whose tunnel never opened sent nothing and had no
     // response window, so it is not completed (and never "no response
@@ -305,6 +349,9 @@ pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObse
             // captured, say) is not a success; it counts as an application
             // failure.
             LoadUnitKind::HttpRequest if not_determined_from_body(rec, step) => obs.application_failure = true,
+            // An operation not sent, or an answer that could not be judged,
+            // is not a success.
+            LoadUnitKind::McpSession if rec.outcome.application == ApplicationState::NotEvaluated => obs.application_failure = true,
             LoadUnitKind::UdpExchange | LoadUnitKind::DtlsExchange => match &obs.proto.dgram {
                 Some(d) if d.received == 0 => obs.no_response = true,
                 // The latency of an exchange is the observed time to first
@@ -327,20 +374,24 @@ fn not_determined_from_body(rec: &ExecutionRecord, step: &StepUnit) -> bool {
     step.application_from_body && rec.outcome.application == ApplicationState::NotEvaluated
 }
 
+fn classify_transport(transport: TransportState, failure: Option<&anvil_domain::execution::TransportFailure>) -> Terminal {
+    match transport {
+        TransportState::Completed => Terminal::Completed,
+        TransportState::Canceled => Terminal::Canceled,
+        _ => match failure {
+            Some(f) if f.kind == FailureKind::Canceled => Terminal::Canceled,
+            Some(f) if is_timeout(f.kind) => Terminal::Timeout,
+            _ => Terminal::TransportFailure,
+        },
+    }
+}
+
 /// The unit-independent part of [`observe`]: terminal class, application and
 /// assertion state, attempt latency, bytes and connections. Failure samples
 /// are added by [`observe`].
 pub fn observe_record(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
     let last_failure = rec.attempts.last().and_then(|a| a.failure.as_ref());
-    let terminal = match rec.outcome.transport {
-        TransportState::Completed => Terminal::Completed,
-        TransportState::Canceled => Terminal::Canceled,
-        _ => match last_failure {
-            Some(f) if f.kind == FailureKind::Canceled => Terminal::Canceled,
-            Some(f) if is_timeout(f.kind) => Terminal::Timeout,
-            _ => Terminal::TransportFailure,
-        },
-    };
+    let terminal = classify_transport(rec.outcome.transport, last_failure);
     let application_failure = terminal == Terminal::Completed && rec.outcome.application == ApplicationState::Failure;
     let assertion_failure = terminal == Terminal::Completed && rec.outcome.assertions == AssertionState::Fail;
     let latency_us = exchange_duration_us(&rec.attempts).unwrap_or(0);
@@ -363,7 +414,13 @@ pub fn observe_record(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
         destination: origin(&rec.prepared.url),
         proto: ProtoObs::default(),
     };
-    for a in &rec.attempts {
+    count_attempts(&mut obs, &rec.attempts);
+    obs
+}
+
+/// Add the bytes and connections of `attempts` to `obs`.
+fn count_attempts(obs: &mut SendObservation, attempts: &[anvil_domain::execution::AttemptObservation]) {
+    for a in attempts {
         obs.bytes_sent += a.bytes.request_headers_logical + a.bytes.request_body;
         obs.bytes_received += a.bytes.response_headers_logical.unwrap_or(0) + a.bytes.response_body_wire.unwrap_or(0);
         if let Some(c) = &a.connection {
@@ -374,7 +431,6 @@ pub fn observe_record(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
             }
         }
     }
-    obs
 }
 
 /// Failure category (class + top finding / failure kind / status / assertion
@@ -533,7 +589,7 @@ fn protocol_obs(out: &ExecutionOutput, step: &StepUnit, terminal: Terminal) -> P
         ..Default::default()
     };
     match step.kind {
-        LoadUnitKind::HttpRequest => {}
+        LoadUnitKind::HttpRequest | LoadUnitKind::McpSession => {}
         LoadUnitKind::GrpcCall | LoadUnitKind::GrpcStream | LoadUnitKind::GrpcClientStream | LoadUnitKind::GrpcBidiStream => {
             if let ProtocolStatus::Grpc { http_status, grpc_status, source, .. } = status {
                 p.grpc_status = *grpc_status;
@@ -1109,6 +1165,8 @@ impl ProtoAccum {
                     }),
                 })
             }
+            // Its counts are the plan's own (sessions, statuses, latency).
+            LoadUnitKind::McpSession => {}
         }
         m
     }

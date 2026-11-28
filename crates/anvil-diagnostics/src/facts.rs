@@ -134,7 +134,7 @@ pub struct ProblemDetails {
 /// A JSON-RPC 2.0 error, as the response carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonRpcError {
-    pub code: i64,
+    pub code: i128,
     /// Redacted excerpt.
     pub message: String,
     /// `error.data.gateway` (Ferrum Edge marks the errors its MCP and A2A
@@ -249,6 +249,13 @@ pub fn body_facts_redacted(content_type: Option<&str>, body: &[u8], redact: Reda
                         first_message: excerpt(redact, errs[0].get("message").and_then(|m| m.as_str()).unwrap_or(""), 300),
                     });
                 }
+            } else if let Some(items) = v.as_array().filter(|a| !a.is_empty() && a.iter().any(is_jsonrpc_response)) {
+                // A JSON-RPC batch answer: its first error, and its first tool
+                // failure, stand for it; an unrelated non-RPC element never
+                // hides a real JSON-RPC error or tool failure.
+                let objects = || items.iter().filter(|i| is_jsonrpc_response(i)).filter_map(|i| i.as_object());
+                f.jsonrpc_error = objects().find_map(|o| jsonrpc_error(o, redact));
+                f.mcp_tool_error = objects().find_map(|o| mcp_tool_error(o, redact));
             }
             f.json_canonical = Some(v);
         }
@@ -268,10 +275,17 @@ fn jsonrpc_error(obj: &serde_json::Map<String, serde_json::Value>, redact: Redac
         return None;
     }
     let e = obj.get("error")?.as_object()?;
-    let code = e.get("code")?.as_i64()?;
+    let code = e.get("code").and_then(|v| v.as_i64().map(i128::from).or_else(|| v.as_u64().map(i128::from)))?;
     let message = excerpt(redact, e.get("message").and_then(|m| m.as_str()).unwrap_or(""), 300);
     let gateway = e.get("data").and_then(|d| d.get("gateway")).and_then(|g| g.as_str()).map(|g| excerpt(redact, g, 64));
     Some(JsonRpcError { code, message, gateway })
+}
+
+/// A JSON-RPC 2.0 response object: `"jsonrpc": "2.0"` with a `result` or an
+/// `error` (the elements of a batch answer).
+fn is_jsonrpc_response(v: &serde_json::Value) -> bool {
+    v.as_object()
+        .is_some_and(|o| o.get("jsonrpc").and_then(|j| j.as_str()) == Some("2.0") && (o.contains_key("result") || o.contains_key("error")))
 }
 
 /// An MCP `tools/call` result that reports a tool failure (`isError: true`).
@@ -492,6 +506,26 @@ mod tests {
         assert_eq!(excerpt(redact, "short", 20), "short");
         // Without a redactor the text is only cut.
         assert_eq!(excerpt(None, &format!("{}{SECRET}", "p".repeat(16)), 20), format!("{}{}", "p".repeat(16), &SECRET[..4]));
+    }
+
+    #[test]
+    fn a_json_rpc_batch_answer_is_read_by_its_first_error() {
+        let batch =
+            br#"[{"jsonrpc":"2.0","id":1,"result":{}},{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}]"#;
+        let f = body_facts_redacted(Some("application/json"), batch, None);
+        assert_eq!(f.jsonrpc_error.as_ref().map(|e| e.code), Some(-32601));
+        // Unsigned JSON-RPC integer codes above i64::MAX are also recognized as application failures.
+        let big_u64 = br#"{"jsonrpc":"2.0","id":2,"error":{"code":9223372036854775808,"message":"large unsigned"}}"#;
+        let f_big = body_facts_redacted(Some("application/json"), big_u64, None);
+        assert_eq!(f_big.jsonrpc_error.as_ref().map(|e| e.code), Some(9_223_372_036_854_775_808i128));
+        let tool = br#"[{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"broke"}]}}]"#;
+        let f = body_facts_redacted(Some("application/json"), tool, None);
+        assert_eq!(f.mcp_tool_error.as_ref().map(|t| t.text.as_str()), Some("broke"));
+        // Not a batch answer: an array of other values, or of requests.
+        let other = br#"[{"jsonrpc":"2.0","id":1,"result":{}},{"error":{"code":1}}]"#;
+        assert!(body_facts_redacted(Some("application/json"), other, None).jsonrpc_error.is_none());
+        let requests = br#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#;
+        assert!(body_facts_redacted(Some("application/json"), requests, None).jsonrpc_error.is_none());
     }
 
     #[test]

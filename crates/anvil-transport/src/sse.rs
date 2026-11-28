@@ -963,7 +963,7 @@ pub async fn run(plan: &SsePlan, events: &EventCtx, cancel: &CancellationToken, 
         let obs = finish_attempt(rec, obs, events);
         let captured = captured.freeze();
         let response = response_record(status, version, resp_headers, body_capture(completeness, wire, &captured, content_type));
-        attempts.push(AttemptOutput { observation: obs, response: Some(response), body: captured });
+        attempts.push(AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured_len: None });
         if !reconnectable || reconnects >= plan.max_reconnects {
             break;
         }
