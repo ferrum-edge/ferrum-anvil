@@ -2052,6 +2052,7 @@ impl H3Transport {
                 content_encoding: content_encoding.as_deref(),
             })
         });
+        let mut answer_probe_deadline: Option<tokio::time::Instant> = None;
         loop {
             let idle_deadline = idle.map(|d| Instant::now() + d);
             tokio::select! {
@@ -2076,6 +2077,7 @@ impl H3Transport {
                             && w.feed(&data)
                         {
                             let probe_deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+                            answer_probe_deadline = Some(probe_deadline);
                             loop {
                                 tokio::select! {
                                     biased;
@@ -2084,8 +2086,22 @@ impl H3Transport {
                                             completeness = BodyCompleteness::Complete;
                                             break;
                                         }
-                                        Ok(Some(c)) if c.remaining() == 0 => continue,
-                                        Ok(Some(_)) => {
+                                        Ok(Some(mut more)) => {
+                                            let more_n = more.remaining();
+                                            if more_n == 0 {
+                                                continue;
+                                            }
+                                            wire += more_n as u64;
+                                            let more_bytes = more.copy_to_bytes(more_n);
+                                            let room = (plan.limits.capture_bytes as usize).saturating_sub(captured.len());
+                                            if room > 0 {
+                                                captured.extend_from_slice(&more_bytes[..more_bytes.len().min(room)]);
+                                            }
+                                            if wire > plan.limits.max_response_bytes {
+                                                completeness = BodyCompleteness::StoppedAtLocalLimit;
+                                                failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::ResponseTooLargeLocal, "stopped reading at the local max_response_bytes limit"));
+                                                break;
+                                            }
                                             completeness = BodyCompleteness::StoppedAfterAnswer;
                                             break;
                                         }
@@ -2153,9 +2169,12 @@ impl H3Transport {
         let stopped = completeness == BodyCompleteness::StoppedAfterAnswer;
         if failure.is_none() && !stopped {
             // h3 hands the trailers over only once the stream ends (FIN): that
-            // wait is bounded like the body's.
+            // wait is bounded like the body's (or by the answer-stop probe when
+            // the watched answer already arrived, so trailers without FIN stop
+            // promptly as StoppedAfterAnswer instead of stalling).
             let idle_deadline = idle.map(|d| Instant::now() + d);
             tokio::select! {
+                biased;
                 r = stream.recv_trailers() => match r {
                     Ok(Some(t)) => {
                         trailers_received = true;
@@ -2171,6 +2190,14 @@ impl H3Transport {
                         failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyReset, format!("the HTTP/3 response stream ended abnormally after its trailers: {e}")));
                     }
                 },
+                _ = async {
+                    match answer_probe_deadline {
+                        Some(d) => tokio::time::sleep_until(d).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    completeness = BodyCompleteness::StoppedAfterAnswer;
+                }
                 _ = sleep_until_opt(idle_deadline) => {
                     completeness = BodyCompleteness::Incomplete;
                     failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "the HTTP/3 response stream did not end after its trailers").with_deadline(plan.timeouts.body_idle_ms));

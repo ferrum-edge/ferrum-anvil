@@ -1438,15 +1438,29 @@ impl HttpTransport {
                                             Some(Ok(next_frame)) => {
                                                 if next_frame.is_data() {
                                                     let more = next_frame.into_data().unwrap_or_default();
-                                                    if more.is_empty() {
-                                                        if body.is_end_stream() {
-                                                            completeness = BodyCompleteness::Complete;
+                                                    if !more.is_empty() {
+                                                        wire += more.len() as u64;
+                                                        let room = (plan.limits.capture_bytes as usize).saturating_sub(captured.len());
+                                                        if room > 0 {
+                                                            captured.extend_from_slice(&more[..more.len().min(room)]);
+                                                        }
+                                                        if wire > plan.limits.max_response_bytes {
+                                                            completeness = BodyCompleteness::StoppedAtLocalLimit;
+                                                            failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::ResponseTooLargeLocal,
+                                                                format!("stopped reading after {} bytes: the local max_response_bytes limit was reached (this is a local limit, not a peer fault)", plan.limits.max_response_bytes)));
                                                             break;
                                                         }
-                                                        continue;
+                                                        if body.is_end_stream() {
+                                                            completeness = BodyCompleteness::Complete;
+                                                        } else {
+                                                            completeness = BodyCompleteness::StoppedAfterAnswer;
+                                                        }
+                                                        break;
                                                     }
-                                                    completeness = BodyCompleteness::StoppedAfterAnswer;
-                                                    break;
+                                                    if body.is_end_stream() {
+                                                        completeness = BodyCompleteness::Complete;
+                                                        break;
+                                                    }
                                                 } else if let Ok(t) = next_frame.into_trailers() {
                                                     trailers_received = true;
                                                     trailers = t.iter().map(|(n, v)| HeaderEntry { name: n.as_str().to_string(), value: String::from_utf8_lossy(v.as_bytes()).into_owned() }).collect();

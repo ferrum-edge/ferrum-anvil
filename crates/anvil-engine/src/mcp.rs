@@ -244,15 +244,19 @@ fn is_event_stream(content_type: Option<&str>) -> bool {
 }
 
 /// Whether `o` has `"jsonrpc": "2.0"` and mutually exclusive `result` or
-/// object `error` (JSON-RPC 2.0 §5).
+/// valid JSON-RPC 2.0 `error` object (`code` integer and `message` string,
+/// JSON-RPC 2.0 §5.1).
 fn has_valid_response_shape(o: &serde_json::Map<String, Value>) -> bool {
     if o.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return false;
     }
     let has_result = o.contains_key("result");
     let has_error_key = o.contains_key("error");
-    let has_error_obj = o.get("error").is_some_and(Value::is_object);
-    (has_result && !has_error_key) || (!has_result && has_error_obj)
+    let has_valid_error = o
+        .get("error")
+        .and_then(Value::as_object)
+        .is_some_and(|e| e.get("code").and_then(Value::as_i64).is_some() && e.get("message").and_then(Value::as_str).is_some());
+    (has_result && !has_error_key) || (!has_result && has_valid_error)
 }
 
 /// Whether `v` is the JSON-RPC 2.0 response to request `id`: a result or an
@@ -365,7 +369,7 @@ fn batch_has_extra_replies(sent_ids: Option<&[Value]>, responses: &[Value]) -> b
     match sent_ids {
         Some(ids) => reply_ids.iter().any(|rid| {
             let got = reply_ids.iter().filter(|x| *x == rid).count();
-            let sent = ids.iter().filter(|x| x == *rid).count();
+            let sent = ids.iter().filter(|x| *x == *rid).count();
             got > sent
         }),
         None => reply_ids.iter().enumerate().any(|(i, rid)| reply_ids[i + 1..].contains(rid)),
@@ -467,8 +471,16 @@ fn stop_at_answer(wanted: Wanted, sent: SentIds, decompress: bool, max_decoded_b
     Arc::new(move |start: &BodyStart<'_>| {
         let wanted = match &wanted {
             Wanted::Batch(_) => {
-                let ids = batch_ids_of(start.request_body);
-                *sent.lock() = ids.clone();
+                // Keep the original POST's batch IDs even if a followed
+                // redirect later turns the request into a bodyless GET.
+                let mut guard = sent.lock();
+                let ids = if guard.is_some() {
+                    guard.clone()
+                } else {
+                    let parsed = batch_ids_of(start.request_body);
+                    *guard = parsed.clone();
+                    parsed
+                };
                 if ids.as_ref().is_some_and(Vec::is_empty) {
                     return None;
                 }
@@ -521,14 +533,14 @@ fn viewer(
 ) -> impl Fn(Option<&ResponseRecord>, &[u8]) -> Option<Bytes> + Sync + '_ {
     move |response: Option<&ResponseRecord>, body: &[u8]| {
         let r = response?;
-        // A batch's answer is read against the ids actually sent; a batch of
-        // notifications only expects no JSON-RPC response.
-        let wanted = wanted.as_ref().and_then(|w| match w {
-            Wanted::Batch(_) => {
-                let ids = sent.lock().clone();
-                if ids.as_ref().is_some_and(Vec::is_empty) { None } else { Some(Wanted::Batch(ids)) }
-            }
-            w => Some(w.clone()),
+        // A batch's answer is read against the ids actually sent. For a
+        // notification-only batch (`Some(vec![])`), keep `Wanted::Batch(Some([]))`
+        // so unrelated replies on 2xx/3xx still map to an empty view rather than
+        // falling through to raw evaluation (while a null-id batch refusal still
+        // surfaces).
+        let wanted = wanted.as_ref().map(|w| match w {
+            Wanted::Batch(_) => Wanted::Batch(sent.lock().clone()),
+            w => w.clone(),
         });
         let mut s = seen.lock();
         s.status = Some(r.status);
@@ -545,7 +557,7 @@ fn viewer(
         };
         let view = match (&wanted, &message) {
             (Some(_), Some(m)) => serde_json::to_vec(m).ok().map(Bytes::from),
-            (Some(_), None) if (200..300).contains(&r.status) => Some(Bytes::new()),
+            (Some(_), None) if (200..400).contains(&r.status) => Some(Bytes::new()),
             _ => None,
         };
         s.message = message;
@@ -1143,6 +1155,9 @@ async fn execute_session(
         let notify = exchange(ctx, "POST", Some(INITIALIZED.into()), session.as_deref(), Some(&version), Checks::None);
         let out = run.exchange(notify, quiet.clone(), None, None).await;
         notes.before.push(exchange_note("notifications/initialized", &out));
+        if out.record.outcome.transport != anvil_domain::outcome::TransportState::Completed && run.close_outcome.is_none() {
+            run.close_outcome = Some((out.record.outcome.transport, out.record.attempts.last().and_then(|a| a.failure.clone())));
+        }
         let stop = if cancel.is_cancelled() {
             Some("the execution was canceled".to_string())
         } else if run.expired() {
@@ -1370,7 +1385,7 @@ mod tests {
         assert_eq!((events, error), (3, None));
         let other = response_in(Some("text/event-stream; charset=utf-8"), stream.as_bytes(), 9).unwrap();
         assert_eq!(other["id"], 9);
-        let null_id = br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600}}"#;
+        let null_id = br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Invalid Request"}}"#;
         assert_eq!(response_in(Some("application/json"), null_id, 2).unwrap()["id"], Value::Null);
         let third = br#"{"jsonrpc":"2.0","id":3,"result":{}}"#;
         assert!(response_in(Some("application/json"), third, 2).is_none(), "another request's response");
@@ -1400,13 +1415,18 @@ mod tests {
     #[test]
     fn response_validation_requires_jsonrpc_2_0_and_exclusive_result_or_object_error() {
         assert!(is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"result":{}})));
-        assert!(is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":{"code":-32600}})));
+        assert!(is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"Invalid Request"}})));
         assert!(!is_response(&serde_json::json!({"id":2,"result":{}})), "missing jsonrpc 2.0");
         assert!(!is_response(&serde_json::json!({"jsonrpc":"1.0","id":2,"result":{}})), "wrong version");
-        assert!(!is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"result":{},"error":{"code":-1}})), "both result and error");
+        assert!(
+            !is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"result":{},"error":{"code":-1,"message":"x"}})),
+            "both result and error"
+        );
         assert!(!is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":"not-an-object"})), "non-object error");
+        assert!(!is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":{}})), "empty error object");
+        assert!(!is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":{"code":-32600}})), "error missing message");
         assert!(!is_response_to(&serde_json::json!({"id":2,"result":{}}), 2));
-        assert!(!is_response_to(&serde_json::json!({"jsonrpc":"2.0","id":2,"result":{},"error":{"code":-1}}), 2));
+        assert!(!is_response_to(&serde_json::json!({"jsonrpc":"2.0","id":2,"result":{},"error":{"code":-1,"message":"x"}}), 2));
     }
 
     #[test]
