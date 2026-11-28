@@ -652,7 +652,7 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
         exported_redir.report.differences
     );
     assert!(
-        exported_redir.report.differences.iter().any(|d| d.contains("3xx responses without Location")),
+        exported_redir.report.differences.iter().any(|d| d.contains("Redirect responses without Location")),
         "{:?}",
         exported_redir.report.differences
     );

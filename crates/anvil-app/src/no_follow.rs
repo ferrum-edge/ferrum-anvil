@@ -200,14 +200,20 @@ impl Dir {
         Ok(rustix::fs::unlinkat(&self.fd, name, rustix::fs::AtFlags::empty())?)
     }
 
-    /// Whether `name` in this opened folder currently refers to a symbolic link
-    /// (`fstatat` with `AT_SYMLINK_NOFOLLOW`), returning `Ok(false)` when absent.
-    pub(crate) fn entry_is_symlink(&self, name: &OsStr) -> io::Result<bool> {
+    /// No-follow metadata lookup of `name` inside this opened folder
+    /// (`fstatat` with `AT_SYMLINK_NOFOLLOW`, requiring no read permission on
+    /// the entry itself). Returns `Ok(None)` only when `name` does not exist;
+    /// otherwise `Ok(Some((is_symlink, (dev, ino))))`.
+    pub(crate) fn entry_identity(&self, name: &OsStr) -> io::Result<Option<(bool, FileId)>> {
         use rustix::fs::{AtFlags, FileType, statat};
         use rustix::io::Errno;
         match statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(st) => Ok(FileType::from_raw_mode(st.st_mode) == FileType::Symlink),
-            Err(Errno::NOENT) => Ok(false),
+            Ok(st) => {
+                #[allow(clippy::unnecessary_cast)]
+                let id = (st.st_dev as u64, st.st_ino as u64);
+                Ok(Some((FileType::from_raw_mode(st.st_mode) == FileType::Symlink, id)))
+            }
+            Err(Errno::NOENT) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
@@ -319,14 +325,29 @@ impl Dir {
         std::fs::remove_file(self.path.join(name))
     }
 
-    /// Whether `name` in this held folder currently refers to a symbolic link
-    /// or junction, returning `Ok(false)` when absent.
-    pub(crate) fn entry_is_symlink(&self, name: &OsStr) -> io::Result<bool> {
-        match std::fs::symlink_metadata(self.path.join(name)) {
-            Ok(meta) => Ok(meta.file_type().is_symlink()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e),
-        }
+    /// No-follow metadata lookup of `name` inside this held folder using
+    /// attribute-only access (requiring no read permission on the file data).
+    /// Returns `Ok(None)` only when `name` does not exist; otherwise
+    /// `Ok(Some((is_symlink, (volume_serial, file_index))))`.
+    pub(crate) fn entry_identity(&self, name: &OsStr) -> io::Result<Option<(bool, FileId)>> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let opened = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_ALL)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(self.path.join(name));
+        let file = match opened {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let meta = file.metadata()?;
+        let id = file_id(&file, &meta)?;
+        Ok(Some((meta.file_type().is_symlink(), id)))
     }
 }
 
@@ -393,12 +414,10 @@ impl Dir {
         std::fs::remove_file(self.path.join(name))
     }
 
-    /// Whether `name` in this held folder currently refers to a symbolic link
-    /// or junction, returning `Ok(false)` when absent.
-    pub(crate) fn entry_is_symlink(&self, name: &OsStr) -> io::Result<bool> {
+    pub(crate) fn entry_identity(&self, name: &OsStr) -> io::Result<Option<(bool, FileId)>> {
         match std::fs::symlink_metadata(self.path.join(name)) {
-            Ok(meta) => Ok(meta.file_type().is_symlink()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Ok(meta) => Ok(Some((meta.file_type().is_symlink(), (0, 0)))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
     }

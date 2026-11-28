@@ -636,8 +636,11 @@ impl FileGrants {
         };
 
         // Publish no-clobber files first, then the plan. Track every published
-        // filename so an unavoidable mid-publish error reports what landed.
+        // filename and OS file identity so an unavoidable mid-publish error
+        // reports what landed and a Unicode-normalization alias (e.g. APFS
+        // NFC/NFD) can never replace a newly published sibling file.
         let mut published: Vec<String> = Vec::new();
+        let mut protected: Vec<FileId> = Vec::new();
         let cleanup_remaining = |jmx_t: Option<&OsStr>, ds_t: Option<&OsStr>, sec_t: Option<&OsStr>| {
             if let Some(t) = jmx_t {
                 let _ = plan_folder.remove_file(t);
@@ -654,6 +657,7 @@ impl FileGrants {
         let mut jmx_t = Some(jmx_tmp);
 
         if let (Some((sec_folder, sec_name, _)), Some(tmp)) = (&secrets_target, sec_tmp.take()) {
+            let staged_id = sec_folder.entry_identity(&tmp).map_err(io)?.map(|(_, id)| id);
             if let Err(err) = sec_folder.publish_no_clobber(&tmp, sec_name) {
                 let _ = sec_folder.remove_file(&tmp);
                 cleanup_remaining(jmx_t.as_deref(), ds_tmp.as_deref(), None);
@@ -665,11 +669,32 @@ impl FileGrants {
                 }
                 return Err(io(err));
             }
+            if let Some(id) = staged_id {
+                protected.push(id);
+            }
             published.push(display_name(Some(sec_name)));
         }
 
         if let (Some(sibling), Some(tmp)) = (sibling_name.as_ref(), ds_tmp.take()) {
-            let res = if replace_dataset { plan_folder.rename(&tmp, sibling) } else { plan_folder.publish_no_clobber(&tmp, sibling) };
+            let staged_id = plan_folder.entry_identity(&tmp).map_err(io)?.map(|(_, id)| id);
+            let target_blocked = match plan_folder.entry_identity(sibling) {
+                Ok(Some((true, _))) => {
+                    Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "dataset destination is a symbolic link"))
+                }
+                Ok(Some((false, id))) if protected.contains(&id) => Some(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "dataset destination aliases the newly written secrets file",
+                )),
+                Ok(_) => None,
+                Err(err) => Some(err),
+            };
+            let res = if let Some(err) = target_blocked {
+                Err(err)
+            } else if replace_dataset {
+                plan_folder.rename(&tmp, sibling)
+            } else {
+                plan_folder.publish_no_clobber(&tmp, sibling)
+            };
             if let Err(err) = res {
                 let _ = plan_folder.remove_file(&tmp);
                 cleanup_remaining(jmx_t.as_deref(), None, None);
@@ -688,18 +713,33 @@ impl FileGrants {
                     published.join(", ")
                 )));
             }
+            if let Some(id) = staged_id {
+                protected.push(id);
+            }
             published.push(display_name(Some(sibling)));
         }
 
-        if let Some(tmp) = jmx_t.take()
-            && let Err(err) = plan_folder.rename(&tmp, plan_name)
-        {
-            let _ = plan_folder.remove_file(&tmp);
-            if published.is_empty() {
-                restore_grants(plan_entry, secrets_entry);
-                return Err(io(err));
+        if let Some(tmp) = jmx_t.take() {
+            let target_blocked = match plan_folder.entry_identity(plan_name) {
+                Ok(Some((true, _))) => Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "plan destination is a symbolic link")),
+                Ok(Some((false, id))) if protected.contains(&id) => {
+                    Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "plan destination aliases a newly written sibling file"))
+                }
+                Ok(_) => None,
+                Err(err) => Some(err),
+            };
+            let res = match target_blocked {
+                Some(err) => Err(err),
+                None => plan_folder.rename(&tmp, plan_name),
+            };
+            if let Err(err) = res {
+                let _ = plan_folder.remove_file(&tmp);
+                if published.is_empty() {
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(io(err));
+                }
+                return Err(GrantError::Io(format!("{err} (already written: {}; the test plan was not written)", published.join(", "))));
             }
-            return Err(GrantError::Io(format!("{err} (already written: {}; the test plan was not written)", published.join(", "))));
         }
 
         let mut written = vec![display_name(Some(plan_name))];
@@ -1009,7 +1049,7 @@ impl PinnedOutput {
         let dir = Dir::open(&canon_parent)?.ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination parent is a symbolic link or not a directory")
         })?;
-        if dir.entry_is_symlink(&name)? {
+        if matches!(dir.entry_identity(&name)?, Some((true, _))) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "destination is a symbolic link; refusing to write through or replace a symlink",
@@ -1020,7 +1060,8 @@ impl PinnedOutput {
     }
 
     /// Whether this pinned destination aliases an already-opened input file
-    /// (same directory entry, symlink target, or hard link).
+    /// (same directory entry, symlink target, or hard link), using no-follow
+    /// metadata lookup that does not require read access to the target.
     pub fn aliases_file(&self, file: &File, meta: &Metadata, file_path: &Path) -> std::io::Result<bool> {
         let canon = std::fs::canonicalize(file_path).ok();
         let same_entry = canon
@@ -1031,69 +1072,104 @@ impl PinnedOutput {
         if same_entry {
             return Ok(true);
         }
-        if let Ok(Some((existing, existing_meta))) = self.dir.open_regular(&self.name) {
-            return Ok(file_id(&existing, &existing_meta)? == file_id(file, meta)?);
+        if let Some((false, existing_id)) = self.dir.entry_identity(&self.name)? {
+            return Ok(existing_id == file_id(file, meta)?);
         }
         Ok(false)
     }
 
     /// Whether two pinned destinations target the same directory entry (or
     /// existing file inode when both already exist).
-    pub fn aliases_output(&self, other: &Self) -> bool {
+    pub fn aliases_output(&self, other: &Self) -> std::io::Result<bool> {
         if self.dir_id == other.dir_id && eq_filename(&self.name, &other.name) {
-            return true;
+            return Ok(true);
         }
-        if let (Ok(Some((a, am))), Ok(Some((b, bm)))) = (self.dir.open_regular(&self.name), other.dir.open_regular(&other.name))
-            && let (Ok(aid), Ok(bid)) = (file_id(&a, &am), file_id(&b, &bm))
-        {
-            return aid == bid;
+        if let (Some((false, aid)), Some((false, bid))) = (self.dir.entry_identity(&self.name)?, other.dir.entry_identity(&other.name)?) {
+            return Ok(aid == bid);
         }
-        false
+        Ok(false)
     }
 
-    /// Stage `bytes` into a new file inside the pinned directory, re-verify
-    /// relative to the pinned directory that the target is neither a symlink
-    /// nor any `protected` file identity (catching APFS Unicode normalization
-    /// aliases even for newly created sibling outputs), and atomically rename
-    /// it into place, returning the published file's OS identity.
-    pub fn write_atomic_guarded(&self, bytes: &[u8], protected: &[PinnedFileId]) -> std::io::Result<PinnedFileId> {
+    /// Stage `bytes` into a new temporary file inside the pinned directory,
+    /// returning a [`StagedPinnedOutput`] that cleans up on drop unless
+    /// published via [`StagedPinnedOutput::publish_guarded`].
+    pub fn stage(&self, bytes: &[u8], owner_only: bool) -> std::io::Result<StagedPinnedOutput<'_>> {
+        if owner_only && !OWNER_ONLY_FILES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "secret output is written only where an owner-only file can be created (macOS and Linux)",
+            ));
+        }
         let tmp = OsString::from(format!(".anvil-{}.partial", Id::new()));
         let stage = || -> std::io::Result<PinnedFileId> {
-            let mut f = self.dir.create_new(&tmp, false)?;
+            let mut f = self.dir.create_new(&tmp, owner_only)?;
             std::io::Write::write_all(&mut f, bytes)?;
             f.sync_all()?;
             let meta = f.metadata()?;
             file_id(&f, &meta).map(PinnedFileId)
         };
-        let staged_id = match stage() {
-            Ok(id) => id,
+        match stage() {
+            Ok(staged_id) => Ok(StagedPinnedOutput { output: self, tmp, staged_id, published: false }),
             Err(err) => {
                 let _ = self.dir.remove_file(&tmp);
-                return Err(err);
+                Err(err)
             }
-        };
-        if self.dir.entry_is_symlink(&self.name)? {
-            let _ = self.dir.remove_file(&tmp);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "destination is a symbolic link; refusing to write through or replace a symlink",
-            ));
         }
-        if let Ok(Some((existing, existing_meta))) = self.dir.open_regular(&self.name) {
-            let existing_id = PinnedFileId(file_id(&existing, &existing_meta)?);
-            if protected.contains(&existing_id) {
-                let _ = self.dir.remove_file(&tmp);
+    }
+
+    /// Stage `bytes` into a new file inside the pinned directory and atomically
+    /// publish it after verifying the leaf is neither a symlink nor any
+    /// `protected` file identity.
+    pub fn write_atomic_guarded(&self, bytes: &[u8], protected: &[PinnedFileId]) -> std::io::Result<PinnedFileId> {
+        self.stage(bytes, false)?.publish_guarded(false, protected)
+    }
+}
+
+/// A staged temporary file inside a [`PinnedOutput`]'s pinned directory.
+pub struct StagedPinnedOutput<'a> {
+    output: &'a PinnedOutput,
+    tmp: OsString,
+    staged_id: PinnedFileId,
+    published: bool,
+}
+
+impl Drop for StagedPinnedOutput<'_> {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = self.output.dir.remove_file(&self.tmp);
+        }
+    }
+}
+
+impl StagedPinnedOutput<'_> {
+    /// Atomically publish the staged file inside the pinned directory after
+    /// checking via no-follow metadata lookup (`entry_identity`) that the leaf
+    /// is neither a symlink nor any `protected` file identity. Any metadata
+    /// lookup error other than `NotFound` fails closed without publishing.
+    pub fn publish_guarded(mut self, no_clobber: bool, protected: &[PinnedFileId]) -> std::io::Result<PinnedFileId> {
+        match self.output.dir.entry_identity(&self.output.name)? {
+            None => {}
+            Some((true, _)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "destination is a symbolic link; refusing to write through or replace a symlink",
+                ));
+            }
+            Some((false, existing_id)) if protected.contains(&PinnedFileId(existing_id)) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "destination resolves to a protected input or sibling output file; refusing to overwrite",
                 ));
             }
+            Some((false, _)) => {}
         }
-        if let Err(err) = self.dir.rename(&tmp, &self.name) {
-            let _ = self.dir.remove_file(&tmp);
-            return Err(err);
+        if no_clobber {
+            self.output.dir.publish_no_clobber(&self.tmp, &self.output.name)?;
+        } else {
+            self.output.dir.rename(&self.tmp, &self.output.name)?;
         }
-        Ok(staged_id)
+        self.published = true;
+        Ok(self.staged_id)
     }
 }
 

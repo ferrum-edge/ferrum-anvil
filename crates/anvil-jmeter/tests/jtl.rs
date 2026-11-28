@@ -324,12 +324,22 @@ fn load_012_jtl_record_limit_is_exact() {
     let qr = import(&two_rows_with_quote, &exact).unwrap();
     assert_eq!(qr.requests.started, 2);
     // A UTF-8 BOM before a quoted multiline header still keeps `FieldStart` so the
-    // embedded newline does not split the header and bypass `max_record_bytes`.
+    // embedded newline does not split the header and bypass `max_record_bytes`,
+    // and short initial reads splitting the BOM still parse identically to `csv-core`.
     let bom_hdr = "\u{feff}\"timeStamp\n\",elapsed,label,responseCode,success,URL\n";
     let mut bom_opts = opts();
     bom_opts.limits.max_record_bytes = (bom_hdr.len() - 1) as u64;
     let bom_csv = format!("{bom_hdr}{T0},1,a,200,true,http://h/\n");
     assert!(matches!(import(&bom_csv, &bom_opts).unwrap_err(), JtlError::RecordTooLong { what: "the CSV header row", .. }));
+    let bom_plain = format!("\u{feff}{crlf_hdr}{T0},1,a,200,true,http://h/\r\n");
+    let split_bom = SplitAt { inner: Cursor::new(bom_plain.as_bytes().to_vec()), split: 1 };
+    let bom_ok = import_jtl(split_bom, &opts()).unwrap();
+    assert_eq!(bom_ok.requests.started, 1);
+    // A long run of blank lines does not falsely trip the record-size guard when
+    // every individual record is within `max_record_bytes`.
+    let many_blanks = format!("{crlf_hdr}{}{T0},1,a,200,true,http://h/\r\n", "\n".repeat(70_000));
+    let blanks_ok = import(&many_blanks, &exact).unwrap();
+    assert_eq!(blanks_ok.requests.started, 1);
     // Unterminated final data row right after a CRLF header at exact max_record_bytes must not be
     // charged for the header's trailing `\n`.
     let exact_row = format!("{T0},1,{},200,true,http://h/", "x".repeat(crlf_hdr.len() - 35));

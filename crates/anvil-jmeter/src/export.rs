@@ -1656,7 +1656,7 @@ fn translate_step(
     }
     t.note("Limits: Anvil's response size, decoded size and header size limits are not enforced by JMeter.");
     t.note(
-        "3xx responses without Location: Anvil keeps the completed 3xx response, whereas JMeter's HttpClient 4 sampler records a transport failure (and skips later steps in an exported chain) even when Follow Redirects is off.",
+        "Redirect responses without Location (301, 302, 303, 308, and 307 on GET/HEAD): Anvil keeps the completed response, whereas JMeter's HttpClient 4 sampler records a transport failure (and skips later steps in an exported chain) even when Follow Redirects is off.",
     );
     if !ctx.integrations.is_empty() {
         t.note("Ferrum gateway profiles: Anvil's gateway diagnostics are not performed by JMeter (they never change what is sent).");

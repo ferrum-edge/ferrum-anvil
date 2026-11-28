@@ -290,7 +290,20 @@ impl<R> Guard<R> {
 impl<R: Read> Read for Guard<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let before = self.total;
-        let n = self.inner.read(buf)?;
+        let mut n = self.inner.read(buf)?;
+        // `csv-core` only strips a leading UTF-8 BOM when all three bytes
+        // arrive in the first buffer. Top up short initial reads matching the
+        // BOM prefix so `Guard` and `csv-core` agree even on short-reading streams.
+        const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+        if self.track_csv_records && before == 0 && n > 0 && n < 3 && buf.len() >= 3 && buf[..n] == BOM[..n] {
+            while n < 3 && buf[..n] == BOM[..n] {
+                let k = self.inner.read(&mut buf[n..3])?;
+                if k == 0 {
+                    break;
+                }
+                n += k;
+            }
+        }
         self.total += n as u64;
         self.since_reset += n as u64;
         if self.total > self.max_total {
@@ -301,8 +314,7 @@ impl<R: Read> Read for Guard<R> {
             for (i, &b) in buf[..n].iter().enumerate() {
                 self.step_csv_byte(before + i as u64, b)?;
             }
-        }
-        if self.since_reset > self.max_record {
+        } else if self.since_reset > self.max_record {
             self.hit = Some(Hit::Record);
             return Err(std::io::Error::other("record size limit"));
         }

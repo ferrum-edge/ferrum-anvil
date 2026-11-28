@@ -15,69 +15,6 @@ pub fn dataset_path(out: &Path) -> PathBuf {
     out.with_file_name(format!("{stem}.dataset.csv"))
 }
 
-/// A temporary file staged beside its final destination, ready to publish
-/// atomically once every output has been staged without error.
-struct StagedFile<'a> {
-    label: &'a str,
-    dest: &'a Path,
-    tmp: PathBuf,
-    no_clobber: bool,
-}
-
-impl Drop for StagedFile<'_> {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.tmp);
-    }
-}
-
-/// Stage `bytes` into a new temporary file beside `dest`, writing and syncing
-/// before any destination is published.
-fn stage_file<'a>(label: &'a str, dest: &'a Path, bytes: &[u8], owner_only: bool, no_clobber: bool) -> Result<StagedFile<'a>> {
-    if owner_only && !secret_output_supported() {
-        bail!("{}: secret output is written only where an owner-only file can be created (macOS and Linux)", dest.display());
-    }
-    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    let tmp_name = format!(".anvil-{}.partial", Id::new());
-    let tmp = parent.join(tmp_name);
-    let write_tmp = || -> Result<()> {
-        use std::io::Write;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        if owner_only {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut f = opts.open(&tmp).with_context(|| format!("staging {label} ({})", dest.display()))?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        Ok(())
-    };
-    if let Err(e) = write_tmp() {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(StagedFile { label, dest, tmp, no_clobber })
-}
-
-impl StagedFile<'_> {
-    /// Publish the staged temp file atomically to `self.dest`:
-    /// - `no_clobber == true`: `hard_link` + `remove_file`, failing with
-    ///   `AlreadyExists` if `dest` (file, folder, or symlink, even dangling) exists.
-    /// - `no_clobber == false`: `rename`, replacing `dest` atomically without
-    ///   following a symlink or truncating an existing inode.
-    fn publish(self) -> Result<()> {
-        let res = if self.no_clobber {
-            std::fs::hard_link(&self.tmp, self.dest).map(|()| {
-                let _ = std::fs::remove_file(&self.tmp);
-            })
-        } else {
-            std::fs::rename(&self.tmp, self.dest)
-        };
-        res.with_context(|| format!("publishing {} ({})", self.label, self.dest.display()))
-    }
-}
-
 /// Whether this platform writes owner-only secret files (on Windows a new
 /// file inherits its folder's access list, which may let others read it).
 pub fn secret_output_supported() -> bool {
@@ -198,7 +135,8 @@ pub fn export_jmx(
     if sensitive_dataset && !secret_output_supported() {
         bail!("the dataset has sensitive columns, and an owner-only file cannot be created on this platform; nothing was written");
     }
-    // Every destination is distinct, checked before anything is written.
+    // Pin every destination directory and verify none is a symlink, directory,
+    // or alias before staging anything.
     let mut destinations: Vec<(&str, &Path)> = vec![("--out", out)];
     if export.dataset_csv.is_some() {
         destinations.push(("the dataset file", dataset.as_path()));
@@ -209,6 +147,7 @@ pub fn export_jmx(
     if let Some(p) = report_file {
         destinations.push(("--report", p));
     }
+    let mut pinned_dests: Vec<(&str, &Path, anvil_app::file_grants::PinnedOutput)> = Vec::with_capacity(destinations.len());
     for (label, p) in &destinations {
         refuse_symlink(label, p)?;
         if let Ok(meta) = std::fs::symlink_metadata(p)
@@ -216,10 +155,13 @@ pub fn export_jmx(
         {
             bail!("{label} ({}) is a directory; nothing was written", p.display());
         }
+        let pinned = anvil_app::file_grants::PinnedOutput::open(p).with_context(|| format!("preparing {label} ({})", p.display()))?;
+        pinned_dests.push((label, p, pinned));
     }
-    for (i, (a, pa)) in destinations.iter().enumerate() {
-        for (b, pb) in &destinations[i + 1..] {
-            if destination_key(pa) == destination_key(pb) {
+    for i in 0..pinned_dests.len() {
+        let (a, pa, pin_a) = &pinned_dests[i];
+        for (b, pb, pin_b) in &pinned_dests[i + 1..] {
+            if destination_key(pa) == destination_key(pb) || pin_a.aliases_output(pin_b)? {
                 bail!("{a} and {b} name the same file; nothing was written");
             }
         }
@@ -235,32 +177,67 @@ pub fn export_jmx(
     {
         bail!("the secrets file already exists; it is never written over an existing file. Nothing was written");
     }
-    // Stage every output before publishing any destination so a staging error
-    // (bad directory, permission error, disk full) leaves nothing behind.
+    // Stage every output inside its pinned directory before publishing any
+    // destination so a staging error leaves nothing behind.
     let report_json = report_file.map(|_| json_safe(&serde_json::to_string_pretty(&export.report).unwrap_or_default()) + "\n");
-    let mut staged: Vec<StagedFile<'_>> = Vec::with_capacity(4);
-    if let (Some(p), Some(props)) = (secrets_file, &export.secrets_properties) {
-        staged.push(stage_file("--secrets-file", p, props.as_bytes(), true, true)?);
+    let find_pinned =
+        |label: &str| pinned_dests.iter().find(|(l, _, _)| *l == label).map(|(_, p, pin)| (*p, pin)).expect("destination was pinned above");
+    let mut staged: Vec<(&str, &Path, anvil_app::file_grants::StagedPinnedOutput<'_>, bool)> = Vec::with_capacity(4);
+    if let (Some(_), Some(props)) = (secrets_file, &export.secrets_properties) {
+        let (p, pin) = find_pinned("--secrets-file");
+        staged.push((
+            "--secrets-file",
+            p,
+            pin.stage(props.as_bytes(), true).with_context(|| format!("staging --secrets-file ({})", p.display()))?,
+            true,
+        ));
     }
     if let Some(csv) = &export.dataset_csv {
-        staged.push(stage_file("the dataset file", &dataset, csv, sensitive_dataset, !force)?);
+        let (p, pin) = find_pinned("the dataset file");
+        staged.push((
+            "the dataset file",
+            p,
+            pin.stage(csv, sensitive_dataset).with_context(|| format!("staging the dataset file ({})", p.display()))?,
+            !force,
+        ));
     }
-    staged.push(stage_file("--out", out, export.jmx.as_bytes(), false, false)?);
-    if let (Some(p), Some(json)) = (report_file, &report_json) {
-        staged.push(stage_file("--report", p, json.as_bytes(), false, false)?);
+    {
+        let (p, pin) = find_pinned("--out");
+        staged.push((
+            "--out",
+            p,
+            pin.stage(export.jmx.as_bytes(), false).with_context(|| format!("staging --out ({})", p.display()))?,
+            false,
+        ));
     }
-    // Publish no-clobber sidecars first, then the plan and optional report.
-    // Remaining staged files are cleaned up on Drop if any publish fails.
+    if let (Some(_), Some(json)) = (report_file, &report_json) {
+        let (p, pin) = find_pinned("--report");
+        staged.push((
+            "--report",
+            p,
+            pin.stage(json.as_bytes(), false).with_context(|| format!("staging --report ({})", p.display()))?,
+            false,
+        ));
+    }
+    // Publish no-clobber sidecars first, then the plan and optional report,
+    // tracking every published OS file identity so Unicode-normalization
+    // aliases (e.g. APFS NFC/NFD) can never replace a newly written sibling.
     let mut published: Vec<String> = Vec::new();
-    for item in staged {
-        let note = format!("{} ({})", item.label, item.dest.display());
-        if let Err(err) = item.publish() {
-            if published.is_empty() {
-                return Err(err.context("nothing was written"));
+    let mut protected: Vec<anvil_app::file_grants::PinnedFileId> = Vec::new();
+    for (label, dest, item, no_clobber) in staged {
+        let note = format!("{label} ({})", dest.display());
+        match item.publish_guarded(no_clobber, &protected).with_context(|| format!("publishing {label} ({})", dest.display())) {
+            Ok(id) => {
+                protected.push(id);
+                published.push(note);
             }
-            return Err(err.context(format!("already written: {}", published.join(", "))));
+            Err(err) => {
+                if published.is_empty() {
+                    return Err(err.context("nothing was written"));
+                }
+                return Err(err.context(format!("already written: {}", published.join(", "))));
+            }
         }
-        published.push(note);
     }
     let r = &export.report;
     println!(
@@ -342,7 +319,7 @@ pub fn import_jtl(app: &App, a: ImportArgs<'_>) -> Result<i32> {
         }
     }
     if let (Some((jp, j)), Some((_, h))) = (&json_out, &html_out)
-        && j.aliases_output(h)
+        && j.aliases_output(h)?
     {
         bail!("--json and --html resolve to the same path ({}); nothing was imported", jp.display());
     }
