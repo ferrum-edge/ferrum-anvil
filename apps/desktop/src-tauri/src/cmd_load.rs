@@ -367,15 +367,15 @@ pub async fn load_export_jmx(
         };
         let sensitive = export.report.dataset.as_ref().is_some_and(|d| !d.sensitive_columns.is_empty());
         let dataset = export.dataset_csv.as_deref().map(|csv| (csv, sensitive));
-        st.file_grants.write_with_dataset(&grant, export.jmx.as_bytes(), dataset, replace_dataset).map_err(|x| x.to_string())?;
-        let mut written = vec![chosen];
-        if dataset.is_some() {
-            written.push(dataset_file);
-        }
-        if let (Some(g), Some(props), Some(name)) = (&secrets_grant, &export.secrets_properties, secrets_name) {
-            st.file_grants.write(g, FilePurpose::JmeterSecretsExport, props.as_bytes()).map_err(|x| x.to_string())?;
-            written.push(name);
-        }
+        let secrets = match (&secrets_grant, &export.secrets_properties) {
+            (Some(g), Some(props)) => Some((g.as_str(), props.as_bytes())),
+            _ => None,
+        };
+        let _ = secrets_name;
+        let (_, written) = st
+            .file_grants
+            .write_jmeter_export(&grant, export.jmx.as_bytes(), dataset, replace_dataset, secrets)
+            .map_err(|x| x.to_string())?;
         Ok(JmxExportOutcome { report: Some(export.report), refused: vec![], written })
     })
     .await

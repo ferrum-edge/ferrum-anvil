@@ -462,3 +462,78 @@ fn load_012_repeated_credential_fields_keep_their_own_values() {
     let props = out.secrets_properties.expect("secrets written");
     assert!(props.contains("=first-SENSITIVE\n") && props.contains("=second-SENSITIVE\n"));
 }
+
+#[test]
+fn load_012_credential_fragments_never_stay_in_jmx_and_mixed_per_run_is_refused() {
+    // Alphabetic literal fragment joined to a secret variable in a non-Authorization
+    // header or API key must move into a secret property, never stay in the JMX.
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/echo");
+    spec.headers.push(KeyValue { sensitive: true, ..KeyValue::new("X-Custom-Token", "secretprefix{{tok}}") });
+    spec.headers.push(KeyValue::new("Authorization", "secretprefix{{tok}}"));
+    spec.headers.push(KeyValue::new("X-Api-Key", "Bearer {{tok}}"));
+    spec.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    let (id, mut c) = step(spec);
+    c.var_layers.push(layer("workspace", &[("tok", "VAL-SENSITIVE", true)]));
+    let out = Fx::new(iterations(1, 1), vec![(id, c, "frag")], None)
+        .export(&ExportOptions { include_secrets: true, ..Default::default() })
+        .expect("static fragments become properties");
+    assert!(!out.jmx.contains("secretprefix"), "literal credential fragment leaked into JMX");
+    assert!(!out.jmx.contains("Bearer ${"), "non-Authorization header must not keep scheme prefix in JMX");
+    let props = out.secrets_properties.expect("secrets written");
+    assert!(props.contains("=secretprefixVAL-SENSITIVE\n"));
+    assert!(props.contains("=Bearer VAL-SENSITIVE\n"));
+
+    // Mixed literal credential fragment with a per-iteration dataset value must be refused.
+    let mut mixed = RequestSpec::http("GET", "http://127.0.0.1:8080/echo");
+    mixed.headers.push(KeyValue { sensitive: true, ..KeyValue::new("X-Custom-Token", "secretprefix{{user}}") });
+    mixed.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    let (id, c) = step(mixed);
+    let e = refused(Fx::new(iterations(1, 1), vec![(id, c, "mixed")], Some(dataset("user\nalice\n"))).export(&ExportOptions::default()));
+    assert_eq!(codes(&e), ["secret_mixed"], "{e}");
+}
+
+#[test]
+fn load_012_sensitive_dataset_and_extraction_values_trigger_redirect_refusal() {
+    // A normally-named header carrying a sensitive dataset column must be refused
+    // when redirects are followed without cross-origin credential forwarding.
+    let mut ds = dataset("user,secret_col\nalice,tok-1\n");
+    ds.sensitive_columns = vec!["secret_col".into()];
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/echo");
+    spec.headers.push(KeyValue::new("X-Context", "{{secret_col}}"));
+    spec.settings.redirects = Some(RedirectPolicy::default());
+    spec.settings.http_version = Some(HttpVersionPolicy::Http1Only);
+    let (id, mut c) = step(spec);
+    with_tls_profile(&mut c, false);
+    let e = refused(
+        Fx::new(iterations(1, 1), vec![(id, c, "ds")], Some(ds)).export(&ExportOptions { include_secrets: true, ..Default::default() }),
+    );
+    assert_eq!(codes(&e), ["redirect_credentials"], "{e}");
+
+    // A normally-named header carrying a sensitive extraction from an earlier
+    // chain step must also be refused when redirects are followed.
+    let mut step1 = RequestSpec::http("GET", "http://127.0.0.1:8080/login");
+    step1.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    step1.extractions.push(Extraction {
+        variable: "session_tok".into(),
+        source: ExtractionSource::JsonPath { path: "$.token".into() },
+        sensitive: true,
+    });
+    let mut step2 = RequestSpec::http("GET", "http://127.0.0.1:8080/profile");
+    step2.headers.push(KeyValue::new("X-Context", "{{session_tok}}"));
+    step2.settings.redirects = Some(RedirectPolicy::default());
+    step2.settings.http_version = Some(HttpVersionPolicy::Http1Only);
+    let (id1, c1) = step(step1);
+    let (id2, mut c2) = step(step2);
+    with_tls_profile(&mut c2, false);
+    let e = refused(Fx::new(iterations(1, 1), vec![(id1, c1, "login"), (id2, c2, "profile")], None).export(&ExportOptions::default()));
+    assert_eq!(codes(&e), ["redirect_credentials"], "{e}");
+}
+
+#[test]
+fn load_012_templated_accept_encoding_header_is_validated_not_overwritten() {
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/");
+    spec.headers.push(KeyValue::new("{{ae_header}}", "zstd"));
+    let (id, mut c) = step(spec);
+    c.var_layers.push(layer("workspace", &[("ae_header", "Accept-Encoding", false)]));
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "ae")], None)), ["accept_encoding"]);
+}

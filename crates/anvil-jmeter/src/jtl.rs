@@ -175,7 +175,9 @@ struct Sample {
     bytes: u64,
     sent_bytes: u64,
     all_threads: u64,
-    url: String,
+    /// Origin (`scheme://host[:port]`) extracted before bounding so long
+    /// userinfo/path/query text is never retained or truncated into a host.
+    destination: Option<String>,
 }
 
 fn bounded(s: &str) -> String {
@@ -223,9 +225,10 @@ fn check_http(url: &str, at: &str) -> Result<(), JtlError> {
     if u.is_empty() || u.starts_with("http://") || u.starts_with("https://") {
         Ok(())
     } else {
+        // Never quote the raw URL value in diagnostics: it may hold credentials
+        // (userinfo, query tokens, or path secrets).
         Err(JtlError::Invalid(format!(
-            "{at}: the sample's URL is '{}', not an HTTP URL; only HTTP sampler results can be imported (the report's unit is an HTTP request)",
-            bounded(u)
+            "{at}: the URL field is not an HTTP URL; only HTTP sampler results can be imported (the report's unit is an HTTP request)"
         )))
     }
 }
@@ -259,6 +262,9 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
                 .unwrap_or_else(|| JtlError::Invalid(format!("the CSV header row: {e}"))));
         }
     };
+    if rdr.position().byte() > limits.max_record_bytes {
+        return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
+    }
     let col = |name: &str| headers.iter().position(|h| h.trim() == name);
     let required = |name: &str| {
         col(name).ok_or_else(|| {
@@ -320,7 +326,7 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
             bytes: parse_count(get(c_bytes)),
             sent_bytes: parse_count(get(c_sent)),
             all_threads: parse_count(get(c_threads)),
-            url: bounded(url),
+            destination: origin(url),
         })?;
     }
     Ok(Stats::default())
@@ -356,7 +362,8 @@ fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
     // Inside the current sample: an assertion result (name, failed), a
     // field being read, and the depth of a skipped sub-result subtree.
     let mut assertion: Option<(String, bool)> = None;
-    let mut field: Option<(Field, String)> = None;
+    // `(field, captured_text, truncated)`
+    let mut field: Option<(Field, String, bool)> = None;
     let mut sub_depth: Option<usize> = None;
 
     fn attrs(e: &BytesStart<'_>, at: &str) -> Result<Sample, JtlError> {
@@ -444,6 +451,9 @@ fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
                 )?;
             }
             Event::Empty(e) => {
+                if depth + 1 > limits.max_depth {
+                    return Err(JtlError::Invalid(format!("{at}: elements nest deeper than {}", limits.max_depth)));
+                }
                 let qn = e.name();
                 let name: &str = qn.as_ref();
                 open(
@@ -469,11 +479,16 @@ fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
                     if depth == d {
                         sub_depth = None;
                     }
-                } else if let Some((which, text)) = field.take() {
+                } else if let Some((which, text, truncated)) = field.take() {
                     match (which, assertion.as_mut(), current.as_mut()) {
                         (Field::Name, Some(a), _) => a.0 = bounded(&text),
                         (Field::Failure | Field::Error, Some(a), _) => a.1 |= text.trim().eq_ignore_ascii_case("true"),
-                        (Field::Url, _, Some(s)) => s.url = bounded(&text),
+                        (Field::Url, _, Some(s)) => {
+                            check_http(&text, &at)?;
+                            // Never derive a destination from a truncated URL
+                            // (a long userinfo prefix could lose its '@' separator).
+                            s.destination = if truncated { None } else { origin(&text) };
+                        }
                         _ => {}
                     }
                 } else if depth == 3 && assertion.is_some() {
@@ -484,23 +499,22 @@ fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
                 } else if depth == 2
                     && let Some(s) = current.take()
                 {
-                    check_http(&s.url, &at)?;
                     f(s)?;
                 }
                 depth = depth.saturating_sub(1);
             }
             Event::Text(t) => {
-                if let Some((_, text)) = field.as_mut() {
+                if let Some((_, text, truncated)) = field.as_mut() {
                     let raw: &str = &t;
-                    capture(text, raw);
+                    *truncated |= capture(text, raw);
                 } else if depth <= 1 && !t.trim().is_empty() {
                     return Err(JtlError::Invalid(format!("{at}: text outside the samples")));
                 }
             }
             Event::CData(t) => {
-                if let Some((_, text)) = field.as_mut() {
+                if let Some((_, text, truncated)) = field.as_mut() {
                     let raw: &str = &t;
-                    capture(text, raw);
+                    *truncated |= capture(text, raw);
                 }
             }
             Event::GeneralRef(r) => {
@@ -521,8 +535,8 @@ fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
                         }
                     }
                 };
-                if let Some((_, text)) = field.as_mut() {
-                    capture(text, &resolved);
+                if let Some((_, text, truncated)) = field.as_mut() {
+                    *truncated |= capture(text, &resolved);
                 }
             }
         }
@@ -540,14 +554,16 @@ fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
     Ok(stats)
 }
 
-/// Append captured text, keeping at most [`MAX_CAPTURE_BYTES`].
-fn capture(text: &mut String, more: &str) {
+/// Append captured text, keeping at most [`MAX_CAPTURE_BYTES`]. Returns `true`
+/// if any input had to be truncated.
+fn capture(text: &mut String, more: &str) -> bool {
     for c in more.chars() {
         if text.len() + c.len_utf8() > MAX_CAPTURE_BYTES {
-            return;
+            return true;
         }
         text.push(c);
     }
+    false
 }
 
 /// A start (or empty) tag at `depth` (1 = the root).
@@ -561,7 +577,7 @@ fn open(
     root: &mut bool,
     current: &mut Option<Sample>,
     assertion: &mut Option<(String, bool)>,
-    field: &mut Option<(Field, String)>,
+    field: &mut Option<(Field, String, bool)>,
     sub_depth: &mut Option<usize>,
     stats: &mut Stats,
     f: &mut dyn FnMut(Sample) -> Result<(), JtlError>,
@@ -581,7 +597,6 @@ fn open(
             "httpSample" => {
                 let s = attrs(e, at)?;
                 if empty {
-                    check_http(&s.url, at)?;
                     f(s)?;
                 } else {
                     *current = Some(s);
@@ -603,14 +618,14 @@ fn open(
                 }
             }
             "assertionResult" if !empty => *assertion = Some((String::new(), false)),
-            "java.net.URL" if !empty => *field = Some((Field::Url, String::new())),
+            "java.net.URL" if !empty => *field = Some((Field::Url, String::new(), false)),
             _ => {}
         },
         4 if assertion.is_some() && !empty => {
             *field = match name {
-                "name" => Some((Field::Name, String::new())),
-                "failure" => Some((Field::Failure, String::new())),
-                "error" => Some((Field::Error, String::new())),
+                "name" => Some((Field::Name, String::new(), false)),
+                "failure" => Some((Field::Failure, String::new(), false)),
+                "error" => Some((Field::Error, String::new(), false)),
                 _ => None,
             };
         }
@@ -619,13 +634,27 @@ fn open(
     Ok(())
 }
 
-/// The origin (`scheme://host[:port]`) of a sample URL, without path, query
-/// or user information.
-fn origin(url: &str) -> Option<String> {
-    let (scheme, rest) = url.split_once("://")?;
-    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
-    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    (!host.is_empty()).then(|| format!("{}://{host}", scheme.to_ascii_lowercase()))
+/// The origin (`scheme://host[:port]`) of a sample URL, extracted before any
+/// truncation so long userinfo, path or query text can never leak into the
+/// destination summary.
+fn origin(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = url::Url::parse(trimmed).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    if host.is_empty() {
+        return None;
+    }
+    let out = match parsed.port() {
+        Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
+        None => format!("{}://{host}", parsed.scheme()),
+    };
+    Some(bounded(&out))
 }
 
 /// The exception class JMeter names in a non-HTTP response code.
@@ -653,7 +682,7 @@ fn observe(s: &Sample) -> SendObservation {
         bytes_sent: s.sent_bytes,
         bytes_received: s.bytes,
         protocol: Some("http/1.1".into()),
-        destination: origin(&s.url),
+        destination: s.destination.clone(),
         ..Default::default()
     };
     match http_status(&s.code) {
@@ -750,6 +779,8 @@ pub fn import_jtl<R: Read + Seek>(mut r: R, opts: &JtlOptions) -> Result<LoadRep
     let bucket_of = |ts: i64| (((ts - t0).max(0) as u64 / 1000 / width) as usize).min(n_buckets - 1);
     let mut metrics = Metrics::new();
     let mut req = RequestCounts::default();
+    let mut total_bytes_sent = 0u64;
+    let mut total_bytes_received = 0u64;
     let mut warmup_sends = 0u64;
     let mut seen = 0u64;
     let stats = for_each_sample(&mut r, format, limits, &mut |s: Sample| {
@@ -758,7 +789,7 @@ pub fn import_jtl<R: Read + Seek>(mut r: R, opts: &JtlOptions) -> Result<LoadRep
             return Err(JtlError::Invalid("the file changed while it was imported".into()));
         }
         let o = observe(&s);
-        let end = s.ts + s.elapsed as i64;
+        let end = s.ts.saturating_add(s.elapsed as i64);
         buckets[bucket_of(s.ts)].started += 1;
         let b = &mut buckets[bucket_of(end)];
         b.completed += u64::from(o.terminal == Terminal::Completed);
@@ -772,6 +803,12 @@ pub fn import_jtl<R: Read + Seek>(mut r: R, opts: &JtlOptions) -> Result<LoadRep
             warmup_sends += 1;
             return Ok(());
         }
+        total_bytes_sent = total_bytes_sent
+            .checked_add(o.bytes_sent)
+            .ok_or_else(|| JtlError::Invalid("aggregate sentBytes overflows 64-bit counter".into()))?;
+        total_bytes_received = total_bytes_received
+            .checked_add(o.bytes_received)
+            .ok_or_else(|| JtlError::Invalid("aggregate bytes overflows 64-bit counter".into()))?;
         metrics.record(&o);
         req.started += 1;
         match o.terminal {

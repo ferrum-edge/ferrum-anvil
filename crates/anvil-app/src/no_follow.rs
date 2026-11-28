@@ -188,6 +188,15 @@ impl Dir {
         Ok(rustix::fs::renameat(&self.fd, from, &self.fd, to)?)
     }
 
+    /// Atomically publish `from` at `to` within this folder only if `to` does
+    /// not already exist (a file, folder, or symlink, even dangling, fails
+    /// with `AlreadyExists` without clobbering it).
+    pub(crate) fn publish_no_clobber(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        rustix::fs::linkat(&self.fd, from, &self.fd, to, rustix::fs::AtFlags::empty())?;
+        let _ = self.remove_file(from);
+        Ok(())
+    }
+
     pub(crate) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
         Ok(rustix::fs::unlinkat(&self.fd, name, rustix::fs::AtFlags::empty())?)
     }
@@ -287,6 +296,14 @@ impl Dir {
         std::fs::rename(self.path.join(from), self.path.join(to))
     }
 
+    /// Atomically publish `from` at `to` within this folder only if `to` does
+    /// not already exist.
+    pub(crate) fn publish_no_clobber(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        std::fs::hard_link(self.path.join(from), self.path.join(to))?;
+        let _ = self.remove_file(from);
+        Ok(())
+    }
+
     pub(crate) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
         std::fs::remove_file(self.path.join(name))
     }
@@ -343,6 +360,12 @@ impl Dir {
 
     pub(crate) fn rename(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
         std::fs::rename(self.path.join(from), self.path.join(to))
+    }
+
+    pub(crate) fn publish_no_clobber(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        std::fs::hard_link(self.path.join(from), self.path.join(to))?;
+        let _ = self.remove_file(from);
+        Ok(())
     }
 
     pub(crate) fn remove_file(&self, name: &OsStr) -> io::Result<()> {

@@ -15,29 +15,51 @@ pub fn dataset_path(out: &Path) -> PathBuf {
     out.with_file_name(format!("{stem}.dataset.csv"))
 }
 
-/// Create `path` for secret material: owner-only (0600) and never over an
-/// existing file or link. Unix only: elsewhere no owner-only file can be
-/// created here, so secret output is refused (see [`secret_output_supported`]).
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    #[cfg(unix)]
-    {
+/// Create a temporary file beside `dest`, write+sync `bytes`, and publish it
+/// atomically to `dest`:
+/// - `no_clobber == true`: uses `hard_link` + `remove_file`, failing with
+///   `AlreadyExists` if `dest` (file, folder, or symlink, even dangling) exists.
+/// - `no_clobber == false`: uses `rename`, replacing `dest` atomically without
+///   following a symlink or truncating an existing inode.
+/// - `owner_only == true`: creates the staged file with mode `0o600` (Unix
+///   only; refused on non-Unix).
+fn write_staged(dest: &Path, bytes: &[u8], owner_only: bool, no_clobber: bool) -> Result<()> {
+    if owner_only && !secret_output_supported() {
+        bail!("{}: secret output is written only where an owner-only file can be created (macOS and Linux)", dest.display());
+    }
+    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let tmp_name = format!(".anvil-{}.partial", Id::new());
+    let tmp = parent.join(tmp_name);
+    let write_tmp = || -> Result<()> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("creating {} (it must not exist yet)", path.display()))?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        if owner_only {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp).with_context(|| format!("staging {}", dest.display()))?;
         f.write_all(bytes)?;
         f.sync_all()?;
         Ok(())
+    };
+    if let Err(e) = write_tmp() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    #[cfg(not(unix))]
-    {
-        let _ = bytes;
-        bail!("{}: secret output is written only where an owner-only file can be created (macOS and Linux)", path.display())
+    let publish = if no_clobber {
+        std::fs::hard_link(&tmp, dest).map(|()| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+    } else {
+        std::fs::rename(&tmp, dest)
+    };
+    if let Err(e) = publish {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("publishing {}", dest.display()));
     }
+    Ok(())
 }
 
 /// Whether this platform writes owner-only secret files (on Windows a new
@@ -46,24 +68,72 @@ pub fn secret_output_supported() -> bool {
     cfg!(unix)
 }
 
-/// A destination as a comparable path: its folder resolved (links
-/// followed), case folded where file systems usually ignore case.
-fn destination_key(p: &Path) -> PathBuf {
-    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-    let parent = abs.parent().map(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf()));
-    let joined = match (parent, abs.file_name()) {
-        (Some(d), Some(n)) => d.join(n),
-        _ => abs,
-    };
-    if cfg!(any(windows, target_os = "macos")) { PathBuf::from(joined.to_string_lossy().to_lowercase()) } else { joined }
+/// Refuse any destination that is already a symbolic link (target or dangling)
+/// so CLI exports never follow links or silently alias another destination.
+fn refuse_symlink(label: &str, p: &Path) -> Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(p)
+        && meta.file_type().is_symlink()
+    {
+        bail!("{label} ({}) is a symbolic link; refusing to write through or replace a symlink. Nothing was written", p.display());
+    }
+    Ok(())
 }
 
-/// `s` quoted for the shell a user runs the printed command in.
-pub fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "_./:-+=@%,".contains(c)) {
+/// A destination as a comparable path: canonicalized when it exists, else its
+/// canonicalized parent joined with its filename (case-folded on case-insensitive
+/// filesystems).
+fn destination_key(p: &Path) -> PathBuf {
+    let resolved = std::fs::canonicalize(p).unwrap_or_else(|_| {
+        let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        let parent = abs.parent().map(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf()));
+        match (parent, abs.file_name()) {
+            (Some(d), Some(n)) => d.join(n),
+            _ => abs,
+        }
+    });
+    if cfg!(any(windows, target_os = "macos")) { PathBuf::from(resolved.to_string_lossy().to_lowercase()) } else { resolved }
+}
+
+/// `s` quoted for POSIX `sh` (`'...'`, where no `$`, `` ` ``, or `\` expansion
+/// occurs; embedded single quotes become `'\''`).
+pub fn shell_quote_posix(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "_./:-+=@,".contains(c)) {
         return s.to_string();
     }
-    if cfg!(windows) { format!("\"{}\"", s.replace('"', "\\\"")) } else { format!("'{}'", s.replace('\'', "'\\''")) }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// `s` quoted for Windows PowerShell (`'...'`, verbatim single-quoted string
+/// where `$`, `` ` ``, and `"` are never expanded; embedded single quotes are
+/// doubled `''`).
+pub fn shell_quote_powershell(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "_./:-+=\\".contains(c)) {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// `s` quoted for the current platform's labeled shell (PowerShell on Windows,
+/// POSIX `sh` on macOS/Linux).
+pub fn shell_quote(s: &str) -> String {
+    if cfg!(windows) { shell_quote_powershell(s) } else { shell_quote_posix(s) }
+}
+
+/// A fresh result filename per export so repeated JMeter runs do not append
+/// into the same JTL file.
+fn fresh_results_name(out: &Path) -> String {
+    let stem: String = out
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "results".into())
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .take(32)
+        .collect();
+    let stem = if stem.is_empty() { "results" } else { stem.as_str() };
+    let id = Id::new().to_string();
+    let suffix = id.split('-').next().unwrap_or("run");
+    format!("{stem}-results-{suffix}.jtl")
 }
 
 /// Export `plan` to `out` (and its dataset next to it). Exit code 3 when
@@ -113,6 +183,9 @@ pub fn export_jmx(
     if let Some(p) = report_file {
         destinations.push(("--report", p));
     }
+    for (label, p) in &destinations {
+        refuse_symlink(label, p)?;
+    }
     for (i, (a, pa)) in destinations.iter().enumerate() {
         for (b, pb) in &destinations[i + 1..] {
             if destination_key(pa) == destination_key(pb) {
@@ -120,32 +193,29 @@ pub fn export_jmx(
             }
         }
     }
-    if export.dataset_csv.is_some() && dataset.exists() && !force {
+    if export.dataset_csv.is_some() && std::fs::symlink_metadata(&dataset).is_ok() && !force {
         bail!(
             "{} already exists beside the plan; pass --force to replace it, or choose another --out. Nothing was written",
             dataset.display()
         );
     }
     if let Some(p) = secrets_file
-        && p.exists()
+        && std::fs::symlink_metadata(p).is_ok()
     {
         bail!("the secrets file already exists; it is never written over an existing file. Nothing was written");
     }
-    std::fs::write(out, &export.jmx).with_context(|| format!("writing {}", out.display()))?;
-    if let Some(csv) = &export.dataset_csv {
-        if sensitive_dataset {
-            let _ = std::fs::remove_file(&dataset);
-            write_private(&dataset, csv)?;
-        } else {
-            std::fs::write(&dataset, csv).with_context(|| format!("writing {}", dataset.display()))?;
-        }
-    }
+    // Publish no-clobber outputs first (secrets, unforced dataset) so a race
+    // never leaves a replaced plan paired with a missing/stale sidecar.
     if let (Some(p), Some(props)) = (secrets_file, &export.secrets_properties) {
-        write_private(p, props.as_bytes())?;
+        write_staged(p, props.as_bytes(), true, true)?;
     }
+    if let Some(csv) = &export.dataset_csv {
+        write_staged(&dataset, csv, sensitive_dataset, !force)?;
+    }
+    write_staged(out, export.jmx.as_bytes(), false, false)?;
     if let Some(p) = report_file {
-        std::fs::write(p, json_safe(&serde_json::to_string_pretty(&export.report)?) + "\n")
-            .with_context(|| format!("writing {}", p.display()))?;
+        let json = json_safe(&serde_json::to_string_pretty(&export.report)?) + "\n";
+        write_staged(p, json.as_bytes(), false, false)?;
     }
     let r = &export.report;
     println!(
@@ -164,27 +234,29 @@ pub fn export_jmx(
     for d in &r.differences {
         println!("  difference: {}", t(d));
     }
-    let needed = r.secret_properties.len();
+    let has_secrets = !r.secret_properties.is_empty();
     let written = r.secrets_written;
-    if needed > 0 {
+    if has_secrets {
         // Names and purposes are in the test plan and the --report file.
         if written {
-            println!("  {needed} JMeter propert(ies) for secrets: written to the --secrets-file (owner-only); delete it after the run");
+            println!("  JMeter secret properties written to the --secrets-file (owner-only); delete it after the run");
         } else {
             println!(
-                "  {needed} JMeter propert(ies) for secrets are required (see --report or the test plan's setUp check); without them the plan stops before any traffic"
+                "  JMeter secret properties are required (see --report or the test plan's setUp check); without them the plan stops before any traffic"
             );
         }
     }
-    let mut cmd = format!("jmeter -n -t {} -l results.jtl", shell_quote(&out.display().to_string()));
+    let results_file = fresh_results_name(out);
+    let shell_label = if cfg!(windows) { "PowerShell" } else { "sh" };
+    let mut cmd = format!("jmeter -n -t {} -l {}", shell_quote(&out.display().to_string()), shell_quote(&results_file));
     if written {
-        cmd.push_str(" -q <the --secrets-file you chose>");
+        cmd.push_str(&format!(" -q {}", shell_quote("<the --secrets-file you chose>")));
     }
     for (k, v) in &r.jmeter_properties {
         cmd.push_str(&format!(" {}", shell_quote(&format!("-J{k}={v}"))));
     }
-    println!("  run: {cmd}");
-    println!("  then: anvil load import-jtl <workspace> --file results.jtl --plan {}", plan.id);
+    println!("  run ({shell_label}): {cmd}");
+    println!("  then: anvil load import-jtl <workspace> --file {} --plan {}", shell_quote(&results_file), plan.id);
     Ok(0)
 }
 

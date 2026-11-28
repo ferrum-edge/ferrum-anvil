@@ -87,8 +87,13 @@ fn load_012_cli_exports_a_plan_refuses_strict_tls_and_imports_results() {
     let report = out.path().join("echo.report.json");
     let o = anvil(data, &["load", "export-jmx", "Shop", "echo", "--out", jmx.to_str().unwrap(), "--report", report.to_str().unwrap()]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
-    let quoted = if cfg!(windows) { format!("\"{}\"", jmx.display()) } else { format!("'{}'", jmx.display()) };
-    assert!(text(&o).contains(&format!("run: jmeter -n -t {quoted} -l results.jtl")), "{}", text(&o));
+    let out_txt = text(&o);
+    let quoted = format!("'{}'", jmx.display());
+    let shell_label = if cfg!(windows) { "PowerShell" } else { "sh" };
+    assert!(out_txt.contains(&format!("run ({shell_label}): jmeter -n -t {quoted} -l ")), "{out_txt}");
+    assert!(out_txt.contains("-Jjmeter.save.saveservice.output_format=xml"), "{out_txt}");
+    assert!(out_txt.contains("-Jjmeter.save.saveservice.url=false"), "{out_txt}");
+    assert!(!out_txt.contains(" -l results.jtl"), "must print a fresh per-run JTL filename: {out_txt}");
     let plan = std::fs::read_to_string(&jmx).unwrap();
     assert!(plan.contains("<HTTPSamplerProxy") && plan.contains("jmeterTestPlan"), "{plan}");
     let r: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
@@ -190,4 +195,37 @@ fn load_012_cli_exports_a_plan_refuses_strict_tls_and_imports_results() {
     let o = anvil(data, &["load", "import-jtl", "Shop", "--file", jtl.to_str().unwrap()]);
     assert!(!o.status.success());
     assert!(text(&o).contains("DOCTYPE"), "{}", text(&o));
+
+    // Symlinked destinations (aliased report or dangling dataset sidecar) are
+    // refused before writing so nothing is overwritten or followed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let real_jmx = out.path().join("alias.jmx");
+        std::fs::write(&real_jmx, b"keep-me").unwrap();
+        let report_link = out.path().join("alias-report.json");
+        symlink(&real_jmx, &report_link).unwrap();
+        let o = anvil(
+            data,
+            &["load", "export-jmx", "Shop", "echo", "--out", real_jmx.to_str().unwrap(), "--report", report_link.to_str().unwrap()],
+        );
+        assert!(!o.status.success() && text(&o).contains("symbolic link"), "{}", text(&o));
+        assert_eq!(std::fs::read(&real_jmx).unwrap(), b"keep-me");
+
+        let plan_with_dangling = out.path().join("dangling.jmx");
+        let dangling_ds = out.path().join("dangling.dataset.csv");
+        symlink(out.path().join("nonexistent-target.csv"), &dangling_ds).unwrap();
+        let o = anvil(data, &["load", "export-jmx", "Shop", "withdata", "--out", plan_with_dangling.to_str().unwrap()]);
+        assert!(!o.status.success() && text(&o).contains("symbolic link"), "{}", text(&o));
+        assert!(!plan_with_dangling.exists());
+
+        // Verify shell quoting with real `sh -c` preserves `$HOME`, spaces, and quotes verbatim.
+        let tricky = out.path().join("plan $HOME 'x'.jmx");
+        let o = anvil(data, &["load", "export-jmx", "Shop", "echo", "--out", tricky.to_str().unwrap()]);
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+        let line = text(&o).lines().find(|l| l.contains("run (sh): ")).unwrap().to_string();
+        let after_t = line.split(" -t ").nth(1).unwrap().split(" -l ").next().unwrap();
+        let evaluated = std::process::Command::new("sh").arg("-c").arg(format!("printf %s {after_t}")).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&evaluated.stdout), tricky.to_string_lossy());
+    }
 }

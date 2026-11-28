@@ -22,6 +22,7 @@ hdrhistogram.workspace = true
 quick-xml.workspace = true
 sha2.workspace = true
 hex.workspace = true
+url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

@@ -284,4 +284,41 @@ fn load_012_jtl_record_limit_is_exact() {
     let tag = |n: usize| format!(r#"<testResults><httpSample t="1" ts="{T0}" s="true" lb="{}" rc="200"/></testResults>"#, "x".repeat(n));
     assert!(import(&tag(900), &o).is_ok());
     assert!(matches!(import(&tag(1_000), &o).unwrap_err(), JtlError::RecordTooLong { limit: 1_000, .. }));
+    // The CSV header row itself obeys max_record_bytes.
+    let huge_header = format!("timeStamp,elapsed,label,responseCode,success,URL,{}\n{T0},1,a,200,true,http://h/,v\n", "c".repeat(1_000));
+    assert!(matches!(import(&huge_header, &o).unwrap_err(), JtlError::RecordTooLong { limit: 1_000, .. }));
+}
+
+#[test]
+fn load_012_jtl_url_credentials_are_never_retained_and_empty_depth_and_overflow_are_enforced() {
+    // Rejected non-HTTP URL with credentials must not quote the credential in the error.
+    let mut bad = String::from(CSV_HEADER);
+    bad += &format!("{T0},1,a,200,OK,t,text,true,,1,1,1,1,ftp://user:TOPSECRET@example.test/x,1,0,0\n");
+    let err = import(&bad, &opts()).unwrap_err().to_string();
+    assert!(err.contains("not an HTTP URL") && !err.contains("TOPSECRET"), "{err}");
+
+    // Long userinfo (> 1024 chars) before '@' must be stripped before bounding,
+    // never turning the userinfo into a destination.
+    let long_user = format!("u:{}SECRET", "a".repeat(1200));
+    let mut csv_u = String::from(CSV_HEADER);
+    csv_u += &format!("{T0},1,a,200,OK,t,text,true,,1,1,1,1,http://{long_user}@127.0.0.1:8080/path?api_key=KSECRET,1,0,0\n");
+    let r = import(&csv_u, &opts()).unwrap();
+    assert_eq!(r.destination_summary, vec!["http://127.0.0.1:8080".to_string()]);
+    assert!(!serde_json::to_string(&r).unwrap().contains("SECRET"));
+
+    // XML empty element at depth + 1 > max_depth inside a valid sample is rejected by depth check.
+    let mut o = opts();
+    o.limits.max_depth = 3;
+    let empty_deep = format!(
+        r#"<testResults><httpSample t="1" ts="{T0}" s="true" lb="a" rc="200"><assertionResult><name/></assertionResult></httpSample></testResults>"#
+    );
+    let err = import(&empty_deep, &o).unwrap_err().to_string();
+    assert!(err.contains("nest deeper than 3"), "{err}");
+
+    // Aggregate byte counts that overflow u64 are rejected cleanly instead of panicking/wrapping.
+    let mut ovf = String::from(CSV_HEADER);
+    ovf += &format!("{T0},1,a,200,OK,t,text,true,,{},1,1,1,http://127.0.0.1:8080/,1,0,0\n", u64::MAX);
+    ovf += &format!("{},1,a,200,OK,t,text,true,,10,1,1,1,http://127.0.0.1:8080/,1,0,0\n", T0 + 10);
+    let err = import(&ovf, &opts()).unwrap_err().to_string();
+    assert!(err.contains("overflows"), "{err}");
 }

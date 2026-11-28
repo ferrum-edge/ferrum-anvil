@@ -1132,19 +1132,44 @@ type Live = { runKey: string; planName: string; progress: LoadProgress | null; t
 /** The Apache JMeter release exported plans target (`anvil_jmeter::JMETER_VERSION`). */
 const JMETER_VERSION = "5.6.3";
 
-/** `s` in double quotes, as sh, cmd and PowerShell read it. */
-const quoted = (s: string) => `"${s.replace(/["\\$`]/g, "\\$&")}"`;
+export type JmeterShell = "posix" | "powershell";
+
+/** Quote `s` verbatim for POSIX `sh` (`'...'`, no `$` or backtick expansion). */
+export const quotePosix = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+
+/** Quote `s` verbatim for Windows PowerShell (`'...'`, no `$` or backtick expansion). */
+export const quotePowerShell = (s: string) => `'${s.replace(/'/g, "''")}'`;
+
+export function defaultJmeterShell(): JmeterShell {
+  return typeof navigator !== "undefined" && /win/i.test(navigator.platform || navigator.userAgent || "") ? "powershell" : "posix";
+}
+
+/** Fresh per-run result filename so repeated JMeter runs never append to an earlier file. */
+export function freshJtlName(planFile = "plan.jmx", now = new Date()): string {
+  const stem = planFile.replace(/\.jmx$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "results";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}-${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
+  return `${stem}-results-${stamp}.jtl`;
+}
 
 /**
  * The command that runs an exported plan, from the folder the plan was saved in.
+ * Uses verbatim single-quote escaping for the labeled shell (POSIX `sh` on
+ * macOS/Linux, PowerShell on Windows) so `$` and backticks in file names are
+ * never expanded, and a fresh `.jtl` file name so runs are never combined.
  * The renderer never learns where the files were saved, so the secrets file
  * (which can be in another folder) is named by a placeholder for its full path.
  */
-export function jmeterCommand(o: JmxExportOutcome): string {
+export function jmeterCommand(
+  o: JmxExportOutcome,
+  resultsFile = freshJtlName(o.written[0] ?? "plan.jmx"),
+  shell: JmeterShell = defaultJmeterShell(),
+): string {
+  const quote = shell === "powershell" ? quotePowerShell : quotePosix;
   const r = o.report;
-  let cmd = `jmeter -n -t ${quoted(o.written[0] ?? "plan.jmx")} -l results.jtl`;
-  if (r?.secrets_written && o.written.length > 1) cmd += ` -q ${quoted(`<full path of ${o.written[o.written.length - 1]}>`)}`;
-  for (const [k, v] of r?.jmeter_properties ?? []) cmd += ` ${quoted(`-J${k}=${v}`)}`;
+  let cmd = `jmeter -n -t ${quote(o.written[0] ?? "plan.jmx")} -l ${quote(resultsFile)}`;
+  if (r?.secrets_written && o.written.length > 1) cmd += ` -q ${quote(`<full path of ${o.written[o.written.length - 1]}>`)}`;
+  for (const [k, v] of r?.jmeter_properties ?? []) cmd += ` ${quote(`-J${k}=${v}`)}`;
   return cmd;
 }
 
@@ -1159,6 +1184,8 @@ export function JmeterExportDialog(props: { planName: string; save: () => Promis
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<JmxExportOutcome | null>(null);
+  const [resultsFile, setResultsFile] = useState<string>("results.jtl");
+  const shell = defaultJmeterShell();
   const base = props.planName.replace(NON_FILE_NAME_CHARS, "_") || "plan";
   const run = async () => {
     setErr(null);
@@ -1173,7 +1200,9 @@ export function JmeterExportDialog(props: { planName: string; save: () => Promis
         secretsFile = await api.chooseFile("jmeter_secrets_export", { file_name: `${base}.secrets.properties` });
         if (!secretsFile) return;
       }
-      setOutcome(await api.exportJmx(saved.id, file.token, secretsFile?.token ?? null, replaceDataset));
+      const res = await api.exportJmx(saved.id, file.token, secretsFile?.token ?? null, replaceDataset);
+      setResultsFile(freshJtlName(res.written[0] ?? `${base}.jmx`));
+      setOutcome(res);
     } catch (e) {
       setErr(String((e as Error).message));
     } finally {
@@ -1242,8 +1271,9 @@ export function JmeterExportDialog(props: { planName: string; save: () => Promis
         <div data-testid="jmx-exported">
           <p>Exported to {outcome.written.join(", ")}.</p>
           <p>
-            Run, in the folder you saved {outcome.written[0]} in: <code data-testid="jmx-command">{jmeterCommand(outcome)}</code>. Then import{" "}
-            <code>results.jtl</code> with Import under Reports.
+            Run ({shell === "powershell" ? "PowerShell" : "POSIX sh"}), in the folder you saved {outcome.written[0]} in:{" "}
+            <code data-testid="jmx-command">{jmeterCommand(outcome, resultsFile, shell)}</code>. Then import{" "}
+            <code>{resultsFile}</code> with Import under Reports.
           </p>
           {report.secret_properties.length > 0 && (
             <div className={report.secrets_written ? "faint" : "warn-box"}>

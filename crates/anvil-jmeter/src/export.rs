@@ -217,6 +217,10 @@ fn reason(request: Option<&str>, code: &'static str, message: impl Into<String>)
 enum Mark {
     /// A JMeter variable (dataset column, extracted value, iteration counter).
     Var(String),
+    /// A JMeter variable carrying sensitive data (a sensitive dataset column
+    /// or a sensitive extraction): renders like [`Mark::Var`], but triggers
+    /// credential-forwarding protections such as the redirect check.
+    SensitiveVar(String),
     /// A secret property (index into [`Secrets::props`]).
     Secret(usize),
     /// A JMeter function for a dynamic helper.
@@ -409,8 +413,10 @@ fn helper_expr(helper: &str) -> Result<String, String> {
 /// Per-iteration values a step sees (see `anvil_load::executor::run_iteration`).
 struct PerRun<'a> {
     dataset_columns: &'a [String],
+    dataset_sensitive: &'a [String],
     with_dataset: bool,
-    extracted: Vec<String>,
+    /// `(variable_name, sensitive)` for values extracted by earlier chain steps.
+    extracted: Vec<(String, bool)>,
 }
 
 /// JMeter variable names for extracted values, by Anvil variable name.
@@ -515,6 +521,10 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             )));
         }
     }
+    // Default JMeter save settings write XML JTL without the request URL or
+    // failure messages, so resolved URL credentials (path secrets or query API
+    // keys) and response bodies are never written to the result file while
+    // `<httpSample>` still identifies every sample as an HTTP request.
     let mut t = Translator {
         input,
         opts,
@@ -524,7 +534,11 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
         reasons: Vec::new(),
         differences: Vec::new(),
         mapping: Vec::new(),
-        jmeter_properties: Vec::new(),
+        jmeter_properties: vec![
+            ("jmeter.save.saveservice.output_format".into(), "xml".into()),
+            ("jmeter.save.saveservice.url".into(), "false".into()),
+            ("jmeter.save.saveservice.assertion_results_failure_message".into(), "false".into()),
+        ],
         contexts: contexts.clone(),
     };
     // Markers must be ours alone.
@@ -555,14 +569,17 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
     let mut specs = Vec::new();
     for (pos, (id, ctx)) in steps.iter().zip(&contexts).enumerate() {
         let name = name_of(input, Some(id)).unwrap_or_else(|| id.to_string());
-        // Values extracted at earlier chain positions of the same scope.
-        let mut extracted: Vec<String> = Vec::new();
+        // Values extracted at earlier chain positions of the same scope,
+        // preserving sensitivity metadata for redirect checks.
+        let mut extracted: Vec<(String, bool)> = Vec::new();
         if chain {
             for earlier in &contexts[..pos] {
                 if earlier.scope == ctx.scope {
                     for e in &earlier.spec.extractions {
-                        if !extracted.contains(&e.variable) {
-                            extracted.push(e.variable.clone());
+                        if let Some(existing) = extracted.iter_mut().find(|(n, _)| n == &e.variable) {
+                            existing.1 = e.sensitive;
+                        } else {
+                            extracted.push((e.variable.clone(), e.sensitive));
                         }
                     }
                 }
@@ -570,6 +587,7 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
         }
         let per_run = PerRun {
             dataset_columns: dataset.map(|d| d.columns.as_slice()).unwrap_or(&[]),
+            dataset_sensitive: dataset.map(|d| d.sensitive_columns.as_slice()).unwrap_or(&[]),
             with_dataset: dataset.is_some() && ctx.scope.is_none(),
             extracted,
         };
@@ -908,43 +926,89 @@ fn step_layers(t: &mut Translator<'_>, pos: usize, ctx: &ExecutionContext, per_r
             .dataset_columns
             .iter()
             .enumerate()
-            .map(|(i, c)| stand_in(c, t.markers.add(Mark::Var(format!("anvil_ds_{i}")))))
+            .map(|(i, c)| {
+                let var_name = format!("anvil_ds_{i}");
+                let mark =
+                    if per_run.dataset_sensitive.iter().any(|s| s == c) { Mark::SensitiveVar(var_name) } else { Mark::Var(var_name) };
+                stand_in(c, t.markers.add(mark))
+            })
             .collect();
         layers.push(VarLayer { label: "dataset".into(), vars });
     }
     if !per_run.extracted.is_empty() {
         let mut vars = Vec::new();
-        for name in &per_run.extracted {
+        for (name, sensitive) in &per_run.extracted {
             let var = t.extracted.var(name);
-            vars.push(stand_in(name, t.markers.add(Mark::Var(var))));
+            let mark = if *sensitive { Mark::SensitiveVar(var) } else { Mark::Var(var) };
+            vars.push(stand_in(name, t.markers.add(mark)));
         }
         layers.push(VarLayer { label: "iteration (extracted)".into(), vars });
     }
     layers
 }
 
-/// Whether a resolved credential value needs a whole-value property: it
-/// holds literal material (anything but markers, whitespace and one
-/// auth-scheme word). `Err` when that literal material is mixed with a
+/// Recognized HTTP authentication schemes permitted as a delimited prefix in
+/// an `Authorization` header (e.g. `Bearer {{token}}`).
+fn is_recognized_auth_scheme(scheme: &str) -> bool {
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "bearer"
+            | "basic"
+            | "digest"
+            | "token"
+            | "apikey"
+            | "api-key"
+            | "oauth"
+            | "dpop"
+            | "hoba"
+            | "mutual"
+            | "negotiate"
+            | "scram-sha-256"
+    )
+}
+
+/// Whether a resolved credential value needs a whole-value property: it holds
+/// any non-whitespace literal material (except a recognized, space-delimited
+/// HTTP auth scheme prefix when `allow_auth_scheme` is true, i.e. an
+/// `Authorization` header). `Err` when that literal material is mixed with a
 /// per-iteration value, which no constant property can hold.
-fn needs_property(markers: &Markers, resolved: &str) -> Result<bool, ()> {
+fn needs_property(markers: &Markers, resolved: &str, allow_auth_scheme: bool) -> Result<bool, ()> {
     let parts = markers.split(resolved);
-    let mut literal = String::new();
     let mut has_mark = false;
     let mut per_run = false;
+    let mut non_ws_lit_count = 0usize;
     for p in &parts {
         match p {
-            Part::Lit(l) => literal.push_str(l),
+            Part::Lit(l) => {
+                if !l.trim().is_empty() {
+                    non_ws_lit_count += 1;
+                }
+            }
             Part::Mark(i) => {
                 has_mark = true;
                 per_run |= !matches!(markers.list[*i], Mark::Secret(_));
             }
         }
     }
-    let lit = literal.trim();
-    let scheme_word = !lit.is_empty() && lit.chars().all(|c| c.is_ascii_alphabetic());
-    if lit.is_empty() || (has_mark && scheme_word) {
+    if non_ws_lit_count == 0 {
         return Ok(false);
+    }
+    if allow_auth_scheme
+        && has_mark
+        && non_ws_lit_count == 1
+        && let [Part::Lit(prefix), Part::Mark(_), rest @ ..] = parts.as_slice()
+        && rest.iter().all(|p| match p {
+            Part::Lit(l) => l.trim().is_empty(),
+            Part::Mark(_) => true,
+        })
+    {
+        let trimmed_start = prefix.trim_start();
+        if let Some(scheme) = trimmed_start.strip_suffix(|c: char| c == ' ' || c == '\t') {
+            let scheme = scheme.trim_end();
+            if !scheme.is_empty() && !scheme.chars().any(char::is_whitespace) && is_recognized_auth_scheme(scheme) {
+                return Ok(false);
+            }
+        }
     }
     if per_run { Err(()) } else { Ok(true) }
 }
@@ -974,7 +1038,7 @@ fn sensitive_value(
         SensitiveValue::Template { value } => {
             let masked = mask_helpers(value, &mut t.markers);
             let out = resolver.resolve(&masked, field).map_err(|f| reason(Some(request), "does_not_prepare", f.message))?;
-            match needs_property(&t.markers, &out) {
+            match needs_property(&t.markers, &out, false) {
                 Ok(false) => Ok(out),
                 Ok(true) => {
                     let key = format!("field:{}:{field}", ctx.request_id.map(|i| i.to_string()).unwrap_or_else(|| pos.to_string()));
@@ -1018,7 +1082,8 @@ fn credential_field(
         return Ok(None);
     }
     let Ok(out) = resolver.resolve(masked_value, kind) else { return Ok(None) };
-    match needs_property(&t.markers, &out) {
+    let allow_auth_scheme = kind == "header" && resolved_name.eq_ignore_ascii_case("authorization");
+    match needs_property(&t.markers, &out, allow_auth_scheme) {
         Ok(false) => Ok(None),
         Ok(true) => {
             // The field's position too: two fields of one name hold two values.
@@ -1256,14 +1321,14 @@ fn translate_step(
             "lint",
             "the JSON or XML body takes per-iteration values or secrets, and the request's lint policy blocks a body that fails lint: Anvil checks every iteration's body and does not send an invalid one, JMeter would send it. Set the request's lint policy to warn or off to export it",
         ));
-    } else if let Some(msg) = &prepared.lint_bypassed {
-        if ctx.spec.lint_policy == LintSendPolicy::Block {
-            rs.push(reason(
-                rq,
-                "lint",
-                format!("the body fails Anvil's lint ({msg}) and the request's lint policy blocks it, so Anvil never sends it"),
-            ));
-        }
+    } else if let Some(msg) = &prepared.lint_bypassed
+        && ctx.spec.lint_policy == LintSendPolicy::Block
+    {
+        rs.push(reason(
+            rq,
+            "lint",
+            format!("the body fails Anvil's lint ({msg}) and the request's lint policy blocks it, so Anvil never sends it"),
+        ));
     }
 
     // ---- URL ----
@@ -1284,7 +1349,7 @@ fn translate_step(
         let (raw_name, value) = pair.split_once('=').unwrap_or((pair, ""));
         let qname = percent_decode(raw_name);
         if anvil_domain::credential_names::is_export_secret_name(&qname, &ctx.redaction_names)
-            && needs_property(&t.markers, value) != Ok(false)
+            && needs_property(&t.markers, value, false) != Ok(false)
         {
             rs.push(reason(
                 rq,
@@ -1313,7 +1378,11 @@ fn translate_step(
     // Brotli. Anvil's inferred header also offers zstd, which JMeter would
     // receive and could not decode; the inferred header is sent without it.
     // An explicit header JMeter cannot honour the same way is refused.
-    let explicit_ae = ctx.spec.headers.iter().any(|h| h.enabled && h.name.trim().eq_ignore_ascii_case("accept-encoding"));
+    let explicit_ae = spec
+        .headers
+        .iter()
+        .filter(|h| h.enabled)
+        .any(|h| resolver.resolve(h.name.trim(), "header").is_ok_and(|n| n.trim().eq_ignore_ascii_case("accept-encoding")));
     if let Some((_, v)) = headers.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
         let text = v.0.iter().map(|(s, _)| s.as_str()).collect::<String>();
         if !explicit_ae {
@@ -1437,8 +1506,12 @@ fn translate_step(
 
     // ---- redirects ----
     let tr: &Translator<'_> = &*t;
-    let secret_in =
-        |s: &str| tr.markers.split(s).iter().any(|p| matches!(p, Part::Mark(i) if matches!(tr.markers.list[*i], Mark::Secret(_))));
+    let secret_in = |s: &str| {
+        tr.markers
+            .split(s)
+            .iter()
+            .any(|p| matches!(p, Part::Mark(i) if matches!(tr.markers.list[*i], Mark::Secret(_) | Mark::SensitiveVar(_))))
+    };
     let carries_credentials = credential_headers
         || prepared.body_uses_secret
         || headers.iter().any(|(n, v)| {
@@ -2027,7 +2100,7 @@ impl Render<'_> {
 
     fn expr(&self, i: usize) -> String {
         match &self.markers.list[i] {
-            Mark::Var(v) => format!("${{{v}}}"),
+            Mark::Var(v) | Mark::SensitiveVar(v) => format!("${{{v}}}"),
             Mark::Secret(s) => format!("${{__P({},)}}", self.secrets.props[*s].name),
             Mark::Helper(e) => e.clone(),
             Mark::Vu => format!("${{__intSum(${{__threadNum}},{})}}", self.vu_offset - 1),

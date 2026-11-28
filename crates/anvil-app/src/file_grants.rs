@@ -472,38 +472,245 @@ impl FileGrants {
         dataset: Option<(&[u8], bool)>,
         replace_dataset: bool,
     ) -> Result<usize, GrantError> {
-        let purpose = FilePurpose::JmeterExport;
-        if dataset.is_some_and(|(_, owner_only)| owner_only) && !OWNER_ONLY_FILES {
+        self.write_jmeter_export(token, bytes, dataset, replace_dataset, None).map(|(n, _)| n)
+    }
+
+    /// Stage and publish a JMeter export (plan, optional sibling dataset, and
+    /// optional separate secrets file) as one coordinated operation:
+    ///
+    /// 1. Validates platform owner-only support and claims both grants under
+    ///    one lock so an expired secrets grant fails before touching disk.
+    /// 2. Stages every temporary file in its pinned folder before publishing
+    ///    any destination.
+    /// 3. Publishes no-clobber destinations first (secrets, then an unconfirmed
+    ///    dataset) via atomic no-clobber linking before replacing the plan.
+    /// 4. On any pre-publish error, cleans up all staged temporaries and
+    ///    restores the grants; on an unavoidable mid-publish error, reports
+    ///    which files were already published.
+    pub fn write_jmeter_export(
+        &self,
+        plan_token: &str,
+        jmx_bytes: &[u8],
+        dataset: Option<(&[u8], bool)>,
+        replace_dataset: bool,
+        secrets: Option<(&str, &[u8])>,
+    ) -> Result<(usize, Vec<String>), GrantError> {
+        let plan_purpose = FilePurpose::JmeterExport;
+        let secrets_purpose = FilePurpose::JmeterSecretsExport;
+        if (dataset.is_some_and(|(_, owner_only)| owner_only) || secrets.is_some()) && !OWNER_ONLY_FILES {
             return Err(GrantError::Invalid(OWNER_ONLY_UNAVAILABLE.into()));
         }
-        let (entry, generation) = self.take(token, purpose)?;
-        let existing_sibling = match &entry.target {
-            Target::Write { dir, name, .. } if dataset.is_some() && !replace_dataset => {
-                let sibling = dataset_name(name);
-                std::fs::symlink_metadata(dir.join(&sibling)).is_ok().then(|| display_name(Some(&sibling)))
+        // Claim both grants atomically under one state lock so an invalid or
+        // expired secrets grant fails before anything is staged or written.
+        let (plan_entry, secrets_entry, generation) = {
+            let mut g = self.state.lock();
+            self.sweep(&mut g);
+            let generation = g.generation;
+            let plan_entry = match g.entries.get(plan_token) {
+                Some(e) if e.purpose == plan_purpose => e.clone(),
+                Some(_) => return Err(GrantError::WrongPurpose),
+                None => return Err(GrantError::Unknown),
+            };
+            let secrets_entry = match secrets {
+                Some((sec_tok, _)) => match g.entries.get(sec_tok) {
+                    Some(e) if e.purpose == secrets_purpose => Some((sec_tok.to_owned(), e.clone())),
+                    Some(_) => return Err(GrantError::WrongPurpose),
+                    None => return Err(GrantError::Unknown),
+                },
+                None => None,
+            };
+            g.entries.remove(plan_token);
+            if let Some((ref sec_tok, _)) = secrets_entry {
+                g.entries.remove(sec_tok);
+            }
+            (plan_entry, secrets_entry, generation)
+        };
+        let restore_grants = |plan_entry: GrantEntry, secrets_entry: Option<(String, GrantEntry)>| {
+            let mut g = self.state.lock();
+            if g.generation == generation {
+                self.admit(&mut g, plan_token.to_owned(), plan_entry);
+                if let Some((sec_tok, sec_entry)) = secrets_entry {
+                    self.admit(&mut g, sec_tok, sec_entry);
+                }
+            }
+        };
+
+        let Target::Write { dir: plan_dir, id: plan_id, name: plan_name } = &plan_entry.target else {
+            restore_grants(plan_entry, secrets_entry);
+            return Err(GrantError::WrongPurpose);
+        };
+        let sibling_name = dataset.map(|_| dataset_name(plan_name));
+
+        // Early existence check for an unconfirmed sibling dataset (enforced
+        // again atomically at publication via publish_no_clobber).
+        if let Some(ref sibling) = sibling_name
+            && !replace_dataset
+            && std::fs::symlink_metadata(plan_dir.join(sibling)).is_ok()
+        {
+            let label = display_name(Some(sibling));
+            restore_grants(plan_entry, secrets_entry);
+            return Err(GrantError::Invalid(format!(
+                "{label} already exists beside the chosen file; choose to replace it, or choose another name. Nothing was written"
+            )));
+        }
+
+        // Open and verify pinned folder(s) and stage every file before
+        // publishing any destination.
+        let plan_folder = match open_pinned_write_dir(plan_dir, *plan_id) {
+            Ok(f) => f,
+            Err(e) => {
+                restore_grants(plan_entry, secrets_entry);
+                return Err(e);
+            }
+        };
+        if let Err(e) = refuse_directory(&plan_dir.join(plan_name)) {
+            restore_grants(plan_entry, secrets_entry);
+            return Err(e);
+        }
+        if let Some(ref sibling) = sibling_name
+            && let Err(e) = refuse_directory(&plan_dir.join(sibling))
+        {
+            restore_grants(plan_entry, secrets_entry);
+            return Err(e);
+        }
+        let secrets_target = match (&secrets_entry, secrets) {
+            (Some((_, se)), Some((_, sec_bytes))) => {
+                let Target::Write { dir: sec_dir, id: sec_id, name: sec_name } = &se.target else {
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(GrantError::WrongPurpose);
+                };
+                if std::fs::symlink_metadata(sec_dir.join(sec_name)).is_ok() {
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(GrantError::Invalid(
+                        "the secrets file already exists; it is never written over an existing file. Nothing was written".into(),
+                    ));
+                }
+                let sec_folder = match open_pinned_write_dir(sec_dir, *sec_id) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        restore_grants(plan_entry, secrets_entry);
+                        return Err(e);
+                    }
+                };
+                if let Err(e) = refuse_directory(&sec_dir.join(sec_name)) {
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(e);
+                }
+                Some((sec_folder, sec_name.clone(), sec_bytes))
             }
             _ => None,
         };
-        if let Some(sibling) = existing_sibling {
-            let mut g = self.state.lock();
-            if g.generation == generation {
-                self.admit(&mut g, token.to_owned(), entry);
+
+        // Stage all temporary files first.
+        let jmx_tmp = match stage_in(&plan_folder, jmx_bytes, plan_purpose.owner_only()) {
+            Ok(t) => t,
+            Err(e) => {
+                restore_grants(plan_entry, secrets_entry);
+                return Err(e);
             }
-            return Err(GrantError::Invalid(format!(
-                "{sibling} already exists beside the chosen file; choose to replace it, or choose another name. Nothing was written"
-            )));
-        }
-        let result = write_target(&entry.target, bytes, purpose.owner_only()).and_then(|()| match (dataset, &entry.target) {
-            (Some((csv, owner_only)), Target::Write { dir, id, name }) => write_in(dir, *id, &dataset_name(name), csv, owner_only),
-            _ => Ok(()),
-        });
-        if result.is_err() {
-            let mut g = self.state.lock();
-            if g.generation == generation {
-                self.admit(&mut g, token.to_owned(), entry);
+        };
+        let dataset_tmp = match dataset {
+            Some((csv, owner_only)) => match stage_in(&plan_folder, csv, owner_only) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    let _ = plan_folder.remove_file(&jmx_tmp);
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let secrets_tmp = match &secrets_target {
+            Some((sec_folder, _, sec_bytes)) => match stage_in(sec_folder, sec_bytes, true) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    let _ = plan_folder.remove_file(&jmx_tmp);
+                    if let Some(ref dt) = dataset_tmp {
+                        let _ = plan_folder.remove_file(dt);
+                    }
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+
+        // Publish no-clobber files first, then the plan. Track every published
+        // filename so an unavoidable mid-publish error reports what landed.
+        let mut published: Vec<String> = Vec::new();
+        let cleanup_remaining = |jmx_t: Option<&OsStr>, ds_t: Option<&OsStr>, sec_t: Option<&OsStr>| {
+            if let Some(t) = jmx_t {
+                let _ = plan_folder.remove_file(t);
             }
+            if let Some(t) = ds_t {
+                let _ = plan_folder.remove_file(t);
+            }
+            if let (Some((sf, _, _)), Some(t)) = (&secrets_target, sec_t) {
+                let _ = sf.remove_file(t);
+            }
+        };
+        let mut sec_tmp = secrets_tmp;
+        let mut ds_tmp = dataset_tmp;
+        let mut jmx_t = Some(jmx_tmp);
+
+        if let (Some((sec_folder, sec_name, _)), Some(tmp)) = (&secrets_target, sec_tmp.take()) {
+            if let Err(err) = sec_folder.publish_no_clobber(&tmp, sec_name) {
+                let _ = sec_folder.remove_file(&tmp);
+                cleanup_remaining(jmx_t.as_deref(), ds_tmp.as_deref(), None);
+                restore_grants(plan_entry, secrets_entry);
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    return Err(GrantError::Invalid(
+                        "the secrets file already exists; it is never written over an existing file. Nothing was written".into(),
+                    ));
+                }
+                return Err(io(err));
+            }
+            published.push(display_name(Some(sec_name)));
         }
-        result.map(|()| bytes.len() + dataset.map_or(0, |(csv, _)| csv.len()))
+
+        if let (Some(ref sibling), Some(tmp)) = (&sibling_name, ds_tmp.take()) {
+            let res = if replace_dataset { plan_folder.rename(&tmp, sibling) } else { plan_folder.publish_no_clobber(&tmp, sibling) };
+            if let Err(err) = res {
+                let _ = plan_folder.remove_file(&tmp);
+                cleanup_remaining(jmx_t.as_deref(), None, None);
+                if published.is_empty() {
+                    restore_grants(plan_entry, secrets_entry);
+                    if !replace_dataset && err.kind() == std::io::ErrorKind::AlreadyExists {
+                        let label = display_name(Some(sibling));
+                        return Err(GrantError::Invalid(format!(
+                            "{label} already exists beside the chosen file; choose to replace it, or choose another name. Nothing was written"
+                        )));
+                    }
+                    return Err(io(err));
+                }
+                return Err(GrantError::Io(format!(
+                    "{err} (already written: {}; the remaining files were not written)",
+                    published.join(", ")
+                )));
+            }
+            published.push(display_name(Some(sibling)));
+        }
+
+        if let Some(tmp) = jmx_t.take()
+            && let Err(err) = plan_folder.rename(&tmp, plan_name)
+        {
+            let _ = plan_folder.remove_file(&tmp);
+            if published.is_empty() {
+                restore_grants(plan_entry, secrets_entry);
+                return Err(io(err));
+            }
+            return Err(GrantError::Io(format!("{err} (already written: {}; the test plan was not written)", published.join(", "))));
+        }
+
+        let mut written = vec![display_name(Some(plan_name))];
+        if let Some(ref sibling) = sibling_name {
+            written.push(display_name(Some(sibling)));
+        }
+        if let Some((_, sec_name, _)) = &secrets_target {
+            written.push(display_name(Some(sec_name)));
+        }
+        let total = jmx_bytes.len() + dataset.map_or(0, |(csv, _)| csv.len()) + secrets.map_or(0, |(_, s)| s.len());
+        Ok((total, written))
     }
 
     /// [`FileGrants::read`], deciding from the start of the file how much of
@@ -775,6 +982,31 @@ fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), G
         return Err(GrantError::Changed);
     }
     write_in(dir, *id, name, bytes, owner_only)
+}
+
+fn open_pinned_write_dir(dir: &Path, id: FileId) -> Result<Dir, GrantError> {
+    if std::fs::canonicalize(dir).map_err(io)? != *dir {
+        return Err(GrantError::Changed);
+    }
+    let Some(folder) = Dir::open(dir).map_err(io)? else {
+        return Err(GrantError::Changed);
+    };
+    if folder.id().map_err(io)? != id {
+        return Err(GrantError::Changed);
+    }
+    Ok(folder)
+}
+
+fn stage_in(folder: &Dir, bytes: &[u8], owner_only: bool) -> Result<OsString, GrantError> {
+    let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
+    let file = folder.create_new(&tmp, owner_only).map_err(io)?;
+    match write_synced(file, bytes) {
+        Ok(()) => Ok(tmp),
+        Err(err) => {
+            let _ = folder.remove_file(&tmp);
+            Err(io(err))
+        }
+    }
 }
 
 /// Replace `name` in the folder at the canonical `dir`, which must still be

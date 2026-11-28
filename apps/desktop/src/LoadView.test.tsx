@@ -1269,7 +1269,8 @@ describe("LOAD-012 JMeter adapter", () => {
     expect(calls("file_choose")).toEqual([{ purpose: "jmeter_export", options: { file_name: "Sockets.jmx", filters: [{ name: "JMeter test plan", extensions: ["jmx"] }], multiple: false } }]);
     expect(calls("load_export_jmx")).toEqual([{ planId: "plan-1", grant: "fg-jmx", secretsGrant: null, replaceDataset: false }]);
     expect(done.textContent).toContain("Exported to Sockets.jmx");
-    expect(screen.getByTestId("jmx-command").textContent).toBe('jmeter -n -t "Sockets.jmx" -l results.jtl "-Jhttpsampler.max_redirects=10"');
+    const cmd = screen.getByTestId("jmx-command").textContent ?? "";
+    expect(cmd).toMatch(/^jmeter -n -t 'Sockets\.jmx' -l 'Sockets-results-\d{8}-\d{6}\.jtl' '-Jhttpsampler\.max_redirects=10'$/);
     expect(done.textContent).toContain("anvil.secret.var.token");
     expect(screen.getByTestId("jmx-differences").textContent).toContain("Dataset rows");
   });
@@ -1299,7 +1300,7 @@ describe("LOAD-012 JMeter adapter", () => {
     expect(calls("file_choose").map((c) => c.purpose)).toEqual(["jmeter_export", "jmeter_secrets_export"]);
     expect(calls("load_export_jmx")).toEqual([{ planId: "plan-1", grant: "fg-jmx", secretsGrant: "fg-secrets", replaceDataset: true }]);
     // The secrets file can be in another folder: a quoted placeholder for its full path.
-    expect(screen.getByTestId("jmx-command").textContent).toContain('-q "<full path of Sockets.secrets.properties>"');
+    expect(screen.getByTestId("jmx-command").textContent).toContain("-q '<full path of Sockets.secrets.properties>'");
   });
 
   it("LOAD-012 shows every refusal (strict TLS among them) and that nothing was written", async () => {
@@ -1387,12 +1388,19 @@ describe("LOAD-012 JMeter adapter", () => {
 });
 
 describe("LOAD-012 jmeterCommand", () => {
-  it("LOAD-012 quotes file names with spaces and shell characters", () => {
+  it("LOAD-012 quotes file names verbatim for POSIX sh and PowerShell without expanding $ expressions", () => {
     const o = {
       report: { secrets_written: true, jmeter_properties: [] as [string, string][] },
       refused: [],
-      written: ["Checkout run.jmx", 'odd "$x".properties'],
+      written: ["Checkout $HOME 'run'.jmx", 'odd "$(whoami)" `x` \'s\'.properties'],
     } as unknown as Parameters<typeof jmeterCommand>[0];
-    expect(jmeterCommand(o)).toBe('jmeter -n -t "Checkout run.jmx" -l results.jtl -q "<full path of odd \\"\\$x\\".properties>"');
+    const posix = jmeterCommand(o, "checkout-results-20261128-000000.jtl", "posix");
+    expect(posix).toBe(
+      `jmeter -n -t 'Checkout $HOME '\\''run'\\''.jmx' -l 'checkout-results-20261128-000000.jtl' -q '<full path of odd "$(whoami)" \`x\` '\\''s'\\''.properties>'`,
+    );
+    const pwsh = jmeterCommand(o, "checkout-results-20261128-000000.jtl", "powershell");
+    expect(pwsh).toBe(
+      `jmeter -n -t 'Checkout $HOME ''run''.jmx' -l 'checkout-results-20261128-000000.jtl' -q '<full path of odd "$(whoami)" \`x\` ''s''.properties>'`,
+    );
   });
 });

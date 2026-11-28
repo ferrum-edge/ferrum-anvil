@@ -64,9 +64,14 @@ async fn run_jmeter(out: &anvil_jmeter::Export, format: &str, secrets: bool) -> 
     }
     let mut cmd = tokio::process::Command::new(jmeter());
     cmd.current_dir(dir.path()).args(["-n", "-t", "plan.jmx", "-l", "results.jtl", "-j", "jmeter.log"]);
-    cmd.arg(format!("-Jjmeter.save.saveservice.output_format={format}"));
     for (k, v) in &out.report.jmeter_properties {
         cmd.arg(format!("-J{k}={v}"));
+    }
+    if !format.is_empty() {
+        cmd.arg(format!("-Jjmeter.save.saveservice.output_format={format}"));
+        if format == "csv" {
+            cmd.arg("-Jjmeter.save.saveservice.url=true");
+        }
     }
     if secrets && let Some(props) = &out.secrets_properties {
         std::fs::write(dir.path().join("secrets.properties"), props.as_bytes()).unwrap();
@@ -369,4 +374,34 @@ fn url_escape(s: &str) -> String {
     s.bytes()
         .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
         .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs Apache JMeter (ANVIL_JMETER_HOME); run by .github/workflows/jmeter.yml"]
+async fn load_012_default_export_properties_do_not_write_url_credentials_to_jtl() {
+    use anvil_domain::auth::KeyLocation;
+    init();
+    let f = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let path_secret = "path-SENSITIVE-token";
+    let query_secret = "qkey-SENSITIVE-value";
+    let mut spec = RequestSpec::http("GET", &f.url("/echo/{{secret_seg}}"));
+    spec.auth = AuthConfig::ApiKey { name: "api_key".into(), value: SensitiveValue::template("{{qkey}}"), location: KeyLocation::Query };
+    spec.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    let (id, mut c) = step(spec);
+    c.var_layers.push(layer("workspace", &[("secret_seg", path_secret, true), ("qkey", query_secret, true)]));
+    let plan = Fx::new(iterations(3, 1), vec![(id, c, "url-secret")], None);
+    let out = plan.export(&export_opts(true)).expect("exported");
+    assert!(!out.jmx.contains("SENSITIVE"), "no secret material in .jmx");
+    // Run JMeter using ONLY the default exported jmeter_properties (XML + url=false).
+    let run = run_jmeter(&out, "", true).await;
+    let raw_jtl = std::fs::read_to_string(run.jtl()).expect("JMeter wrote results.jtl");
+    assert!(!raw_jtl.contains(path_secret), "URL path secret leaked into JTL: {raw_jtl}");
+    assert!(!raw_jtl.contains(query_secret), "query API key leaked into JTL: {raw_jtl}");
+    let report = import(&run, &plan);
+    assert_eq!((report.requests.started, report.requests.completed), (3, 3));
+    assert!(report.engine_version.ends_with("+jtl-xml"));
+    // Ground truth: JMeter actually sent both resolved secrets to the fixture.
+    let got = received(&f, "/echo/");
+    assert_eq!(got.len(), 3);
+    assert!(got.iter().all(|(p, _)| p.contains(path_secret) && p.contains(query_secret)), "{got:?}");
 }

@@ -679,6 +679,27 @@ fn load_012_an_existing_dataset_beside_the_plan_is_replaced_only_when_chosen() {
     assert_eq!(std::fs::read(&sibling).unwrap(), b"\"a\"\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn load_012_write_jmeter_export_preserves_existing_plan_when_secrets_grant_invalid_or_occupied() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = file(dir.path(), "plan.jmx", b"working-plan");
+    let grants = FileGrants::default();
+    let g = grants.grant_write(FilePurpose::JmeterExport, &plan_path).unwrap();
+    // Invalid/expired secrets token must fail before touching the existing plan.
+    let err = grants.write_jmeter_export(&g.token, b"replacement-plan", None, false, Some(("expired-token", b"k=v\n"))).unwrap_err();
+    assert_eq!(err, GrantError::Unknown);
+    assert_eq!(std::fs::read(&plan_path).unwrap(), b"working-plan");
+
+    // Occupied secrets file must also fail before touching the existing plan.
+    let occupied = file(dir.path(), "plan.secrets.properties", b"existing-secrets");
+    let sg = grants.grant_write(FilePurpose::JmeterSecretsExport, &occupied).unwrap();
+    let err = grants.write_jmeter_export(&g.token, b"replacement-plan", None, false, Some((&sg.token, b"k=v\n"))).unwrap_err();
+    assert!(matches!(err, GrantError::Invalid(ref m) if m.contains("already exists")), "{err}");
+    assert_eq!(std::fs::read(&plan_path).unwrap(), b"working-plan");
+    assert_eq!(std::fs::read(&occupied).unwrap(), b"existing-secrets");
+}
+
 #[cfg(not(unix))]
 #[test]
 fn load_012_secret_output_is_refused_where_no_owner_only_file_can_be_created() {
