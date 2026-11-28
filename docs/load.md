@@ -427,8 +427,10 @@ live progress and in a crash report rebuilt from the last snapshot.
 The worker samples its own process: peak CPU (user+system time over wall
 time; 100 % = one core), peak RSS (`getrusage(RUSAGE_SELF)`), peak open
 descriptors (`/dev/fd`, `/proc/self/fd` on Linux), and start-lag p99/max
-(open workloads). On non-Unix platforms these are `None` and the report says
-the measurement is unavailable.
+(open workloads). On Windows the same three come from `GetProcessTimes`
+(user+kernel time), `K32GetProcessMemoryInfo` (peak working set) and
+`GetProcessHandleCount`. On any other platform they are `None` and the report
+says the measurement is unavailable.
 
 For open workloads `target_not_achieved` is set, with the reasons, when any
 of these hold:
@@ -876,7 +878,8 @@ server:
   that lands after its bucket was finalized updates counts but not
   percentiles.
 * Peak CPU is sampled at the progress cadence (≥ 250 ms), so short bursts are
-  averaged. Generator health is unavailable on non-Unix platforms.
+  averaged. On Windows the descriptor count is the process handle count
+  (handles of every kind), not only sockets and files.
 
 ## Matrix coverage
 
