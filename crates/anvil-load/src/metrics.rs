@@ -287,24 +287,31 @@ pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObse
         obs.setup_us = 0;
         count_attempts(&mut obs, &out.session_attempts);
         if obs.terminal == Terminal::Completed
-            && let Some((close_transport, close_failure)) = &out.session_close_outcome
+            && let Some(aux) = &out.session_auxiliary_outcome
         {
-            let close_terminal = classify_transport(*close_transport, close_failure.as_ref());
-            if close_terminal != Terminal::Completed {
-                obs.terminal = close_terminal;
+            let aux_terminal = classify_transport(aux.transport, aux.failure.as_ref());
+            if aux_terminal != Terminal::Completed {
+                obs.terminal = aux_terminal;
                 obs.application_failure = false;
                 obs.assertion_failure = false;
-                obs.deadline_ms =
-                    if close_terminal == Terminal::Timeout { close_failure.as_ref().and_then(|f| f.deadline_ms) } else { None };
+                obs.deadline_ms = if aux_terminal == Terminal::Timeout { aux.failure.as_ref().and_then(|f| f.deadline_ms) } else { None };
                 if obs.is_failure() {
-                    let class = if close_terminal == Terminal::Timeout { "timeout" } else { "transport_failure" };
-                    let kind = close_failure.as_ref().map(|f| snake(&f.kind)).unwrap_or_else(|| "session_close".into());
-                    obs.category = Some(truncate_chars(&format!("{class}: mcp_close.{kind}"), 120));
-                    let detail = close_failure
-                        .as_ref()
-                        .map(|f| format!("{kind}: {}", f.message))
-                        .unwrap_or_else(|| "MCP session close did not complete".into());
-                    obs.example = Some(truncate_chars(&format!("DELETE {} → {detail}", rec.prepared.url), MAX_EXAMPLE_CHARS));
+                    let class = if aux_terminal == Terminal::Timeout { "timeout" } else { "transport_failure" };
+                    let (stage, method_label, fallback_kind, fallback_detail) = match aux.exchange {
+                        anvil_engine::McpAuxiliaryExchange::InitializedNotification => (
+                            "mcp_initialized",
+                            "POST (notifications/initialized)",
+                            "initialized_notification",
+                            "MCP notifications/initialized did not complete",
+                        ),
+                        anvil_engine::McpAuxiliaryExchange::SessionClose => {
+                            ("mcp_close", "DELETE", "session_close", "MCP session close did not complete")
+                        }
+                    };
+                    let kind = aux.failure.as_ref().map(|f| snake(&f.kind)).unwrap_or_else(|| fallback_kind.into());
+                    obs.category = Some(truncate_chars(&format!("{class}: {stage}.{kind}"), 120));
+                    let detail = aux.failure.as_ref().map(|f| format!("{kind}: {}", f.message)).unwrap_or_else(|| fallback_detail.into());
+                    obs.example = Some(truncate_chars(&format!("{method_label} {} → {detail}", rec.prepared.url), MAX_EXAMPLE_CHARS));
                 }
             }
         }

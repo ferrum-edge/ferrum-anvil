@@ -972,7 +972,7 @@ fn fail_attempt(
     if let Some(t) = track {
         obs.early_data = Some(t.finish());
     }
-    AttemptOutput { observation: obs, response: None, body: Bytes::new() }
+    AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured: false }
 }
 
 /// DNS for a QUIC destination (there is no TCP connect phase).
@@ -2053,6 +2053,7 @@ impl H3Transport {
             })
         });
         let mut answer_probe_deadline: Option<tokio::time::Instant> = None;
+        let mut answer_captured = false;
         loop {
             let idle_deadline = idle.map(|d| Instant::now() + d);
             tokio::select! {
@@ -2076,6 +2077,7 @@ impl H3Transport {
                         if let Some(w) = watch.as_mut()
                             && w.feed(&data)
                         {
+                            answer_captured = wire <= plan.limits.capture_bytes;
                             let probe_deadline = tokio::time::Instant::now() + Duration::from_millis(20);
                             answer_probe_deadline = Some(probe_deadline);
                             loop {
@@ -2166,8 +2168,7 @@ impl H3Transport {
         }
         let mut trailers = Vec::new();
         let mut trailers_received = false;
-        let stopped = completeness == BodyCompleteness::StoppedAfterAnswer;
-        if failure.is_none() && !stopped {
+        if failure.is_none() && completeness != BodyCompleteness::StoppedAfterAnswer {
             // h3 hands the trailers over only once the stream ends (FIN): that
             // wait is bounded like the body's (or by the answer-stop probe when
             // the watched answer already arrived, so trailers without FIN stop
@@ -2199,32 +2200,41 @@ impl H3Transport {
                     completeness = BodyCompleteness::StoppedAfterAnswer;
                 }
                 _ = sleep_until_opt(idle_deadline) => {
-                    completeness = BodyCompleteness::Incomplete;
-                    failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "the HTTP/3 response stream did not end after its trailers").with_deadline(plan.timeouts.body_idle_ms));
+                    if answer_probe_deadline.is_some() {
+                        completeness = BodyCompleteness::StoppedAfterAnswer;
+                    } else {
+                        completeness = BodyCompleteness::Incomplete;
+                        failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyIdleTimeout, "the HTTP/3 response stream did not end after its trailers").with_deadline(plan.timeouts.body_idle_ms));
+                    }
                 }
                 _ = sleep_until_opt(total_deadline) => {
-                    completeness = BodyCompleteness::Incomplete;
-                    failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::TotalTimeout, "total deadline elapsed while waiting for the end of the response").with_deadline(plan.timeouts.total_ms));
+                    if answer_probe_deadline.is_some() {
+                        completeness = BodyCompleteness::StoppedAfterAnswer;
+                    } else {
+                        completeness = BodyCompleteness::Incomplete;
+                        failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::TotalTimeout, "total deadline elapsed while waiting for the end of the response").with_deadline(plan.timeouts.total_ms));
+                    }
                 }
                 _ = cancel.cancelled() => {
                     completeness = BodyCompleteness::Canceled;
                     failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled while waiting for the end of the response"));
                 }
             }
-            // A deadline or a cancel ended the wait for the end of the
-            // stream: trailers h3 already received are still the server's,
-            // so they are recorded rather than dropped.
+            // A deadline, answer probe expiry, or a cancel ended the wait for
+            // the end of the stream: trailers h3 already received are still the
+            // server's, so they are recorded rather than dropped.
             if !trailers_received
-                && failure
-                    .as_ref()
-                    .is_some_and(|f| matches!(f.kind, FailureKind::BodyIdleTimeout | FailureKind::TotalTimeout | FailureKind::Canceled))
+                && (completeness == BodyCompleteness::StoppedAfterAnswer
+                    || failure.as_ref().is_some_and(|f| {
+                        matches!(f.kind, FailureKind::BodyIdleTimeout | FailureKind::TotalTimeout | FailureKind::Canceled)
+                    }))
                 && let Ok(Some(t)) = stream.peek_recv_trailers()
             {
                 trailers_received = true;
                 trailers = header_entries(&t);
             }
         }
-        if stopped || failure.as_ref().is_some_and(|f| f.kind != FailureKind::BodyReset) {
+        if completeness == BodyCompleteness::StoppedAfterAnswer || failure.as_ref().is_some_and(|f| f.kind != FailureKind::BodyReset) {
             // Stop the response now: finishing the report never waits for
             // the peer (a dropped stream would be stopped with code 0).
             stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
@@ -2264,7 +2274,7 @@ impl H3Transport {
                 blob_sha256: if captured.is_empty() { None } else { Some(crate::certs::sha256_hex(&captured)) },
             },
         };
-        (AttemptOutput { observation: obs, response: Some(response), body: captured }, None)
+        (AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured }, None)
     }
 }
 

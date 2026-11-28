@@ -518,7 +518,7 @@ mod tests {
             inferred: vec![],
             lint_bypassed: None,
             attempts: vec![],
-            last: AttemptOutput { observation: attempt, response: Some(response), body: Bytes::new() },
+            last: AttemptOutput { observation: attempt, response: Some(response), body: Bytes::new(), answer_captured: false },
             trust: FerrumTrust::Trusted {
                 profile_name: "lab gateway".into(),
                 compatibility_id: "ferrum-edge-0.9.9".into(),

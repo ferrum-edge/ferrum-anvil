@@ -72,10 +72,28 @@ pub struct ExecutionOutput {
     pub session_attempts: Vec<anvil_domain::execution::AttemptObservation>,
     /// For an MCP session where an auxiliary exchange (`notifications/initialized`
     /// or the closing `DELETE`) did not complete at the transport level (timed
-    /// out, was canceled, or failed), its transport state and failure, preserved
-    /// separately from the operation's own record so load classification honors
-    /// the session's full boundary.
-    pub session_close_outcome: Option<(anvil_domain::outcome::TransportState, Option<TransportFailure>)>,
+    /// out, was canceled, or failed), its exchange stage, transport state, and
+    /// failure, preserved separately from the operation's own record so load
+    /// classification honors the session's full boundary.
+    pub session_auxiliary_outcome: Option<SessionAuxiliaryOutcome>,
+}
+
+/// Which auxiliary MCP session exchange (outside the main operation) did not
+/// complete at the transport level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpAuxiliaryExchange {
+    /// `POST` of `notifications/initialized` after the handshake.
+    InitializedNotification,
+    /// `DELETE` closing the session after the operation.
+    SessionClose,
+}
+
+/// Non-completed transport outcome of an auxiliary MCP session exchange.
+#[derive(Debug, Clone)]
+pub struct SessionAuxiliaryOutcome {
+    pub exchange: McpAuxiliaryExchange,
+    pub transport: anvil_domain::outcome::TransportState,
+    pub failure: Option<TransportFailure>,
 }
 
 /// Operational response facts, kept outside the persistable record. Debug

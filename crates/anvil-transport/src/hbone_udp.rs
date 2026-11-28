@@ -892,7 +892,7 @@ pub async fn run(plan: &HboneUdpPlan, events: &EventCtx, cancel: &CancellationTo
     }
     let obs = finish_attempt(rec, obs, events);
     SessionOutput::single(
-        AttemptOutput { observation: obs, response: None, body: Bytes::new() },
+        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured: false },
         Some(tr.finish()),
         udp_status(sent, received),
         facts,

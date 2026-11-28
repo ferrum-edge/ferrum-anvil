@@ -179,6 +179,11 @@ pub struct AttemptOutput {
     pub observation: AttemptObservation,
     pub response: Option<ResponseRecord>,
     pub body: Bytes,
+    /// Whether an answer-stop watcher (`BodyStop`) signaled completion while
+    /// all bytes up through the correlated answer were still within
+    /// `capture_bytes`. Trailing probe frames may still push `wire_bytes` past
+    /// `capture_bytes` without invalidating the captured answer.
+    pub answer_captured: bool,
 }
 
 // ------------------------------------------------------------------ body ---
@@ -900,7 +905,7 @@ impl HttpTransport {
             obs.phases = std::mem::take(&mut rec.phases);
             obs.dispatch = dispatch;
             obs.failure = Some(f);
-            AttemptOutput { observation: obs, response: None, body: Bytes::new() }
+            AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured: false }
         };
 
         // Unsupported combinations fail before any traffic.
@@ -1394,6 +1399,7 @@ impl HttpTransport {
                 })
             })
             .filter(|_| !no_body);
+        let mut answer_captured = false;
         loop {
             let idle_deadline = idle.map(|d| Instant::now() + d);
             tokio::select! {
@@ -1424,8 +1430,11 @@ impl HttpTransport {
                             // confirm whether the peer actually ended it.
                             if let Some(w) = watch.as_mut()
                                 && w.feed(&data)
-                                && !body.is_end_stream()
                             {
+                                answer_captured = wire <= plan.limits.capture_bytes;
+                                if body.is_end_stream() {
+                                    break;
+                                }
                                 let probe_deadline = tokio::time::Instant::now() + Duration::from_millis(20);
                                 loop {
                                     tokio::select! {
@@ -1604,7 +1613,7 @@ impl HttpTransport {
         obs.failure = failure;
         obs.duration_us = rec.us();
         obs.phases = std::mem::take(&mut rec.phases);
-        (AttemptOutput { observation: obs, response: Some(response), body: captured }, None)
+        (AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured }, None)
     }
 
     /// Set up HTTP/1.1 or HTTP/2 over an established stream. With

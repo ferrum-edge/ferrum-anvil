@@ -243,6 +243,12 @@ fn is_event_stream(content_type: Option<&str>) -> bool {
     content_type.and_then(|ct| ct.split(';').next()).is_some_and(|m| m.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
+/// Whether `v` is a JSON integer representable in 64-bit signed or unsigned
+/// form (rejects strings, booleans, floats, and out-of-range numbers).
+fn is_json_integer(v: &Value) -> bool {
+    v.as_i64().is_some() || v.as_u64().is_some()
+}
+
 /// Whether `o` has `"jsonrpc": "2.0"` and mutually exclusive `result` or
 /// valid JSON-RPC 2.0 `error` object (`code` integer and `message` string,
 /// JSON-RPC 2.0 §5.1).
@@ -255,7 +261,7 @@ fn has_valid_response_shape(o: &serde_json::Map<String, Value>) -> bool {
     let has_valid_error = o
         .get("error")
         .and_then(Value::as_object)
-        .is_some_and(|e| e.get("code").and_then(Value::as_i64).is_some() && e.get("message").and_then(Value::as_str).is_some());
+        .is_some_and(|e| e.get("code").is_some_and(is_json_integer) && e.get("message").and_then(Value::as_str).is_some());
     (has_result && !has_error_key) || (!has_result && has_valid_error)
 }
 
@@ -481,9 +487,6 @@ fn stop_at_answer(wanted: Wanted, sent: SentIds, decompress: bool, max_decoded_b
                     *guard = parsed.clone();
                     parsed
                 };
-                if ids.as_ref().is_some_and(Vec::is_empty) {
-                    return None;
-                }
                 Wanted::Batch(ids)
             }
             w => w.clone(),
@@ -558,6 +561,7 @@ fn viewer(
         let view = match (&wanted, &message) {
             (Some(_), Some(m)) => serde_json::to_vec(m).ok().map(Bytes::from),
             (Some(_), None) if (200..400).contains(&r.status) => Some(Bytes::new()),
+            (None, _) if (300..400).contains(&r.status) => Some(Bytes::new()),
             _ => None,
         };
         s.message = message;
@@ -595,7 +599,9 @@ fn quoted(v: Option<&Value>, r: &Redactor) -> String {
 /// A JSON-RPC error code as a note shows it: the integer, never the
 /// server's raw JSON.
 fn code_label(e: &Value) -> String {
-    e.get("code").and_then(Value::as_i64).map_or_else(|| "(not an integer)".to_string(), |c| c.to_string())
+    e.get("code")
+        .and_then(|v| v.as_i64().map(|c| c.to_string()).or_else(|| v.as_u64().map(|c| c.to_string())))
+        .unwrap_or_else(|| "(not an integer)".to_string())
 }
 
 /// `code (message)` of a JSON-RPC error object.
@@ -771,14 +777,26 @@ struct Run<'a> {
     /// Every attempt of every exchange, in order (a load unit counts the
     /// session's whole traffic).
     traffic: Vec<anvil_domain::execution::AttemptObservation>,
-    /// Non-completed transport outcome of the closing `DELETE` exchange (when
-    /// closing is on), preserved separately from the operation's record.
-    close_outcome: Option<(anvil_domain::outcome::TransportState, Option<TransportFailure>)>,
+    /// First non-completed transport outcome of an auxiliary session exchange
+    /// (`notifications/initialized` or the closing `DELETE`), preserved
+    /// separately from the operation's record.
+    auxiliary_outcome: Option<crate::SessionAuxiliaryOutcome>,
 }
 
 impl Run<'_> {
     fn expired(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
+    }
+
+    fn record_auxiliary_failure(
+        &mut self,
+        exchange: crate::McpAuxiliaryExchange,
+        transport: anvil_domain::outcome::TransportState,
+        failure: Option<TransportFailure>,
+    ) {
+        if self.auxiliary_outcome.is_none() {
+            self.auxiliary_outcome = Some(crate::SessionAuxiliaryOutcome { exchange, transport, failure });
+        }
     }
 
     async fn exchange(
@@ -851,17 +869,19 @@ impl Run<'_> {
             after.push("MCP session left open (closing is off for this request)".into());
         } else if self.cancel.is_cancelled() {
             after.push("MCP session not closed: the execution was canceled".into());
-            self.close_outcome = Some((
+            self.record_auxiliary_failure(
+                crate::McpAuxiliaryExchange::SessionClose,
                 anvil_domain::outcome::TransportState::Canceled,
                 Some(TransportFailure::new(
                     Phase::Connect,
                     FailureKind::Canceled,
                     "MCP session close (DELETE) was skipped because the execution was canceled",
                 )),
-            ));
+            );
         } else if self.expired() {
             after.push("MCP session not closed: the session deadline was reached".into());
-            self.close_outcome = Some((
+            self.record_auxiliary_failure(
+                crate::McpAuxiliaryExchange::SessionClose,
                 anvil_domain::outcome::TransportState::Incomplete,
                 Some(
                     TransportFailure::new(
@@ -871,12 +891,16 @@ impl Run<'_> {
                     )
                     .with_deadline(self.total_ms),
                 ),
-            ));
+            );
         } else {
             let close = exchange(ctx, "DELETE", None, Some(sid), Some(version), Checks::None);
             let closed = self.exchange(close, events.clone(), None, None).await;
             if closed.record.outcome.transport != anvil_domain::outcome::TransportState::Completed {
-                self.close_outcome = Some((closed.record.outcome.transport, closed.record.attempts.last().and_then(|a| a.failure.clone())));
+                self.record_auxiliary_failure(
+                    crate::McpAuxiliaryExchange::SessionClose,
+                    closed.record.outcome.transport,
+                    closed.record.attempts.last().and_then(|a| a.failure.clone()),
+                );
             }
             after.push(close_note(&closed));
         }
@@ -1094,7 +1118,7 @@ async fn execute_session(
         redactor: Redactor::new(vec![], ctx.redaction_names.clone()),
         timed_out: false,
         traffic: Vec::new(),
-        close_outcome: None,
+        auxiliary_outcome: None,
     };
     // The handshake and the close are not the execution the caller follows:
     // their progress events are not forwarded.
@@ -1148,15 +1172,19 @@ async fn execute_session(
                 }
                 let mut out = finish(out, notes, &run, refused.issued.as_deref(), &seen, true);
                 out.session_attempts = run.traffic.get(out.record.attempts.len()..).map(<[_]>::to_vec).unwrap_or_default();
-                out.session_close_outcome = run.close_outcome.clone();
+                out.session_auxiliary_outcome = run.auxiliary_outcome.clone();
                 return vec![(out, None)];
             }
         }
         let notify = exchange(ctx, "POST", Some(INITIALIZED.into()), session.as_deref(), Some(&version), Checks::None);
         let out = run.exchange(notify, quiet.clone(), None, None).await;
         notes.before.push(exchange_note("notifications/initialized", &out));
-        if out.record.outcome.transport != anvil_domain::outcome::TransportState::Completed && run.close_outcome.is_none() {
-            run.close_outcome = Some((out.record.outcome.transport, out.record.attempts.last().and_then(|a| a.failure.clone())));
+        if out.record.outcome.transport != anvil_domain::outcome::TransportState::Completed {
+            run.record_auxiliary_failure(
+                crate::McpAuxiliaryExchange::InitializedNotification,
+                out.record.outcome.transport,
+                out.record.attempts.last().and_then(|a| a.failure.clone()),
+            );
         }
         let stop = if cancel.is_cancelled() {
             Some("the execution was canceled".to_string())
@@ -1174,7 +1202,7 @@ async fn execute_session(
             let own = run.traffic.len().saturating_sub(out.record.attempts.len())..run.traffic.len();
             let mut out = finish(out, notes, &run, session.as_deref(), &Seen::default(), false);
             out.session_attempts = others(&run.traffic, &own);
-            out.session_close_outcome = run.close_outcome.clone();
+            out.session_auxiliary_outcome = run.auxiliary_outcome.clone();
             return vec![(out, None)];
         }
         // A server that does not accept the notification may still answer
@@ -1277,7 +1305,7 @@ async fn execute_session(
         run.close(ctx, spec, sid, &version, &quiet, &mut last.notes.after).await;
     }
     let traffic = std::mem::take(&mut run.traffic);
-    let close_outcome = run.close_outcome.clone();
+    let auxiliary_outcome = run.auxiliary_outcome.clone();
     let total_sent = sent.len();
     sent.into_iter()
         .enumerate()
@@ -1286,7 +1314,7 @@ async fn execute_session(
             let mut out = finish(s.out, s.notes, &run, session.as_deref(), &s.seen, s.expects_response);
             out.session_attempts = others(&traffic, &s.own);
             if i + 1 == total_sent {
-                out.session_close_outcome = close_outcome.clone();
+                out.session_auxiliary_outcome = auxiliary_outcome.clone();
             }
             (out, message)
         })
@@ -1425,8 +1453,26 @@ mod tests {
         assert!(!is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":"not-an-object"})), "non-object error");
         assert!(!is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":{}})), "empty error object");
         assert!(!is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":{"code":-32600}})), "error missing message");
+        assert!(!is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":{"code":1.5,"message":"float"}})), "float error code");
+        assert!(
+            is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":{"code":9223372036854775808u64,"message":"large unsigned"}})),
+            "u64 integer error code above i64::MAX must be accepted"
+        );
+        assert_eq!(code_label(&serde_json::json!({"code": 9223372036854775808u64})), "9223372036854775808");
         assert!(!is_response_to(&serde_json::json!({"id":2,"result":{}}), 2));
         assert!(!is_response_to(&serde_json::json!({"jsonrpc":"2.0","id":2,"result":{},"error":{"code":-1,"message":"x"}}), 2));
+    }
+
+    #[test]
+    fn malformed_batch_watch_stops_early_only_on_lone_null_id_refusal() {
+        let stop = stop_at_answer(Wanted::Batch(None), Arc::new(Mutex::new(None)), true, 64 * 1024);
+        let mut watch = stop(&BodyStart { request_body: b"[1]", content_type: Some("text/event-stream"), content_encoding: None })
+            .expect("malformed batch [1] must still install watch for lone null-id refusal");
+        assert!(!watch.feed(b"data: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\n\n"), "unrelated response id must not stop watch");
+        assert!(
+            watch.feed(b"data: {\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid Request\"}}\n\n"),
+            "lone null-id refusal must trigger early stop"
+        );
     }
 
     #[test]

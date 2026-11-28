@@ -492,7 +492,12 @@ pub async fn run(plan: &TcpPlan, events: &EventCtx, cancel: &CancellationToken, 
     obs.bytes.connection_bytes_read = Some(stats.bytes_read());
     let obs = finish_attempt(rec, obs, events);
     let ps = ProtocolStatus::Tcp { bytes_sent, bytes_received, half_closed, closed_by };
-    SessionOutput::single(AttemptOutput { observation: obs, response: None, body: Bytes::new() }, Some(tr.finish()), ps, facts)
+    SessionOutput::single(
+        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured: false },
+        Some(tr.finish()),
+        ps,
+        facts,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
