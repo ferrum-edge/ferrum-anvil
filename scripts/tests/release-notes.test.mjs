@@ -660,15 +660,59 @@ assert r["stopped_cleanly"] is False and r["cleanup_unconfirmed"] is True and "c
 m.stop = orig_stop
 m.subprocess.Popen = orig_popen
 
-# 5. Real Unix stop() terminates a live session process cleanly and skips killpg after reap.
+# 5. Real Unix stop() terminates a live session process cleanly and never invokes killpg after reap.
 if os.name == "posix":
     m.SYSTEM = "Linux"
     real_p = m.subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     ok, err = m.stop(real_p)
     assert ok is True and err is None and real_p.returncode is not None
-    # Calling stop() again after reap must not raise or signal a reused pgid.
-    ok2, err2 = m.stop(real_p)
-    assert ok2 is True and err2 is None
+    killpg_calls = []
+    orig_killpg = m.os.killpg
+    m.os.killpg = lambda pgid, sig: killpg_calls.append((pgid, sig))
+    try:
+        ok2, err2 = m.stop(real_p)
+        assert ok2 is True and err2 is None and killpg_calls == []
+    finally:
+        m.os.killpg = orig_killpg
+
+# 5b. Linux early exit with a reparented WebKitGTK orphan marks cleanup unconfirmed.
+m.SYSTEM = "Linux"
+linux_orphan = {"pid": 901, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "WebKitWebProcess", "rss": 20}
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: None
+m.wait_gone = lambda expected, timeout=30: False if expected else True
+lin_calls = {"n": 0}
+def linux_early_procs():
+    lin_calls["n"] += 1
+    return [] if lin_calls["n"] == 1 else [linux_orphan]
+m.processes = linux_early_procs
+m.subprocess.Popen = lambda *a, **kw: EarlyProc()
+r_lin = m.one_run("/bin/true", 0, 0.05, 1)
+assert r_lin["stopped_cleanly"] is False and r_lin["cleanup_unconfirmed"] is True
+assert r_lin.get("provisional_left_running") == [901]
+m.subprocess.Popen = orig_popen
+
+# 5c. macOS partial procinfo failure keeps unresolved new WebKit helpers in provisional_out.
+m.SYSTEM = "Darwin"
+m.responsible_pid = lambda pid: 100 if pid == 100 else (555 if pid == 202 else None)
+prov = set()
+mfound, _, mver = m.helpers(
+    [
+        {"pid": 100, "ppid": 99, "start": "Sat Nov 28 06:00:00 2026", "name": "anvil-desktop", "rss": 10},
+        {"pid": 202, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.WebContent", "rss": 20},
+        {"pid": 203, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.Networking", "rss": 20},
+    ],
+    100,
+    set(),
+    known_app_owner=100,
+    provisional_out=prov,
+)
+assert mver is False and [h["pid"] for h in mfound] == [203] and (203, "Sat Nov 28 06:00:01 2026", "com.apple.WebKit.Networking") in prov
+
+# 5d. Non-Linux force_stop never signals raw numeric PIDs and returns False so cleanup is unconfirmed.
+m.SYSTEM = "Darwin"
+m.processes = lambda: [{"pid": 888, "ppid": 1, "start": "T1", "name": "anvil-desktop", "rss": 10}]
+assert m.force_stop({(888, "T1", "anvil-desktop")}) is False
 
 # 6. summarize.py emits missing-lane rows and --require-expected rejects missing/duplicate/unexpected lanes.
 spec2 = importlib.util.spec_from_file_location("s", sys.argv[2])
@@ -694,6 +738,10 @@ with tempfile.TemporaryDirectory() as td:
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err_buf2):
         rc_dup = s.main(["--require-expected", "--expect", "Darwin:runner 1", "--expect", "Linux:runner 1", str(dup_a), str(dup_b)])
     assert rc_dup == 1 and "duplicate lanes" in err_buf2.getvalue() and "missing lanes" in err_buf2.getvalue()
+    err_buf3 = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err_buf3):
+        rc_unexp = s.main(["--require-expected", str(dup_a)])
+    assert rc_unexp == 1 and "unexpected lanes" in err_buf3.getvalue()
 print("OK")
 `;
   const r = spawnSync("python3", ["-I", "-c", script, join(root, "scripts", "perf", "measure_desktop.py"), join(root, "scripts", "perf", "summarize.py")], { encoding: "utf8" });

@@ -81,7 +81,7 @@ def main(argv: list[str]) -> int:
                     },
                 }
             )
-    unexpected_lanes = sorted(seen_lanes - set(expected_lanes)) if expected_lanes else []
+    unexpected_lanes = sorted(seen_lanes - set(expected_lanes)) if (expected_lanes or args.require_expected) else []
 
     results.sort(key=lambda d: (d["os"], d.get("label", "")))
     print("| Job | Runs | " + " | ".join(f"{t}: launch 1 / later median" for _, t in COLUMNS) + " | Webview processes (last valid launch) | Attribution: launch 1 / later |")

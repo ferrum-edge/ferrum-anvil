@@ -189,12 +189,62 @@ def _start_not_earlier(child_start: str, parent_start: str) -> bool:
     return c[1] >= p[1]
 
 
+class _WinProcess:
+    """Minimal Popen-compatible handle wrapper for a suspended-then-job-assigned Windows process."""
+
+    STILL_ACTIVE = 259
+    WAIT_OBJECT_0 = 0x00000000
+    WAIT_TIMEOUT = 0x00000102
+
+    def __init__(self, k32, h_process: int, pid: int) -> None:
+        self._k32 = k32
+        self._handle: int | None = h_process
+        self.pid: int = pid
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        if self.returncode is not None:
+            return self.returncode
+        if not self._handle:
+            return self.returncode
+        code = ctypes.c_uint32(0)
+        if self._k32.GetExitCodeProcess(self._handle, ctypes.byref(code)):
+            if code.value != self.STILL_ACTIVE:
+                self.returncode = int(code.value)
+                self._close()
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is not None:
+            return self.returncode
+        if not self._handle:
+            return 0
+        ms = 0xFFFFFFFF if timeout is None else max(0, int(timeout * 1000))
+        res = self._k32.WaitForSingleObject(self._handle, ms)
+        if res == self.WAIT_TIMEOUT:
+            raise subprocess.TimeoutExpired(cmd="anvil-desktop", timeout=timeout or 0)
+        rc = self.poll()
+        return 0 if rc is None else rc
+
+    def kill(self) -> None:
+        if self._handle and self.returncode is None:
+            self._k32.TerminateProcess(self._handle, 1)
+
+    def _close(self) -> None:
+        if self._handle:
+            self._k32.CloseHandle(self._handle)
+            self._handle = None
+
+
 class _WinJob:
-    """Kernel-enforced Windows Job Object for launch ownership and tree teardown."""
+    """Kernel-enforced Windows Job Object for creation-time launch ownership and tree teardown."""
 
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
     JOB_OBJECT_EXTENDED_LIMIT_INFO = 9
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    CREATE_SUSPENDED = 0x00000004
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
+    CREATE_UNICODE_ENVIRONMENT = 0x00000400
 
     def __init__(self) -> None:
         self.handle: int | None = None
@@ -215,6 +265,27 @@ class _WinJob:
         k32.OpenProcess.restype = ctypes.c_void_p
         k32.IsProcessInJob.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
         k32.IsProcessInJob.restype = ctypes.c_int
+        k32.CreateProcessW.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        k32.CreateProcessW.restype = ctypes.c_int
+        k32.ResumeThread.argtypes = [ctypes.c_void_p]
+        k32.ResumeThread.restype = ctypes.c_uint32
+        k32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        k32.GetExitCodeProcess.restype = ctypes.c_int
+        k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        k32.WaitForSingleObject.restype = ctypes.c_uint32
+        k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        k32.TerminateProcess.restype = ctypes.c_int
         k32.CloseHandle.argtypes = [ctypes.c_void_p]
         k32.CloseHandle.restype = ctypes.c_int
 
@@ -263,6 +334,78 @@ class _WinJob:
             return
         self.handle = h
         self._kernel32 = k32
+
+    def spawn_suspended_and_assign(self, app: str, env: dict[str, str]) -> _WinProcess | None:
+        """Start `app` suspended, assign it to the Job Object before any thread runs, then resume."""
+        if not self.handle or self._kernel32 is None:
+            return None
+
+        class _StartupInfoW(ctypes.Structure):
+            _fields_ = [
+                ("cb", ctypes.c_uint32),
+                ("lpReserved", ctypes.c_wchar_p),
+                ("lpDesktop", ctypes.c_wchar_p),
+                ("lpTitle", ctypes.c_wchar_p),
+                ("dwX", ctypes.c_uint32),
+                ("dwY", ctypes.c_uint32),
+                ("dwXSize", ctypes.c_uint32),
+                ("dwYSize", ctypes.c_uint32),
+                ("dwXCountChars", ctypes.c_uint32),
+                ("dwYCountChars", ctypes.c_uint32),
+                ("dwFillAttribute", ctypes.c_uint32),
+                ("dwFlags", ctypes.c_uint32),
+                ("wShowWindow", ctypes.c_uint16),
+                ("cbReserved2", ctypes.c_uint16),
+                ("lpReserved2", ctypes.c_void_p),
+                ("hStdInput", ctypes.c_void_p),
+                ("hStdOutput", ctypes.c_void_p),
+                ("hStdError", ctypes.c_void_p),
+            ]
+
+        class _ProcessInformation(ctypes.Structure):
+            _fields_ = [
+                ("hProcess", ctypes.c_void_p),
+                ("hThread", ctypes.c_void_p),
+                ("dwProcessId", ctypes.c_uint32),
+                ("dwThreadId", ctypes.c_uint32),
+            ]
+
+        si = _StartupInfoW()
+        si.cb = ctypes.sizeof(si)
+        pi = _ProcessInformation()
+        env_block = "\0".join(f"{k}={v}" for k, v in env.items()) + "\0\0"
+        env_buf = ctypes.create_unicode_buffer(env_block)
+        cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline([app]))
+        flags = self.CREATE_SUSPENDED | self.CREATE_NEW_PROCESS_GROUP | self.CREATE_UNICODE_ENVIRONMENT
+        ok = self._kernel32.CreateProcessW(
+            app,
+            cmdline,
+            None,
+            None,
+            0,
+            flags,
+            ctypes.byref(env_buf),
+            None,
+            ctypes.byref(si),
+            ctypes.byref(pi),
+        )
+        if not ok:
+            return None
+        assigned = bool(self._kernel32.AssignProcessToJobObject(self.handle, pi.hProcess))
+        if not assigned:
+            self._kernel32.TerminateProcess(pi.hProcess, 1)
+            self._kernel32.CloseHandle(pi.hThread)
+            self._kernel32.CloseHandle(pi.hProcess)
+            return None
+        self.assigned = True
+        if self._kernel32.ResumeThread(pi.hThread) == 0xFFFFFFFF:
+            self._kernel32.TerminateJobObject(self.handle, 1)
+            self._kernel32.CloseHandle(pi.hThread)
+            self._kernel32.CloseHandle(pi.hProcess)
+            self.assigned = False
+            return None
+        self._kernel32.CloseHandle(pi.hThread)
+        return _WinProcess(self._kernel32, int(pi.hProcess), int(pi.dwProcessId))
 
     def assign(self, proc: subprocess.Popen) -> bool:
         if not self.handle or self._kernel32 is None:
@@ -353,11 +496,21 @@ def helpers(
     before: set[ProcId],
     known_app_owner: int | None = None,
     win_job: _WinJob | None = None,
+    provisional_out: set[ProcId] | None = None,
 ) -> tuple[list[dict], str, bool]:
-    """The app's webview processes, attribution label, and whether ownership is verified per-launch."""
+    """The app's webview processes, attribution label, and whether ownership is verified per-launch.
+
+    When `provisional_out` is supplied, any newly observed helper whose ownership
+    could not be verified (e.g. a macOS WebKit service whose `procinfo` query
+    returned None, or a Linux WebKitGTK orphan after an early app exit) is added
+    there so cleanup never falsely succeeds while it is still running.
+    """
     if SYSTEM == "Darwin":
         webkit = [r for r in rows if is_mac_webkit(r["name"])]
         owners = {r["pid"]: responsible_pid(r["pid"]) for r in webkit}
+        unresolved = [r for r in webkit if owners[r["pid"]] is None and proc_identity(r) not in before]
+        if provisional_out is not None:
+            provisional_out |= {proc_identity(r) for r in unresolved}
         attributed = [r for r in webkit if owners[r["pid"]] == app_pid and proc_identity(r) not in before]
         if attributed:
             return attributed, "launchctl procinfo responsible pid", True
@@ -370,9 +523,15 @@ def helpers(
             shared = [r for r in webkit if owners[r["pid"]] == app_owner and proc_identity(r) not in before]
             if shared:
                 return shared, "launchctl procinfo shared responsible pid + pid delta (provisional)", False
-        if app_owner is not None and any(o is not None for o in owners.values()):
-            # procinfo works for both the app and WebKit services, and none belong to this app.
+        if app_owner is not None and not unresolved and any(o is not None for o in owners.values()):
+            # procinfo succeeded for the app and every WebKit service, and none belong to this app.
             return [], "launchctl procinfo responsible pid", True
+        if unresolved and app_owner is not None:
+            return (
+                unresolved,
+                "pid delta (provisional; WebKit ownership partially unavailable)",
+                False,
+            )
         # App ownership could not be queried (e.g. early exit) or procinfo gave no owner:
         # fall back to provisional pid-delta so surviving helpers are detected without authorizing SIGKILL.
         return (
@@ -397,7 +556,15 @@ def helpers(
             True,
         )
     tree = descendants(rows, app_pid, before=before, require_creation_order=True)
-    return [r for r in tree if r["name"] in LINUX_WEBVIEW], "process tree (WebKitGTK processes descending from the app)", True
+    found = [r for r in tree if r["name"] in LINUX_WEBVIEW]
+    if provisional_out is not None and not any(r["pid"] == app_pid for r in rows):
+        # App already exited and any surviving WebKitGTK children were reparented:
+        # track newly observed WebKitGTK helpers provisionally so cleanup cannot
+        # report success while an orphan still runs.
+        provisional_out |= {
+            proc_identity(r) for r in rows if r["name"] in LINUX_WEBVIEW and proc_identity(r) not in before
+        }
+    return found, "process tree (WebKitGTK processes descending from the app)", True
 
 
 def stop(proc: subprocess.Popen, win_job: _WinJob | None = None) -> tuple[bool, str | None]:
@@ -463,17 +630,42 @@ def wait_gone(expected: set[ProcId], timeout: float = 30) -> bool:
     return False
 
 
-def force_stop(verified_expected: set[ProcId]) -> None:
-    """Force-stop ONLY verified per-launch processes whose (pid, start, name) still matches."""
+def force_stop(verified_expected: set[ProcId]) -> bool:
+    """Force-stop ONLY verified processes bound to an OS handle/pidfd checked after opening.
+
+    Returns True only when every surviving process could be signaled through a
+    race-free handle (Linux `pidfd_open` + re-check + `pidfd_send_signal`). On
+    platforms without race-free PID handles, never signals raw numeric PIDs;
+    returns False so teardown marks cleanup unconfirmed instead.
+    """
     still_live = alive(verified_expected)
-    for pid, _start, _name in sorted(still_live):
+    if not still_live:
+        return True
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if SYSTEM != "Linux" or pidfd_open is None or pidfd_send_signal is None:
+        return False
+    all_bound = True
+    for expected_id in sorted(still_live):
+        pid = expected_id[0]
+        fd = None
         try:
-            if SYSTEM == "Windows":
-                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
-            else:
-                os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+            fd = pidfd_open(pid, 0)
+            # While `fd` is held open, the kernel cannot reassign `pid`.
+            # Re-verify identity before signaling through `fd`.
+            if expected_id in alive({expected_id}):
+                pidfd_send_signal(fd, signal.SIGKILL)
+        except (ProcessLookupError, FileNotFoundError):
             pass
+        except OSError:
+            all_bound = False
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    return all_bound
 
 
 # ------------------------------------------------------------- runs
@@ -491,9 +683,13 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
         kwargs["start_new_session"] = True
     win_job = _WinJob() if SYSTEM == "Windows" else None
     t0 = time.monotonic()
-    proc = subprocess.Popen([app], **kwargs)
-    if win_job is not None:
-        win_job.assign(proc)
+    proc: subprocess.Popen | _WinProcess | None = None
+    if win_job is not None and win_job.handle is not None:
+        proc = win_job.spawn_suspended_and_assign(app, env)
+    if proc is None:
+        proc = subprocess.Popen([app], **kwargs)
+        if win_job is not None:
+            win_job.assign(proc)
     result: dict = {"run": index, "pid": proc.pid}
     verified_owned: set[ProcId] = set()
     provisional_owned: set[ProcId] = set()
@@ -544,6 +740,7 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                 before,
                 known_app_owner=app_responsible_pid,
                 win_job=win_job,
+                provisional_out=provisional_owned,
             )
             if app_row is not None and proc_identity(app_row) not in before:
                 verified_owned.add(proc_identity(app_row))
@@ -596,6 +793,7 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                 before,
                 known_app_owner=app_responsible_pid,
                 win_job=win_job,
+                provisional_out=provisional_owned,
             )
             if verified:
                 verified_owned |= {proc_identity(h) for h in later}
@@ -621,10 +819,14 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
             result["stopped_cleanly"] = verified_gone and provisional_gone and cleanup_error is None
             if not verified_gone:
                 left_verified = alive(verified_owned)
-                force_stop(left_verified)
+                bound = force_stop(left_verified)
                 verified_gone = wait_gone(verified_owned, 15)
                 still_verified = sorted(pid for pid, _, _ in alive(verified_owned)) if not verified_gone else []
-                result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in left_verified)} outlived the app's stop (stopped by force)"
+                if bound:
+                    result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in left_verified)} outlived the app's stop (stopped by force)"
+                else:
+                    result["cleanup_unconfirmed"] = True
+                    result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in left_verified)} outlived the app's stop without a safe termination handle"
                 if still_verified:
                     result["left_running"] = still_verified
             if not provisional_gone:
