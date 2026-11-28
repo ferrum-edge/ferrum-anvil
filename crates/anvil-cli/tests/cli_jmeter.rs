@@ -57,7 +57,7 @@ fn setup(root: &Path) {
     let mut echo_secret = RequestSpec::http("GET", "http://127.0.0.1:9/echo");
     echo_secret.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
     echo_secret.auth = anvil_domain::auth::AuthConfig::Bearer {
-        token: anvil_domain::auth::SensitiveValue::literal("cli-secret-token"),
+        token: anvil_domain::secret::SensitiveValue::template("cli-secret-token"),
         prefix: "Bearer".into(),
     };
     let echo_secret = app.create_request(&ws.meta.id, None, "SecretEcho", echo_secret).unwrap();
