@@ -485,6 +485,8 @@ fn e21_grpcweb_relabel(env: &Env) -> Fut<'_> {
 fn e21_grpc_refusal(c: &mut Checks, o: &ExecutionOutput, web: bool, code: i32, message: &str) {
     if web {
         e21_trailer_only_body(c, o);
+    } else {
+        e21_native_trailers_only(c, o);
     }
     let (http, st, src, msg) = grpc_status(o);
     let (want, what) = if web {
@@ -497,6 +499,22 @@ fn e21_grpc_refusal(c: &mut Checks, o: &ExecutionOutput, web: bool, code: i32, m
         format!("{what}, grpc-status {code} and the gateway's message"),
         http == Some(200) && src == Some(want) && st == Some(code) && msg == message,
         format!("{http:?} {st:?} {src:?} {msg}"),
+    );
+}
+
+/// A native gRPC Trailers-Only refusal completes cleanly with no DATA frames,
+/// no separate HTTP trailers, and no framing or transport failure.
+fn e21_native_trailers_only(c: &mut Checks, o: &ExecutionOutput) {
+    let messages = o.record.stream.as_ref().map_or(0, |t| t.received_count);
+    let transport = o.record.outcome.transport;
+    let no_separate_trailers = o.record.response.as_ref().is_some_and(|r| r.trailers.is_empty() && !r.trailers_received);
+    let empty_body = o.body.is_empty();
+    let no_framing_error = o.session_facts.as_ref().is_none_or(|f| f.grpc_framing_error.is_none());
+    c.add(
+        CheckKind::GroundTruth,
+        "the native gRPC Trailers-Only refusal completed cleanly with an empty body and no separate trailers",
+        transport == TransportState::Completed && messages == 0 && empty_body && no_separate_trailers && no_framing_error,
+        format!("messages={messages} empty_body={empty_body} no_separate_trailers={no_separate_trailers} transport={transport:?}"),
     );
 }
 
@@ -582,6 +600,10 @@ fn e21_grpc_breaker(env: &Env) -> Fut<'_> {
         let mut opened = false;
         for _ in 0..4 {
             let o = send(env, &e21_call(env, &url, false)).await;
+            if !env.trusted {
+                c.absent_prefix(&o, "ferrum.token");
+                c.absent_prefix(&o, "ferrum.outcome");
+            }
             let (_, st, _, msg) = grpc_status(&o);
             opened = st == Some(14) && msg == E21_BREAKER_MSG;
             last = Some(o);
@@ -651,7 +673,15 @@ fn e21_ws_relay(env: &Env) -> Fut<'_> {
             handshake == Some(503) && header(&o, "x-gateway-error").is_empty(),
             format!("{handshake:?} {:?}", header(&o, "x-gateway-error")),
         );
-        c.add(CheckKind::GroundTruth, "the backend received the upgrade", !requests_since(&env.fx.echo.log, before).is_empty(), "");
+        let reqs = requests_since(&env.fx.echo.log, before);
+        let upgraded = reqs.iter().any(|(path, headers)| {
+            let get_hdr = |name: &str| headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
+            path.starts_with("/status/503")
+                && get_hdr("upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+                && get_hdr("connection").is_some_and(|v| v.to_ascii_lowercase().contains("upgrade"))
+                && get_hdr("sec-websocket-key").is_some()
+        });
+        c.add(CheckKind::GroundTruth, "the backend received the WebSocket upgrade on /status/503", upgraded, format!("{reqs:?}"));
         let raw = o.decoded_body.as_ref().unwrap_or(&o.body);
         c.add(
             CheckKind::GroundTruth,

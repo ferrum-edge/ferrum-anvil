@@ -163,8 +163,9 @@ pub fn compatibility_id() -> String {
 }
 
 /// One SemVer pre-release identifier: numeric ones sort before alphanumeric
-/// ones, numerically; alphanumeric ones in ASCII order.
-type PreId = (bool, u64, String);
+/// ones, numerically (at arbitrary precision by digit length then digits);
+/// alphanumeric ones in ASCII order.
+type PreId = (bool, usize, String);
 
 /// SemVer precedence of a release tag: `v0.9.10` after `v0.9.9`, and a
 /// pre-release before its release (`v1.0.0-rc.1` < `v1.0.0-rc.2` <
@@ -180,9 +181,14 @@ fn release_order(tag: &str) -> (Vec<u64>, bool, Vec<PreId>) {
     let ids = pre
         .map(|pre| {
             pre.split('.')
-                .map(|id| match id.parse::<u64>() {
-                    Ok(n) => (false, n, String::new()),
-                    Err(_) => (true, 0, id.to_string()),
+                .map(|id| {
+                    if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
+                        let trimmed = id.trim_start_matches('0');
+                        let digits = if trimmed.is_empty() { "0" } else { trimmed };
+                        (false, digits.len(), digits.to_string())
+                    } else {
+                        (true, 0, id.to_string())
+                    }
                 })
                 .collect()
         })

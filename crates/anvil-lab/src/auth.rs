@@ -501,7 +501,13 @@ async fn query_alias(env: &Env, route: &str, recovery: String) -> Outcome {
     let o = go(env, &ctx(env, "GET", &path, AuthConfig::None)).await;
     signal(&mut c, &o, 401, "Ambiguous token query parameter");
     // The record redacts WWW-Authenticate; read the gateway's own header.
-    challenge_is(&mut c, raw_challenge(&path, &[]).await, "error=\"invalid_request\"");
+    let chal = raw_challenge(&path, &[]).await;
+    c.add(
+        CheckKind::GroundTruth,
+        "gateway challenge uses Bearer scheme with `error=\"invalid_request\"`",
+        chal.as_deref().is_some_and(|v| v.len() >= 7 && v[..7].eq_ignore_ascii_case("bearer ") && v.contains("error=\"invalid_request\"")),
+        format!("{chal:?}"),
+    );
     backend_untouched(&mut c, env, before);
     gateway_outcome(&mut c, env, &o);
     if env.trusted {
@@ -518,12 +524,36 @@ async fn query_alias(env: &Env, route: &str, recovery: String) -> Outcome {
             format!("{ids:?}"),
         );
     }
-    let r = go(env, &ctx(env, "GET", &format!("{route}/echo?token={recovery}"), AuthConfig::None)).await;
+    let before_recovery = env.fx.echo.log.entries().len();
+    let mut r = go(env, &ctx(env, "GET", &format!("{route}/echo?token={recovery}"), AuthConfig::None)).await;
     c.success(CheckKind::Recovery, &r);
-    // The plugin strips the accepted token before forwarding: the echo
-    // backend never sees it, so it cannot reflect it into recorded output.
-    let echoed = crate::fixtures_policy::body_text(&r);
-    c.add(CheckKind::Recovery, "the accepted token was not forwarded to the backend", !echoed.contains(&recovery), "");
+    // The plugin strips the accepted token before forwarding: check both
+    // fixture ground truth and the echoed body, then scrub the recovery body
+    // before returning so failed Lab artifacts can never serialize a leaked
+    // fixture credential.
+    let received: Vec<_> = env
+        .fx
+        .echo
+        .log
+        .entries()
+        .into_iter()
+        .skip(before_recovery)
+        .filter_map(|e| match e.event {
+            anvil_fixtures::GroundTruth::RequestReceived { path, headers, .. } => Some((path, headers)),
+            _ => None,
+        })
+        .collect();
+    let backend_clean =
+        !received.is_empty() && received.iter().all(|(p, hs)| !p.contains(&recovery) && hs.iter().all(|(_, v)| !v.contains(&recovery)));
+    let echoed_clean = !crate::fixtures_policy::body_text(&r).contains(&recovery);
+    c.add(
+        CheckKind::Recovery,
+        "the accepted token was not forwarded to the backend",
+        backend_clean && echoed_clean,
+        format!("backend_requests={} backend_clean={backend_clean} echoed_clean={echoed_clean}", received.len()),
+    );
+    r.body = Default::default();
+    r.decoded_body = None;
     Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
 }
 
