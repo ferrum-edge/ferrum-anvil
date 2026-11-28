@@ -50,14 +50,15 @@ must make no gateway attribution.
 | MCP-006 | `tools/call fx.nope` | `-32003`, `plugin.mcp_gateway.unknown_item`; not forwarded |
 | MCP-007 | `tools/list` with `initialize` off | HTTP 400, `-32600`, `plugin.mcp_gateway.session_or_version_rejected` |
 | MCP-008 | `tools/call fx.fail` | a result with `isError: true`: `app.mcp_tool_error`, an application failure, no catalog outcome; forwarded |
+| EXT-E21-MCP-BRIDGE | `tools/call br.ping` on a second `mcp_gateway` instance whose OpenAPI bridge is served from a regex route (`~/e21-bridge/.*`) | JSON-RPC `-32603` `OpenAPI bridge operation path is outside this proxy's route` (v0.9.21 confines bridged calls to a literal listen prefix, #7410, GHSA-26x8-8jq5-f73p): `plugin.mcp_gateway.openapi_bridge_outside_route`; not forwarded |
 
 Anvil sends MCP requests as `Content-Type: application/json` with no `charset`, so v0.9.10's refusal
 of a non-UTF-8 request charset (`-32600` before routing, GHSA-4f9m-cfqg-fhx9) changes no scenario
 here; the profile configures no `ai_prompt_shield`.
 
-Not covered yet: per-consumer tool grants and OpenAPI-generated tools. Releases from v0.9.9 have
-both (`mcp_gateway` grants, and the OpenAPI bridge whose failed or refused calls the catalog records
-as `plugin.mcp_gateway.openapi_bridge_error_result`; see
-[the v0.9.9 delta](../audit/gateway-0.9.9-delta.md)), but this profile configures neither, so the
-lab does not exercise them. Earlier pinned releases (v0.9.5 to v0.9.8) have one tool policy for every
+Not covered yet: per-consumer tool grants and a successful OpenAPI-generated tool call. Releases
+from v0.9.9 have both (`mcp_gateway` grants, and the OpenAPI bridge whose failed or refused calls the
+catalog records as `plugin.mcp_gateway.openapi_bridge_error_result`; see
+[the v0.9.9 delta](../audit/gateway-0.9.9-delta.md)). The profile configures one OpenAPI bridge, for
+EXT-E21-MCP-BRIDGE's v0.9.21 confinement refusal only, and no grants. Earlier pinned releases (v0.9.5 to v0.9.8) have one tool policy for every
 caller and no OpenAPI tool source.

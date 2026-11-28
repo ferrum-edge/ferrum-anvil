@@ -14,9 +14,9 @@
 version: "1"
 
 resource_counts:
-  proxies: 24
+  proxies: 28
   consumers: 0
-  plugin_configs: 25
+  plugin_configs: 29
   upstreams: 0
 
 proxies:
@@ -309,6 +309,55 @@ proxies:
     pool_enable_http2: false
     plugins:
       - plugin_config_id: gw020-ai-content
+
+  # ---- Ferrum Edge v0.9.21 refusals (EXT-E21-*, docs/lab/policy-admission.md) ---------------
+  # EXT-E21-REQ-DUP: request_transformer with a JSON body rule refuses a body that repeats a
+  # member name with 400 (#7469).
+  - id: e21-req-dup
+    listen_path: /e21/req-dup
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19201
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: e21-req-transform
+
+  # EXT-E21-RESP-DUP: response_transformer with a JSON body rule replaces a backend body that
+  # repeats a member name with 502 (#7469).
+  - id: e21-resp-dup
+    listen_path: /e21/resp-dup
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19201
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: e21-resp-transform
+
+  # EXT-E21-SHIELD-DUP: ai_prompt_shield (reject) refuses a JSON body that repeats a member name
+  # in every scan mode (GHSA-49cr-v28q-9hgp).
+  - id: e21-shield-dup
+    listen_path: /e21/shield-dup
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19201
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: e21-shield
+
+  # EXT-E21-BODYVAL-RESP: body_validator response validation with a fixed v0.9.21 detail for a
+  # missing required field (GHSA-84xq-rr63-39pw).
+  - id: e21-bodyval-resp
+    listen_path: /e21/bodyval-resp
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19201
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: e21-bodyval
 
 plugin_configs:
   - id: lab-access-log
@@ -616,3 +665,43 @@ plugin_configs:
           target: header
           key: X-Gateway-Error
           value: overload
+
+  - id: e21-req-transform
+    plugin_name: request_transformer
+    scope: proxy
+    proxy_id: e21-req-dup
+    enabled: true
+    config:
+      rules:
+        - operation: add
+          target: body
+          key: lab_marker
+          value: "1"
+
+  - id: e21-resp-transform
+    plugin_name: response_transformer
+    scope: proxy
+    proxy_id: e21-resp-dup
+    enabled: true
+    config:
+      rules:
+        - operation: add
+          target: body
+          key: lab_marker
+          value: "1"
+
+  - id: e21-shield
+    plugin_name: ai_prompt_shield
+    scope: proxy
+    proxy_id: e21-shield-dup
+    enabled: true
+    config:
+      action: reject
+
+  - id: e21-bodyval
+    plugin_name: body_validator
+    scope: proxy
+    proxy_id: e21-bodyval-resp
+    enabled: true
+    config:
+      response_required_fields: [id]

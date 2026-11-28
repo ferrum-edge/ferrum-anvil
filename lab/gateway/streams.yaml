@@ -18,9 +18,9 @@
 version: "1"
 
 resource_counts:
-  proxies: 21
+  proxies: 26
   consumers: 0
-  plugin_configs: 3
+  plugin_configs: 7
   upstreams: 0
 
 proxies:
@@ -224,6 +224,71 @@ proxies:
     backend_tls_server_ca_cert_path: "{{LAB_CERTS}}/ca.crt"
     tcp_idle_timeout_seconds: 30
 
+  # ---- Ferrum Edge v0.9.21 refusals (EXT-E21-*, docs/lab/streams-cpdp.md) -------------------
+  # EXT-E21-GRPCWEB-ASSERT: an OPA decision header makes this a route with gateway-asserted
+  # request headers and no grpc_web translator, so v0.9.21 refuses a gRPC-Web call before any
+  # before_proxy hook (#7064). OPA runs first (authorize phase): it fails open, as 19409 is
+  # unbound. Failing closed, its own 503 (framed grpc-status 14) would answer instead, as Lab
+  # run 46067252897 showed.
+  - id: e21-grpcweb-assert
+    listen_path: /e21-grpcweb-assert
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19402
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: e21-opa-assert
+
+  # EXT-E21-GRPCWEB-RELABEL: the same kind of route, where a request_transformer header rule
+  # labels a plain request with a content-type listing a gRPC-Web media type; v0.9.21 refuses it
+  # at the end of the before_proxy pass with the JSON 415 (#7064). OPA fails open (19409 unbound).
+  - id: e21-grpcweb-relabel
+    listen_path: /e21-grpcweb-relabel
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19403
+    strip_listen_path: true
+    pool_enable_http2: false
+    plugins:
+      - plugin_config_id: e21-opa-relabel
+      - plugin_config_id: e21-relabel
+
+  # EXT-E21-GRPC-ADMISSION: request_deduplication with enforce_required is HTTP-only admission
+  # policy, so a native gRPC call is refused before any plugin runs (route protocol admission).
+  - id: e21-grpc-admission
+    listen_path: /e21-grpc-admission
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19402
+    strip_listen_path: true
+    plugins:
+      - plugin_config_id: e21-dedup-required
+
+  # EXT-E21-GRPC-BREAKER: one connection failure to the UNBOUND 19409 opens the breaker; the
+  # next native gRPC call, then a gRPC-Web one, get the breaker refusal in their renderings.
+  - id: e21-grpc-breaker
+    listen_path: /e21-grpc-breaker
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19409
+    strip_listen_path: true
+    circuit_breaker:
+      failure_threshold: 1
+      success_threshold: 1
+      timeout_seconds: 2
+      trip_on_connection_errors: true
+
+  # EXT-E21-WS-RELAY: a WebSocket upgrade to the HTTP fixture, which answers it with its own
+  # 503; v0.9.21 relays a backend's 3xx-5xx upgrade refusal unchanged (#7414).
+  - id: e21-ws-relay
+    listen_path: /e21-ws-relay
+    backend_scheme: http
+    backend_host: 127.0.0.1
+    backend_port: 19403
+    strip_listen_path: true
+    pool_enable_http2: false
+
 plugin_configs:
   - id: lab-access-log
     plugin_name: stdout_logging
@@ -245,3 +310,47 @@ plugin_configs:
     proxy_id: grpcweb-down
     enabled: true
     config: {}
+
+  - id: e21-opa-assert
+    plugin_name: opa
+    scope: proxy
+    proxy_id: e21-grpcweb-assert
+    enabled: true
+    config:
+      opa_host: "http://127.0.0.1:19409"
+      policy_path: anvil/lab/allow
+      fail_open: true
+      timeout_ms: 500
+      decision_request_headers: [x-lab-decision]
+
+  - id: e21-opa-relabel
+    plugin_name: opa
+    scope: proxy
+    proxy_id: e21-grpcweb-relabel
+    enabled: true
+    config:
+      opa_host: "http://127.0.0.1:19409"
+      policy_path: anvil/lab/allow
+      fail_open: true
+      timeout_ms: 500
+      decision_request_headers: [x-lab-decision]
+
+  - id: e21-relabel
+    plugin_name: request_transformer
+    scope: proxy
+    proxy_id: e21-grpcweb-relabel
+    enabled: true
+    config:
+      rules:
+        - operation: add
+          target: header
+          key: content-type
+          value: "application/json, application/grpc-web"
+
+  - id: e21-dedup-required
+    plugin_name: request_deduplication
+    scope: proxy
+    proxy_id: e21-grpc-admission
+    enabled: true
+    config:
+      enforce_required: true

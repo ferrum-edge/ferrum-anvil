@@ -154,6 +154,40 @@ fn ctrl(env: &Env) -> Fut<'_> {
 /// MCP-001: tools/list through the gateway: allowed and denied tools are
 /// listed (denied ones are shown in this profile), the hidden tool and the
 /// unconfigured new tool are not, and a listed schema is the server's.
+/// EXT-E21-MCP-BRIDGE: a bridged tool call on an OpenAPI bridge served from a
+/// regex route. v0.9.21 confines bridged calls to a literal listen prefix, so
+/// the call is refused with JSON-RPC -32603 "OpenAPI bridge operation path is
+/// outside this proxy's route" (#7410) and nothing reaches the backend.
+fn e21_mcp_bridge(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let before = env.upstream.state.calls().len();
+        let checks = vec![AssertionKind::JsonRpcError { code: -32603 }];
+        let o = send(env, &as_mcp(request(&TARGET, env.trusted, "POST", "/e21-bridge/mcp"), call("br.ping", "{}"), checks)).await;
+        c.status_in(&o, &[200]);
+        assertions_pass(&mut c, &o);
+        let message = anvil_engine::mcp::operation_response(&o)
+            .and_then(|v| v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).map(String::from));
+        c.add(
+            CheckKind::GroundTruth,
+            "the JSON-RPC error's message is the bridge confinement message",
+            message.as_deref() == Some("OpenAPI bridge operation path is outside this proxy's route"),
+            format!("{message:?}"),
+        );
+        let n = env.upstream.state.calls().len().saturating_sub(before);
+        c.add(CheckKind::GroundTruth, "the server behind the gateway saw no new call", n == 0, format!("{n} call(s)"));
+        outcome(&mut c, env, &o, "plugin.mcp_gateway.openapi_bridge_outside_route");
+        let r = send(env, &gateway(env, call("fx.echo", r#"{"text":"recovered"}"#), vec![])).await;
+        c.add(
+            CheckKind::Recovery,
+            "an allowed tool call through the main endpoint succeeds",
+            r.record.outcome.application == ApplicationState::Success,
+            r.record.outcome.summary.clone(),
+        );
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+    })
+}
+
 fn mcp001(env: &Env) -> Fut<'_> {
     Box::pin(async move {
         let mut c = Checks::new();
@@ -284,6 +318,7 @@ pub fn all() -> Vec<Def> {
         Def { id: "MCP-006", title: "Unknown tool: -32003 unknown_item", run: mcp006 },
         Def { id: "MCP-007", title: "Request without a session: 400 session_or_version_rejected", run: mcp007 },
         Def { id: "MCP-008", title: "Tool reports isError: the tool's failure, not the gateway's", run: mcp008 },
+        Def { id: "EXT-E21-MCP-BRIDGE", title: "OpenAPI bridge call outside a literal route: -32603 (v0.9.21)", run: e21_mcp_bridge },
     ]
 }
 

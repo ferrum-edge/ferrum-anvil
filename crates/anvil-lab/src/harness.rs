@@ -101,9 +101,15 @@ pub async fn run_defs<E: LabEnv>(
             let started = Instant::now();
             let o = (def.run)(env).await;
             let mut checks = o.checks;
-            if !trusted && let Some(m) = &o.main {
-                checks.absent_prefix(m, "ferrum.token");
-                checks.absent_prefix(m, "ferrum.outcome");
+            if !trusted {
+                if let Some(m) = &o.main {
+                    checks.absent_prefix(m, "ferrum.token");
+                    checks.absent_prefix(m, "ferrum.outcome");
+                }
+                if let Some(r) = &o.recovery {
+                    checks.absent_prefix(r, "ferrum.token");
+                    checks.absent_prefix(r, "ferrum.outcome");
+                }
             }
             let status = if checks.all_passed() { "passed" } else { "failed" };
             let id = if trusted { def.id.to_string() } else { format!("{}-untrusted", def.id) };
