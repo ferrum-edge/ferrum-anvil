@@ -85,6 +85,23 @@ impl ExistingBackup {
     pub(crate) fn name(&self) -> &OsStr {
         &self.name
     }
+
+    pub(crate) fn into_name(self) -> OsString {
+        self.name
+    }
+}
+
+/// Outcome of an ownership-verified rollback of a published sibling file.
+pub(crate) enum RollbackOutcome {
+    /// Ownership matched `expected_id` and the file was safely removed or
+    /// restored from its backup without clobbering any concurrent entry.
+    Restored,
+    /// Ownership did not match `expected_id` (a concurrent writer replaced the
+    /// entry), so rollback was skipped; any backup was preserved on disk.
+    Skipped(Option<OsString>),
+    /// Ownership matched and our published entry was removed, but restoring the
+    /// previous backup via no-clobber rename failed; the backup was preserved.
+    Failed { backup_name: OsString, err: io::Error },
 }
 
 fn not_absolute() -> io::Error {
@@ -350,18 +367,20 @@ impl Dir {
 
     /// Acquire an exclusive cross-process `flock` on a stable lock file opened
     /// without following links inside this pinned directory. Matches the
-    /// directory's group/other write permissions on creation (so shared local
-    /// and NFS directories allow other authorized writers to acquire `RDWR`
-    /// locks), opens existing lock files without `O_CREAT` (avoiding Linux
-    /// `fs.protected_regular` rejections in sticky directories like `/tmp`),
-    /// and falls back to `O_RDONLY` when an existing lock file is read-only to
-    /// the current user.
+    /// directory's group ownership and write permissions on creation (so shared
+    /// local and NFS directories without setgid still allow authorized writers
+    /// to acquire `RDWR` locks), opens existing entries with `O_NONBLOCK` and
+    /// without `O_CREAT` (avoiding FIFO hangs and Linux `fs.protected_regular`
+    /// rejections in sticky directories), and reports actionable errors if an
+    /// existing lock cannot be locked exclusively.
     pub(crate) fn lock_exclusive(&self) -> io::Result<(File, FileId)> {
-        use rustix::fs::{Mode, OFlags};
+        use rustix::fs::{Gid, Mode, OFlags};
         use rustix::io::Errno;
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-        let dir_mode = self.fd.metadata()?.permissions().mode();
+        let dir_meta = self.fd.metadata()?;
+        let dir_mode = dir_meta.permissions().mode();
+        let dir_gid = dir_meta.gid();
         let mut target_mode: u32 = 0o600;
         if dir_mode & 0o020 != 0 {
             target_mode |= 0o060;
@@ -371,8 +390,8 @@ impl Dir {
         }
 
         let create_flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let open_rw_flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let open_ro_flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let open_rw_flags = OFlags::RDWR | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let open_ro_flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         #[allow(clippy::unnecessary_cast)]
         let create_mode = Mode::from_raw_mode(target_mode as rustix::fs::RawMode);
 
@@ -381,11 +400,48 @@ impl Dir {
             match rustix::fs::openat(&self.fd, EXPORT_LOCK_NAME, create_flags, create_mode) {
                 Ok(fd) => {
                     let file = File::from(fd);
-                    #[allow(clippy::unnecessary_cast)]
-                    let _ = rustix::fs::fchmod(&file, Mode::from_raw_mode(target_mode as rustix::fs::RawMode));
                     let meta = file.metadata()?;
                     if !meta.is_file() {
+                        drop(file);
+                        let _ = self.remove_file(OsStr::new(EXPORT_LOCK_NAME));
                         return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
+                    }
+                    if dir_mode & 0o020 != 0
+                        && meta.gid() != dir_gid
+                        && let Err(err) = rustix::fs::fchown(&file, None, Some(Gid::from_raw(dir_gid)))
+                    {
+                        drop(file);
+                        let _ = self.remove_file(OsStr::new(EXPORT_LOCK_NAME));
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            format!(
+                                "cannot align '{EXPORT_LOCK_NAME}' group ownership with shared output directory (gid {dir_gid}): {err}; set the directory setgid bit or adjust group permissions"
+                            ),
+                        ));
+                    }
+                    #[allow(clippy::unnecessary_cast)]
+                    if let Err(err) = rustix::fs::fchmod(&file, Mode::from_raw_mode(target_mode as rustix::fs::RawMode)) {
+                        drop(file);
+                        let _ = self.remove_file(OsStr::new(EXPORT_LOCK_NAME));
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            format!("cannot set shared permissions ({target_mode:04o}) on '{EXPORT_LOCK_NAME}': {err}"),
+                        ));
+                    }
+                    let meta = file.metadata()?;
+                    let actual_mode = meta.permissions().mode() & 0o777;
+                    if (dir_mode & 0o020 != 0 && (meta.gid() != dir_gid || actual_mode & 0o060 != 0o060))
+                        || (dir_mode & 0o002 != 0 && actual_mode & 0o006 != 0o006)
+                    {
+                        drop(file);
+                        let _ = self.remove_file(OsStr::new(EXPORT_LOCK_NAME));
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            format!(
+                                "cannot verify shared write permissions on '{EXPORT_LOCK_NAME}' (mode {actual_mode:04o}, gid {}); check output directory permissions",
+                                meta.gid()
+                            ),
+                        ));
                     }
                     let id = file_id(&file, &meta)?;
                     file.lock()?;
@@ -403,7 +459,7 @@ impl Dir {
                         return Ok((file, id));
                     }
                     Err(Errno::NOENT) => continue,
-                    Err(Errno::ACCES) => match rustix::fs::openat(&self.fd, EXPORT_LOCK_NAME, open_ro_flags, Mode::empty()) {
+                    Err(Errno::ACCESS) => match rustix::fs::openat(&self.fd, EXPORT_LOCK_NAME, open_ro_flags, Mode::empty()) {
                         Ok(fd) => {
                             let file = File::from(fd);
                             let meta = file.metadata()?;
@@ -411,11 +467,25 @@ impl Dir {
                                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
                             }
                             let id = file_id(&file, &meta)?;
-                            file.lock()?;
+                            file.lock().map_err(|err| {
+                                io::Error::new(
+                                    err.kind(),
+                                    format!(
+                                        "cannot lock existing '{EXPORT_LOCK_NAME}' without write permission ({err}); grant write access or remove the stale lock file"
+                                    ),
+                                )
+                            })?;
                             return Ok((file, id));
                         }
                         Err(Errno::NOENT) => continue,
-                        Err(e) => return Err(e.into()),
+                        Err(e) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                format!(
+                                    "cannot open existing '{EXPORT_LOCK_NAME}' ({e}); grant write access or remove the stale lock file"
+                                ),
+                            ));
+                        }
                     },
                     Err(e) => return Err(e.into()),
                 },
@@ -426,6 +496,16 @@ impl Dir {
             }
         }
         Err(last_err.unwrap_or_else(|| io::Error::other("could not open export directory lock file")))
+    }
+
+    /// Whether `name` resolves to the same OS file identity as an existing
+    /// `.anvil-export.lock` entry in this directory (catches Unicode case-fold,
+    /// NFC/NFD, or hard-link aliases even for writers that do not lock).
+    pub(crate) fn entry_aliases_export_lock(&self, name: &OsStr) -> io::Result<bool> {
+        let Some((_, lock_id)) = self.entry_identity(OsStr::new(EXPORT_LOCK_NAME))? else {
+            return Ok(false);
+        };
+        Ok(matches!(self.entry_identity(name)?, Some((_, dest_id)) if dest_id == lock_id))
     }
 
     /// Back up an existing regular file `name` inside this folder without
@@ -466,16 +546,56 @@ impl Dir {
         }
     }
 
-    pub(crate) fn abort_backup(&self, backup: ExistingBackup, target: &OsStr) {
+    /// Abort a backup before replacement landed. When the backup moved the
+    /// original entry aside, restores it with no-clobber rename so a concurrent
+    /// entry is never overwritten, returning the preserved backup filename on
+    /// error.
+    pub(crate) fn abort_backup(&self, backup: ExistingBackup, target: &OsStr) -> std::result::Result<(), (OsString, io::Error)> {
         if backup.moved {
-            let _ = self.rename(&backup.name, target);
+            if let Err(err) = self.publish_no_clobber(&backup.name, target) {
+                return Err((backup.name, err));
+            }
         } else {
             let _ = self.remove_file(&backup.name);
         }
+        Ok(())
     }
 
-    pub(crate) fn restore_backup(&self, backup: ExistingBackup, target: &OsStr) -> io::Result<()> {
-        self.rename(&backup.name, target)
+    /// Roll back a published `target` only if it still has `expected_id`,
+    /// preserving any concurrently installed entry. Quarantines `target` first
+    /// and re-verifies `expected_id` on the quarantined entry before deleting
+    /// it, then restores `backup` via atomic no-clobber rename.
+    pub(crate) fn rollback_owned(&self, target: &OsStr, expected_id: FileId, backup: Option<ExistingBackup>) -> RollbackOutcome {
+        if !matches!(self.entry_identity(target), Ok(Some((false, cur))) if cur == expected_id) {
+            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+        }
+        let quarantine = OsString::from(format!(".anvil-rollback-{}.partial", uuid::Uuid::new_v4().simple()));
+        if self.publish_no_clobber(target, &quarantine).is_err() {
+            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+        }
+        if !matches!(self.entry_identity(&quarantine), Ok(Some((false, cur))) if cur == expected_id) {
+            // A concurrent writer swapped `target` right before quarantine; put
+            // their entry back without clobbering anything newer and keep any
+            // backup for recovery.
+            let _ = self.publish_no_clobber(&quarantine, target);
+            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+        }
+        match backup {
+            Some(b) => match self.publish_no_clobber(&b.name, target) {
+                Ok(()) => {
+                    let _ = self.remove_file(&quarantine);
+                    RollbackOutcome::Restored
+                }
+                Err(err) => {
+                    let _ = self.remove_file(&quarantine);
+                    RollbackOutcome::Failed { backup_name: b.name, err }
+                }
+            },
+            None => {
+                let _ = self.remove_file(&quarantine);
+                RollbackOutcome::Restored
+            }
+        }
     }
 
     pub(crate) fn discard_backup(&self, backup: ExistingBackup) {
@@ -789,6 +909,13 @@ impl Dir {
         Ok((file, id))
     }
 
+    pub(crate) fn entry_aliases_export_lock(&self, name: &OsStr) -> io::Result<bool> {
+        let Some((_, lock_id)) = self.entry_identity(OsStr::new(EXPORT_LOCK_NAME))? else {
+            return Ok(false);
+        };
+        Ok(matches!(self.entry_identity(name)?, Some((_, dest_id)) if dest_id == lock_id))
+    }
+
     pub(crate) fn backup_existing_regular(&self, name: &OsStr) -> io::Result<Option<ExistingBackup>> {
         use std::os::windows::fs::OpenOptionsExt;
         const FILE_READ_ATTRIBUTES: u32 = 0x0080;
@@ -826,16 +953,45 @@ impl Dir {
         }
     }
 
-    pub(crate) fn abort_backup(&self, backup: ExistingBackup, target: &OsStr) {
+    pub(crate) fn abort_backup(&self, backup: ExistingBackup, target: &OsStr) -> std::result::Result<(), (OsString, io::Error)> {
         if backup.moved {
-            let _ = self.rename(&backup.name, target);
+            if let Err(err) = self.publish_no_clobber(&backup.name, target) {
+                return Err((backup.name, err));
+            }
         } else {
             let _ = self.remove_file(&backup.name);
         }
+        Ok(())
     }
 
-    pub(crate) fn restore_backup(&self, backup: ExistingBackup, target: &OsStr) -> io::Result<()> {
-        self.rename(&backup.name, target)
+    pub(crate) fn rollback_owned(&self, target: &OsStr, expected_id: FileId, backup: Option<ExistingBackup>) -> RollbackOutcome {
+        if !matches!(self.entry_identity(target), Ok(Some((false, cur))) if cur == expected_id) {
+            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+        }
+        let quarantine = OsString::from(format!(".anvil-rollback-{}.partial", uuid::Uuid::new_v4().simple()));
+        if self.publish_no_clobber(target, &quarantine).is_err() {
+            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+        }
+        if !matches!(self.entry_identity(&quarantine), Ok(Some((false, cur))) if cur == expected_id) {
+            let _ = self.publish_no_clobber(&quarantine, target);
+            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+        }
+        match backup {
+            Some(b) => match self.publish_no_clobber(&b.name, target) {
+                Ok(()) => {
+                    let _ = self.remove_file(&quarantine);
+                    RollbackOutcome::Restored
+                }
+                Err(err) => {
+                    let _ = self.remove_file(&quarantine);
+                    RollbackOutcome::Failed { backup_name: b.name, err }
+                }
+            },
+            None => {
+                let _ = self.remove_file(&quarantine);
+                RollbackOutcome::Restored
+            }
+        }
     }
 
     pub(crate) fn discard_backup(&self, backup: ExistingBackup) {
@@ -948,6 +1104,10 @@ impl Dir {
         }
     }
 
+    pub(crate) fn entry_aliases_export_lock(&self, _name: &OsStr) -> io::Result<bool> {
+        Ok(false)
+    }
+
     pub(crate) fn backup_existing_regular(&self, name: &OsStr) -> io::Result<Option<ExistingBackup>> {
         let path = self.path.join(name);
         let meta = match std::fs::symlink_metadata(&path) {
@@ -973,16 +1133,20 @@ impl Dir {
         }
     }
 
-    pub(crate) fn abort_backup(&self, backup: ExistingBackup, target: &OsStr) {
+    pub(crate) fn abort_backup(&self, backup: ExistingBackup, target: &OsStr) -> std::result::Result<(), (OsString, io::Error)> {
         if backup.moved {
-            let _ = self.rename(&backup.name, target);
+            if let Err(err) = self.publish_no_clobber(&backup.name, target) {
+                return Err((backup.name, err));
+            }
         } else {
             let _ = self.remove_file(&backup.name);
         }
+        Ok(())
     }
 
-    pub(crate) fn restore_backup(&self, backup: ExistingBackup, target: &OsStr) -> io::Result<()> {
-        self.rename(&backup.name, target)
+    pub(crate) fn rollback_owned(&self, _target: &OsStr, _expected_id: FileId, backup: Option<ExistingBackup>) -> RollbackOutcome {
+        // Fallback platforms lack reliable inode identities; preserve any backup.
+        RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name))
     }
 
     pub(crate) fn discard_backup(&self, backup: ExistingBackup) {

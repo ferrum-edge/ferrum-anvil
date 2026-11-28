@@ -868,7 +868,7 @@ fn observe(s: &Sample) -> SendObservation {
         latency_us: s.elapsed.saturating_mul(1000),
         bytes_sent: s.sent_bytes,
         bytes_received: s.bytes,
-        protocol: Some("http/1.1".into()),
+        protocol: None,
         destination: s.destination.clone(),
         ..Default::default()
     };

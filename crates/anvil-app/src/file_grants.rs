@@ -398,7 +398,14 @@ impl FileGrants {
             return Err(not_folder());
         }
         // The folder chosen, which a write must still find at its path.
-        let id = Dir::open(&dir).map_err(io)?.ok_or_else(not_folder)?.id().map_err(io)?;
+        let folder = Dir::open(&dir).map_err(io)?.ok_or_else(not_folder)?;
+        if folder.entry_aliases_export_lock(name).map_err(io)? {
+            return Err(GrantError::Invalid(format!(
+                "'{}' is reserved for Anvil's export lock; choose another filename",
+                crate::no_follow::EXPORT_LOCK_NAME
+            )));
+        }
+        let id = folder.id().map_err(io)?;
         refuse_directory(&dir.join(name))?;
         let file_name = display_name(Some(name));
         self.insert(purpose, Target::Write { dir, id, name: name.to_owned() }, file_name, generation, None)
@@ -749,7 +756,7 @@ impl FileGrants {
         };
 
         let mut ds_backup: Option<crate::no_follow::ExistingBackup> = None;
-        let mut ds_published_id: Option<FileId> = None;
+        let mut ds_owned_id: Option<FileId> = None;
         if let (Some(sibling), Some((tmp, staged_id))) = (sibling_name.as_ref(), ds_tmp.take()) {
             let target_blocked = match plan_folder.entry_identity(sibling) {
                 Ok(Some((true, _))) => {
@@ -762,6 +769,7 @@ impl FileGrants {
                 Ok(_) => None,
                 Err(err) => Some(err),
             };
+            let mut abort_recovery = String::new();
             let res = if let Some(err) = target_blocked {
                 Err(err)
             } else if replace_dataset {
@@ -771,8 +779,12 @@ impl FileGrants {
                         let r = plan_folder.rename_staged(&tmp, sibling);
                         if r.is_err()
                             && let Some(backup) = ds_backup.take()
+                            && let Err((backup_name, restore_err)) = plan_folder.abort_backup(backup, sibling)
                         {
-                            plan_folder.abort_backup(backup, sibling);
+                            abort_recovery = format!(
+                                "; could not restore moved dataset backup ({restore_err}), previous dataset backup preserved at {}",
+                                display_name(Some(&backup_name))
+                            );
                         }
                         r
                     }
@@ -784,7 +796,7 @@ impl FileGrants {
             if let Err(err) = res {
                 plan_folder.cleanup_staged(&tmp);
                 cleanup_remaining(jmx_t.as_ref(), None, None);
-                if published.is_empty() {
+                if published.is_empty() && abort_recovery.is_empty() {
                     restore_grants(plan_entry, secrets_entry);
                     if !replace_dataset && err.kind() == std::io::ErrorKind::AlreadyExists {
                         let label = display_name(Some(sibling));
@@ -794,8 +806,11 @@ impl FileGrants {
                     }
                     return Err(io(err));
                 }
+                if published.is_empty() {
+                    return Err(GrantError::Io(format!("{err}{abort_recovery}")));
+                }
                 return Err(GrantError::Io(format!(
-                    "{err} (already written: {}; the remaining files were not written)",
+                    "{err} (already written: {}; the remaining files were not written{abort_recovery})",
                     format_published(&published)
                 )));
             }
@@ -803,8 +818,9 @@ impl FileGrants {
             protected.push(staged_id);
             match plan_folder.entry_identity(sibling) {
                 Ok(Some((false, pub_id))) => {
-                    ds_published_id = Some(pub_id);
-                    if pub_id != staged_id {
+                    if pub_id == staged_id {
+                        ds_owned_id = Some(staged_id);
+                    } else {
                         protected.push(pub_id);
                     }
                 }
@@ -841,7 +857,14 @@ impl FileGrants {
                 Ok(Some((false, id))) if protected.contains(&id) => {
                     Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "plan destination aliases a protected sibling or lock file"))
                 }
-                Ok(_) => None,
+                Ok(_) => match plan_folder.entry_aliases_export_lock(plan_name) {
+                    Ok(true) => Some(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("plan destination aliases reserved '{}'", crate::no_follow::EXPORT_LOCK_NAME),
+                    )),
+                    Ok(false) => None,
+                    Err(err) => Some(err),
+                },
                 Err(err) => Some(err),
             };
             let res = match target_blocked {
@@ -850,36 +873,34 @@ impl FileGrants {
             };
             if let Err(err) = res {
                 plan_folder.cleanup_staged(&tmp);
-                // Roll back the companion dataset sidecar ONLY after verifying
-                // we still own the published entry; preserve any backup and
-                // report its recovery name if ownership changed or restore fails.
+                // Roll back the companion dataset sidecar ONLY when ownership is
+                // tied to our staged file handle and preserved through quarantine;
+                // preserve any backup and report its recovery name otherwise.
                 let mut recovery = String::new();
-                if let Some(ref sibling) = sibling_name
-                    && let Some(expected_id) = ds_published_id
-                {
-                    let still_owned = matches!(plan_folder.entry_identity(sibling), Ok(Some((false, cur))) if cur == expected_id);
-                    if still_owned {
-                        match ds_backup.take() {
-                            Some(backup) => {
-                                let backup_label = display_name(Some(backup.name()));
-                                match plan_folder.restore_backup(backup, sibling) {
-                                    Ok(()) => published.retain(|(role, _)| *role != PublishedRole::Dataset),
-                                    Err(restore_err) => {
-                                        recovery = format!(
-                                            "; dataset rollback failed ({restore_err}), previous dataset backup preserved at {backup_label}"
-                                        );
-                                    }
+                if let Some(ref sibling) = sibling_name {
+                    if let Some(expected_id) = ds_owned_id {
+                        match plan_folder.rollback_owned(sibling, expected_id, ds_backup.take()) {
+                            crate::no_follow::RollbackOutcome::Restored => {
+                                published.retain(|(role, _)| *role != PublishedRole::Dataset);
+                            }
+                            crate::no_follow::RollbackOutcome::Skipped(backup_name) => {
+                                if let Some(name) = backup_name {
+                                    recovery = format!(
+                                        "; dataset entry changed concurrently so rollback was skipped, previous dataset backup preserved at {}",
+                                        display_name(Some(&name))
+                                    );
                                 }
                             }
-                            None => {
-                                if plan_folder.remove_file(sibling).is_ok() {
-                                    published.retain(|(role, _)| *role != PublishedRole::Dataset);
-                                }
+                            crate::no_follow::RollbackOutcome::Failed { backup_name, err: restore_err } => {
+                                recovery = format!(
+                                    "; dataset rollback failed ({restore_err}), previous dataset backup preserved at {}",
+                                    display_name(Some(&backup_name))
+                                );
                             }
                         }
                     } else if let Some(backup) = ds_backup.take() {
                         recovery = format!(
-                            "; dataset entry changed concurrently so rollback was skipped, previous dataset backup preserved at {}",
+                            "; published dataset ownership could not be tied to the staged file so rollback was skipped, previous dataset backup preserved at {}",
                             display_name(Some(backup.name()))
                         );
                     }
@@ -1176,11 +1197,12 @@ fn eq_filename(a: &OsStr, b: &OsStr) -> bool {
 }
 
 /// Whether `name` matches Anvil's reserved export directory lock filename or
-/// any case/trailing-dot/space filesystem-equivalent spelling of it.
+/// any Unicode/case/trailing-dot/space filesystem-equivalent spelling of it
+/// (e.g. Kelvin sign `K` folding to `k` on case-insensitive APFS/NTFS).
 pub fn is_reserved_export_lock_name(name: &OsStr) -> bool {
     let text = name.to_string_lossy();
     let trimmed = if cfg!(windows) { text.trim_end_matches(['.', ' ']) } else { text.as_ref() };
-    trimmed.eq_ignore_ascii_case(crate::no_follow::EXPORT_LOCK_NAME)
+    trimmed.to_lowercase() == crate::no_follow::EXPORT_LOCK_NAME
 }
 
 /// An opaque OS file identity (device + inode on Unix, volume serial + file
@@ -1222,6 +1244,12 @@ impl PinnedOutput {
         let dir = Dir::open(&canon_parent)?.ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination parent is a symbolic link or not a directory")
         })?;
+        if dir.entry_aliases_export_lock(&name)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("destination aliases reserved '{}'; choose another filename", crate::no_follow::EXPORT_LOCK_NAME),
+            ));
+        }
         if matches!(dir.entry_identity(&name)?, Some((true, _))) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1274,13 +1302,15 @@ impl PinnedOutput {
             ));
         }
         let (mut f, tmp) = self.dir.stage_new(owner_only)?;
-        let stage = (|| -> std::io::Result<()> {
+        let stage = (|| -> std::io::Result<FileId> {
             std::io::Write::write_all(&mut f, bytes)?;
-            f.sync_all()
+            f.sync_all()?;
+            let meta = f.metadata()?;
+            file_id(&f, &meta)
         })();
         drop(f);
         match stage {
-            Ok(()) => Ok(StagedPinnedOutput { output: self, tmp, published: false }),
+            Ok(staged_id) => Ok(StagedPinnedOutput { output: self, tmp, staged_id, published: false }),
             Err(err) => {
                 self.dir.cleanup_staged(&tmp);
                 Err(err)
@@ -1296,10 +1326,16 @@ impl PinnedOutput {
         self.dir.lock_exclusive().map(|(file, id)| (file, PinnedFileId(id)))
     }
 
-    /// Verify that the current non-symlink entry at this destination still has
-    /// the expected OS file identity before rolling it back.
-    pub fn verify_identity(&self, expected: PinnedFileId) -> std::io::Result<bool> {
-        Ok(matches!(self.dir.entry_identity(&self.name)?, Some((false, id)) if PinnedFileId(id) == expected))
+    /// Roll back this destination only if it still matches `expected_id` (tied
+    /// to our staged handle) through quarantine verification, restoring any
+    /// backup via atomic no-clobber rename so concurrent entries are never lost.
+    pub fn rollback_owned(&self, expected_id: PinnedFileId, backup: Option<PinnedBackup<'_>>) -> PinnedRollback {
+        let raw = backup.and_then(|mut b| b.backup.take());
+        match self.dir.rollback_owned(&self.name, expected_id.0, raw) {
+            crate::no_follow::RollbackOutcome::Restored => PinnedRollback::Restored,
+            crate::no_follow::RollbackOutcome::Skipped(name) => PinnedRollback::Skipped(name),
+            crate::no_follow::RollbackOutcome::Failed { backup_name, err } => PinnedRollback::Failed { backup_name, err },
+        }
     }
 
     /// Back up an existing regular file at this pinned destination after
@@ -1338,9 +1374,16 @@ impl PinnedOutput {
     }
 }
 
+/// Outcome of [`PinnedOutput::rollback_owned`].
+pub enum PinnedRollback {
+    Restored,
+    Skipped(Option<OsString>),
+    Failed { backup_name: OsString, err: std::io::Error },
+}
+
 /// A backup of a pre-existing file at a [`PinnedOutput`] destination that
-/// automatically aborts/restores on drop unless explicitly discarded or
-/// restored.
+/// aborts safely via no-clobber on drop if replacement never landed, and
+/// preserves the backup on disk if dropped after replacement without settlement.
 pub struct PinnedBackup<'a> {
     output: &'a PinnedOutput,
     backup: Option<crate::no_follow::ExistingBackup>,
@@ -1353,15 +1396,12 @@ impl PinnedBackup<'_> {
         self.replaced = true;
     }
 
-    /// Restore the backed-up file over the replacement destination. On failure,
-    /// preserves the backup on disk and returns its filename alongside the I/O
-    /// error so callers can report a recovery path.
-    pub fn restore(mut self) -> std::result::Result<(), (OsString, std::io::Error)> {
+    /// Abort the backup before replacement landed. When the original entry was
+    /// moved aside, restores it with atomic no-clobber rename and returns the
+    /// preserved backup filename on failure.
+    pub fn abort(mut self) -> std::result::Result<(), (OsString, std::io::Error)> {
         if let Some(backup) = self.backup.take() {
-            let name = backup.name().to_os_string();
-            if let Err(err) = self.output.dir.restore_backup(backup, &self.output.name) {
-                return Err((name, err));
-            }
+            self.output.dir.abort_backup(backup, &self.output.name)?;
         }
         Ok(())
     }
@@ -1370,7 +1410,7 @@ impl PinnedBackup<'_> {
     /// when ownership of the published entry could not be verified), returning
     /// its filename for user recovery.
     pub fn preserve(mut self) -> Option<OsString> {
-        self.backup.take().map(|b| b.name().to_os_string())
+        self.backup.take().map(crate::no_follow::ExistingBackup::into_name)
     }
 
     /// Discard the backup after the companion output succeeded.
@@ -1383,12 +1423,10 @@ impl PinnedBackup<'_> {
 
 impl Drop for PinnedBackup<'_> {
     fn drop(&mut self) {
-        if let Some(backup) = self.backup.take() {
-            if self.replaced {
-                let _ = self.output.dir.restore_backup(backup, &self.output.name);
-            } else {
-                self.output.dir.abort_backup(backup, &self.output.name);
-            }
+        if let Some(backup) = self.backup.take()
+            && !self.replaced
+        {
+            let _ = self.output.dir.abort_backup(backup, &self.output.name);
         }
     }
 }
@@ -1397,7 +1435,15 @@ impl Drop for PinnedBackup<'_> {
 pub struct StagedPinnedOutput<'a> {
     output: &'a PinnedOutput,
     tmp: crate::no_follow::StagedFile,
+    staged_id: FileId,
     published: bool,
+}
+
+impl StagedPinnedOutput<'_> {
+    /// The OS file identity captured directly from this staged file's handle.
+    pub fn staged_id(&self) -> PinnedFileId {
+        PinnedFileId(self.staged_id)
+    }
 }
 
 impl Drop for StagedPinnedOutput<'_> {
@@ -1443,6 +1489,12 @@ impl StagedPinnedOutput<'_> {
     pub fn publish_guarded(mut self, no_clobber: bool, protected: &[PinnedFileId]) -> Result<PinnedFileId, PublishError> {
         let pre = |source| PublishError { published: false, source };
         let post = |source| PublishError { published: true, source };
+        if self.output.dir.entry_aliases_export_lock(&self.output.name).map_err(pre)? {
+            return Err(pre(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("destination aliases reserved '{}'; refusing to overwrite", crate::no_follow::EXPORT_LOCK_NAME),
+            )));
+        }
         match self.output.dir.entry_identity(&self.output.name).map_err(pre)? {
             None => {}
             Some((true, _)) => {
@@ -1530,6 +1582,12 @@ fn write_in(dir: &Path, id: FileId, name: &OsStr, bytes: &[u8], owner_only: bool
     };
     if folder.id().map_err(io)? != id {
         return Err(GrantError::Changed);
+    }
+    if is_reserved_export_lock_name(name) || folder.entry_aliases_export_lock(name).map_err(io)? {
+        return Err(GrantError::Invalid(format!(
+            "'{}' is reserved for Anvil's export lock; choose another filename",
+            crate::no_follow::EXPORT_LOCK_NAME
+        )));
     }
     refuse_directory(&dir.join(name))?;
     // A fresh, exclusively created file (staged inside an owner-only private

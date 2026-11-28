@@ -961,7 +961,7 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             post_reasons.push(reason(
                 Some(rq_name),
                 "url_path",
-                "a secret or dataset value in the request URL path produces an empty ('//') or dot segment that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler normalizes the path before sending",
+                "a secret or dataset value in the request URL path introduces a query ('?') or fragment ('#') delimiter, or produces an empty ('//') or dot segment that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler rewrites or splits the path before sending",
             ));
         }
     }
@@ -1579,11 +1579,18 @@ fn translate_step(
     // segments (`//`) and dot segments that Anvil sends verbatim. Validate
     // static paths, every rendered dataset row, and any secret/dynamic path
     // segments whose runtime shape could produce a rewritten path.
+    if target.port == 0 {
+        rs.push(reason(
+            rq,
+            "url_port",
+            "the request URL targets port 0; JMeter interprets port 0 as the scheme's default port (80 or 443) and would send traffic to a different port",
+        ));
+    }
     if path_has_httpclient4_rewrite(&target.path) {
         rs.push(reason(
             rq,
             "url_path",
-            "the request URL path contains an empty ('//') or dot segment that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler normalizes the path before sending",
+            "the request URL path contains a query ('?') or fragment ('#') delimiter, or an empty ('//') or dot segment that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler rewrites or splits the path before sending",
         ));
     } else if t.markers.has_marks(&target.path) {
         let parts = t.markers.split(&target.path);
@@ -1606,7 +1613,7 @@ fn translate_step(
             rs.push(reason(
                 rq,
                 "url_path",
-                "the request URL path substitutes a runtime value whose shape cannot be verified against empty ('//') or dot segments that JMeter's HttpClient 4 sampler normalizes before sending",
+                "the request URL path substitutes a runtime value whose shape cannot be verified against query ('?') or fragment ('#') delimiters or empty ('//') and dot segments that JMeter's HttpClient 4 sampler rewrites before sending",
             ));
         } else if has_secret_mark {
             t.path_secret_checks.push((name.to_string(), target.path.clone()));
@@ -1635,7 +1642,7 @@ fn translate_step(
             rs.push(reason(
                 rq,
                 "url_path",
-                "a dataset row produces an empty ('//') or dot segment in the request URL path that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler normalizes the path before sending",
+                "a dataset row introduces a query ('?') or fragment ('#') delimiter, or produces an empty ('//') or dot segment in the request URL path that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler rewrites or splits the path before sending",
             ));
         }
     }
@@ -2013,6 +2020,20 @@ fn translate_step(
 
     // ---- timeouts and limits ----
     let to = settings.timeouts;
+    for (field, val) in [("connect", to.connect_ms), ("response-headers", to.response_headers_ms), ("body-idle", to.body_idle_ms)] {
+        if let Some(ms) = val
+            && (ms == 0 || ms > i32::MAX as u64)
+        {
+            rs.push(reason(
+                rq,
+                "timeout",
+                format!(
+                    "the {field} timeout ({ms} ms) is outside JMeter's supported positive 32-bit millisecond range (1..={} ms; JMeter treats 0 as no timeout)",
+                    i32::MAX
+                ),
+            ));
+        }
+    }
     let response_timeout = match (to.response_headers_ms, to.body_idle_ms) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),

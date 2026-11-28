@@ -561,10 +561,12 @@ export function PlanEditor(props: {
   const label = (id: string) => props.requests.find((r) => r.id === id)?.label ?? "(missing request)";
 
   const otherWorkspace = p.workspace_id !== props.workspaceId;
-  const saveIt = async (): Promise<LoadPlan | null> => {
+  const saveIt = async (rethrow = false): Promise<LoadPlan | null> => {
     setErr(null);
     if (otherWorkspace) {
-      setErr("This plan belongs to another workspace; switch back to it to save or run the plan.");
+      const msg = "This plan belongs to another workspace; switch back to it to save or run the plan.";
+      setErr(msg);
+      if (rethrow) throw new Error(msg);
       return null;
     }
     try {
@@ -578,7 +580,9 @@ export function PlanEditor(props: {
       props.onSaved(saved, sent);
       return saved;
     } catch (e) {
-      setErr(String((e as Error).message));
+      const msg = String((e as Error).message);
+      setErr(msg);
+      if (rethrow) throw new Error(msg);
       return null;
     }
   };
@@ -901,7 +905,9 @@ export function PlanEditor(props: {
         />
       )}
 
-      {jmxDlg && <JmeterExportDialog key={p.workspace_id} workspaceId={p.workspace_id} planName={p.name} save={() => saveIt()} onClose={() => setJmxDlg(false)} />}
+      {jmxDlg && (
+        <JmeterExportDialog key={p.workspace_id} workspaceId={p.workspace_id} planName={p.name} save={() => saveIt(true)} onClose={() => setJmxDlg(false)} />
+      )}
 
       {preflight && (
         <Modal
@@ -1342,7 +1348,7 @@ export function JtlImportDialog(props: {
   onImported: (workspaceId: string, runId: string) => void;
 }) {
   const [planId, setPlanId] = useState("");
-  const [version, setVersion] = useState(JMETER_VERSION);
+  const [version, setVersion] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const opRef = useRef(0);
@@ -1400,8 +1406,8 @@ export function JtlImportDialog(props: {
         </select>
       </label>
       <label className="lbl">
-        JMeter version
-        <input className="field" value={version} onChange={(e) => setVersion(e.target.value)} />
+        JMeter version (optional)
+        <input className="field" value={version} placeholder={JMETER_VERSION} onChange={(e) => setVersion(e.target.value)} />
       </label>
       {err && (
         <div className="bad-box" role="alert">

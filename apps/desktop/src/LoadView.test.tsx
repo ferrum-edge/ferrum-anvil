@@ -1380,7 +1380,7 @@ describe("LOAD-012 JMeter adapter", () => {
     fireEvent.click(button("Import"));
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "pa" } });
     fireEvent.click(button("Choose results file…"));
-    await waitFor(() => expect(calls("load_import_jtl")).toEqual([{ workspaceId: "A", grant: "fg-jtl", planId: "pa", jmeterVersion: "5.6.3" }]));
+    await waitFor(() => expect(calls("load_import_jtl")).toEqual([{ workspaceId: "A", grant: "fg-jtl", planId: "pa", jmeterVersion: null }]));
     expect(calls("file_choose")[0].purpose).toBe("jtl_import");
     expect(await screen.findByText("imported from JMeter")).toBeTruthy();
     expect(notify).toHaveBeenCalledWith("JMeter results imported as a report.");
@@ -1461,6 +1461,21 @@ describe("LOAD-012 JMeter adapter", () => {
     resolvePicker([{ token: "fg-jmx", file_name: "plan.jmx" }]);
     await act(async () => {});
     expect(calls("load_export_jmx")).toEqual([]);
+  });
+
+  it("LOAD-012 displays plan save errors inside the JMX export dialog", async () => {
+    render(
+      <JmeterExportDialog
+        workspaceId="A"
+        planName="Plan A"
+        save={async () => {
+          throw new Error("plan name cannot be blank");
+        }}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(button("Choose file and export…"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("plan name cannot be blank");
   });
 });
 

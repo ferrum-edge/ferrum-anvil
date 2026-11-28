@@ -1088,13 +1088,33 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     // JSONPath `NotExists` is refused because JMeter's inverted JSONPathAssertion
     // passes on malformed non-JSON responses where Anvil fails.
     let mut jp_not_exists = RequestSpec::http("GET", "http://example.test/items");
-    jp_not_exists.assertions.push(Assertion {
-        kind: AssertionKind::JsonPath { path: "$.error".into(), comparison: Comparison::NotExists, value: String::new() },
-        enabled: true,
-    });
+    jp_not_exists.assertions.push(assertion(AssertionKind::JsonPath {
+        path: "$.error".into(),
+        comparison: Comparison::NotExists,
+        value: String::new(),
+    }));
     jp_not_exists.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
     let (id_jpne, c_jpne) = step(jp_not_exists);
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_jpne, c_jpne, "jp-not-exists")], None)), ["assertion"]);
+
+    // Explicit port 0 is refused because JMeter treats port 0 as the scheme's default port.
+    let mut port_zero = RequestSpec::http("GET", "http://127.0.0.1:0/items");
+    port_zero.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_p0, c_p0) = step(port_zero);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_p0, c_p0, "port-zero")], None)), ["url_port"]);
+
+    // Mapped finite timeouts outside 1..=i32::MAX ms are refused.
+    let mut zero_to = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    zero_to.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    zero_to.settings.timeouts = Some(TimeoutOverrides { connect_ms: Some(0), ..TimeoutOverrides::default() });
+    let (id_zt, c_zt) = step(zero_to);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_zt, c_zt, "zero-to")], None)), ["timeout"]);
+
+    let mut huge_to = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    huge_to.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    huge_to.settings.timeouts = Some(TimeoutOverrides { response_headers_ms: Some(i32::MAX as u64 + 1), ..TimeoutOverrides::default() });
+    let (id_ht, c_ht) = step(huge_to);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_ht, c_ht, "huge-to")], None)), ["timeout"]);
 
     // Default jmeter_properties pin start timestamps in epoch milliseconds.
     assert!(

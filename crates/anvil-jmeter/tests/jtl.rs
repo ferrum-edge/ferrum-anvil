@@ -104,7 +104,7 @@ fn check_six(r: &LoadReport) {
     assert_eq!(r.timeouts_censored.elapsed_at_timeout.max_us, 5_000_000);
     assert_eq!(r.engine, "apache-jmeter");
     assert_eq!(r.destination_summary, vec!["http://127.0.0.1:8080".to_string()]);
-    assert_eq!(r.protocols, vec![("http/1.1".to_string(), 6)]);
+    assert!(r.protocols.is_empty(), "JTL does not establish a wire protocol: {:?}", r.protocols);
     assert_eq!(r.bytes_received, 6 * 120);
     let cats: Vec<&str> = r.failure_categories.iter().map(|c| c.category.as_str()).collect();
     assert!(cats.contains(&"application_failure: http 404"), "{cats:?}");
