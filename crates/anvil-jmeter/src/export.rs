@@ -137,7 +137,8 @@ pub struct ExportReport {
     /// any traffic.
     pub secret_properties: Vec<SecretProperty>,
     /// Non-secret JMeter properties to pass with `-J` so JMeter follows the
-    /// plan's settings (e.g. the redirect limit).
+    /// plan's settings (e.g. XML JTL save settings that omit URLs and response
+    /// bodies).
     pub jmeter_properties: Vec<(String, String)>,
     pub dataset: Option<DatasetReport>,
     pub thread_groups: usize,
@@ -694,7 +695,108 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
     used_secrets.sort_unstable();
     used_secrets.dedup();
     let uses_iteration = used_marks.iter().any(|m| matches!(m, Mark::Var(v) if v == ITERATION_VAR));
+    let needs_iteration_gate = groups.iter().any(|g| matches!(g.kind, GroupKind::Iterations { gate: Some(_), .. }));
     let uses_vu = used_marks.iter().any(|m| matches!(m, Mark::Vu));
+
+    // Reject any used secret variable whose template expands to a per-iteration
+    // value or dynamic helper (which no static JMeter property can represent).
+    let mut secret_reasons = Vec::new();
+    for i in &used_secrets {
+        let p = &t.secrets.props[*i];
+        if let SecretSource::VariableEntry { step, layer, var } = &p.source {
+            let ctx = t.contexts[*step];
+            let entry = &ctx.var_layers[*layer].vars[*var];
+            if ctx.secrets.variable_secret(*layer, *var).is_none() && !entry.literal && entry.value.contains("{{") {
+                let mut probe_markers = Markers::default();
+                let mut probe_layers = Vec::new();
+                for (li, l) in ctx.var_layers.iter().enumerate() {
+                    let mut vars = Vec::new();
+                    for (vi, e) in l.vars.iter().enumerate() {
+                        if e.secret || ctx.secrets.variable_secret(li, vi).is_some() || e.value == DEFERRED_SECRET_VALUE {
+                            vars.push(VarEntry {
+                                name: e.name.clone(),
+                                value: probe_markers.add(Mark::Secret(0)),
+                                secret: false,
+                                literal: true,
+                            });
+                        } else if e.literal {
+                            vars.push(e.clone());
+                        } else {
+                            vars.push(VarEntry {
+                                name: e.name.clone(),
+                                value: mask_helpers(&e.value, &mut probe_markers),
+                                secret: false,
+                                literal: false,
+                            });
+                        }
+                    }
+                    probe_layers.push(VarLayer { label: l.label.clone(), vars });
+                }
+                let stand_in = |name: &str, value: String| VarEntry { name: name.into(), value, secret: false, literal: true };
+                let iter_mark = probe_markers.add(Mark::Var(ITERATION_VAR.into()));
+                let vu_mark = probe_markers.add(Mark::Vu);
+                probe_layers.push(VarLayer {
+                    label: "load".into(),
+                    vars: vec![stand_in("anvil.iteration", iter_mark), stand_in("anvil.vu", vu_mark)],
+                });
+                if let Some(d) = dataset
+                    && ctx.scope.is_none()
+                {
+                    let vars = d
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .map(|(ci, c)| stand_in(c, probe_markers.add(Mark::Var(format!("anvil_ds_{ci}")))))
+                        .collect();
+                    probe_layers.push(VarLayer { label: "dataset".into(), vars });
+                }
+                if chain {
+                    let mut ext_vars = Vec::new();
+                    for earlier in &t.contexts[..*step] {
+                        if earlier.scope == ctx.scope {
+                            for ex in &earlier.spec.extractions {
+                                ext_vars.push(stand_in(&ex.variable, probe_markers.add(Mark::Var(ex.variable.clone()))));
+                            }
+                        }
+                    }
+                    if !ext_vars.is_empty() {
+                        probe_layers.push(VarLayer { label: "iteration (extracted)".into(), vars: ext_vars });
+                    }
+                }
+                let probe = Resolver::new(probe_layers, None);
+                let masked = mask_helpers(&entry.value, &mut probe_markers);
+                match probe.resolve(&masked, "variables") {
+                    Ok(expanded) => {
+                        let has_per_run = probe_markers
+                            .split(&expanded)
+                            .iter()
+                            .any(|part| matches!(part, Part::Mark(mi) if !matches!(probe_markers.list[*mi], Mark::Secret(_))));
+                        if has_per_run {
+                            secret_reasons.push(reason(
+                                None,
+                                "secret_mixed",
+                                format!(
+                                    "{} depends on a per-iteration value or dynamic helper; JMeter cannot represent it as a static property",
+                                    p.purpose
+                                ),
+                            ));
+                        }
+                    }
+                    Err(f) => {
+                        let msg = if entry.secret {
+                            "could not resolve a secret variable; check the vault and active variables".to_string()
+                        } else {
+                            f.message
+                        };
+                        secret_reasons.push(reason(None, "does_not_prepare", format!("{}: {msg}", p.purpose)));
+                    }
+                }
+            }
+        }
+    }
+    if !secret_reasons.is_empty() {
+        return Err(ExportRefused { reasons: secret_reasons });
+    }
 
     let mut plan_children = Vec::new();
     let secret_properties: Vec<SecretProperty> = used_secrets
@@ -703,13 +805,15 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
         .collect();
     let has_secrets_guard = !secret_properties.is_empty();
     let single_group = group_nodes.len() == 1;
-    if uses_iteration {
+    if uses_iteration || needs_iteration_gate {
         // Scope CounterConfig inside the sole load thread group when there is
         // only one so the SetupThreadGroup secrets check never advances
         // `anvil.iteration` before iteration 0. For multi-stage closed
         // workloads that share one TestPlan-scoped counter across groups,
         // start at -1 when SetupThreadGroup is present so the setup iteration
-        // consumes -1 and load traffic starts at 0.
+        // consumes -1 and load traffic starts at 0. Fixed-count workloads with
+        // an uneven thread/loop gate also use this single CounterConfig so the
+        // gate and `{{anvil.iteration}}` can never diverge across threads.
         let start = if !single_group && has_secrets_guard { "-1" } else { "0" };
         let counter = Node::new(
             "CounterConfig",
@@ -730,7 +834,9 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
         } else {
             plan_children.push(counter);
         }
-        t.map("{{anvil.iteration}}", "Counter shared by all threads (from 0, one per iteration)");
+        if uses_iteration {
+            t.map("{{anvil.iteration}}", "Counter shared by all threads (from 0, one per iteration)");
+        }
     }
     if uses_vu {
         t.map("{{anvil.vu}}", "${__intSum(${__threadNum},offset)}: the thread number from 0 across the thread groups");
@@ -947,19 +1053,19 @@ fn step_layers(t: &mut Translator<'_>, pos: usize, ctx: &ExecutionContext, per_r
             let credential = anvil_domain::credential_names::is_export_secret_name(&e.name, &ctx.redaction_names)
                 && classify_template_value(&e.value, TemplateSyntax::Nunjucks) == TemplateKind::Literal;
             if e.secret || vault.is_some() || e.value == DEFERRED_SECRET_VALUE || credential {
-                let (key, source) = match &vault {
-                    Some(r) => (format!("vault:{}", r.id), SecretSource::Vault { step: pos, secret: r.clone() }),
-                    None if e.value != DEFERRED_SECRET_VALUE
-                        && (e.literal || classify_template_value(&e.value, TemplateSyntax::Nunjucks) == TemplateKind::Literal) =>
-                    {
-                        (
-                            format!("var:{}:{}:{}", layer.label, e.name, hex::encode(Sha256::digest(e.value.as_bytes()))),
-                            SecretSource::Literal(e.value.clone()),
-                        )
+                let key = match &vault {
+                    Some(r) if e.literal => format!("vault:{}", r.id),
+                    None if e.value != DEFERRED_SECRET_VALUE && (e.literal || !e.value.contains("{{")) => {
+                        format!("var:{}:{}:{}", layer.label, e.name, hex::encode(Sha256::digest(e.value.as_bytes())))
                     }
-                    None => (format!("var-tmpl:{pos}:{li}:{vi}"), SecretSource::VariableEntry { step: pos, layer: li, var: vi }),
+                    _ => format!("var-entry:{pos}:{li}:{vi}"),
                 };
-                let idx = t.secrets.add(key, format!("var.{}", slug(&e.name)), format!("variable '{}' ({})", e.name, layer.label), source);
+                let idx = t.secrets.add(
+                    key,
+                    format!("var.{}", slug(&e.name)),
+                    format!("variable '{}' ({})", e.name, layer.label),
+                    SecretSource::VariableEntry { step: pos, layer: li, var: vi },
+                );
                 vars.push(VarEntry { name: e.name.clone(), value: t.markers.add(Mark::Secret(idx)), secret: false, literal: true });
             } else if e.literal {
                 vars.push(e.clone());
@@ -1451,6 +1557,13 @@ fn translate_step(
         .iter()
         .filter(|h| h.enabled)
         .any(|h| resolver.resolve(h.name.trim(), "header").is_ok_and(|n| n.trim().eq_ignore_ascii_case("accept-encoding")));
+    if !settings.decompress {
+        rs.push(reason(
+            rq,
+            "accept_encoding",
+            "automatic decompression is off: Anvil keeps compressed responses encoded, whereas JMeter's HttpClient 4 sampler automatically decompresses gzip, deflate and br responses even without an explicit Accept-Encoding header. Turn automatic decompression on to export it",
+        ));
+    }
     let mut noted_inferred_ae = false;
     for (_, v) in headers.iter_mut().filter(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
         let text = v.0.iter().map(|(s, _)| s.as_str()).collect::<String>();
@@ -1470,12 +1583,6 @@ fn translate_step(
                     rq,
                     "accept_encoding",
                     format!("the Accept-Encoding header offers '{c}', which JMeter 5.6.3 cannot decode (it decodes gzip, deflate and br)"),
-                ));
-            } else if !settings.decompress && codings.iter().any(|c| c != "identity") {
-                rs.push(reason(
-                    rq,
-                    "accept_encoding",
-                    "automatic decompression is off while the request asks for compressed responses: Anvil keeps the encoded body, JMeter always decodes it",
                 ));
             }
         }
@@ -2144,6 +2251,13 @@ fn thread_groups(t: &mut Translator<'_>) -> Vec<Group> {
                 cur = cur.max(s.target);
                 time += s.duration_secs;
             }
+            if groups.is_empty() {
+                t.reasons.push(reason(
+                    None,
+                    "workload",
+                    "the closed workload has no active virtual users before the end of its schedule, so JMeter would send 0 requests",
+                ));
+            }
             t.map(
                 "closed workload (virtual users, stages)",
                 "one Thread Group per increase: its threads, ramp-up, start delay and duration to the end of the schedule",
@@ -2469,7 +2583,7 @@ fn thread_group_node(index: usize, g: &Group, body: Vec<Node>, cookies: bool, da
     match &g.kind {
         GroupKind::Closed { think_ms, .. } if *think_ms > 0 => body.push(test_action("Anvil think time", 1, 0, *think_ms)),
         GroupKind::Iterations { gate: Some(n), .. } => {
-            body = vec![if_node(format!("Anvil: stop after {n} iterations"), format!("${{__jexl3(${{__counter(FALSE,)}} <= {n})}}"), body)];
+            body = vec![if_node(format!("Anvil: stop after {n} iterations"), format!("${{__jexl3(${{{ITERATION_VAR}}} < {n})}}"), body)];
         }
         _ => {}
     }
@@ -2523,14 +2637,16 @@ fn resolve_secret(t: &Translator<'_>, source: &SecretSource) -> Result<Zeroizing
         SecretSource::VariableEntry { step, layer, var } => {
             let ctx = t.contexts[*step];
             let entry = &ctx.var_layers[*layer].vars[*var];
-            if entry.value == DEFERRED_SECRET_VALUE {
-                return Err(format!("variable '{}' references an unavailable secret", entry.name));
+            let r = real(ctx);
+            if !entry.literal {
+                let raw = r.variable_value(*layer, *var).map_err(|f| f.message)?;
+                let mut probe = Markers::default();
+                let masked = mask_helpers(&raw, &mut probe);
+                if probe.has_marks(&masked) {
+                    return Err("references a dynamic helper that JMeter cannot represent as a static property".into());
+                }
             }
-            if entry.literal {
-                Ok(Zeroizing::new(entry.value.clone()))
-            } else {
-                real(ctx).resolve(&entry.value, "variables").map(Zeroizing::new).map_err(|f| f.message)
-            }
+            r.resolve_entry(*layer, *var, "variables").map(Zeroizing::new).map_err(|f| f.message)
         }
         SecretSource::Template { step, template } => {
             let ctx = t.contexts[*step];

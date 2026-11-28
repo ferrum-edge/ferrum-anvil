@@ -271,30 +271,39 @@ pub fn export_jmx(
     let results_file = fresh_results_name(out);
     let shell_label = if cfg!(windows) { "PowerShell" } else { "sh" };
     // When the exported plan carries a relative sidecar CSV dataset, launch
-    // JMeter from the JMX's directory (in a subshell / Push-Location block so
-    // the caller's working directory is preserved) so JMeter's FileServer
-    // always resolves the sidecar dataset next to the JMX rather than a
-    // same-named file in an unrelated working directory.
-    let (jmx_arg, prefix, suffix, import_results_file) = if r.dataset.is_some() {
-        let dir = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-        let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| out.display().to_string());
-        let import_path = if dir == Path::new(".") { results_file.clone() } else { dir.join(&results_file).display().to_string() };
+    // JMeter from the JMX's absolute directory (in a subshell / guarded
+    // Push-Location -LiteralPath block so the caller's working directory is
+    // preserved, CDPATH and PowerShell wildcards cannot misdirect it, and a
+    // failed directory change aborts before launching JMeter).
+    let abs_out = std::path::absolute(out).unwrap_or_else(|_| out.to_path_buf());
+    let (jmx_arg, prefix, suffix, import_results_file, secrets_placeholder) = if r.dataset.is_some() {
+        let raw_dir = abs_out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let abs_dir = std::fs::canonicalize(raw_dir).unwrap_or_else(|_| raw_dir.to_path_buf());
+        let name = abs_out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| abs_out.display().to_string());
+        let import_path = abs_dir.join(&results_file).display().to_string();
         if cfg!(windows) {
             (
                 name,
-                format!("Push-Location {}; try {{ ", shell_quote(&dir.display().to_string())),
-                " } finally { Pop-Location }".to_string(),
+                format!("Push-Location -LiteralPath {}; if ($?) {{ try {{ ", shell_quote(&abs_dir.display().to_string())),
+                " } finally { Pop-Location } }".to_string(),
                 import_path,
+                "<absolute path to the --secrets-file you chose>",
             )
         } else {
-            (name, format!("(cd {} && ", shell_quote(&dir.display().to_string())), ")".to_string(), import_path)
+            (
+                name,
+                format!("(cd -- {} && ", shell_quote(&abs_dir.display().to_string())),
+                ")".to_string(),
+                import_path,
+                "<absolute path to the --secrets-file you chose>",
+            )
         }
     } else {
-        (out.display().to_string(), String::new(), String::new(), results_file.clone())
+        (out.display().to_string(), String::new(), String::new(), results_file.clone(), "<the --secrets-file you chose>")
     };
     let mut cmd = format!("{prefix}jmeter -n -t {} -l {}", shell_quote(&jmx_arg), shell_quote(&results_file));
     if written {
-        cmd.push_str(&format!(" -q {}", shell_quote("<the --secrets-file you chose>")));
+        cmd.push_str(&format!(" -q {}", shell_quote(secrets_placeholder)));
     }
     for (k, v) in &r.jmeter_properties {
         cmd.push_str(&format!(" {}", shell_quote(&format!("-J{k}={v}"))));

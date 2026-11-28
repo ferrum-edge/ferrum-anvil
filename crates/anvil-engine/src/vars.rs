@@ -182,6 +182,25 @@ impl Resolver {
         self.resolve_inner(input, field, &mut stack, 0)
     }
 
+    /// Resolve a specific variable entry at `(layer, variable)` using the same
+    /// literal/template expansion and secret-error redaction rules as
+    /// [`Self::resolve`], without re-looking up by variable name (so a higher
+    /// layer with the same name cannot shadow it).
+    pub fn resolve_entry(&self, layer: usize, variable: usize, field: &str) -> Result<String, TransportFailure> {
+        let entry = &self.layers[layer].vars[variable];
+        let raw = self.variable_value(layer, variable)?;
+        if entry.literal {
+            return Ok(raw);
+        }
+        let mut stack = vec![entry.name.clone()];
+        self.resolve_inner(&raw, field, &mut stack, 1).map_err(|mut failure| {
+            if entry.secret {
+                failure.message = "could not resolve a secret variable; check the vault and active variables".into();
+            }
+            failure
+        })
+    }
+
     fn resolve_inner(&self, input: &str, field: &str, stack: &mut Vec<String>, depth: usize) -> Result<String, TransportFailure> {
         if !input.contains("{{") {
             return Ok(input.to_string());

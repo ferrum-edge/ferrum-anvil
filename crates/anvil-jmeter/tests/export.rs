@@ -256,13 +256,16 @@ fn load_012_workloads_become_thread_groups() {
     assert_eq!(doc.prop(g, "OpenModelThreadGroup.schedule"), "rate(0/s) rate(5/s) even_arrivals(30 s) rate(5/s) pause(5 s)");
     assert!(out.report.differences.iter().any(|d| d.contains("never drops an arrival")));
 
-    // Iterations that do not divide among the lanes: a shared counter gate.
+    // Iterations that do not divide among the lanes: gated by the same shared CounterConfig.
     let out = Fx::new(iterations(7, 3), vec![(id, c, "root")], None).export(&ExportOptions::default()).expect("exported");
     let doc = Doc::parse(&out.jmx);
     let tg = doc.first("ThreadGroup");
     assert_eq!((doc.prop(tg, "ThreadGroup.num_threads"), doc.prop(tg, "LoopController.loops")), ("3".into(), "3".into()));
+    let counter = doc.child(tg, "CounterConfig");
+    assert_eq!(doc.prop(counter, "CounterConfig.start"), "0");
+    assert_eq!(doc.prop(counter, "CounterConfig.name"), "anvil_iteration");
     let gate = doc.child(tg, "IfController");
-    assert_eq!(doc.prop(gate, "IfController.condition"), "${__jexl3(${__counter(FALSE,)} <= 7)}");
+    assert_eq!(doc.prop(gate, "IfController.condition"), "${__jexl3(${anvil_iteration} < 7)}");
 }
 
 #[test]
@@ -884,4 +887,43 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     te_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
     let (id_te, c_te) = step(te_req);
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_te, c_te, "te")], None)), ["transfer_encoding_header"]);
+
+    // Mixed template secret variable (`prefix-{{suffix}}`) must expand through
+    // native variable resolution rather than writing raw `{{suffix}}` into secrets.properties.
+    let mut mixed_sec = RequestSpec::http("GET", "http://127.0.0.1:8080/sec");
+    mixed_sec.headers.push(KeyValue::new("X-Api-Key", "{{token}}"));
+    mixed_sec.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_ms, mut c_ms) = step(mixed_sec);
+    c_ms.var_layers.push(layer("workspace", &[("suffix", "resolved-tail", false), ("token", "prefix-{{suffix}}", true)]));
+    let out_ms = Fx::new(iterations(1, 1), vec![(id_ms, c_ms, "mixed-sec")], None)
+        .export(&ExportOptions { include_secrets: true, ..ExportOptions::default() })
+        .expect("exported");
+    let props_ms = out_ms.secrets_properties.as_deref().expect("secrets written");
+    assert!(props_ms.contains("=prefix-resolved-tail\n"), "mixed secret variable must expand recursively: {props_ms}");
+    assert!(!props_ms.contains("{{suffix}}"), "unresolved template leaked into secrets.properties: {props_ms}");
+
+    // Secret variable depending on a per-iteration value is refused with `secret_mixed`.
+    let mut dyn_sec = RequestSpec::http("GET", "http://127.0.0.1:8080/sec");
+    dyn_sec.headers.push(KeyValue::new("X-Api-Key", "{{token}}"));
+    dyn_sec.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_dsec, mut c_dsec) = step(dyn_sec);
+    c_dsec.var_layers.push(layer("workspace", &[("token", "prefix-{{anvil.iteration}}", true)]));
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_dsec, c_dsec, "dyn-sec")], None)), ["secret_mixed"]);
+
+    // Closed workload that holds 0 VUs until the very end produces 0 thread groups and is refused.
+    let mut zc_req = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    zc_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_zc, c_zc) = step(zc_req);
+    let zero_closed = Workload::ClosedVirtualUsers {
+        stages: vec![Stage { duration_secs: 1, target: 0 }, Stage { duration_secs: 0, target: 1 }],
+        think_time_ms: 0,
+    };
+    assert_eq!(export_codes(&Fx::new(zero_closed, vec![(id_zc, c_zc, "zero-closed")], None)), ["workload"]);
+
+    // `decompress = false` is refused even without an explicit Accept-Encoding header.
+    let mut decomp_req = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    decomp_req.settings.decompress = Some(false);
+    decomp_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_dc, c_dc) = step(decomp_req);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_dc, c_dc, "no-decompress")], None)), ["accept_encoding"]);
 }

@@ -672,13 +672,29 @@ impl FileGrants {
                 }
                 return Err(io(err));
             }
-            protected.push(staged_id);
-            if let Ok(Some((false, pub_id))) = sec_folder.entry_identity(sec_name)
-                && pub_id != staged_id
-            {
-                protected.push(pub_id);
-            }
             published.push(display_name(Some(sec_name)));
+            protected.push(staged_id);
+            match sec_folder.entry_identity(sec_name) {
+                Ok(Some((false, pub_id))) => {
+                    if pub_id != staged_id {
+                        protected.push(pub_id);
+                    }
+                }
+                Ok(_) => {
+                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.as_ref().map(|(t, _)| t), None);
+                    return Err(GrantError::Io(format!(
+                        "cannot verify published secrets file identity (already written: {}; the remaining files were not written)",
+                        published.join(", ")
+                    )));
+                }
+                Err(err) => {
+                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.as_ref().map(|(t, _)| t), None);
+                    return Err(GrantError::Io(format!(
+                        "cannot verify published secrets file identity: {err} (already written: {}; the remaining files were not written)",
+                        published.join(", ")
+                    )));
+                }
+            }
         }
 
         if let (Some(sibling), Some((tmp, staged_id))) = (sibling_name.as_ref(), ds_tmp.take()) {
@@ -718,13 +734,29 @@ impl FileGrants {
                     published.join(", ")
                 )));
             }
-            protected.push(staged_id);
-            if let Ok(Some((false, pub_id))) = plan_folder.entry_identity(sibling)
-                && pub_id != staged_id
-            {
-                protected.push(pub_id);
-            }
             published.push(display_name(Some(sibling)));
+            protected.push(staged_id);
+            match plan_folder.entry_identity(sibling) {
+                Ok(Some((false, pub_id))) => {
+                    if pub_id != staged_id {
+                        protected.push(pub_id);
+                    }
+                }
+                Ok(_) => {
+                    cleanup_remaining(jmx_t.as_ref(), None, None);
+                    return Err(GrantError::Io(format!(
+                        "cannot verify published dataset file identity (already written: {}; the remaining files were not written)",
+                        published.join(", ")
+                    )));
+                }
+                Err(err) => {
+                    cleanup_remaining(jmx_t.as_ref(), None, None);
+                    return Err(GrantError::Io(format!(
+                        "cannot verify published dataset file identity: {err} (already written: {}; the remaining files were not written)",
+                        published.join(", ")
+                    )));
+                }
+            }
         }
 
         if let Some(tmp) = jmx_t.take() {
@@ -1109,15 +1141,13 @@ impl PinnedOutput {
             ));
         }
         let (mut f, tmp) = self.dir.stage_new(owner_only)?;
-        let stage = (|| -> std::io::Result<PinnedFileId> {
+        let stage = (|| -> std::io::Result<()> {
             std::io::Write::write_all(&mut f, bytes)?;
-            f.sync_all()?;
-            let meta = f.metadata()?;
-            file_id(&f, &meta).map(PinnedFileId)
+            f.sync_all()
         })();
         drop(f);
         match stage {
-            Ok(staged_id) => Ok(StagedPinnedOutput { output: self, tmp, staged_id, published: false }),
+            Ok(()) => Ok(StagedPinnedOutput { output: self, tmp, published: false }),
             Err(err) => {
                 self.dir.cleanup_staged(&tmp);
                 Err(err)
@@ -1137,7 +1167,6 @@ impl PinnedOutput {
 pub struct StagedPinnedOutput<'a> {
     output: &'a PinnedOutput,
     tmp: crate::no_follow::StagedFile,
-    staged_id: PinnedFileId,
     published: bool,
 }
 
@@ -1179,12 +1208,12 @@ impl StagedPinnedOutput<'_> {
         self.published = true;
         // Re-read the published entry's file identity so filesystems where
         // rename changes FileId (e.g. FAT32/exFAT) still protect the published
-        // sibling from subsequent aliasing writes.
-        let published_id = match self.output.dir.entry_identity(&self.output.name) {
-            Ok(Some((false, id))) => PinnedFileId(id),
-            _ => self.staged_id,
-        };
-        Ok(published_id)
+        // sibling from subsequent aliasing writes; fail closed if identity
+        // verification fails rather than falling back to a potentially stale ID.
+        match self.output.dir.entry_identity(&self.output.name)? {
+            Some((false, id)) => Ok(PinnedFileId(id)),
+            _ => Err(std::io::Error::other("cannot verify published file identity")),
+        }
     }
 }
 

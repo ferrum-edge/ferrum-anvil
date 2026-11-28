@@ -213,11 +213,12 @@ impl Dir {
 
     /// Atomically publish `from` at `to` within this folder only if `to` does
     /// not already exist (a file, folder, or symlink, even dangling, fails
-    /// with `AlreadyExists` without clobbering it).
+    /// with `AlreadyExists` without clobbering it). Uses an atomic exclusive
+    /// rename (`RENAME_NOREPLACE` / `RENAME_EXCL`) where supported so FAT32 and
+    /// exFAT volumes without hard links work, falling back to `linkat` +
+    /// `unlinkat` only when the filesystem or OS lacks exclusive rename.
     pub(crate) fn publish_no_clobber(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
-        rustix::fs::linkat(&self.fd, from, &self.fd, to, rustix::fs::AtFlags::empty())?;
-        let _ = self.remove_file(from);
-        Ok(())
+        rename_no_clobber(&self.fd, from, &self.fd, to)
     }
 
     pub(crate) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
@@ -279,8 +280,7 @@ impl Dir {
             #[cfg(target_vendor = "apple")]
             StagedFile::ApplePrivateDir { dir_name, dir_fd, file_name } => {
                 use rustix::fs::AtFlags;
-                rustix::fs::linkat(dir_fd, file_name, &self.fd, to, AtFlags::empty())?;
-                let _ = rustix::fs::unlinkat(dir_fd, file_name, AtFlags::empty());
+                rename_no_clobber(dir_fd, file_name, &self.fd, to)?;
                 let _ = rustix::fs::unlinkat(&self.fd, dir_name, AtFlags::REMOVEDIR);
                 Ok(())
             }
@@ -331,6 +331,29 @@ impl Dir {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Atomically move `from` in `from_dir` to `to` in `to_dir` only when `to`
+/// does not already exist. Prefers atomic exclusive rename (`RENAME_NOREPLACE`
+/// on Linux, `RENAME_EXCL` on Apple) so filesystems without hard-link support
+/// (FAT32, exFAT) succeed, falling back to `linkat` + `unlinkat` only when
+/// exclusive rename is unsupported.
+#[cfg(unix)]
+fn rename_no_clobber(from_dir: &File, from: &OsStr, to_dir: &File, to: &OsStr) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        use rustix::fs::RenameFlags;
+        use rustix::io::Errno;
+        match rustix::fs::renameat_with(from_dir, from, to_dir, to, RenameFlags::NOREPLACE) {
+            Ok(()) => return Ok(()),
+            Err(Errno::EXIST) => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+            Err(Errno::NOSYS | Errno::NOTSUP | Errno::INVAL) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    rustix::fs::linkat(from_dir, from, to_dir, to, rustix::fs::AtFlags::empty())?;
+    let _ = rustix::fs::unlinkat(from_dir, from, rustix::fs::AtFlags::empty());
+    Ok(())
 }
 
 /// Enforce owner-only permissions on a newly created open file descriptor
