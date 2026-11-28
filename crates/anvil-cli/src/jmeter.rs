@@ -293,7 +293,11 @@ pub fn export_jmx(
         }
         s
     };
-    let jmeter_bin = if cfg!(windows) { "& java -jar (Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar')" } else { "jmeter" };
+    let jmeter_bin = if cfg!(windows) {
+        "& java -jar $(if ($env:JMETER_HOME) { Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar' } else { Join-Path (Split-Path -Parent (Get-Command jmeter -ErrorAction Stop).Source) 'ApacheJMeter.jar' })"
+    } else {
+        "jmeter"
+    };
     let (jmx_arg, prefix, suffix, import_results_file, secrets_placeholder) = if r.dataset.is_some() {
         let raw_dir = abs_out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
         let canon_dir = std::fs::canonicalize(raw_dir).unwrap_or_else(|_| raw_dir.to_path_buf());
@@ -304,7 +308,7 @@ pub fn export_jmx(
             (
                 name,
                 format!("$__p = Get-Location; try {{ Set-Location -LiteralPath {} -ErrorAction Stop; ", shell_quote(&dir_str)),
-                " } finally { Set-Location -LiteralPath $__p.ProviderPath }".to_string(),
+                " } finally { Set-Location -LiteralPath $__p.Path }".to_string(),
                 import_path,
                 "<absolute path to the --secrets-file you chose>",
             )

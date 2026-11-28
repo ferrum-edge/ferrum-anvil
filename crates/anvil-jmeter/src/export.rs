@@ -405,6 +405,12 @@ fn helper_expr(helper: &str) -> Result<String, String> {
             if hi < lo {
                 return Err(format!("the dynamic helper {{{{${helper}}}}} has an empty range, so Anvil refuses every send"));
             }
+            if hi == i64::MAX {
+                return Err(format!(
+                    "the dynamic helper {{{{${helper}}}}} uses upper bound {} (i64::MAX); JMeter's __Random adds 1 to the maximum and overflows",
+                    i64::MAX
+                ));
+            }
             format!("${{__Random({lo},{hi},)}}")
         }
         "isoTimestamp" => {
@@ -553,6 +559,7 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             ("jmeter.save.saveservice.samplerData".into(), "false".into()),
             ("jmeter.save.saveservice.requestHeaders".into(), "false".into()),
             ("jmeter.save.saveservice.responseHeaders".into(), "false".into()),
+            ("sample_variables".into(), String::new()),
         ],
         contexts: contexts.clone(),
     };
@@ -725,12 +732,13 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             SecretSource::VariableEntry { step, layer, var } => {
                 let ctx = t.contexts[*step];
                 let entry = &ctx.var_layers[*layer].vars[*var];
-                if ctx.secrets.variable_secret(*layer, *var).is_none() && !entry.literal && entry.value.contains("{{") {
-                    if let Err(r) =
+                if ctx.secrets.variable_secret(*layer, *var).is_none()
+                    && !entry.literal
+                    && entry.value.contains("{{")
+                    && let Err(r) =
                         validate_static_secret_template(&t, *step, &entry.value, &p.purpose, entry.secret, dataset, chain, false)
-                    {
-                        secret_reasons.push(r);
-                    }
+                {
+                    secret_reasons.push(r);
                 }
             }
             SecretSource::Template { step, template } if template.contains("{{") => {
@@ -1146,7 +1154,7 @@ fn sensitive_value(
             match needs_property(&t.markers, &out, false) {
                 Ok(false) => Ok(out),
                 Ok(true) => {
-                    let key = format!("field:{}:{field}", ctx.request_id.map(|i| i.to_string()).unwrap_or_else(|| pos.to_string()));
+                    let key = format!("field:{pos}:{}:{field}", ctx.request_id.map(|i| i.to_string()).unwrap_or_else(|| pos.to_string()));
                     let idx = t.secrets.add(
                         key,
                         base,
@@ -1191,9 +1199,11 @@ fn credential_field(
     match needs_property(&t.markers, &out, allow_auth_scheme) {
         Ok(false) => Ok(None),
         Ok(true) => {
-            // The field's position too: two fields of one name hold two values.
+            // The step and field position too: repeated requests in a chain
+            // see different extracted variables, and two fields of one name
+            // hold two values.
             let key = format!(
-                "field:{}:{kind}:{index}:{resolved_name}",
+                "field:{pos}:{}:{kind}:{index}:{resolved_name}",
                 ctx.request_id.map(|i| i.to_string()).unwrap_or_else(|| pos.to_string())
             );
             let idx = t.secrets.add(
@@ -1746,14 +1756,34 @@ fn translate_step(
                 format!("the request follows redirects with {method}; JMeter re-sends a redirected {method} as GET without its body, Anvil keeps the method and body of a 307 or 308. Turn off following redirects for this request to export it"),
             ));
         }
-        // A redirect can lead to an https URL, which Anvil verifies (and
-        // may reach over HTTP/2); JMeter would accept any certificate.
+        // A redirect can lead to an https URL, where Anvil enforces its TLS
+        // profile (certificate verification, client identity, TLS 1.3 minimum,
+        // server-name override, SPIFFE identity) and HTTP version policy,
+        // whereas JMeter accepts any certificate over HTTP/1.1.
         if target.scheme != "https" && !https_like_jmeter {
-            rs.push(reason(
-                rq,
-                "redirect_tls",
-                "the request follows redirects, and a redirect can lead to an https URL: Anvil verifies that certificate (and may negotiate HTTP/2), JMeter would accept any certificate over HTTP/1.1. Turn off following redirects for this request to export it",
-            ));
+            let detail = match profile {
+                Some(p) if !p.verify => {
+                    let mut diffs = Vec::new();
+                    if p.client_identity.is_some() {
+                        diffs.push("presents a client certificate");
+                    }
+                    if p.min_version == TlsMinVersion::Tls13 {
+                        diffs.push("requires TLS 1.3");
+                    }
+                    if p.server_name_override.is_some() || p.server_spiffe.is_some() {
+                        diffs.push("overrides the server name or expects a SPIFFE identity");
+                    }
+                    if settings.http_version != HttpVersionPolicy::Http1Only {
+                        diffs.push("may negotiate HTTP/2 or HTTP/3");
+                    }
+                    format!(
+                        "the request follows redirects, and a redirect can lead to an https URL: its TLS/HTTP settings ({}) differ from JMeter's HTTP/1.1 unverified HTTPS handling. Turn off following redirects for this request to export it",
+                        diffs.join(", ")
+                    )
+                }
+                _ => "the request follows redirects, and a redirect can lead to an https URL: Anvil verifies that certificate (and enforces any TLS profile settings and HTTP version policy), whereas JMeter accepts any certificate over HTTP/1.1. Turn off following redirects for this request to export it".into(),
+            };
+            rs.push(reason(rq, "redirect_tls", detail));
         }
         let max = settings.redirects.max.to_string();
         match t.jmeter_properties.iter().find(|(k, _)| k == "httpsampler.max_redirects") {
@@ -2547,7 +2577,7 @@ fn thread_group_node(index: usize, g: &Group, body: Vec<Node>, cookies: bool, da
                         "LoopController",
                         "LoopControlPanel",
                         "Anvil gated dataset iteration",
-                        vec![Prop::Bool("LoopController.continue_forever", false), Prop::s("LoopController.loops", "1")],
+                        vec![Prop::Bool("LoopController.continue_forever", true), Prop::s("LoopController.loops", "1")],
                     )
                     .with_children(inner),
                 ]
@@ -2629,25 +2659,19 @@ fn validate_static_secret_template(
     let ctx = t.contexts[step];
     let mut probe_markers = Markers::default();
     let mut probe_layers = Vec::new();
-    let real_for_vault = expand_vault.then(|| Resolver::new(ctx.var_layers.clone(), None).with_secrets(ctx.secrets.clone()));
+    let mut vault_markers: Vec<(usize, usize, usize)> = Vec::new();
     for (li, l) in ctx.var_layers.iter().enumerate() {
         let mut vars = Vec::new();
         for (vi, e) in l.vars.iter().enumerate() {
             let vault_ref = ctx.secrets.variable_secret(li, vi);
-            if let Some(ref r) = real_for_vault
-                && vault_ref.is_some()
-            {
-                let raw = r.variable_value(li, vi).map_err(|f| reason(None, "secret_unavailable", format!("{purpose}: {}", f.message)))?;
-                if e.literal || !raw.contains("{{") {
-                    vars.push(VarEntry { name: e.name.clone(), value: probe_markers.add(Mark::Secret(0)), secret: false, literal: true });
-                } else {
-                    vars.push(VarEntry {
-                        name: e.name.clone(),
-                        value: mask_helpers(&raw, &mut probe_markers),
-                        secret: false,
-                        literal: false,
-                    });
-                }
+            if expand_vault && vault_ref.is_some() {
+                // Keep vault entries deferred until the dependency walk
+                // actually reaches them, so an unused or shadowed vault entry
+                // never aborts export of a valid template.
+                let slot = vault_markers.len() + 1;
+                let marker = probe_markers.add(Mark::Secret(slot));
+                vault_markers.push((slot, li, vi));
+                vars.push(VarEntry { name: e.name.clone(), value: marker, secret: false, literal: true });
             } else if vault_ref.is_some() || e.value == DEFERRED_SECRET_VALUE || e.literal || !e.value.contains("{{") {
                 vars.push(VarEntry {
                     name: e.name.clone(),
@@ -2697,32 +2721,58 @@ fn validate_static_secret_template(
             probe_layers.push(VarLayer { label: "iteration (extracted)".into(), vars: ext_vars });
         }
     }
-    let probe = Resolver::new(probe_layers, None);
+    let real_for_vault = expand_vault.then(|| Resolver::new(ctx.var_layers.clone(), None).with_secrets(ctx.secrets.clone()));
     let masked = mask_helpers(template, &mut probe_markers);
-    match probe.resolve(&masked, "variables") {
-        Ok(expanded) => {
-            let has_per_run = probe_markers
-                .split(&expanded)
-                .iter()
-                .any(|part| matches!(part, Part::Mark(mi) if !matches!(probe_markers.list[*mi], Mark::Secret(_))));
-            if has_per_run {
-                return Err(reason(
-                    None,
-                    "secret_mixed",
-                    format!(
-                        "{purpose} depends on a per-iteration value or dynamic helper; JMeter cannot represent it as a static property"
-                    ),
-                ));
+    let mut expanded_vault = vec![false; vault_markers.len()];
+    loop {
+        let probe = Resolver::new(probe_layers.clone(), None);
+        let expanded = match probe.resolve(&masked, "variables") {
+            Ok(expanded) => expanded,
+            Err(f) => {
+                let msg = if redact_errors {
+                    "could not resolve a secret variable; check the vault and active variables".to_string()
+                } else {
+                    f.message
+                };
+                return Err(reason(None, "does_not_prepare", format!("{purpose}: {msg}")));
             }
-            Ok(())
+        };
+        let parts = probe_markers.split(&expanded);
+        let has_per_run = parts.iter().any(|part| matches!(part, Part::Mark(mi) if !matches!(probe_markers.list[*mi], Mark::Secret(_))));
+        if has_per_run {
+            return Err(reason(
+                None,
+                "secret_mixed",
+                format!("{purpose} depends on a per-iteration value or dynamic helper; JMeter cannot represent it as a static property"),
+            ));
         }
-        Err(f) => {
-            let msg = if redact_errors {
-                "could not resolve a secret variable; check the vault and active variables".to_string()
-            } else {
-                f.message
-            };
-            Err(reason(None, "does_not_prepare", format!("{purpose}: {msg}")))
+        let Some(ref r) = real_for_vault else {
+            return Ok(());
+        };
+        let mut newly_expanded = false;
+        for part in &parts {
+            if let Part::Mark(mi) = part
+                && let Mark::Secret(slot) = probe_markers.list[*mi]
+                && slot > 0
+                && !expanded_vault[slot - 1]
+            {
+                expanded_vault[slot - 1] = true;
+                newly_expanded = true;
+                let (_, li, vi) = vault_markers[slot - 1];
+                let orig = &ctx.var_layers[li].vars[vi];
+                let raw = r.variable_value(li, vi).map_err(|f| reason(None, "secret_unavailable", format!("{purpose}: {}", f.message)))?;
+                let target = &mut probe_layers[li].vars[vi];
+                if orig.literal || !raw.contains("{{") {
+                    target.value = probe_markers.add(Mark::Secret(0));
+                    target.literal = true;
+                } else {
+                    target.value = mask_helpers(&raw, &mut probe_markers);
+                    target.literal = false;
+                }
+            }
+        }
+        if !newly_expanded {
+            return Ok(());
         }
     }
 }

@@ -1181,8 +1181,12 @@ export function jmeterCommand(
   const quote = shell === "powershell" ? quotePowerShell : quotePosix;
   const r = o.report;
   // On Windows, invoke java with ApacheJMeter.jar directly so jmeter.bat never
-  // re-parses single-quoted filenames through cmd.exe.
-  const bin = shell === "powershell" ? "& java -jar (Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar')" : "jmeter";
+  // re-parses single-quoted filenames through cmd.exe; fall back to the jar
+  // beside `jmeter` on PATH when JMETER_HOME is unset.
+  const bin =
+    shell === "powershell"
+      ? "& java -jar $(if ($env:JMETER_HOME) { Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar' } else { Join-Path (Split-Path -Parent (Get-Command jmeter -ErrorAction Stop).Source) 'ApacheJMeter.jar' })"
+      : "jmeter";
   let cmd = `${bin} -n -t ${quote(o.written[0] ?? "plan.jmx")} -l ${quote(resultsFile)}`;
   if (r?.secrets_written && o.written.length > 1) cmd += ` -q ${quote(`<full path of ${o.written[o.written.length - 1]}>`)}`;
   for (const [k, v] of r?.jmeter_properties ?? []) cmd += ` ${quote(`-J${k}=${v}`)}`;
@@ -1332,22 +1336,28 @@ export function JtlImportDialog(props: {
   const [version, setVersion] = useState(JMETER_VERSION);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const activeWs = useRef(props.workspaceId);
-  activeWs.current = props.workspaceId;
+  const opRef = useRef(0);
+  useEffect(() => {
+    const id = ++opRef.current;
+    return () => {
+      opRef.current = id + 1;
+    };
+  }, [props.workspaceId]);
   const choose = async () => {
     const ws = props.workspaceId;
+    const op = ++opRef.current;
     setErr(null);
     setBusy(true);
     try {
       const f = await api.chooseFile("jtl_import", { filters: [{ name: "JMeter results", extensions: ["jtl", "csv", "xml"] }] });
-      if (!f || activeWs.current !== ws) return;
+      if (!f || opRef.current !== op) return;
       const runId = await api.importJtl(ws, f.token, planId || null, version.trim() || null);
-      if (activeWs.current !== ws) return;
+      if (opRef.current !== op) return;
       props.onImported(ws, runId);
     } catch (e) {
-      if (activeWs.current === ws) setErr(String((e as Error).message));
+      if (opRef.current === op) setErr(String((e as Error).message));
     } finally {
-      if (activeWs.current === ws) setBusy(false);
+      if (opRef.current === op) setBusy(false);
     }
   };
   return (

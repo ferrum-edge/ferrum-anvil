@@ -115,7 +115,11 @@ fn load_012_cli_exports_a_plan_refuses_strict_tls_and_imports_results() {
     let out_txt = text(&o);
     let quoted = format!("'{}'", jmx.display());
     let shell_label = if cfg!(windows) { "PowerShell" } else { "sh" };
-    let expected_bin = if cfg!(windows) { "& java -jar (Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar')" } else { "jmeter" };
+    let expected_bin = if cfg!(windows) {
+        "& java -jar $(if ($env:JMETER_HOME) { Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar' } else { Join-Path (Split-Path -Parent (Get-Command jmeter -ErrorAction Stop).Source) 'ApacheJMeter.jar' })"
+    } else {
+        "jmeter"
+    };
     assert!(out_txt.contains(&format!("run ({shell_label}): {expected_bin} -n -t {quoted} -l ")), "{out_txt}");
     assert!(out_txt.contains("-Jjmeter.save.saveservice.output_format=xml"), "{out_txt}");
     assert!(out_txt.contains("-Jjmeter.save.saveservice.url=false"), "{out_txt}");
@@ -141,7 +145,8 @@ fn load_012_cli_exports_a_plan_refuses_strict_tls_and_imports_results() {
     if cfg!(windows) {
         assert!(
             ds_txt.contains("Set-Location -LiteralPath ")
-                && ds_txt.contains("-ErrorAction Stop; & java -jar (Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar') -n -t d.jmx")
+                && ds_txt.contains(&format!("-ErrorAction Stop; {expected_bin} -n -t d.jmx"))
+                && ds_txt.contains("Set-Location -LiteralPath $__p.Path }")
                 && !ds_txt.contains(r"\\?\"),
             "{ds_txt}"
         );
@@ -150,7 +155,7 @@ fn load_012_cli_exports_a_plan_refuses_strict_tls_and_imports_results() {
         let om = anvil(data, &["load", "export-jmx", "Shop", "echo", "--out", meta.to_str().unwrap()]);
         assert_eq!(om.status.code(), Some(0), "{}", text(&om));
         let meta_txt = text(&om);
-        assert!(meta_txt.contains("& java -jar (Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar') -n -t '"), "{meta_txt}");
+        assert!(meta_txt.contains(&format!("{expected_bin} -n -t '")), "{meta_txt}");
     } else {
         assert!(ds_txt.contains("(cd -- ") && ds_txt.contains("&& jmeter -n -t d.jmx"), "{ds_txt}");
     }

@@ -955,10 +955,12 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     let doc_gd = Doc::parse(&out_gd.jmx);
     let csv_gd = doc_gd.first("CSVDataSet");
     assert_eq!(doc_gd.prop(csv_gd, "filename"), "./ report.dataset.csv");
-    let csv_gd_parent = csv_gd.parent().and_then(|ht| ht.prev_sibling_element()).map(|el| el.tag_name().name().to_string());
-    assert_eq!(csv_gd_parent.as_deref(), Some("LoopController"), "gated CSVDataSet must live inside the gated 1-loop LoopController");
+    let csv_gd_parent = csv_gd.parent().and_then(|ht| ht.prev_sibling_element()).expect("gated LoopController");
+    assert_eq!(csv_gd_parent.tag_name().name(), "LoopController", "gated CSVDataSet must live inside the gated 1-loop LoopController");
+    assert_eq!(doc_gd.prop(csv_gd_parent, "LoopController.continue_forever"), "true");
+    assert_eq!(doc_gd.prop(csv_gd_parent, "LoopController.loops"), "1");
 
-    // Default jmeter_properties explicitly disable response/header/samplerData/on_error capture.
+    // Default jmeter_properties explicitly disable response/header/samplerData/on_error/sample_variables capture.
     for prop in [
         "jmeter.save.saveservice.response_data",
         "jmeter.save.saveservice.response_data.on_error",
@@ -972,4 +974,37 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
             out_gd.report.jmeter_properties
         );
     }
+    assert!(
+        out_gd.report.jmeter_properties.iter().any(|(k, v)| k == "sample_variables" && v.is_empty()),
+        "missing default sample_variables= clearing property: {:?}",
+        out_gd.report.jmeter_properties
+    );
+
+    // $randomInt upper bound i64::MAX overflows JMeter's __Random (max + 1) and must be refused.
+    let mut rmax_req = RequestSpec::http("GET", "http://example.test/{{$randomInt 0 9223372036854775807}}");
+    rmax_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_rmax, c_rmax) = step(rmax_req);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_rmax, c_rmax, "rmax")], None)), ["dynamic_helper"]);
+
+    // Repeated request ID in a chain: step 0 extracts `tok` before step 1, so step 1's whole-field
+    // credential template referencing non-literal secret `wrap = "{{tok}}"` sees the extracted `tok`
+    // and must be refused as `secret_mixed` rather than reusing step 0's secret key.
+    let mut rep_req = RequestSpec::http("GET", "http://example.test/items");
+    rep_req.headers.push(KeyValue::new("X-Api-Key", "prefix-{{wrap}}"));
+    rep_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let mut rep_req_step0 = rep_req.clone();
+    rep_req_step0.extractions.push(Extraction {
+        variable: "tok".into(),
+        source: ExtractionSource::Header { name: "X-Next-Token".into() },
+        sensitive: false,
+    });
+    let (shared_id, mut c_rep0) = step(rep_req_step0);
+    c_rep0.var_layers.push(layer("env", &[("tok", "initial-static", false), ("wrap", "{{tok}}", true)]));
+    let (_, mut c_rep1) = step(rep_req);
+    c_rep1.request_id = Some(shared_id);
+    c_rep1.var_layers.push(layer("env", &[("tok", "initial-static", false), ("wrap", "{{tok}}", true)]));
+    assert_eq!(
+        export_codes(&Fx::new(iterations(1, 1), vec![(shared_id, c_rep0, "rep-0"), (shared_id, c_rep1, "rep-1")], None)),
+        ["secret_mixed"]
+    );
 }

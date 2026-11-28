@@ -432,8 +432,10 @@ async fn load_012_default_export_properties_do_not_write_url_credentials_to_jtl(
     let f = fx::serve("127.0.0.1:0", None).await.unwrap();
     let path_secret = "path-SENSITIVE-token";
     let query_secret = "qkey-SENSITIVE-value";
+    let ds_secret_cell = "ds-SAMPLEVAR-value";
     let mut spec = RequestSpec::http("GET", &f.url("/echo/{{secret_seg}}"));
     spec.auth = AuthConfig::ApiKey { name: "api_key".into(), value: SensitiveValue::template("{{qkey}}"), location: KeyLocation::Query };
+    spec.headers.push(KeyValue::new("X-User", "{{user}}"));
     spec.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
     // Also attach a failing body assertion on the echoed response (which echoes
     // both secrets) to prove default XML save properties write neither URLs,
@@ -441,14 +443,15 @@ async fn load_012_default_export_properties_do_not_write_url_credentials_to_jtl(
     spec.assertions.push(assertion(AssertionKind::Body { comparison: Comparison::Contains, value: "NEVER-MATCHES".into() }));
     let (id, mut c) = step(spec);
     c.var_layers.push(layer("workspace", &[("secret_seg", path_secret, true), ("qkey", query_secret, true)]));
-    let plan = Fx::new(iterations(3, 1), vec![(id, c, "url-secret")], None);
+    let plan = Fx::new(iterations(3, 1), vec![(id, c, "url-secret")], Some(dataset(&format!("user\n{ds_secret_cell}\n"))));
     let out = plan.export(&export_opts(true)).expect("exported");
     assert!(!out.jmx.contains("SENSITIVE"), "no secret material in .jmx");
     // Run JMeter with a noisy local properties file enabling response/header/samplerData
-    // capture on error, overridden ONLY by our exported default `-J` properties, to
-    // prove none of the echoed credentials or headers leak into results.jtl.
+    // and sample_variables capture, overridden ONLY by our exported default `-J` properties,
+    // to prove none of the echoed credentials, headers, or dataset variables leak into results.jtl.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("plan.jmx"), &out.jmx).unwrap();
+    std::fs::write(dir.path().join("plan.dataset.csv"), out.dataset_csv.as_ref().unwrap()).unwrap();
     std::fs::write(dir.path().join("secrets.properties"), out.secrets_properties.as_ref().unwrap().as_bytes()).unwrap();
     std::fs::write(
         dir.path().join("noisy.properties"),
@@ -456,7 +459,8 @@ async fn load_012_default_export_properties_do_not_write_url_credentials_to_jtl(
          jmeter.save.saveservice.response_data.on_error=true\n\
          jmeter.save.saveservice.samplerData=true\n\
          jmeter.save.saveservice.requestHeaders=true\n\
-         jmeter.save.saveservice.responseHeaders=true\n",
+         jmeter.save.saveservice.responseHeaders=true\n\
+         sample_variables=anvil_ds_0\n",
     )
     .unwrap();
     let mut cmd = tokio::process::Command::new(jmeter());
@@ -483,6 +487,8 @@ async fn load_012_default_export_properties_do_not_write_url_credentials_to_jtl(
     let raw_jtl = std::fs::read_to_string(run.jtl()).expect("JMeter wrote results.jtl");
     assert!(!raw_jtl.contains(path_secret), "URL path secret leaked into JTL: {raw_jtl}");
     assert!(!raw_jtl.contains(query_secret), "query API key leaked into JTL: {raw_jtl}");
+    assert!(!raw_jtl.contains(ds_secret_cell), "sample_variables leaked dataset value into JTL: {raw_jtl}");
+    assert!(!raw_jtl.contains("anvil_ds_0="), "sample_variables attribute leaked into JTL: {raw_jtl}");
     assert!(!raw_jtl.contains("<assertionResult>"), "assertion result body leaked into JTL: {raw_jtl}");
     assert!(!raw_jtl.contains("<responseData"), "response body leaked into JTL: {raw_jtl}");
     assert!(!raw_jtl.contains("<requestHeader"), "request headers leaked into JTL: {raw_jtl}");

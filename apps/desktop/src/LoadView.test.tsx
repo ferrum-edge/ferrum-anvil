@@ -1398,9 +1398,11 @@ describe("LOAD-012 jmeterCommand", () => {
     expect(posix).toBe(
       `jmeter -n -t 'Checkout $HOME '\\''run'\\''.jmx' -l 'checkout-results-20261128-000000.jtl' -q '<full path of odd "$(whoami)" \`x\` '\\''s'\\''.properties>'`,
     );
+    const pwshBin =
+      "& java -jar $(if ($env:JMETER_HOME) { Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar' } else { Join-Path (Split-Path -Parent (Get-Command jmeter -ErrorAction Stop).Source) 'ApacheJMeter.jar' })";
     const pwsh = jmeterCommand(o, "checkout-results-20261128-000000.jtl", "powershell");
     expect(pwsh).toBe(
-      `& java -jar (Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar') -n -t 'Checkout $HOME ''run''.jmx' -l 'checkout-results-20261128-000000.jtl' -q '<full path of odd "$(whoami)" \`x\` ''s''.properties>'`,
+      `${pwshBin} -n -t 'Checkout $HOME ''run''.jmx' -l 'checkout-results-20261128-000000.jtl' -q '<full path of odd "$(whoami)" \`x\` ''s''.properties>'`,
     );
     const meta = {
       report: { secrets_written: false, jmeter_properties: [] as [string, string][] },
@@ -1408,7 +1410,7 @@ describe("LOAD-012 jmeterCommand", () => {
       written: ["a & %TEMP% ^ !x!.jmx"],
     } as unknown as Parameters<typeof jmeterCommand>[0];
     expect(jmeterCommand(meta, "r.jtl", "powershell")).toBe(
-      `& java -jar (Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar') -n -t 'a & %TEMP% ^ !x!.jmx' -l 'r.jtl'`,
+      `${pwshBin} -n -t 'a & %TEMP% ^ !x!.jmx' -l 'r.jtl'`,
     );
     // PowerShell also treats typographic single quotes as string delimiters.
     expect(quotePowerShell("a\u2018b\u2019c\u201ad\u201be")).toBe("'a\u2018\u2018b\u2019\u2019c\u201a\u201ad\u201b\u201be'");
