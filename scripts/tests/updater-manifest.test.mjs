@@ -111,6 +111,8 @@ test("a published latest.json that the app would misread or refuse is rejected",
   const bad = [
     [(m) => (m.version = "0.1.8"), /version "0\.1\.8" is not 0\.1\.9/],
     [(m) => (m.pub_date = "yesterday"), /pub_date/],
+    [(m) => (m.pub_date = "2026-02-30T00:00:00Z"), /pub_date/],
+    [(m) => (m.platforms["linux-x86_64-appimage"].signature = `${m.platforms["linux-x86_64-appimage"].signature}\n`), /must not contain whitespace/],
     [(m) => delete m.platforms["windows-x86_64-msi"], /platforms are/],
     [(m) => (m.platforms["linux-x86_64"] = m.platforms["linux-x86_64-appimage"]), /platforms are/],
     [(m) => (m.platforms["linux-x86_64-appimage"].url = m.platforms["linux-x86_64-appimage"].url.replace("anvil-v0.1.9", "anvil-v0.1.8")), /not an asset of anvil-v0\.1\.9/],
@@ -137,12 +139,72 @@ test("a published latest.json that the app would misread or refuse is rejected",
     mutate(m);
     assert.throws(() => checkPublishedManifest(m, published), message);
   }
-  // Exact sidecar signature binding catches a same-version swap even when
-  // trusted-comment filenames match (as on darwin-aarch64 vs darwin-x86_64).
+  // Exact evidence + sidecar signature binding catches a same-version swap
+  // even when trusted-comment filenames match (as on darwin-aarch64 vs
+  // darwin-x86_64), and rejects evidence whose sidecar filename does not match
+  // the matched asset.
   const signatures = Object.fromEntries(
     Object.values(PUBLISHED.platforms).map((entry) => [`${decodeURIComponent(entry.url.split("/").pop())}.sig`, entry.signature]),
   );
-  assert.doesNotThrow(() => checkPublishedManifest(PUBLISHED, { ...published, signatures }));
+  const evidence = {
+    updater: { signed: true, manifest: "latest.json", key_id: "BFE08514FEC0E65A" },
+    targets: [
+      {
+        target: "aarch64-apple-darwin",
+        updater: {
+          artifacts: [
+            {
+              name: "Ferrum-Anvil_0.1.9_aarch64.app.tar.gz",
+              signature: "Ferrum-Anvil_0.1.9_aarch64.app.tar.gz.sig",
+              platforms: ["darwin-aarch64-app", "darwin-aarch64"],
+            },
+          ],
+        },
+      },
+      {
+        target: "x86_64-apple-darwin",
+        updater: {
+          artifacts: [
+            {
+              name: "Ferrum-Anvil_0.1.9_x64.app.tar.gz",
+              signature: "Ferrum-Anvil_0.1.9_x64.app.tar.gz.sig",
+              platforms: ["darwin-x86_64-app", "darwin-x86_64"],
+            },
+          ],
+        },
+      },
+      {
+        target: "x86_64-unknown-linux-gnu",
+        updater: {
+          artifacts: [
+            {
+              name: "Ferrum-Anvil_0.1.9_amd64.AppImage",
+              signature: "Ferrum-Anvil_0.1.9_amd64.AppImage.sig",
+              platforms: ["linux-x86_64-appimage"],
+            },
+          ],
+        },
+      },
+      {
+        target: "x86_64-pc-windows-msvc",
+        updater: {
+          artifacts: [
+            {
+              name: "Ferrum-Anvil_0.1.9_x64-setup.exe",
+              signature: "Ferrum-Anvil_0.1.9_x64-setup.exe.sig",
+              platforms: ["windows-x86_64-nsis"],
+            },
+            {
+              name: "Ferrum-Anvil_0.1.9_x64_en-US.msi",
+              signature: "Ferrum-Anvil_0.1.9_x64_en-US.msi.sig",
+              platforms: ["windows-x86_64-msi"],
+            },
+          ],
+        },
+      },
+    ],
+  };
+  assert.doesNotThrow(() => checkPublishedManifest(PUBLISHED, { ...published, evidence, signatures }));
   const swappedMac = clone();
   const armSig = swappedMac.platforms["darwin-aarch64"].signature;
   const x64Sig = swappedMac.platforms["darwin-x86_64"].signature;
@@ -150,7 +212,11 @@ test("a published latest.json that the app would misread or refuse is rejected",
   swappedMac.platforms["darwin-aarch64-app"].signature = x64Sig;
   swappedMac.platforms["darwin-x86_64"].signature = armSig;
   swappedMac.platforms["darwin-x86_64-app"].signature = armSig;
-  assert.throws(() => checkPublishedManifest(swappedMac, { ...published, signatures }), /inline signature differs from/);
+  assert.throws(() => checkPublishedManifest(swappedMac, { ...published, evidence, signatures }), /inline signature differs from/);
+  const swappedEvidence = JSON.parse(JSON.stringify(evidence));
+  swappedEvidence.targets[0].updater.artifacts[0].signature = "Ferrum-Anvil_0.1.9_x64.app.tar.gz.sig";
+  swappedEvidence.targets[1].updater.artifacts[0].signature = "Ferrum-Anvil_0.1.9_aarch64.app.tar.gz.sig";
+  assert.throws(() => checkPublishedManifest(swappedMac, { ...published, evidence: swappedEvidence, signatures }), /sidecar .* does not match/);
   // Signed by another key, or for another version.
   const other = keyPair();
   const m = clone();

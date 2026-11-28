@@ -110,7 +110,24 @@ const ARCH_FOR = {
   "windows-x86_64": /(?:_|-)(?:x64|x86_64)[._-]/,
 };
 const PLATFORM_KEY = /^(darwin|linux|windows)-(x86_64|aarch64)(?:-(app|appimage|nsis|msi))?$/;
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/;
+
+function isValidRfc3339Utc(value) {
+  if (typeof value !== "string") return false;
+  const m = ISO_DATE.exec(value);
+  if (!m) return false;
+  const [y, mo, d, h, mi, s] = m.slice(1).map(Number);
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 59) return false;
+  const dt = new Date(Date.UTC(y, mo - 1, d, h, mi, s));
+  return (
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === mo - 1 &&
+    dt.getUTCDate() === d &&
+    dt.getUTCHours() === h &&
+    dt.getUTCMinutes() === mi &&
+    dt.getUTCSeconds() === s
+  );
+}
 
 /** The `file:` field minisign / Tauri writes into the trusted comment, if any. */
 export const signedFile = (trusted) =>
@@ -133,7 +150,7 @@ export const signedFile = (trusted) =>
 export function checkPublishedManifest(manifest, { repo, tag, version, pubkey, evidence, signatures } = {}) {
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) throw new Error("latest.json is not a JSON object");
   if (manifest.version !== version) throw new Error(`latest.json version ${JSON.stringify(manifest.version)} is not ${version}`);
-  if (typeof manifest.pub_date !== "string" || !ISO_DATE.test(manifest.pub_date)) throw new Error("latest.json pub_date is not an RFC 3339 UTC time");
+  if (!isValidRfc3339Utc(manifest.pub_date)) throw new Error("latest.json pub_date is not an RFC 3339 UTC time");
   if (typeof manifest.notes !== "string") throw new Error("latest.json notes is not a string");
   const platforms = manifest.platforms;
   if (!platforms || typeof platforms !== "object" || Array.isArray(platforms)) throw new Error("latest.json platforms is not an object");
@@ -162,6 +179,7 @@ export function checkPublishedManifest(manifest, { repo, tag, version, pubkey, e
     const [, os, arch, installer] = PLATFORM_KEY.exec(key) ?? [];
     const entry = platforms[key];
     if (!entry || typeof entry.url !== "string" || typeof entry.signature !== "string") throw new Error(`latest.json ${key}: needs url and signature strings`);
+    if (/\s/.test(entry.signature)) throw new Error(`latest.json ${key}: inline signature must not contain whitespace`);
     if (!entry.url.startsWith(prefix)) throw new Error(`latest.json ${key}: ${entry.url} is not an asset of ${tag}`);
     const asset = decodeURIComponent(entry.url.slice(prefix.length));
     const wanted = ASSET_FOR[installer ?? (os === "darwin" ? "app" : "")];
@@ -183,10 +201,13 @@ export function checkPublishedManifest(manifest, { repo, tag, version, pubkey, e
       const expected = expectedByPlatform.get(key);
       if (!expected) throw new Error(`latest.json ${key}: missing from release-evidence.json`);
       if (asset !== expected.name) throw new Error(`latest.json ${key}: ${asset} does not match release-evidence.json asset ${expected.name}`);
+      if (expected.signature !== `${asset}.sig`) {
+        throw new Error(`latest.json ${key}: release-evidence.json sidecar ${expected.signature} does not match ${asset}.sig`);
+      }
       if (signatures) {
         const expectedSig = signatures[expected.signature];
         if (typeof expectedSig !== "string") throw new Error(`latest.json ${key}: missing sidecar signature ${expected.signature}`);
-        if (entry.signature.trim() !== expectedSig.trim()) {
+        if (entry.signature !== expectedSig.trim()) {
           throw new Error(`latest.json ${key}: inline signature differs from ${expected.signature}`);
         }
       }
@@ -194,7 +215,7 @@ export function checkPublishedManifest(manifest, { repo, tag, version, pubkey, e
       const sidecar = `${asset}.sig`;
       const expectedSig = signatures[sidecar];
       if (typeof expectedSig !== "string") throw new Error(`latest.json ${key}: missing sidecar signature ${sidecar}`);
-      if (entry.signature.trim() !== expectedSig.trim()) {
+      if (entry.signature !== expectedSig.trim()) {
         throw new Error(`latest.json ${key}: inline signature differs from ${sidecar}`);
       }
     }
