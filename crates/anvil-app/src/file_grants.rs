@@ -668,7 +668,7 @@ impl FileGrants {
             published.push(display_name(Some(sec_name)));
         }
 
-        if let (Some(ref sibling), Some(tmp)) = (&sibling_name, ds_tmp.take()) {
+        if let (Some(sibling), Some(tmp)) = (sibling_name.as_ref(), ds_tmp.take()) {
             let res = if replace_dataset { plan_folder.rename(&tmp, sibling) } else { plan_folder.publish_no_clobber(&tmp, sibling) };
             if let Err(err) = res {
                 let _ = plan_folder.remove_file(&tmp);
