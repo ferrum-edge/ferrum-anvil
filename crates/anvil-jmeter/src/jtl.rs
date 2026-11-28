@@ -324,6 +324,7 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
     let (c_failure, c_bytes, c_sent, c_threads) = (col("failureMessage"), col("bytes"), col("sentBytes"), col("allThreads"));
     let mut record = csv::StringRecord::new();
     let mut line = 1u64;
+    let mut first_record = true;
     loop {
         rdr.get_mut().reset();
         match rdr.read_record(&mut record) {
@@ -331,21 +332,22 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
                 // For CRLF headers, `csv::Reader::headers()` stops at `\r` and
                 // consumes the trailing `\n` on the first `read_record` call
                 // (including when `\r` and `\n` are split across reads).
-                if line == 1 && rdr.get_ref().header_bytes.max(rdr.position().byte()) > limits.max_record_bytes {
+                if first_record && rdr.get_ref().header_bytes.max(rdr.position().byte()) > limits.max_record_bytes {
                     return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
                 }
                 break;
             }
             Ok(true) => {
-                if line == 1
+                if first_record
                     && (rdr.get_ref().header_bytes > limits.max_record_bytes
                         || record.position().is_some_and(|p| p.byte() > limits.max_record_bytes))
                 {
                     return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
                 }
+                first_record = false;
             }
             Err(e) => {
-                if line == 1 && rdr.get_ref().header_bytes > limits.max_record_bytes {
+                if first_record && rdr.get_ref().header_bytes > limits.max_record_bytes {
                     return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
                 }
                 return Err(limit_error(rdr.get_ref(), limits, "a CSV record").unwrap_or_else(|| match e.kind() {

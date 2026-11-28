@@ -7995,7 +7995,7 @@
     },
     {
      "path": "apps/desktop/e2e/updater/rel003-1-refusal.e2e.ts",
-     "line": 30,
+     "line": 31,
      "kind": "native_e2e"
     },
     {
@@ -8005,7 +8005,7 @@
     },
     {
      "path": "apps/desktop/e2e/updater/rel003-2-install.e2e.ts",
-     "line": 34,
+     "line": 35,
      "kind": "native_e2e"
     },
     {
@@ -8025,7 +8025,7 @@
     },
     {
      "path": "apps/desktop/e2e/updater/update.ts",
-     "line": 49,
+     "line": 50,
      "kind": "native_e2e"
     },
     {
@@ -8045,7 +8045,7 @@
     }
    ],
    "lab": null,
-   "note": "Refusal is automated against built bundles: .github/workflows/updater-e2e.yml builds the e2e-instrumented desktop bundle (AppImage on ubuntu-26.04, .app on macos-15, and on windows-2025 the NSIS and the MSI installer, installed silently; there the plugin starts the verified installer and ends the app, and the spec checks the installed executable's version, the installer's restart of the app and the unchanged profile contents from outside) with a minisign key generated for the run and a loopback HTTPS update endpoint whose test CA is added to the system trust store (requireSignedVersion stays on), and drives the app's update_install command through WebDriver (apps/desktop/e2e/updater/). A correctly signed update served with a certificate from an untrusted CA is refused before any request reaches the endpoint; an update signed by another key, one with a corrupted signature and one altered after signing are each refused with the plugin's minisign error after the app requested the manifest and the artifact; during each refusal the bundle's files (SHA-256, mode, size, inode, mtime), the reported version and the persistent profile files (SQLite's -shm read index excluded) are unchanged. Relaunched afterwards, the bundle matches its recorded contents and reports its own version, and the same profile unlocks with the same workspaces; a validly signed update installs and the relaunched bundle reports the new version. The rel_003_* unit tests run more signature variants through the same updater path on Tauri's mock runtime. Every manifest served copies the newest published release's latest.json, whose shape (the seven platform keys, asset URLs of that tag, owner-key signatures recording its version) the job checks with checkPublishedManifest (also unit-tested on anvil-v0.1.9's manifest). Not covered: release-profile bundles without the e2e feature, .deb/.rpm (no in-app update). The valid path was also run by hand on macOS arm64 from 0.1.0 to 0.1.1 (release runs 36827029766 and 36835226571, updater key BFE08514FEC0E65A); macOS may re-prompt for Keychain access after an update of an unsigned build (ferrum-edge/ferrum-anvil#2)."
+   "note": "Refusal is automated against built bundles: .github/workflows/updater-e2e.yml builds the e2e-instrumented desktop bundle (AppImage on ubuntu-26.04, .app on macos-15, and on windows-2025 the NSIS and the MSI installer, installed silently; there the plugin starts the verified installer and ends the app, and the spec checks the installed executable's version, the installer's restart of the app and the unchanged profile contents from outside) with a minisign key generated for the run and a loopback HTTPS update endpoint whose test CA is added to the system trust store (requireSignedVersion stays on), and drives the app's update_install command through WebDriver (apps/desktop/e2e/updater/). A correctly signed update served with a certificate from an untrusted CA is refused before any request reaches the endpoint; an update signed by another key, one with a corrupted signature and one altered after signing are each refused with the plugin's minisign error after the app requested the manifest and the artifact; during each refusal the bundle's files (SHA-256, mode, size, inode, mtime), the reported version and the persistent profile files (SQLite's -shm read index excluded) are unchanged. Relaunched afterwards, the bundle matches its recorded contents and reports its own version, and the same profile unlocks with the same workspaces; a validly signed update installs and the relaunched bundle reports the new version. The rel_003_* unit tests run more signature variants through the same updater path on Tauri's mock runtime. Every manifest served copies the newest published release's latest.json, whose shape (the seven platform keys, asset URLs of that tag, owner-key signatures recording its version) the job checks with checkPublishedManifest (also unit-tested on anvil-v0.1.9's manifest). Release-profile bundles built with default features (no e2e feature) run the same specs on ubuntu-26.04 (AppImage) and windows-2025 (NSIS, MSI) through the official tauri-driver (WebKitWebDriver; msedgedriver), with the profile created by the release CLI and unlocked through the lock screen. Not covered: a release-profile macOS .app (WKWebView has no platform WebDriver), .deb/.rpm (no in-app update). The valid path was also run by hand on macOS arm64 from 0.1.0 to 0.1.1 (release runs 36827029766 and 36835226571, updater key BFE08514FEC0E65A); macOS may re-prompt for Keychain access after an update of an unsigned build (ferrum-edge/ferrum-anvil#2)."
   },
   {
    "id": "REL-004",

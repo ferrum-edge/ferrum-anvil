@@ -11,5 +11,5 @@
     "isolatedModules": true,
     "types": ["node", "mocha", "@wdio/globals/types", "@wdio/mocha-framework", "@wdio/tauri-service"]
   },
-  "include": ["./**/*.ts", "../wdio.conf.ts"]
+  "include": ["./**/*.ts", "../wdio.conf.ts", "../wdio.release.conf.ts"]
 }
