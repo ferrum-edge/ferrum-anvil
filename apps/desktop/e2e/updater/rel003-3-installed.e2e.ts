@@ -3,10 +3,11 @@
 // the same profile.
 import { expect } from "@wdio/globals";
 import { invoke, profileName, waitForWorkbench } from "../helpers";
-import { OFFERED, appVersion } from "./update";
+import { OFFERED, appVersion, unlockThroughLockScreen } from "./update";
 
 describe("REL-003: the relaunched bundle runs the installed update", () => {
   it("reports the offered version and unlocks the same profile", async () => {
+    await unlockThroughLockScreen();
     await waitForWorkbench();
     expect(await appVersion()).toBe(OFFERED);
     const status = await invoke<{ state: string; profile?: string }>("app_status");

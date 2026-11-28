@@ -855,9 +855,21 @@ signature) and the artifact, and call the app's `update_install` command:
 | `rel003-2-install` | relaunched, the bundle is byte for byte as recorded before the refusals and reports its own version, and the same profile unlocks with the same workspaces (`workspaces_list`); the validly signed update installs: the AppImage file, or the `.app` folder, now holds the offered build, and the profile files (`-shm` excluded) are unchanged during the install. On Windows the plugin starts the verified installer (NSIS `/P /UPDATE`, or msiexec `/i … /passive`) and ends the app, so the spec starts `update_install` without waiting for it and checks from outside: the app downloaded the manifest and the artifact, the installed executable's version becomes the offered one, the installer (the updater's staged `<app>-<version>-installer.exe`, or msiexec) finishes and restarts the app (which the spec stops), and the profile files' contents are unchanged; the spec then drops the WebDriver session the update ended, so the run ends cleanly |
 | `rel003-3-installed` | relaunched, the bundle reports the offered version and unlocks the same profile |
 
-The bundles carry the `e2e` feature (embedded WebDriver) and a debug build,
-so this is not packaging evidence for release-profile bundles without that
-feature. The workflow runs when the update path, its tests or the
+Three more jobs run the same three specs against **release-profile** bundles
+built with default features, as `release.yml` builds them (no `e2e` feature:
+no embedded WebDriver, no environment-driven unlock): the AppImage on Ubuntu
+26.04 and the NSIS and MSI installs on Windows 2025. They are driven through
+`wdio.release.conf.ts`, the `@wdio/tauri-service` "external" provider: the
+official `tauri-driver` 2.1.0 (installed with `cargo install --locked`), which
+starts the platform's WebDriver (WebKitWebDriver from `webkit2gtk-driver` on
+Linux; msedgedriver matched to the WebView2 runtime on Windows) and enables
+webview automation for the process it launches (Tauri's
+`TAURI_WEBVIEW_AUTOMATION`); Anvil's code is the release code. The profile is
+created beforehand with the release CLI (`anvil profile create`, passphrase
+from `ANVIL_PASSPHRASE`), and each spec unlocks it by typing the passphrase
+into the lock screen (`unlockThroughLockScreen`). The macOS `.app` has no
+platform WebDriver for its webview, so the e2e job is the macOS coverage in
+this workflow. The workflow runs when the update path, its tests or the
 workflow change, weekly and on demand.
 
 ## Clean-install smoke (REL-001)
