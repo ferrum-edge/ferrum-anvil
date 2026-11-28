@@ -100,7 +100,7 @@ is recorded in [its audit](audit/gateway-0.9.21-delta.md#qualification-status).
 
 - **179 cases have executed evidence:**
   - 100 live against the real gateway (including TRUST-009/010/011, the G01 lookup cases);
-  - 75 automated tests (REL-003, signed update integrity, among them: built desktop bundles on Linux, macOS and Windows (NSIS and MSI installs) refuse an update signed by another key, with a corrupted signature or altered after signing, and install a validly signed one; release-profile bundles without the e2e feature are not covered);
+  - 75 automated tests (REL-003, signed update integrity, among them: built desktop bundles on Linux, macOS and Windows (NSIS and MSI installs) refuse an update signed by another key, with a corrupted signature or altered after signing, and install a validly signed one; release-profile bundles without the e2e feature do the same on Linux and Windows, driven through the official tauri-driver);
   - 4 executed release checks:
     - REL-002, production driver absence: the release check on every installer and archive.
     - REL-006/007/008, download manifest match, website navigation and website feature truth: the hosted website check in [verification/website-evidence.md](verification/website-evidence.md), the one record of its pin, command, runs and counts. `website-evidence.yml`, which `release.yml` calls on every release run without gating the draft release, re-runs the website repository's tests at the pinned ferrum-edge/ferrumedge commit `5acfcd4`; pull_request run [46023775311](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/46023775311) passes 592 of 594 with none failed (the two skipped are live CDN checks unrelated to Anvil).

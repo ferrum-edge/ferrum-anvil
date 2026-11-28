@@ -28,11 +28,13 @@ import {
   startUpdateServer,
   statePath,
   stopInstalledApps,
+  unlockThroughLockScreen,
   until,
 } from "./update";
 
 describe("REL-003: after the refusals, the relaunched bundle is unchanged and a valid update installs", () => {
   before(async () => {
+    await unlockThroughLockScreen();
     await waitForWorkbench();
   });
 

@@ -28,9 +28,13 @@ on:
       # The NSIS template the Windows lanes install and update through.
       - "apps/desktop/src-tauri/windows/installer.nsi"
       - "apps/desktop/src-tauri/Cargo.toml"
+      # Release lanes create a profile with the CLI and unlock through LockScreen.
+      - "apps/desktop/src/LockScreen.tsx"
+      - "crates/anvil-cli/src/main.rs"
       - "apps/desktop/e2e/updater/**"
       - "apps/desktop/e2e/helpers.ts"
       - "apps/desktop/wdio.conf.ts"
+      - "apps/desktop/wdio.release.conf.ts"
       - "scripts/updater-manifest.mjs"
       - "scripts/tests/updater-manifest.test.mjs"
       - ".github/workflows/updater-e2e.yml"
@@ -45,9 +49,13 @@ on:
       # The NSIS template the Windows lanes install and update through.
       - "apps/desktop/src-tauri/windows/installer.nsi"
       - "apps/desktop/src-tauri/Cargo.toml"
+      # Release lanes create a profile with the CLI and unlock through LockScreen.
+      - "apps/desktop/src/LockScreen.tsx"
+      - "crates/anvil-cli/src/main.rs"
       - "apps/desktop/e2e/updater/**"
       - "apps/desktop/e2e/helpers.ts"
       - "apps/desktop/wdio.conf.ts"
+      - "apps/desktop/wdio.release.conf.ts"
       - "scripts/updater-manifest.mjs"
       - "scripts/tests/updater-manifest.test.mjs"
       - ".github/workflows/updater-e2e.yml"
@@ -72,23 +80,29 @@ env:
 
 jobs:
   updater-e2e:
-    name: Updater E2E · ${{ matrix.os }} · ${{ matrix.bundles }}
+    name: Updater E2E · ${{ matrix.os }} · ${{ matrix.bundles }} · ${{ matrix.build }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-26.04
-            bundles: appimage
-          - os: macos-15
-            bundles: app
-          - os: windows-2025
-            bundles: nsis
-          - os: windows-2025
-            bundles: msi
+          - { os: ubuntu-26.04, bundles: appimage, build: e2e }
+          - { os: macos-15, bundles: app, build: e2e }
+          - { os: windows-2025, bundles: nsis, build: e2e }
+          - { os: windows-2025, bundles: msi, build: e2e }
+          # Release profile, default features (no e2e feature, no embedded
+          # WebDriver, no environment-driven unlock), driven through the
+          # official tauri-driver (wdio.release.conf.ts).
+          - { os: ubuntu-26.04, bundles: appimage, build: release }
+          - { os: windows-2025, bundles: nsis, build: release }
+          - { os: windows-2025, bundles: msi, build: release }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     env:
       BUNDLES: ${{ matrix.bundles }}
+      BUILD: ${{ matrix.build }}
+      # Cargo's output folder for the build profile.
+      PROFILE_DIR: ${{ matrix.build == 'release' && 'release' || 'debug' }}
+      WDIO_CONFIG: ${{ matrix.build == 'release' && './wdio.release.conf.ts' || './wdio.conf.ts' }}
       # Windows: which install the updater replaces (its latest.json key).
       ANVIL_E2E_UPDATE_BUNDLE: ${{ matrix.bundles }}
     steps:
@@ -215,16 +229,19 @@ jobs:
             console.log(`${tag}: latest.json has ${keys.join(", ")}, each bound to release-evidence.json and its published .sig sidecar`);
           '
 
-      - name: Build the installed bundle (shipped version, e2e feature, test key)
+      - name: Build the installed bundle (shipped version, test key; e2e or release build)
         shell: bash
         working-directory: apps/desktop
         run: |
           set -euo pipefail
-          rm -rf ../../target/debug/bundle
-          npx tauri build --ci --debug --features e2e --bundles "$BUNDLES" --config "$REL003/base.json"
+          rm -rf "../../target/$PROFILE_DIR/bundle"
+          # e2e: debug build with the test-only feature; release: the release
+          # profile with default features, as release.yml builds it.
+          extra=(); [ "$BUILD" = release ] || extra=(--debug --features e2e)
+          npx tauri build --ci "${extra[@]}" --bundles "$BUNDLES" --config "$REL003/base.json"
           if [ "$RUNNER_OS" = Windows ]; then
             shopt -s nullglob
-            if [ "$BUNDLES" = nsis ]; then found=(../../target/debug/bundle/nsis/*-setup.exe); else found=(../../target/debug/bundle/msi/*.msi); fi
+            if [ "$BUNDLES" = nsis ]; then found=("../../target/$PROFILE_DIR/bundle"/nsis/*-setup.exe); else found=("../../target/$PROFILE_DIR/bundle"/msi/*.msi); fi
             [ "${#found[@]}" = 1 ] || { echo "::error::expected one $BUNDLES installer, found ${#found[@]}"; exit 1; }
             cp "${found[0]}" "$REL003/install/"
             # Installed silently by the next step; it sets ANVIL_E2E_APP and ANVIL_E2E_UPDATE_INSTALLED.
@@ -232,14 +249,14 @@ jobs:
             exit 0
           fi
           if [ "$RUNNER_OS" = Linux ]; then
-            shopt -s nullglob; found=(../../target/debug/bundle/appimage/*.AppImage)
+            shopt -s nullglob; found=("../../target/$PROFILE_DIR/bundle"/appimage/*.AppImage)
             [ "${#found[@]}" = 1 ] || { echo "::error::expected one AppImage, found ${#found[@]}"; exit 1; }
             installed="$REL003/install/Ferrum Anvil.AppImage"
             cp "${found[0]}" "$installed"
             chmod 755 "$installed"
             app="$installed"
           else
-            shopt -s nullglob; found=(../../target/debug/bundle/macos/*.app)
+            shopt -s nullglob; found=("../../target/$PROFILE_DIR/bundle"/macos/*.app)
             [ "${#found[@]}" = 1 ] || { echo "::error::expected one .app, found ${#found[@]}"; exit 1; }
             cp -R "${found[0]}" "$REL003/install/"
             installed="$REL003/install/$(basename "${found[0]}")"
@@ -248,6 +265,29 @@ jobs:
           [ -x "$app" ] || { echo "::error::$app is not executable"; exit 1; }
           { echo "ANVIL_E2E_UPDATE_INSTALLED=$installed"; echo "ANVIL_E2E_APP=$app"; } >> "$GITHUB_ENV"
           ls -la "$REL003/install"
+
+      - name: Profile and tauri-driver (release build)
+        if: matrix.build == 'release'
+        shell: bash
+        env:
+          ANVIL_DATA_DIR: ${{ runner.temp }}/rel003/data
+        run: |
+          set -euo pipefail
+          # The release CLI creates the passphrase profile the specs unlock
+          # through the lock screen (a release build has no environment unlock).
+          cargo build --locked --release -p anvil-cli
+          cli="target/release/anvil"; [ "$RUNNER_OS" = Windows ] && cli="target/release/anvil.exe"
+          ANVIL_PASSPHRASE="$ANVIL_E2E_PASSPHRASE" "$cli" profile create "REL-003 E2E" | sed 's/RECOVERY KEY.*/RECOVERY KEY (withheld from the log)/'
+          # The official Tauri WebDriver proxy, pinned, and the platform driver
+          # it starts (WebKitWebDriver on Linux; msedgedriver is downloaded by
+          # @wdio/tauri-service to match the WebView2 runtime).
+          cargo install tauri-driver --version 2.1.0 --locked
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends webkitgtk-webdriver
+            command -v WebKitWebDriver
+          fi
+          command -v tauri-driver
 
       - name: Install the installed bundle (Windows)
         if: runner.os == 'Windows'
@@ -271,6 +311,16 @@ jobs:
           if (-not $exe) { Get-ChildItem -Recurse -LiteralPath $dir -ErrorAction SilentlyContinue | Out-Host; throw "no app executable in $dir after the install" }
           "ANVIL_E2E_UPDATE_INSTALLED=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "ANVIL_E2E_APP=$exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          if ($env:BUILD -eq "release") {
+            # GitHub Actions Windows runners execute elevated (Administrator);
+            # WebView2 150+ ignores env/HKCU remote-debugging flags under
+            # elevation, which causes msedgedriver to time out waiting for
+            # DevToolsActivePort. The HKLM policy is honored under elevation.
+            $exeName = [IO.Path]::GetFileName($exe)
+            $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+            if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force | Out-Null }
+            New-ItemProperty -Path $policyPath -Name $exeName -Value "--remote-debugging-port=0" -PropertyType String -Force | Out-Null
+          }
           Get-ChildItem -LiteralPath $dir | Out-Host
           (Get-Item -LiteralPath $exe).VersionInfo | Format-List ProductVersion, FileVersion | Out-Host
 
@@ -279,17 +329,18 @@ jobs:
         working-directory: apps/desktop
         run: |
           set -euo pipefail
-          rm -rf ../../target/debug/bundle
+          rm -rf "../../target/$PROFILE_DIR/bundle"
+          extra=(); [ "$BUILD" = release ] || extra=(--debug --features e2e)
           TAURI_SIGNING_PRIVATE_KEY="$(cat "$REL003/keys/updater.key")" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$REL003_KEY_PASSWORD" \
-            npx tauri build --ci --debug --features e2e --bundles "$BUNDLES" --config "$REL003/update.json"
+            npx tauri build --ci "${extra[@]}" --bundles "$BUNDLES" --config "$REL003/update.json"
           shopt -s nullglob
           if [ "$RUNNER_OS" = Windows ]; then
-            if [ "$BUNDLES" = nsis ]; then found=(../../target/debug/bundle/nsis/*_"$OFFERED"_*-setup.exe); else found=(../../target/debug/bundle/msi/*_"$OFFERED"_*.msi); fi
+            if [ "$BUNDLES" = nsis ]; then found=("../../target/$PROFILE_DIR/bundle"/nsis/*_"$OFFERED"_*-setup.exe); else found=("../../target/$PROFILE_DIR/bundle"/msi/*_"$OFFERED"_*.msi); fi
           elif [ "$RUNNER_OS" = Linux ]; then
-            found=(../../target/debug/bundle/appimage/*_"$OFFERED"_*.AppImage)
+            found=("../../target/$PROFILE_DIR/bundle"/appimage/*_"$OFFERED"_*.AppImage)
           else
-            found=(../../target/debug/bundle/macos/*.app.tar.gz)
-            apps=(../../target/debug/bundle/macos/*.app)
+            found=("../../target/$PROFILE_DIR/bundle"/macos/*.app.tar.gz)
+            apps=("../../target/$PROFILE_DIR/bundle"/macos/*.app)
             cp -R "${apps[0]}" "$REL003/fixtures/expected.app"
           fi
           [ "${#found[@]}" = 1 ] || { echo "::error::expected one updater artifact, found ${#found[@]}"; exit 1; }
@@ -331,8 +382,8 @@ jobs:
         run: |
           stop_app() { if [ "$RUNNER_OS" = Windows ]; then taskkill //IM "$(basename "$ANVIL_E2E_APP")" //F //T >/dev/null 2>&1 || true; else pkill -f anvil-desktop || true; pkill -f "$ANVIL_E2E_APP" || true; fi; sleep 2; }
           trap stop_app EXIT
-          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a --server-args="-screen 0 1600x1000x24" npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-1-refusal.e2e.ts
-          else npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-1-refusal.e2e.ts; fi
+          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a --server-args="-screen 0 1600x1000x24" npx wdio run "$WDIO_CONFIG" --spec ./e2e/updater/rel003-1-refusal.e2e.ts
+          else npx wdio run "$WDIO_CONFIG" --spec ./e2e/updater/rel003-1-refusal.e2e.ts; fi
 
       - name: Run 2 — the relaunched bundle is unchanged; a valid update installs
         shell: bash
@@ -346,8 +397,8 @@ jobs:
         run: |
           stop_app() { if [ "$RUNNER_OS" = Windows ]; then taskkill //IM "$(basename "$ANVIL_E2E_APP")" //F //T >/dev/null 2>&1 || true; else pkill -f anvil-desktop || true; pkill -f "$ANVIL_E2E_APP" || true; fi; sleep 2; }
           trap stop_app EXIT
-          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a --server-args="-screen 0 1600x1000x24" npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-2-install.e2e.ts
-          else npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-2-install.e2e.ts; fi
+          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a --server-args="-screen 0 1600x1000x24" npx wdio run "$WDIO_CONFIG" --spec ./e2e/updater/rel003-2-install.e2e.ts
+          else npx wdio run "$WDIO_CONFIG" --spec ./e2e/updater/rel003-2-install.e2e.ts; fi
 
       - name: Run 3 — the relaunched bundle runs the update
         shell: bash
@@ -361,14 +412,14 @@ jobs:
         run: |
           stop_app() { if [ "$RUNNER_OS" = Windows ]; then taskkill //IM "$(basename "$ANVIL_E2E_APP")" //F //T >/dev/null 2>&1 || true; else pkill -f anvil-desktop || true; pkill -f "$ANVIL_E2E_APP" || true; fi; sleep 2; }
           trap stop_app EXIT
-          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a --server-args="-screen 0 1600x1000x24" npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-3-installed.e2e.ts
-          else npx wdio run ./wdio.conf.ts --spec ./e2e/updater/rel003-3-installed.e2e.ts; fi
+          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a --server-args="-screen 0 1600x1000x24" npx wdio run "$WDIO_CONFIG" --spec ./e2e/updater/rel003-3-installed.e2e.ts
+          else npx wdio run "$WDIO_CONFIG" --spec ./e2e/updater/rel003-3-installed.e2e.ts; fi
 
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: updater-e2e-screenshots-${{ matrix.os }}-${{ matrix.bundles }}-${{ github.run_id }}
+          name: updater-e2e-screenshots-${{ matrix.os }}-${{ matrix.bundles }}-${{ matrix.build }}-${{ github.run_id }}
           path: apps/desktop/e2e/screenshots/*.png
           if-no-files-found: ignore
           retention-days: 30

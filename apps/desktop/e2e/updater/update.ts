@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
 import { createServer, type Server } from "node:https";
 import { basename, join, relative } from "node:path";
+import { $ } from "@wdio/globals";
 import { invoke } from "../helpers";
 
 export function required(name: string): string {
@@ -249,4 +250,18 @@ export async function until(what: string, check: () => boolean, timeoutMs: numbe
     await new Promise((r) => setTimeout(r, 1000));
   }
   throw new Error(`timed out after ${timeoutMs / 1000} s waiting for ${what}`);
+}
+
+/**
+ * A release-profile build (ANVIL_E2E_RELEASE=1, wdio.release.conf.ts) has no
+ * environment-driven unlock: type the passphrase of the profile the workflow
+ * created with the release CLI into the lock screen and unlock it, as a user
+ * does. An `e2e` build is already unlocked; this does nothing there.
+ */
+export async function unlockThroughLockScreen(): Promise<void> {
+  if (process.env.ANVIL_E2E_RELEASE !== "1") return;
+  const passphrase = $('input[type="password"]');
+  await passphrase.waitForDisplayed({ timeout: 90_000 });
+  await passphrase.setValue(required("ANVIL_E2E_PASSPHRASE"));
+  await $('//button[@type="submit"][normalize-space()="Unlock"]').click();
 }

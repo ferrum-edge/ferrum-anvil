@@ -25,6 +25,7 @@ import {
   startUpdateServer,
   statePath,
   type UpdateServer,
+  unlockThroughLockScreen,
 } from "./update";
 
 describe("REL-003: the built bundle refuses tampered updates", () => {
@@ -33,6 +34,7 @@ describe("REL-003: the built bundle refuses tampered updates", () => {
   const signature = fixture("update.sig").toString("utf8").trim();
 
   before(async () => {
+    await unlockThroughLockScreen();
     await waitForWorkbench();
     server = await startUpdateServer();
   });
