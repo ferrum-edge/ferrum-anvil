@@ -76,7 +76,7 @@
  /// Indicates the specific type/cause of URL error.
 --- /dev/null
 +++ b/src/protocol/deflate.rs
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,236 @@
 +//! RFC 7692 `permessage-deflate` codec (feature `deflate`).
 +//!
 +//! This module only runs the per-message codec for parameters that were
@@ -252,7 +252,10 @@
 +                self.inflate(&TAIL, &mut out, already, max)?;
 +            }
 +            if self.config.decompress_no_context_takeover || self.stream_ended {
-+                self.decompressor.reset(false);
++                self.decompressor = Decompress::new_with_window_bits(
++                    false,
++                    self.config.decompress_window_bits.clamp(9, 15),
++                );
 +            }
 +            self.receiving = false;
 +            self.stream_ended = false;
@@ -261,12 +264,19 @@
 +    }
 +
 +    fn inflate(&mut self, mut input: &[u8], out: &mut Vec<u8>, already: usize, max: usize) -> Result<()> {
++        // zlib (and zlib-rs) compiles without INFLATE_STRICT, so a back-reference
++        // inside the current output slice succeeds even when its distance exceeds
++        // the configured window_bits. When the peer agreed to a window smaller
++        // than the 2^15 maximum, draining one byte at a time keeps the active
++        // output slice empty at each symbol so every back-reference resolves
++        // against the bounded sliding window and rejects distances past it.
++        let chunk_cap = if self.config.decompress_window_bits < 15 { 1 } else { self.scratch.len() };
 +        while !self.stream_ended {
 +            // Room for one byte more than the limit allows, to detect it.
 +            let room = max
 +                .saturating_sub(already.saturating_add(out.len()))
 +                .saturating_add(1)
-+                .min(self.scratch.len());
++                .min(chunk_cap);
 +            let (in0, out0) = (self.decompressor.total_in(), self.decompressor.total_out());
 +            let status = self
 +                .decompressor

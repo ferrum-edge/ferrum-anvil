@@ -333,6 +333,11 @@ fn a_peer_outside_its_agreed_window_is_refused() {
     let mut ws = client(wire.clone(), negotiated(), 1 << 16);
     assert_eq!(ws.read().unwrap(), Message::Text(expected.into()));
     let small = DeflateConfig { decompress_window_bits: 9, ..DeflateConfig::default() };
-    let mut ws = client(wire, Some(small), 1 << 16);
+    let mut ws = client(wire.clone(), Some(small), 1 << 16);
+    assert!(matches!(ws.read(), Err(Error::Protocol(ProtocolError::InvalidCompressedMessage(_)))));
+    // Window enforcement survives a reset under server_no_context_takeover.
+    let small_nct = DeflateConfig { decompress_window_bits: 9, decompress_no_context_takeover: true, ..DeflateConfig::default() };
+    let mut ws = client(frames(&[&[0xc1, 0x07], HELLO, &wire]), Some(small_nct), 1 << 16);
+    assert_eq!(ws.read().unwrap(), Message::Text("Hello".into()));
     assert!(matches!(ws.read(), Err(Error::Protocol(ProtocolError::InvalidCompressedMessage(_)))));
 }
