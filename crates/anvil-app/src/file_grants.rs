@@ -588,6 +588,20 @@ impl FileGrants {
                 return Err(e);
             }
         };
+        let reliable_identity = match plan_folder.supports_reliable_identity() {
+            Ok(v) => v,
+            Err(e) => {
+                restore_grants(plan_entry, secrets_entry);
+                return Err(io(e));
+            }
+        };
+        if replace_dataset && sibling_name.is_some() && !reliable_identity {
+            restore_grants(plan_entry, secrets_entry);
+            return Err(GrantError::Io(
+                "cannot safely replace an existing dataset file on a filesystem without reliable file identity or atomic exclusive rename"
+                    .into(),
+            ));
+        }
         if let Err(e) = refuse_directory(&plan_dir.join(plan_name)) {
             restore_grants(plan_entry, secrets_entry);
             return Err(e);
@@ -626,16 +640,19 @@ impl FileGrants {
             _ => None,
         };
 
-        // Stage all temporary files first.
-        let (jmx_tmp, _) = match stage_in(&plan_folder, jmx_bytes, plan_purpose.owner_only()) {
+        // Stage all temporary files first. Keep the dataset's live handle open
+        // through settlement so its OS identity cannot be recycled before JMX
+        // commit or quarantine verification.
+        let (jmx_tmp, _, jmx_live) = match stage_in(&plan_folder, jmx_bytes, plan_purpose.owner_only(), false) {
             Ok(t) => t,
             Err(e) => {
                 restore_grants(plan_entry, secrets_entry);
                 return Err(e);
             }
         };
+        drop(jmx_live);
         let dataset_tmp = match dataset {
-            Some((csv, owner_only)) => match stage_in(&plan_folder, csv, owner_only) {
+            Some((csv, owner_only)) => match stage_in(&plan_folder, csv, owner_only, reliable_identity) {
                 Ok(t) => Some(t),
                 Err(e) => {
                     plan_folder.cleanup_staged(&jmx_tmp);
@@ -646,12 +663,16 @@ impl FileGrants {
             None => None,
         };
         let secrets_tmp = match &secrets_target {
-            Some((sec_folder, _, sec_bytes)) => match stage_in(sec_folder, sec_bytes, true) {
-                Ok(t) => Some(t),
+            Some((sec_folder, _, sec_bytes)) => match stage_in(sec_folder, sec_bytes, true, false) {
+                Ok((tmp, id, live)) => {
+                    drop(live);
+                    Some((tmp, id))
+                }
                 Err(e) => {
                     plan_folder.cleanup_staged(&jmx_tmp);
-                    if let Some((ref dt, _)) = dataset_tmp {
-                        plan_folder.cleanup_staged(dt);
+                    if let Some((dt, _, live)) = dataset_tmp {
+                        drop(live);
+                        plan_folder.cleanup_staged(&dt);
                     }
                     restore_grants(plan_entry, secrets_entry);
                     return Err(e);
@@ -675,13 +696,14 @@ impl FileGrants {
         let format_published = |items: &[(PublishedRole, String)]| items.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join(", ");
         let mut protected: Vec<FileId> = Vec::new();
         let cleanup_remaining = |jmx_t: Option<&crate::no_follow::StagedFile>,
-                                 ds_t: Option<&crate::no_follow::StagedFile>,
+                                 ds_t: Option<(crate::no_follow::StagedFile, FileId, Option<File>)>,
                                  sec_t: Option<&crate::no_follow::StagedFile>| {
             if let Some(t) = jmx_t {
                 plan_folder.cleanup_staged(t);
             }
-            if let Some(t) = ds_t {
-                plan_folder.cleanup_staged(t);
+            if let Some((t, _, live)) = ds_t {
+                drop(live);
+                plan_folder.cleanup_staged(&t);
             }
             if let (Some((sf, _, _)), Some(t)) = (&secrets_target, sec_t) {
                 sf.cleanup_staged(t);
@@ -692,9 +714,21 @@ impl FileGrants {
         let mut jmx_t = Some(jmx_tmp);
 
         if let (Some((sec_folder, sec_name, _)), Some((tmp, staged_id))) = (&secrets_target, sec_tmp.take()) {
-            if let Err(err) = sec_folder.publish_staged_no_clobber(&tmp, sec_name) {
+            let sec_alias = match sec_folder.entry_aliases_export_lock(sec_name) {
+                Ok(true) => Some(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("secrets destination aliases reserved '{}'", crate::no_follow::EXPORT_LOCK_NAME),
+                )),
+                Ok(false) => None,
+                Err(err) => Some(err),
+            };
+            let sec_res = match sec_alias {
+                Some(err) => Err(err),
+                None => sec_folder.publish_staged_no_clobber(&tmp, sec_name),
+            };
+            if let Err(err) = sec_res {
                 sec_folder.cleanup_staged(&tmp);
-                cleanup_remaining(jmx_t.as_ref(), ds_tmp.as_ref().map(|(t, _)| t), None);
+                cleanup_remaining(jmx_t.as_ref(), ds_tmp.take(), None);
                 restore_grants(plan_entry, secrets_entry);
                 if err.kind() == std::io::ErrorKind::AlreadyExists {
                     return Err(GrantError::Invalid(
@@ -712,14 +746,14 @@ impl FileGrants {
                     }
                 }
                 Ok(_) => {
-                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.as_ref().map(|(t, _)| t), None);
+                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.take(), None);
                     return Err(GrantError::Io(format!(
                         "cannot verify published secrets file identity (already written: {}; the remaining files were not written)",
                         format_published(&published)
                     )));
                 }
                 Err(err) => {
-                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.as_ref().map(|(t, _)| t), None);
+                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.take(), None);
                     return Err(GrantError::Io(format!(
                         "cannot verify published secrets file identity: {err} (already written: {}; the remaining files were not written)",
                         format_published(&published)
@@ -740,7 +774,7 @@ impl FileGrants {
                     Some(lock)
                 }
                 Err(err) => {
-                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.as_ref().map(|(t, _)| t), None);
+                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.take(), None);
                     if published.is_empty() {
                         restore_grants(plan_entry, secrets_entry);
                         return Err(io(err));
@@ -756,8 +790,8 @@ impl FileGrants {
         };
 
         let mut ds_backup: Option<crate::no_follow::ExistingBackup> = None;
-        let mut ds_owned_id: Option<FileId> = None;
-        if let (Some(sibling), Some((tmp, staged_id))) = (sibling_name.as_ref(), ds_tmp.take()) {
+        let mut ds_owned_handle: Option<File> = None;
+        if let (Some(sibling), Some((tmp, staged_id, ds_live))) = (sibling_name.as_ref(), ds_tmp.take()) {
             let target_blocked = match plan_folder.entry_identity(sibling) {
                 Ok(Some((true, _))) => {
                     Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "dataset destination is a symbolic link"))
@@ -766,7 +800,14 @@ impl FileGrants {
                     std::io::ErrorKind::InvalidInput,
                     "dataset destination aliases a protected sibling or lock file",
                 )),
-                Ok(_) => None,
+                Ok(_) => match plan_folder.entry_aliases_export_lock(sibling) {
+                    Ok(true) => Some(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("dataset destination aliases reserved '{}'", crate::no_follow::EXPORT_LOCK_NAME),
+                    )),
+                    Ok(false) => None,
+                    Err(err) => Some(err),
+                },
                 Err(err) => Some(err),
             };
             let mut abort_recovery = String::new();
@@ -776,13 +817,22 @@ impl FileGrants {
                 match plan_folder.backup_existing_regular(sibling) {
                     Ok(backup) => {
                         ds_backup = backup;
-                        let r = plan_folder.rename_staged(&tmp, sibling);
+                        // If backup moved the original aside (or no original
+                        // existed), publish with no-clobber so a concurrent
+                        // file installed in the vacated slot is never
+                        // overwritten.
+                        let use_no_clobber = ds_backup.as_ref().is_none_or(|b| b.is_moved());
+                        let r = if use_no_clobber {
+                            plan_folder.publish_staged_no_clobber(&tmp, sibling)
+                        } else {
+                            plan_folder.rename_staged(&tmp, sibling)
+                        };
                         if r.is_err()
                             && let Some(backup) = ds_backup.take()
                             && let Err((backup_name, restore_err)) = plan_folder.abort_backup(backup, sibling)
                         {
                             abort_recovery = format!(
-                                "; could not restore moved dataset backup ({restore_err}), previous dataset backup preserved at {}",
+                                "; could not restore or safely discard dataset backup ({restore_err}), previous dataset backup preserved at {}",
                                 display_name(Some(&backup_name))
                             );
                         }
@@ -794,6 +844,7 @@ impl FileGrants {
                 plan_folder.publish_staged_no_clobber(&tmp, sibling)
             };
             if let Err(err) = res {
+                drop(ds_live);
                 plan_folder.cleanup_staged(&tmp);
                 cleanup_remaining(jmx_t.as_ref(), None, None);
                 if published.is_empty() && abort_recovery.is_empty() {
@@ -818,13 +869,19 @@ impl FileGrants {
             protected.push(staged_id);
             match plan_folder.entry_identity(sibling) {
                 Ok(Some((false, pub_id))) => {
-                    if pub_id == staged_id {
-                        ds_owned_id = Some(staged_id);
+                    let live_matches =
+                        ds_live.as_ref().and_then(|h| h.metadata().and_then(|m| file_id(h, &m)).ok()).is_some_and(|lid| lid == pub_id);
+                    if live_matches {
+                        ds_owned_handle = ds_live;
                     } else {
-                        protected.push(pub_id);
+                        drop(ds_live);
+                        if pub_id != staged_id {
+                            protected.push(pub_id);
+                        }
                     }
                 }
                 Ok(_) => {
+                    drop(ds_live);
                     cleanup_remaining(jmx_t.as_ref(), None, None);
                     // Ownership of `sibling` could not be verified, so do not
                     // unlink or overwrite it; preserve any backup for recovery.
@@ -838,6 +895,7 @@ impl FileGrants {
                     )));
                 }
                 Err(err) => {
+                    drop(ds_live);
                     cleanup_remaining(jmx_t.as_ref(), None, None);
                     let recovery = ds_backup
                         .take()
@@ -852,6 +910,25 @@ impl FileGrants {
         }
 
         if let Some(tmp) = jmx_t.take() {
+            // Before committing the JMX, verify the live dataset object we
+            // published is still installed at `sibling` (when reliable identity
+            // is available) so we never pair our JMX with a concurrently
+            // replaced dataset.
+            if let Some(ref sibling) = sibling_name
+                && reliable_identity
+                && !ds_owned_handle.as_ref().is_some_and(|h| plan_folder.verify_live_entry(sibling, h).unwrap_or(false))
+            {
+                plan_folder.cleanup_staged(&tmp);
+                drop(ds_owned_handle);
+                let recovery = ds_backup
+                    .take()
+                    .map(|b| format!("; previous dataset backup preserved at {}", display_name(Some(b.name()))))
+                    .unwrap_or_default();
+                return Err(GrantError::Io(format!(
+                    "published dataset entry changed concurrently before test plan commit (already written: {}; the test plan was not written{recovery})",
+                    format_published(&published)
+                )));
+            }
             let target_blocked = match plan_folder.entry_identity(plan_name) {
                 Ok(Some((true, _))) => Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "plan destination is a symbolic link")),
                 Ok(Some((false, id))) if protected.contains(&id) => {
@@ -874,21 +951,28 @@ impl FileGrants {
             if let Err(err) = res {
                 plan_folder.cleanup_staged(&tmp);
                 // Roll back the companion dataset sidecar ONLY when ownership is
-                // tied to our staged file handle and preserved through quarantine;
-                // preserve any backup and report its recovery name otherwise.
+                // verified against our live staged handle through atomic
+                // quarantine; preserve any backup and report recovery paths
+                // otherwise.
                 let mut recovery = String::new();
                 if let Some(ref sibling) = sibling_name {
-                    if let Some(expected_id) = ds_owned_id {
-                        match plan_folder.rollback_owned(sibling, expected_id, ds_backup.take()) {
+                    if let Some(live_handle) = ds_owned_handle.take() {
+                        match plan_folder.rollback_owned(sibling, live_handle, ds_backup.take()) {
                             crate::no_follow::RollbackOutcome::Restored => {
                                 published.retain(|(role, _)| *role != PublishedRole::Dataset);
                             }
-                            crate::no_follow::RollbackOutcome::Skipped(backup_name) => {
+                            crate::no_follow::RollbackOutcome::Skipped { backup_name, quarantine_left } => {
                                 if let Some(name) = backup_name {
-                                    recovery = format!(
+                                    recovery.push_str(&format!(
                                         "; dataset entry changed concurrently so rollback was skipped, previous dataset backup preserved at {}",
                                         display_name(Some(&name))
-                                    );
+                                    ));
+                                }
+                                if let Some((q_name, q_err)) = quarantine_left {
+                                    recovery.push_str(&format!(
+                                        "; concurrent dataset entry could not be returned from quarantine ({q_err}), preserved at {}",
+                                        display_name(Some(&q_name))
+                                    ));
                                 }
                             }
                             crate::no_follow::RollbackOutcome::Failed { backup_name, err: restore_err } => {
@@ -900,7 +984,7 @@ impl FileGrants {
                         }
                     } else if let Some(backup) = ds_backup.take() {
                         recovery = format!(
-                            "; published dataset ownership could not be tied to the staged file so rollback was skipped, previous dataset backup preserved at {}",
+                            "; published dataset ownership could not be verified against the live staged file so rollback was skipped, previous dataset backup preserved at {}",
                             display_name(Some(backup.name()))
                         );
                     }
@@ -921,6 +1005,7 @@ impl FileGrants {
         if let Some(backup) = ds_backup.take() {
             plan_folder.discard_backup(backup);
         }
+        drop(ds_owned_handle);
 
         let mut written = vec![display_name(Some(plan_name))];
         if let Some(ref sibling) = sibling_name {
@@ -1196,13 +1281,57 @@ fn eq_filename(a: &OsStr, b: &OsStr) -> bool {
     if cfg!(any(windows, target_os = "macos")) { a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()) } else { a == b }
 }
 
+/// Unicode default-ignorable and HFS+ TN1150 ignorable characters stripped
+/// during filesystem-equivalent filename comparison (macOS HFS+/APFS, Windows).
+fn is_fs_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
 /// Whether `name` matches Anvil's reserved export directory lock filename or
-/// any Unicode/case/trailing-dot/space filesystem-equivalent spelling of it
-/// (e.g. Kelvin sign `K` folding to `k` on case-insensitive APFS/NTFS).
+/// any filesystem-equivalent spelling of it (Unicode/ASCII case folding such as
+/// Kelvin sign `K` -> `k`, HFS+/Unicode default-ignorable characters, and
+/// Windows trailing dots/spaces or NTFS alternate data streams).
 pub fn is_reserved_export_lock_name(name: &OsStr) -> bool {
     let text = name.to_string_lossy();
-    let trimmed = if cfg!(windows) { text.trim_end_matches(['.', ' ']) } else { text.as_ref() };
-    trimmed.to_lowercase() == crate::no_follow::EXPORT_LOCK_NAME
+    let base = if cfg!(windows) { text.split(':').next().unwrap_or("").trim_end_matches(['.', ' ']) } else { text.as_ref() };
+    let mut folded = String::with_capacity(base.len());
+    for ch in base.chars() {
+        if is_fs_ignorable(ch) {
+            continue;
+        }
+        match ch {
+            '\u{0130}' | '\u{0131}' => folded.push('i'),
+            '\u{017F}' => folded.push('s'),
+            '\u{212A}' => folded.push('k'),
+            other => {
+                for lc in other.to_lowercase() {
+                    if !is_fs_ignorable(lc) {
+                        folded.push(lc);
+                    }
+                }
+            }
+        }
+    }
+    folded == crate::no_follow::EXPORT_LOCK_NAME
 }
 
 /// An opaque OS file identity (device + inode on Unix, volume serial + file
@@ -1293,8 +1422,24 @@ impl PinnedOutput {
 
     /// Stage `bytes` into a new temporary file inside the pinned directory,
     /// returning a [`StagedPinnedOutput`] that cleans up on drop unless
-    /// published via [`StagedPinnedOutput::publish_guarded`].
+    /// published via [`StagedPinnedOutput::publish_guarded`]. When
+    /// `keep_live_handle` is true and the filesystem supports reliable
+    /// identity, keeps a handle to the staged file object open through
+    /// settlement so its OS identity cannot be recycled before verification.
     pub fn stage(&self, bytes: &[u8], owner_only: bool) -> std::io::Result<StagedPinnedOutput<'_>> {
+        self.stage_with_options(bytes, owner_only, false)
+    }
+
+    /// Like [`PinnedOutput::stage`], keeping a live OS handle open when the
+    /// directory's filesystem supports reliable identity so dataset ownership
+    /// can be verified against the live file object through JMX commit or
+    /// rollback.
+    pub fn stage_owned(&self, bytes: &[u8], owner_only: bool) -> std::io::Result<StagedPinnedOutput<'_>> {
+        let keep_live = self.dir.supports_reliable_identity().unwrap_or(false);
+        self.stage_with_options(bytes, owner_only, keep_live)
+    }
+
+    fn stage_with_options(&self, bytes: &[u8], owner_only: bool, keep_live: bool) -> std::io::Result<StagedPinnedOutput<'_>> {
         if owner_only && !OWNER_ONLY_FILES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -1302,20 +1447,38 @@ impl PinnedOutput {
             ));
         }
         let (mut f, tmp) = self.dir.stage_new(owner_only)?;
-        let stage = (|| -> std::io::Result<FileId> {
+        let stage = (|| -> std::io::Result<(FileId, Option<File>)> {
             std::io::Write::write_all(&mut f, bytes)?;
             f.sync_all()?;
             let meta = f.metadata()?;
-            file_id(&f, &meta)
+            let id = file_id(&f, &meta)?;
+            if keep_live {
+                let live = self.dir.into_staged_keepalive(&tmp, f)?;
+                Ok((id, Some(live)))
+            } else {
+                drop(f);
+                Ok((id, None))
+            }
         })();
-        drop(f);
         match stage {
-            Ok(staged_id) => Ok(StagedPinnedOutput { output: self, tmp, staged_id, published: false }),
+            Ok((staged_id, live_handle)) => Ok(StagedPinnedOutput { output: self, tmp, staged_id, live_handle, published: false }),
             Err(err) => {
                 self.dir.cleanup_staged(&tmp);
                 Err(err)
             }
         }
+    }
+
+    /// Whether this pinned destination's directory sits on a filesystem with
+    /// reliable file identities across renames and atomic exclusive rename.
+    pub fn supports_reliable_identity(&self) -> std::io::Result<bool> {
+        self.dir.supports_reliable_identity()
+    }
+
+    /// Verify that this pinned destination still names the exact live OS file
+    /// object pinned by `live_handle`.
+    pub fn verify_live_entry(&self, live_handle: &File) -> std::io::Result<bool> {
+        self.dir.verify_live_entry(&self.name, live_handle)
     }
 
     /// Acquire an exclusive cross-process lock on this destination's pinned
@@ -1326,14 +1489,16 @@ impl PinnedOutput {
         self.dir.lock_exclusive().map(|(file, id)| (file, PinnedFileId(id)))
     }
 
-    /// Roll back this destination only if it still matches `expected_id` (tied
-    /// to our staged handle) through quarantine verification, restoring any
+    /// Roll back this destination only if it still names the live object pinned
+    /// by `live_handle` through atomic quarantine verification, restoring any
     /// backup via atomic no-clobber rename so concurrent entries are never lost.
-    pub fn rollback_owned(&self, expected_id: PinnedFileId, backup: Option<PinnedBackup<'_>>) -> PinnedRollback {
+    pub fn rollback_owned(&self, live_handle: File, backup: Option<PinnedBackup<'_>>) -> PinnedRollback {
         let raw = backup.and_then(|mut b| b.backup.take());
-        match self.dir.rollback_owned(&self.name, expected_id.0, raw) {
+        match self.dir.rollback_owned(&self.name, live_handle, raw) {
             crate::no_follow::RollbackOutcome::Restored => PinnedRollback::Restored,
-            crate::no_follow::RollbackOutcome::Skipped(name) => PinnedRollback::Skipped(name),
+            crate::no_follow::RollbackOutcome::Skipped { backup_name, quarantine_left } => {
+                PinnedRollback::Skipped { backup_name, quarantine_left }
+            }
             crate::no_follow::RollbackOutcome::Failed { backup_name, err } => PinnedRollback::Failed { backup_name, err },
         }
     }
@@ -1377,7 +1542,7 @@ impl PinnedOutput {
 /// Outcome of [`PinnedOutput::rollback_owned`].
 pub enum PinnedRollback {
     Restored,
-    Skipped(Option<OsString>),
+    Skipped { backup_name: Option<OsString>, quarantine_left: Option<(OsString, std::io::Error)> },
     Failed { backup_name: OsString, err: std::io::Error },
 }
 
@@ -1391,14 +1556,21 @@ pub struct PinnedBackup<'a> {
 }
 
 impl PinnedBackup<'_> {
+    /// Whether this backup moved the original file aside (leaving the
+    /// destination slot empty so publication must use no-clobber).
+    pub fn is_moved(&self) -> bool {
+        self.backup.as_ref().is_some_and(crate::no_follow::ExistingBackup::is_moved)
+    }
+
     /// Record that the replacement file has landed at the destination.
     pub fn mark_replaced(&mut self) {
         self.replaced = true;
     }
 
     /// Abort the backup before replacement landed. When the original entry was
-    /// moved aside, restores it with atomic no-clobber rename and returns the
-    /// preserved backup filename on failure.
+    /// moved aside, restores it with atomic no-clobber rename; when hard-linked,
+    /// removes the backup only if the destination still names the original file.
+    /// Returns the preserved backup filename on failure.
     pub fn abort(mut self) -> std::result::Result<(), (OsString, std::io::Error)> {
         if let Some(backup) = self.backup.take() {
             self.output.dir.abort_backup(backup, &self.output.name)?;
@@ -1436,6 +1608,7 @@ pub struct StagedPinnedOutput<'a> {
     output: &'a PinnedOutput,
     tmp: crate::no_follow::StagedFile,
     staged_id: FileId,
+    live_handle: Option<File>,
     published: bool,
 }
 
@@ -1448,6 +1621,7 @@ impl StagedPinnedOutput<'_> {
 
 impl Drop for StagedPinnedOutput<'_> {
     fn drop(&mut self) {
+        drop(self.live_handle.take());
         if !self.published {
             self.output.dir.cleanup_staged(&self.tmp);
         }
@@ -1486,7 +1660,21 @@ impl StagedPinnedOutput<'_> {
     /// checking via no-follow metadata lookup (`entry_identity`) that the leaf
     /// is neither a symlink nor any `protected` file identity. Any metadata
     /// lookup error other than `NotFound` fails closed without publishing.
-    pub fn publish_guarded(mut self, no_clobber: bool, protected: &[PinnedFileId]) -> Result<PinnedFileId, PublishError> {
+    pub fn publish_guarded(self, no_clobber: bool, protected: &[PinnedFileId]) -> Result<PinnedFileId, PublishError> {
+        let (id, live) = self.publish_guarded_owned(no_clobber, protected)?;
+        drop(live);
+        Ok(id)
+    }
+
+    /// Like [`StagedPinnedOutput::publish_guarded`], returning the live file
+    /// handle when the published destination still matches that live object so
+    /// callers can verify ownership before committing a companion file or
+    /// rolling back.
+    pub fn publish_guarded_owned(
+        mut self,
+        no_clobber: bool,
+        protected: &[PinnedFileId],
+    ) -> Result<(PinnedFileId, Option<File>), PublishError> {
         let pre = |source| PublishError { published: false, source };
         let post = |source| PublishError { published: true, source };
         if self.output.dir.entry_aliases_export_lock(&self.output.name).map_err(pre)? {
@@ -1517,12 +1705,19 @@ impl StagedPinnedOutput<'_> {
             self.output.dir.rename_staged(&self.tmp, &self.output.name).map_err(pre)?;
         }
         self.published = true;
+        let live_handle = self.live_handle.take();
         // Re-read the published entry's file identity so filesystems where
         // rename changes FileId (e.g. FAT32/exFAT) still protect the published
         // sibling from subsequent aliasing writes; fail closed if identity
         // verification fails rather than falling back to a potentially stale ID.
         match self.output.dir.entry_identity(&self.output.name).map_err(post)? {
-            Some((false, id)) => Ok(PinnedFileId(id)),
+            Some((false, id)) => {
+                let verified_live = live_handle.and_then(|h| {
+                    let lid = h.metadata().and_then(|m| file_id(&h, &m)).ok()?;
+                    (lid == id).then_some(h)
+                });
+                Ok((PinnedFileId(id), verified_live))
+            }
             _ => Err(post(std::io::Error::other("cannot verify published file identity"))),
         }
     }
@@ -1553,17 +1748,28 @@ fn open_pinned_write_dir(dir: &Path, id: FileId) -> Result<Dir, GrantError> {
     Ok(folder)
 }
 
-fn stage_in(folder: &Dir, bytes: &[u8], owner_only: bool) -> Result<(crate::no_follow::StagedFile, FileId), GrantError> {
+fn stage_in(
+    folder: &Dir,
+    bytes: &[u8],
+    owner_only: bool,
+    keep_live: bool,
+) -> Result<(crate::no_follow::StagedFile, FileId, Option<File>), GrantError> {
     let (mut file, tmp) = folder.stage_new(owner_only).map_err(io)?;
-    let res = (|| -> std::io::Result<FileId> {
+    let res = (|| -> std::io::Result<(FileId, Option<File>)> {
         std::io::Write::write_all(&mut file, bytes)?;
         file.sync_all()?;
         let meta = file.metadata()?;
-        file_id(&file, &meta)
+        let id = file_id(&file, &meta)?;
+        if keep_live {
+            let live = folder.into_staged_keepalive(&tmp, file)?;
+            Ok((id, Some(live)))
+        } else {
+            drop(file);
+            Ok((id, None))
+        }
     })();
-    drop(file);
     match res {
-        Ok(id) => Ok((tmp, id)),
+        Ok((id, live)) => Ok((tmp, id, live)),
         Err(err) => {
             folder.cleanup_staged(&tmp);
             Err(io(err))
@@ -1583,22 +1789,42 @@ fn write_in(dir: &Path, id: FileId, name: &OsStr, bytes: &[u8], owner_only: bool
     if folder.id().map_err(io)? != id {
         return Err(GrantError::Changed);
     }
-    if is_reserved_export_lock_name(name) || folder.entry_aliases_export_lock(name).map_err(io)? {
-        return Err(GrantError::Invalid(format!(
+    let reserved_err = || {
+        GrantError::Invalid(format!(
             "'{}' is reserved for Anvil's export lock; choose another filename",
             crate::no_follow::EXPORT_LOCK_NAME
-        )));
+        ))
+    };
+    if is_reserved_export_lock_name(name) || folder.entry_aliases_export_lock(name).map_err(io)? {
+        return Err(reserved_err());
     }
     refuse_directory(&dir.join(name))?;
     // A fresh, exclusively created file (staged inside an owner-only private
     // directory on macOS when `owner_only` is true): an existing file or link
     // under the temporary name is never opened or followed.
     let (file, tmp) = folder.stage_new(owner_only).map_err(io)?;
+    if let Err(err) = write_synced(file, bytes) {
+        folder.cleanup_staged(&tmp);
+        return Err(io(err));
+    }
+    // Recheck lock identity right before publication in case an export lock
+    // appeared while staging.
+    match folder.entry_aliases_export_lock(name) {
+        Ok(true) => {
+            folder.cleanup_staged(&tmp);
+            return Err(reserved_err());
+        }
+        Ok(false) => {}
+        Err(err) => {
+            folder.cleanup_staged(&tmp);
+            return Err(io(err));
+        }
+    }
     // Only a file created here is removed when the write fails, never an
     // entry that was already there under the temporary name. Renaming
     // replaces the destination entry itself; a link there is replaced, not
     // followed.
-    match write_synced(file, bytes).and_then(|()| folder.rename_staged(&tmp, name)) {
+    match folder.rename_staged(&tmp, name) {
         Ok(()) => Ok(()),
         Err(err) => {
             folder.cleanup_staged(&tmp);

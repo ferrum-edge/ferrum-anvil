@@ -182,6 +182,20 @@ pub fn export_jmx(
     let report_json = report_file.map(|_| json_safe(&serde_json::to_string_pretty(&export.report).unwrap_or_default()) + "\n");
     let find_pinned =
         |label: &str| pinned_dests.iter().find(|(l, _, _)| *l == label).map(|(_, p, pin)| (*p, pin)).expect("destination was pinned above");
+    let dataset_reliable_id = if export.dataset_csv.is_some() {
+        let (p, pin) = find_pinned("the dataset file");
+        let reliable =
+            pin.supports_reliable_identity().with_context(|| format!("checking filesystem identity support for {}", p.display()))?;
+        if force && !reliable {
+            anyhow::bail!(
+                "cannot safely replace an existing dataset file ({}) on a filesystem without reliable file identity or atomic exclusive rename; nothing was written",
+                p.display()
+            );
+        }
+        reliable
+    } else {
+        false
+    };
     let mut staged: Vec<(&str, &Path, anvil_app::file_grants::StagedPinnedOutput<'_>, bool)> = Vec::with_capacity(4);
     if let (Some(_), Some(props)) = (secrets_file, &export.secrets_properties) {
         let (p, pin) = find_pinned("--secrets-file");
@@ -197,7 +211,7 @@ pub fn export_jmx(
         staged.push((
             "the dataset file",
             p,
-            pin.stage(csv, sensitive_dataset).with_context(|| format!("staging the dataset file ({})", p.display()))?,
+            pin.stage_owned(csv, sensitive_dataset).with_context(|| format!("staging the dataset file ({})", p.display()))?,
             !force,
         ));
     }
@@ -235,16 +249,15 @@ pub fn export_jmx(
     // Publish no-clobber sidecars first, then the plan and optional report,
     // tracking every published OS file identity so Unicode-normalization
     // aliases (e.g. APFS NFC/NFD) can never replace a newly written sibling.
-    // Back up any pre-existing dataset sidecar before overwriting it so a
-    // pre-publish JMX failure restores the previous dataset (only after
-    // verifying ownership) and preserves the backup for recovery otherwise.
+    // Back up any pre-existing dataset sidecar before overwriting it, keep the
+    // staged dataset handle open through JMX settlement, and verify the live
+    // object before committing the JMX or deleting a quarantined entry.
     let mut published: Vec<String> = Vec::new();
     let mut dataset_backup: Option<anvil_app::file_grants::PinnedBackup<'_>> = None;
     let mut dataset_published_note: Option<String> = None;
-    let mut dataset_owned_id: Option<anvil_app::file_grants::PinnedFileId> = None;
+    let mut dataset_live_handle: Option<std::fs::File> = None;
     for (label, dest, item, no_clobber) in staged {
         let note = format!("{label} ({})", dest.display());
-        let staged_id = item.staged_id();
         if label == "the dataset file" && !no_clobber {
             let (_, ds_pin) = find_pinned("the dataset file");
             match ds_pin.backup_existing_regular_guarded(&protected) {
@@ -258,20 +271,52 @@ pub fn export_jmx(
                 }
             }
         }
-        match item.publish_guarded(no_clobber, &protected) {
-            Ok(id) => {
+        if label == "--out" && dataset_published_note.is_some() && dataset_reliable_id {
+            let (ds_path, ds_pin) = find_pinned("the dataset file");
+            let still_owned = dataset_live_handle.as_ref().is_some_and(|h| ds_pin.verify_live_entry(h).unwrap_or(false));
+            if !still_owned {
+                drop(item);
+                drop(dataset_live_handle);
+                let mut recovery = String::new();
+                if let Some(backup) = dataset_backup.take()
+                    && let Some(name) = backup.preserve()
+                {
+                    let backup_path = ds_path.parent().map(|p| p.join(&name)).unwrap_or_else(|| PathBuf::from(&name));
+                    recovery = format!("; previous dataset backup preserved at {}", backup_path.display());
+                }
+                return Err(anyhow::anyhow!(
+                    "published dataset entry changed concurrently before publishing {label} ({}) (already written: {}{recovery})",
+                    dest.display(),
+                    published.join(", ")
+                ));
+            }
+        }
+        let effective_no_clobber = if label == "the dataset file" {
+            // If backup moved the original aside (or no original existed),
+            // publish with no-clobber so a file installed in the vacated slot
+            // is never overwritten.
+            no_clobber || dataset_backup.as_ref().is_none_or(|b| b.is_moved())
+        } else {
+            no_clobber
+        };
+        let pub_res = if label == "the dataset file" {
+            item.publish_guarded_owned(effective_no_clobber, &protected)
+        } else {
+            item.publish_guarded(effective_no_clobber, &protected).map(|id| (id, None))
+        };
+        match pub_res {
+            Ok((id, live_opt)) => {
                 if label == "the dataset file" {
                     if let Some(backup) = dataset_backup.as_mut() {
                         backup.mark_replaced();
                     }
                     dataset_published_note = Some(note.clone());
-                    if id == staged_id {
-                        dataset_owned_id = Some(staged_id);
+                    dataset_live_handle = live_opt;
+                } else if label == "--out" {
+                    if let Some(backup) = dataset_backup.take() {
+                        backup.discard();
                     }
-                } else if label == "--out"
-                    && let Some(backup) = dataset_backup.take()
-                {
-                    backup.discard();
+                    drop(dataset_live_handle.take());
                 }
                 protected.push(id);
                 published.push(note);
@@ -292,30 +337,38 @@ pub fn export_jmx(
                             let backup_path = dest.parent().map(|p| p.join(&name)).unwrap_or_else(|| PathBuf::from(&name));
                             recovery = format!("; previous dataset backup preserved at {}", backup_path.display());
                         }
-                    } else if label == "--out"
-                        && let Some(backup) = dataset_backup.take()
-                    {
-                        // JMX already landed; keep the paired replacement dataset
-                        // and discard the backup.
-                        backup.discard();
+                    } else if label == "--out" {
+                        if let Some(backup) = dataset_backup.take() {
+                            // JMX already landed; keep the paired replacement dataset
+                            // and discard the backup.
+                            backup.discard();
+                        }
+                        drop(dataset_live_handle.take());
                     }
                     published.push(note);
                 } else if label == "--out"
                     && let Some(ds_note) = dataset_published_note.take()
                 {
                     let (ds_path, ds_pin) = find_pinned("the dataset file");
-                    if let Some(owned_id) = dataset_owned_id {
-                        match ds_pin.rollback_owned(owned_id, dataset_backup.take()) {
+                    if let Some(live_handle) = dataset_live_handle.take() {
+                        match ds_pin.rollback_owned(live_handle, dataset_backup.take()) {
                             anvil_app::file_grants::PinnedRollback::Restored => {
                                 published.retain(|p| p != &ds_note);
                             }
-                            anvil_app::file_grants::PinnedRollback::Skipped(backup_name) => {
+                            anvil_app::file_grants::PinnedRollback::Skipped { backup_name, quarantine_left } => {
                                 if let Some(name) = backup_name {
                                     let backup_path = ds_path.parent().map(|p| p.join(&name)).unwrap_or_else(|| PathBuf::from(&name));
-                                    recovery = format!(
+                                    recovery.push_str(&format!(
                                         "; dataset entry changed concurrently so rollback was skipped, previous dataset backup preserved at {}",
                                         backup_path.display()
-                                    );
+                                    ));
+                                }
+                                if let Some((q_name, q_err)) = quarantine_left {
+                                    let q_path = ds_path.parent().map(|p| p.join(&q_name)).unwrap_or_else(|| PathBuf::from(&q_name));
+                                    recovery.push_str(&format!(
+                                        "; concurrent dataset entry could not be returned from quarantine ({q_err}), preserved at {}",
+                                        q_path.display()
+                                    ));
                                 }
                             }
                             anvil_app::file_grants::PinnedRollback::Failed { backup_name, err: restore_err } => {
@@ -332,7 +385,7 @@ pub fn export_jmx(
                     {
                         let backup_path = ds_path.parent().map(|p| p.join(&name)).unwrap_or_else(|| PathBuf::from(&name));
                         recovery = format!(
-                            "; published dataset ownership could not be tied to the staged file so rollback was skipped, previous dataset backup preserved at {}",
+                            "; published dataset ownership could not be verified against the live staged file so rollback was skipped, previous dataset backup preserved at {}",
                             backup_path.display()
                         );
                     }
@@ -342,7 +395,7 @@ pub fn export_jmx(
                 {
                     let backup_path = dest.parent().map(|p| p.join(&name)).unwrap_or_else(|| PathBuf::from(&name));
                     recovery = format!(
-                        "; could not restore moved dataset backup ({restore_err}), previous dataset backup preserved at {}",
+                        "; could not restore or safely discard dataset backup ({restore_err}), previous dataset backup preserved at {}",
                         backup_path.display()
                     );
                 }

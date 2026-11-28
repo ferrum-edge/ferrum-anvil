@@ -1106,13 +1106,14 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     // Mapped finite timeouts outside 1..=i32::MAX ms are refused.
     let mut zero_to = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
     zero_to.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
-    zero_to.settings.timeouts = Some(TimeoutOverrides { connect_ms: Some(0), ..TimeoutOverrides::default() });
+    zero_to.settings.timeouts = Some(TimeoutOverrides { connect_ms: Some(Some(0)), ..TimeoutOverrides::default() });
     let (id_zt, c_zt) = step(zero_to);
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_zt, c_zt, "zero-to")], None)), ["timeout"]);
 
     let mut huge_to = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
     huge_to.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
-    huge_to.settings.timeouts = Some(TimeoutOverrides { response_headers_ms: Some(i32::MAX as u64 + 1), ..TimeoutOverrides::default() });
+    huge_to.settings.timeouts =
+        Some(TimeoutOverrides { response_headers_ms: Some(Some(i32::MAX as u64 + 1)), ..TimeoutOverrides::default() });
     let (id_ht, c_ht) = step(huge_to);
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_ht, c_ht, "huge-to")], None)), ["timeout"]);
 

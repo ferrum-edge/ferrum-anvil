@@ -923,7 +923,7 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             post_reasons.push(reason(
                 Some(rq_name),
                 "url_path",
-                "a URL path segment is backed by a vault secret whose shape (empty '//' or dot segments that JMeter's HttpClient 4 rewrites) cannot be verified without reading the secret; export with secrets included or move the credential out of the path",
+                "a URL path segment is backed by a vault secret whose shape (query '?' or fragment '#' delimiters that Anvil parses before sending, or empty '//' and dot segments that JMeter's HttpClient 4 rewrites) cannot be verified without reading the secret; export with secrets included or move the credential out of the path",
             ));
             continue;
         }
@@ -961,7 +961,7 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             post_reasons.push(reason(
                 Some(rq_name),
                 "url_path",
-                "a secret or dataset value in the request URL path introduces a query ('?') or fragment ('#') delimiter, or produces an empty ('//') or dot segment that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler rewrites or splits the path before sending",
+                "a secret or dataset value in the request URL path introduces a query ('?') or fragment ('#') delimiter (which Anvil parses before sending) or produces an empty ('//') or dot segment (which Anvil sends verbatim whereas JMeter's HttpClient 4 sampler rewrites)",
             ));
         }
     }
@@ -1590,7 +1590,7 @@ fn translate_step(
         rs.push(reason(
             rq,
             "url_path",
-            "the request URL path contains a query ('?') or fragment ('#') delimiter, or an empty ('//') or dot segment that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler rewrites or splits the path before sending",
+            "the request URL path contains a query ('?') or fragment ('#') delimiter (which Anvil parses before sending) or an empty ('//') or dot segment (which Anvil sends verbatim whereas JMeter's HttpClient 4 sampler rewrites)",
         ));
     } else if t.markers.has_marks(&target.path) {
         let parts = t.markers.split(&target.path);
@@ -1613,7 +1613,7 @@ fn translate_step(
             rs.push(reason(
                 rq,
                 "url_path",
-                "the request URL path substitutes a runtime value whose shape cannot be verified against query ('?') or fragment ('#') delimiters or empty ('//') and dot segments that JMeter's HttpClient 4 sampler rewrites before sending",
+                "the request URL path substitutes a runtime value whose shape cannot be verified against query ('?') or fragment ('#') delimiters (which Anvil parses before sending) or empty ('//') and dot segments that JMeter's HttpClient 4 sampler rewrites",
             ));
         } else if has_secret_mark {
             t.path_secret_checks.push((name.to_string(), target.path.clone()));
@@ -1642,7 +1642,7 @@ fn translate_step(
             rs.push(reason(
                 rq,
                 "url_path",
-                "a dataset row introduces a query ('?') or fragment ('#') delimiter, or produces an empty ('//') or dot segment in the request URL path that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler rewrites or splits the path before sending",
+                "a dataset row introduces a query ('?') or fragment ('#') delimiter (which Anvil parses before sending) or produces an empty ('//') or dot segment in the request URL path (which Anvil sends verbatim whereas JMeter's HttpClient 4 sampler rewrites)",
             ));
         }
     }

@@ -720,10 +720,14 @@ fn load_012_write_jmeter_export_rolls_back_dataset_when_plan_publish_fails() {
     assert_eq!(std::fs::read(&elsewhere).unwrap(), b"other");
     assert!(partial_files(dir.path()).is_empty());
 
-    // The export lock filename is reserved across FileGrants and PinnedOutput.
+    // The export lock filename is reserved across FileGrants and PinnedOutput
+    // including Unicode case-folded and HFS+/Unicode default-ignorable spellings.
     assert!(matches!(grants.grant_write(FilePurpose::JmeterExport, &dir.path().join(".anvil-export.lock")), Err(GrantError::Invalid(_))));
     assert!(anvil_app::file_grants::PinnedOutput::open(&dir.path().join(".anvil-export.lock")).is_err());
     assert!(anvil_app::file_grants::PinnedOutput::open(&dir.path().join(".ANVIL-EXPORT.LOCK")).is_err());
+    assert!(anvil_app::file_grants::is_reserved_export_lock_name(std::ffi::OsStr::new(".anvil-export.loc\u{212a}")));
+    assert!(anvil_app::file_grants::is_reserved_export_lock_name(std::ffi::OsStr::new(".anvil-export.\u{200c}lock")));
+    assert!(anvil_app::file_grants::is_reserved_export_lock_name(std::ffi::OsStr::new("\u{feff}.anvil-export.lock")));
 }
 
 #[cfg(target_vendor = "apple")]

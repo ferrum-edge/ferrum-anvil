@@ -1475,7 +1475,7 @@ describe("LOAD-012 JMeter adapter", () => {
       />,
     );
     fireEvent.click(button("Choose file and export…"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("plan name cannot be blank");
+    expect((await screen.findByRole("alert")).textContent).toContain("plan name cannot be blank");
   });
 });
 

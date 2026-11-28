@@ -79,6 +79,7 @@ pub(crate) const EXPORT_LOCK_NAME: &str = ".anvil-export.lock";
 pub(crate) struct ExistingBackup {
     name: OsString,
     moved: bool,
+    original_id: FileId,
 }
 
 impl ExistingBackup {
@@ -89,16 +90,22 @@ impl ExistingBackup {
     pub(crate) fn into_name(self) -> OsString {
         self.name
     }
+
+    pub(crate) fn is_moved(&self) -> bool {
+        self.moved
+    }
 }
 
 /// Outcome of an ownership-verified rollback of a published sibling file.
 pub(crate) enum RollbackOutcome {
-    /// Ownership matched `expected_id` and the file was safely removed or
-    /// restored from its backup without clobbering any concurrent entry.
+    /// Ownership matched the live staged handle and the file was safely removed
+    /// or restored from its backup without clobbering any concurrent entry.
     Restored,
-    /// Ownership did not match `expected_id` (a concurrent writer replaced the
-    /// entry), so rollback was skipped; any backup was preserved on disk.
-    Skipped(Option<OsString>),
+    /// Ownership did not match (or atomic quarantine was unavailable), so
+    /// rollback was skipped; any backup was preserved on disk. If a swapped
+    /// entry could not be moved back out of quarantine without clobbering a
+    /// newer file, `quarantine_left` carries its filename and error for recovery.
+    Skipped { backup_name: Option<OsString>, quarantine_left: Option<(OsString, io::Error)> },
     /// Ownership matched and our published entry was removed, but restoring the
     /// previous backup via no-clobber rename failed; the backup was preserved.
     Failed { backup_name: OsString, err: io::Error },
@@ -365,14 +372,62 @@ impl Dir {
         }
     }
 
+    /// Whether this directory sits on a filesystem with stable file identities
+    /// across renames and atomic exclusive rename (`RENAME_NOREPLACE` /
+    /// `RENAME_EXCL`), required for safe dataset replacement and rollback.
+    pub(crate) fn supports_reliable_identity(&self) -> io::Result<bool> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            let st = rustix::fs::fstatfs(&self.fd)?;
+            #[allow(clippy::unnecessary_cast)]
+            let fs_type = st.f_type as u64;
+            // FAT (MSDOS_SUPER_MAGIC = 0x4d44) and exFAT (EXFAT_SUPER_MAGIC = 0x2011_bab0)
+            // derive inode numbers from directory entries, which can change on rename.
+            Ok(!matches!(fs_type, 0x4d44 | 0x2011_bab0))
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            let st = rustix::fs::fstatfs(&self.fd)?;
+            let bytes: Vec<u8> = st.f_fstypename.iter().map(|&c| c as u8).take_while(|&b| b != 0).collect();
+            let fs_name = std::str::from_utf8(&bytes).unwrap_or("");
+            Ok(!(fs_name.eq_ignore_ascii_case("msdos") || fs_name.eq_ignore_ascii_case("exfat") || fs_name.eq_ignore_ascii_case("fat")))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+        {
+            Ok(false)
+        }
+    }
+
+    /// Return a live keep-alive handle to a freshly staged file whose open
+    /// descriptor pins the OS file object against identity reuse through
+    /// settlement. On Unix the staged descriptor itself serves as that handle.
+    pub(crate) fn into_staged_keepalive(&self, _staged: &StagedFile, file: File) -> io::Result<File> {
+        Ok(file)
+    }
+
+    /// Verify that `name` currently resolves (without following links) to the
+    /// exact live OS file object pinned by `live_handle`.
+    pub(crate) fn verify_live_entry(&self, name: &OsStr, live_handle: &File) -> io::Result<bool> {
+        let live_meta = live_handle.metadata()?;
+        let live_id = file_id(live_handle, &live_meta)?;
+        Ok(matches!(self.entry_identity(name)?, Some((false, cur)) if cur == live_id))
+    }
+
+    /// Atomically rename `from` to `to` within this folder only when `to` does
+    /// not exist, without any non-atomic `linkat`/`unlinkat` fallback.
+    pub(crate) fn rename_no_clobber_atomic(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        rename_no_clobber_atomic(&self.fd, from, &self.fd, to)
+    }
+
     /// Acquire an exclusive cross-process `flock` on a stable lock file opened
-    /// without following links inside this pinned directory. Matches the
-    /// directory's group ownership and write permissions on creation (so shared
-    /// local and NFS directories without setgid still allow authorized writers
-    /// to acquire `RDWR` locks), opens existing entries with `O_NONBLOCK` and
-    /// without `O_CREAT` (avoiding FIFO hangs and Linux `fs.protected_regular`
-    /// rejections in sticky directories), and reports actionable errors if an
-    /// existing lock cannot be locked exclusively.
+    /// without following links inside this pinned directory. Initializes and
+    /// verifies new lock files under a private temporary name before publishing
+    /// via no-clobber rename (so a failed init can never expose or unlink the
+    /// canonical lock name and split exporters across two inodes), requires
+    /// group alignment only when access depends on group ownership (allowing
+    /// `1777` root-owned `/tmp` directories for ordinary users), opens existing
+    /// entries with `O_NONBLOCK` without `O_CREAT`, and reports actionable
+    /// errors if an existing lock cannot be locked exclusively.
     pub(crate) fn lock_exclusive(&self) -> io::Result<(File, FileId)> {
         use rustix::fs::{Gid, Mode, OFlags};
         use rustix::io::Errno;
@@ -381,11 +436,14 @@ impl Dir {
         let dir_meta = self.fd.metadata()?;
         let dir_mode = dir_meta.permissions().mode();
         let dir_gid = dir_meta.gid();
+        let group_writable = dir_mode & 0o020 != 0;
+        let world_writable = dir_mode & 0o002 != 0;
+        let need_group_owner = group_writable && !world_writable;
         let mut target_mode: u32 = 0o600;
-        if dir_mode & 0o020 != 0 {
+        if group_writable {
             target_mode |= 0o060;
         }
-        if dir_mode & 0o002 != 0 {
+        if world_writable {
             target_mode |= 0o006;
         }
 
@@ -396,45 +454,110 @@ impl Dir {
         let create_mode = Mode::from_raw_mode(target_mode as rustix::fs::RawMode);
 
         let mut last_err = None;
-        for _ in 0..4 {
-            match rustix::fs::openat(&self.fd, EXPORT_LOCK_NAME, create_flags, create_mode) {
+        for _ in 0..8 {
+            match rustix::fs::openat(&self.fd, EXPORT_LOCK_NAME, open_rw_flags, Mode::empty()) {
                 Ok(fd) => {
                     let file = File::from(fd);
                     let meta = file.metadata()?;
                     if !meta.is_file() {
-                        drop(file);
-                        let _ = self.remove_file(OsStr::new(EXPORT_LOCK_NAME));
                         return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
                     }
-                    if dir_mode & 0o020 != 0
-                        && meta.gid() != dir_gid
-                        && let Err(err) = rustix::fs::fchown(&file, None, Some(Gid::from_raw(dir_gid)))
-                    {
-                        drop(file);
-                        let _ = self.remove_file(OsStr::new(EXPORT_LOCK_NAME));
+                    let id = file_id(&file, &meta)?;
+                    file.lock()?;
+                    return Ok((file, id));
+                }
+                Err(Errno::ACCESS) => match rustix::fs::openat(&self.fd, EXPORT_LOCK_NAME, open_ro_flags, Mode::empty()) {
+                    Ok(fd) => {
+                        let file = File::from(fd);
+                        let meta = file.metadata()?;
+                        if !meta.is_file() {
+                            return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
+                        }
+                        let id = file_id(&file, &meta)?;
+                        file.lock().map_err(|err| {
+                            io::Error::new(
+                                err.kind(),
+                                format!(
+                                    "cannot lock existing '{EXPORT_LOCK_NAME}' without write permission ({err}); grant write access or remove the stale lock file"
+                                ),
+                            )
+                        })?;
+                        return Ok((file, id));
+                    }
+                    Err(Errno::NOENT) => continue,
+                    Err(e) => {
                         return Err(io::Error::new(
                             io::ErrorKind::PermissionDenied,
-                            format!(
-                                "cannot align '{EXPORT_LOCK_NAME}' group ownership with shared output directory (gid {dir_gid}): {err}; set the directory setgid bit or adjust group permissions"
-                            ),
+                            format!("cannot open existing '{EXPORT_LOCK_NAME}' ({e}); grant write access or remove the stale lock file"),
                         ));
+                    }
+                },
+                Err(Errno::NOENT) => {
+                    // Initialize and verify a private candidate before exposing
+                    // it at the canonical lock name via no-clobber publish so a
+                    // failed initialization never leaves or unlinks a visible
+                    // `.anvil-export.lock`.
+                    let candidate = OsString::from(format!(".anvil-export-lock-{}.partial", uuid::Uuid::new_v4().simple()));
+                    let fd = match rustix::fs::openat(&self.fd, &candidate, create_flags, create_mode) {
+                        Ok(fd) => fd,
+                        Err(e) => {
+                            last_err = Some(e.into());
+                            break;
+                        }
+                    };
+                    let file = File::from(fd);
+                    let meta = match file.metadata() {
+                        Ok(m) => m,
+                        Err(err) => {
+                            drop(file);
+                            let _ = self.remove_file(&candidate);
+                            return Err(err);
+                        }
+                    };
+                    if !meta.is_file() {
+                        drop(file);
+                        let _ = self.remove_file(&candidate);
+                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
+                    }
+                    if group_writable && meta.gid() != dir_gid {
+                        match rustix::fs::fchown(&file, None, Some(Gid::from_raw(dir_gid))) {
+                            Ok(()) => {}
+                            Err(err) if need_group_owner => {
+                                drop(file);
+                                let _ = self.remove_file(&candidate);
+                                return Err(io::Error::new(
+                                    io::ErrorKind::PermissionDenied,
+                                    format!(
+                                        "cannot align '{EXPORT_LOCK_NAME}' group ownership with shared output directory (gid {dir_gid}): {err}; set the directory setgid bit or adjust group permissions"
+                                    ),
+                                ));
+                            }
+                            Err(_) => {}
+                        }
                     }
                     #[allow(clippy::unnecessary_cast)]
                     if let Err(err) = rustix::fs::fchmod(&file, Mode::from_raw_mode(target_mode as rustix::fs::RawMode)) {
                         drop(file);
-                        let _ = self.remove_file(OsStr::new(EXPORT_LOCK_NAME));
+                        let _ = self.remove_file(&candidate);
                         return Err(io::Error::new(
                             io::ErrorKind::PermissionDenied,
                             format!("cannot set shared permissions ({target_mode:04o}) on '{EXPORT_LOCK_NAME}': {err}"),
                         ));
                     }
-                    let meta = file.metadata()?;
+                    let meta = match file.metadata() {
+                        Ok(m) => m,
+                        Err(err) => {
+                            drop(file);
+                            let _ = self.remove_file(&candidate);
+                            return Err(err);
+                        }
+                    };
                     let actual_mode = meta.permissions().mode() & 0o777;
-                    if (dir_mode & 0o020 != 0 && (meta.gid() != dir_gid || actual_mode & 0o060 != 0o060))
-                        || (dir_mode & 0o002 != 0 && actual_mode & 0o006 != 0o006)
+                    if (need_group_owner && (meta.gid() != dir_gid || actual_mode & 0o060 != 0o060))
+                        || (world_writable && (actual_mode & 0o006 != 0o006 || (group_writable && actual_mode & 0o060 != 0o060)))
                     {
                         drop(file);
-                        let _ = self.remove_file(OsStr::new(EXPORT_LOCK_NAME));
+                        let _ = self.remove_file(&candidate);
                         return Err(io::Error::new(
                             io::ErrorKind::PermissionDenied,
                             format!(
@@ -443,52 +566,24 @@ impl Dir {
                             ),
                         ));
                     }
-                    let id = file_id(&file, &meta)?;
-                    file.lock()?;
-                    return Ok((file, id));
-                }
-                Err(Errno::EXIST) => match rustix::fs::openat(&self.fd, EXPORT_LOCK_NAME, open_rw_flags, Mode::empty()) {
-                    Ok(fd) => {
-                        let file = File::from(fd);
-                        let meta = file.metadata()?;
-                        if !meta.is_file() {
-                            return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
-                        }
-                        let id = file_id(&file, &meta)?;
-                        file.lock()?;
-                        return Ok((file, id));
-                    }
-                    Err(Errno::NOENT) => continue,
-                    Err(Errno::ACCESS) => match rustix::fs::openat(&self.fd, EXPORT_LOCK_NAME, open_ro_flags, Mode::empty()) {
-                        Ok(fd) => {
-                            let file = File::from(fd);
-                            let meta = file.metadata()?;
-                            if !meta.is_file() {
-                                return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
-                            }
+                    match self.publish_no_clobber(&candidate, OsStr::new(EXPORT_LOCK_NAME)) {
+                        Ok(()) => {
                             let id = file_id(&file, &meta)?;
-                            file.lock().map_err(|err| {
-                                io::Error::new(
-                                    err.kind(),
-                                    format!(
-                                        "cannot lock existing '{EXPORT_LOCK_NAME}' without write permission ({err}); grant write access or remove the stale lock file"
-                                    ),
-                                )
-                            })?;
+                            file.lock()?;
                             return Ok((file, id));
                         }
-                        Err(Errno::NOENT) => continue,
-                        Err(e) => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::PermissionDenied,
-                                format!(
-                                    "cannot open existing '{EXPORT_LOCK_NAME}' ({e}); grant write access or remove the stale lock file"
-                                ),
-                            ));
+                        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                            drop(file);
+                            let _ = self.remove_file(&candidate);
+                            continue;
                         }
-                    },
-                    Err(e) => return Err(e.into()),
-                },
+                        Err(err) => {
+                            drop(file);
+                            let _ = self.remove_file(&candidate);
+                            return Err(err);
+                        }
+                    }
+                }
                 Err(e) => {
                     last_err = Some(e.into());
                     break;
@@ -510,8 +605,10 @@ impl Dir {
 
     /// Back up an existing regular file `name` inside this folder without
     /// following symlinks so a subsequent companion-file failure can restore
-    /// it. Prefers an atomic hard link (zero gap while `name` stays live) and
-    /// falls back to an exclusive rename on filesystems without hard links.
+    /// it. Refuses replacement up front on filesystems without reliable file
+    /// identity or atomic exclusive rename. Prefers an atomic hard link (zero
+    /// gap while `name` stays live) and falls back to an atomic exclusive
+    /// rename on filesystems without hard links.
     pub(crate) fn backup_existing_regular(&self, name: &OsStr) -> io::Result<Option<ExistingBackup>> {
         use rustix::fs::{AtFlags, FileType, statat};
         use rustix::io::Errno;
@@ -529,16 +626,31 @@ impl Dir {
                 if ft != FileType::RegularFile {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, "destination is not a regular file"));
                 }
+                if !self.supports_reliable_identity()? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "cannot safely replace an existing dataset file on a filesystem without reliable file identity or atomic exclusive rename",
+                    ));
+                }
                 let backup = OsString::from(format!(".anvil-backup-{}.partial", uuid::Uuid::new_v4().simple()));
                 match rustix::fs::linkat(&self.fd, name, &self.fd, &backup, AtFlags::empty()) {
-                    Ok(()) => Ok(Some(ExistingBackup { name: backup, moved: false })),
+                    Ok(()) => {
+                        let Some((false, original_id)) = self.entry_identity(&backup)? else {
+                            let _ = self.remove_file(&backup);
+                            return Err(io::Error::other("cannot verify backed-up dataset identity"));
+                        };
+                        Ok(Some(ExistingBackup { name: backup, moved: false, original_id }))
+                    }
                     Err(e)
                         if matches!(e, Errno::PERM | Errno::NOSYS | Errno::INVAL | Errno::XDEV | Errno::MLINK)
                             || e == Errno::OPNOTSUPP
                             || e == Errno::NOTSUP =>
                     {
-                        self.publish_no_clobber(name, &backup)?;
-                        Ok(Some(ExistingBackup { name: backup, moved: true }))
+                        self.rename_no_clobber_atomic(name, &backup)?;
+                        let Some((false, original_id)) = self.entry_identity(&backup)? else {
+                            return Err(io::Error::other("cannot verify moved dataset backup identity"));
+                        };
+                        Ok(Some(ExistingBackup { name: backup, moved: true, original_id }))
                     }
                     Err(e) => Err(e.into()),
                 }
@@ -548,7 +660,9 @@ impl Dir {
 
     /// Abort a backup before replacement landed. When the backup moved the
     /// original entry aside, restores it with no-clobber rename so a concurrent
-    /// entry is never overwritten, returning the preserved backup filename on
+    /// entry is never overwritten. When the backup is a hard link, removes the
+    /// backup ONLY after verifying `target` still names the original inode;
+    /// otherwise preserves the backup and returns its filename alongside the
     /// error.
     pub(crate) fn abort_backup(&self, backup: ExistingBackup, target: &OsStr) -> std::result::Result<(), (OsString, io::Error)> {
         if backup.moved {
@@ -556,43 +670,68 @@ impl Dir {
                 return Err((backup.name, err));
             }
         } else {
+            let same_original = matches!(
+                (self.entry_identity(&backup.name), self.entry_identity(target)),
+                (Ok(Some((false, bid))), Ok(Some((false, tid)))) if bid == backup.original_id && tid == backup.original_id
+            );
+            if !same_original {
+                return Err((
+                    backup.name,
+                    io::Error::other("destination changed before publication completed; preserving original backup"),
+                ));
+            }
             let _ = self.remove_file(&backup.name);
         }
         Ok(())
     }
 
-    /// Roll back a published `target` only if it still has `expected_id`,
-    /// preserving any concurrently installed entry. Quarantines `target` first
-    /// and re-verifies `expected_id` on the quarantined entry before deleting
-    /// it, then restores `backup` via atomic no-clobber rename.
-    pub(crate) fn rollback_owned(&self, target: &OsStr, expected_id: FileId, backup: Option<ExistingBackup>) -> RollbackOutcome {
+    /// Roll back a published `target` only if it still names the live object
+    /// pinned by `live_handle`, preserving any concurrently installed entry.
+    /// Quarantines `target` via strictly atomic exclusive rename (never
+    /// `linkat`/`unlinkat`), re-verifies the quarantined entry against the
+    /// live handle before deleting it, and restores `backup` via atomic
+    /// no-clobber rename.
+    pub(crate) fn rollback_owned(&self, target: &OsStr, live_handle: File, backup: Option<ExistingBackup>) -> RollbackOutcome {
+        let live_id_now = |h: &File| -> Option<FileId> { h.metadata().and_then(|m| file_id(h, &m)).ok() };
+        let Some(expected_id) = live_id_now(&live_handle) else {
+            return RollbackOutcome::Skipped { backup_name: backup.map(ExistingBackup::into_name), quarantine_left: None };
+        };
         if !matches!(self.entry_identity(target), Ok(Some((false, cur))) if cur == expected_id) {
-            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+            return RollbackOutcome::Skipped { backup_name: backup.map(ExistingBackup::into_name), quarantine_left: None };
         }
         let quarantine = OsString::from(format!(".anvil-rollback-{}.partial", uuid::Uuid::new_v4().simple()));
-        if self.publish_no_clobber(target, &quarantine).is_err() {
-            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+        if self.rename_no_clobber_atomic(target, &quarantine).is_err() {
+            return RollbackOutcome::Skipped { backup_name: backup.map(ExistingBackup::into_name), quarantine_left: None };
         }
-        if !matches!(self.entry_identity(&quarantine), Ok(Some((false, cur))) if cur == expected_id) {
+        let live_matches = live_id_now(&live_handle)
+            .zip(self.entry_identity(&quarantine).ok().flatten())
+            .is_some_and(|(live_id, (is_sym, q_id))| !is_sym && q_id == live_id);
+        if !live_matches {
             // A concurrent writer swapped `target` right before quarantine; put
-            // their entry back without clobbering anything newer and keep any
-            // backup for recovery.
-            let _ = self.publish_no_clobber(&quarantine, target);
-            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+            // their entry back atomically without clobbering anything newer and
+            // surface the quarantine path + error if restoration fails.
+            let quarantine_left = match self.rename_no_clobber_atomic(&quarantine, target) {
+                Ok(()) => None,
+                Err(err) => Some((quarantine, err)),
+            };
+            return RollbackOutcome::Skipped { backup_name: backup.map(ExistingBackup::into_name), quarantine_left };
         }
         match backup {
             Some(b) => match self.publish_no_clobber(&b.name, target) {
                 Ok(()) => {
                     let _ = self.remove_file(&quarantine);
+                    drop(live_handle);
                     RollbackOutcome::Restored
                 }
                 Err(err) => {
                     let _ = self.remove_file(&quarantine);
+                    drop(live_handle);
                     RollbackOutcome::Failed { backup_name: b.name, err }
                 }
             },
             None => {
                 let _ = self.remove_file(&quarantine);
+                drop(live_handle);
                 RollbackOutcome::Restored
             }
         }
@@ -600,6 +739,31 @@ impl Dir {
 
     pub(crate) fn discard_backup(&self, backup: ExistingBackup) {
         let _ = self.remove_file(&backup.name);
+    }
+}
+
+/// Strictly atomic exclusive rename (`RENAME_NOREPLACE` / `RENAME_EXCL`) with
+/// NO `linkat`/`unlinkat` fallback, used when quarantining or returning a live
+/// destination so a concurrent swap can never be unlinked.
+#[cfg(unix)]
+fn rename_no_clobber_atomic(from_dir: &File, from: &OsStr, to_dir: &File, to: &OsStr) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        use rustix::fs::RenameFlags;
+        use rustix::io::Errno;
+        match rustix::fs::renameat_with(from_dir, from, to_dir, to, RenameFlags::NOREPLACE) {
+            Ok(()) => Ok(()),
+            Err(Errno::EXIST) => Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+            Err(e) if matches!(e, Errno::NOSYS | Errno::INVAL) || e == Errno::OPNOTSUPP || e == Errno::NOTSUP => {
+                Err(io::Error::new(io::ErrorKind::Unsupported, format!("atomic exclusive rename unsupported: {e}")))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    {
+        let _ = (from_dir, from, to_dir, to);
+        Err(io::Error::new(io::ErrorKind::Unsupported, "atomic exclusive rename unsupported on this platform"))
     }
 }
 
@@ -803,8 +967,91 @@ impl Dir {
     /// that name, a link included, makes it fail: nothing existing is opened
     /// or followed.
     pub(crate) fn create_new(&self, name: &OsStr, owner_only: bool) -> io::Result<File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
         let _ = owner_only;
-        std::fs::OpenOptions::new().write(true).create_new(true).open(self.path.join(name))
+        std::fs::OpenOptions::new().write(true).create_new(true).share_mode(FILE_SHARE_ALL).open(self.path.join(name))
+    }
+
+    /// Whether this held folder sits on NTFS or ReFS, where Windows file IDs
+    /// remain stable across renames and `MoveFileExW` supports atomic no-clobber
+    /// rename while an attribute-only handle is open (unlike FAT/FAT32/exFAT).
+    #[allow(unsafe_code)]
+    pub(crate) fn supports_reliable_identity(&self) -> io::Result<bool> {
+        use std::os::windows::io::AsRawHandle;
+
+        unsafe extern "system" {
+            fn GetVolumeInformationByHandleW(
+                hfile: *mut std::ffi::c_void,
+                lp_volume_name_buffer: *mut u16,
+                n_volume_name_size: u32,
+                lp_volume_serial_number: *mut u32,
+                lp_maximum_component_length: *mut u32,
+                lp_file_system_flags: *mut u32,
+                lp_file_system_name_buffer: *mut u16,
+                n_file_system_name_size: u32,
+            ) -> i32;
+        }
+
+        let folder = self.held.last().ok_or_else(not_absolute)?;
+        let mut fs_flags: u32 = 0;
+        let mut fs_name_buf = [0u16; 64];
+        // SAFETY: `folder.as_raw_handle()` is a valid open directory handle;
+        // `fs_name_buf` is a writable UTF-16 buffer of length `fs_name_buf.len()`.
+        let ok = unsafe {
+            GetVolumeInformationByHandleW(
+                folder.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut fs_flags,
+                fs_name_buf.as_mut_ptr(),
+                fs_name_buf.len() as u32,
+            )
+        };
+        if ok == 0 {
+            return Ok(false);
+        }
+        let len = fs_name_buf.iter().position(|&c| c == 0).unwrap_or(fs_name_buf.len());
+        let fs_name = String::from_utf16_lossy(&fs_name_buf[..len]);
+        Ok(fs_name.eq_ignore_ascii_case("NTFS") || fs_name.eq_ignore_ascii_case("ReFS"))
+    }
+
+    /// Open a lightweight attribute-only keep-alive handle to a freshly staged
+    /// file while its write handle is still open (zero gap), verify both point
+    /// to the same file object, then drop the write handle so the file is
+    /// closed for writing while its NTFS/ReFS file identity stays pinned.
+    pub(crate) fn into_staged_keepalive(&self, staged: &StagedFile, write_file: File) -> io::Result<File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        let StagedFile::Direct(name) = staged;
+        let expected = file_id(&write_file, &write_file.metadata()?)?;
+        let live = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_ALL)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.path.join(name))?;
+        let actual = file_id(&live, &live.metadata()?)?;
+        drop(write_file);
+        if actual != expected {
+            return Err(io::Error::other("staged file changed while opening keep-alive handle"));
+        }
+        Ok(live)
+    }
+
+    /// Verify that `name` currently resolves (without following links) to the
+    /// exact live OS file object pinned by `live_handle`.
+    pub(crate) fn verify_live_entry(&self, name: &OsStr, live_handle: &File) -> io::Result<bool> {
+        let live_meta = live_handle.metadata()?;
+        let live_id = file_id(live_handle, &live_meta)?;
+        Ok(matches!(self.entry_identity(name)?, Some((false, cur)) if cur == live_id))
+    }
+
+    pub(crate) fn rename_no_clobber_atomic(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        self.publish_no_clobber(from, to)
     }
 
     /// Rename `from` to `to` within this folder. A link at `to` is replaced,
@@ -944,12 +1191,25 @@ impl Dir {
         if !meta.is_file() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "destination is not a regular file"));
         }
+        if !self.supports_reliable_identity()? {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "cannot safely replace an existing dataset file on a filesystem without reliable file identity or atomic exclusive rename",
+            ));
+        }
         let backup = OsString::from(format!(".anvil-backup-{}.partial", uuid::Uuid::new_v4().simple()));
         if std::fs::hard_link(&path, self.path.join(&backup)).is_ok() {
-            Ok(Some(ExistingBackup { name: backup, moved: false }))
+            let Some((false, original_id)) = self.entry_identity(&backup)? else {
+                let _ = self.remove_file(&backup);
+                return Err(io::Error::other("cannot verify backed-up dataset identity"));
+            };
+            Ok(Some(ExistingBackup { name: backup, moved: false, original_id }))
         } else {
-            self.publish_no_clobber(name, &backup)?;
-            Ok(Some(ExistingBackup { name: backup, moved: true }))
+            self.rename_no_clobber_atomic(name, &backup)?;
+            let Some((false, original_id)) = self.entry_identity(&backup)? else {
+                return Err(io::Error::other("cannot verify moved dataset backup identity"));
+            };
+            Ok(Some(ExistingBackup { name: backup, moved: true, original_id }))
         }
     }
 
@@ -959,36 +1219,59 @@ impl Dir {
                 return Err((backup.name, err));
             }
         } else {
+            let same_original = matches!(
+                (self.entry_identity(&backup.name), self.entry_identity(target)),
+                (Ok(Some((false, bid))), Ok(Some((false, tid)))) if bid == backup.original_id && tid == backup.original_id
+            );
+            if !same_original {
+                return Err((
+                    backup.name,
+                    io::Error::other("destination changed before publication completed; preserving original backup"),
+                ));
+            }
             let _ = self.remove_file(&backup.name);
         }
         Ok(())
     }
 
-    pub(crate) fn rollback_owned(&self, target: &OsStr, expected_id: FileId, backup: Option<ExistingBackup>) -> RollbackOutcome {
+    pub(crate) fn rollback_owned(&self, target: &OsStr, live_handle: File, backup: Option<ExistingBackup>) -> RollbackOutcome {
+        let live_id_now = |h: &File| -> Option<FileId> { h.metadata().and_then(|m| file_id(h, &m)).ok() };
+        let Some(expected_id) = live_id_now(&live_handle) else {
+            return RollbackOutcome::Skipped { backup_name: backup.map(ExistingBackup::into_name), quarantine_left: None };
+        };
         if !matches!(self.entry_identity(target), Ok(Some((false, cur))) if cur == expected_id) {
-            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+            return RollbackOutcome::Skipped { backup_name: backup.map(ExistingBackup::into_name), quarantine_left: None };
         }
         let quarantine = OsString::from(format!(".anvil-rollback-{}.partial", uuid::Uuid::new_v4().simple()));
-        if self.publish_no_clobber(target, &quarantine).is_err() {
-            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+        if self.rename_no_clobber_atomic(target, &quarantine).is_err() {
+            return RollbackOutcome::Skipped { backup_name: backup.map(ExistingBackup::into_name), quarantine_left: None };
         }
-        if !matches!(self.entry_identity(&quarantine), Ok(Some((false, cur))) if cur == expected_id) {
-            let _ = self.publish_no_clobber(&quarantine, target);
-            return RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name));
+        let live_matches = live_id_now(&live_handle)
+            .zip(self.entry_identity(&quarantine).ok().flatten())
+            .is_some_and(|(live_id, (is_sym, q_id))| !is_sym && q_id == live_id);
+        if !live_matches {
+            let quarantine_left = match self.rename_no_clobber_atomic(&quarantine, target) {
+                Ok(()) => None,
+                Err(err) => Some((quarantine, err)),
+            };
+            return RollbackOutcome::Skipped { backup_name: backup.map(ExistingBackup::into_name), quarantine_left };
         }
         match backup {
             Some(b) => match self.publish_no_clobber(&b.name, target) {
                 Ok(()) => {
                     let _ = self.remove_file(&quarantine);
+                    drop(live_handle);
                     RollbackOutcome::Restored
                 }
                 Err(err) => {
                     let _ = self.remove_file(&quarantine);
+                    drop(live_handle);
                     RollbackOutcome::Failed { backup_name: b.name, err }
                 }
             },
             None => {
                 let _ = self.remove_file(&quarantine);
+                drop(live_handle);
                 RollbackOutcome::Restored
             }
         }
@@ -1108,6 +1391,18 @@ impl Dir {
         Ok(false)
     }
 
+    pub(crate) fn supports_reliable_identity(&self) -> io::Result<bool> {
+        Ok(false)
+    }
+
+    pub(crate) fn into_staged_keepalive(&self, _staged: &StagedFile, file: File) -> io::Result<File> {
+        Ok(file)
+    }
+
+    pub(crate) fn verify_live_entry(&self, _name: &OsStr, _live_handle: &File) -> io::Result<bool> {
+        Ok(false)
+    }
+
     pub(crate) fn backup_existing_regular(&self, name: &OsStr) -> io::Result<Option<ExistingBackup>> {
         let path = self.path.join(name);
         let meta = match std::fs::symlink_metadata(&path) {
@@ -1124,13 +1419,10 @@ impl Dir {
         if !meta.is_file() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "destination is not a regular file"));
         }
-        let backup = OsString::from(format!(".anvil-backup-{}.partial", uuid::Uuid::new_v4().simple()));
-        if std::fs::hard_link(&path, self.path.join(&backup)).is_ok() {
-            Ok(Some(ExistingBackup { name: backup, moved: false }))
-        } else {
-            self.rename(name, &backup)?;
-            Ok(Some(ExistingBackup { name: backup, moved: true }))
-        }
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "cannot safely replace an existing dataset file on a platform without reliable file identity",
+        ))
     }
 
     pub(crate) fn abort_backup(&self, backup: ExistingBackup, target: &OsStr) -> std::result::Result<(), (OsString, io::Error)> {
@@ -1138,15 +1430,15 @@ impl Dir {
             if let Err(err) = self.publish_no_clobber(&backup.name, target) {
                 return Err((backup.name, err));
             }
+            Ok(())
         } else {
-            let _ = self.remove_file(&backup.name);
+            Err((backup.name, io::Error::other("cannot verify original dataset identity on this platform; preserving backup")))
         }
-        Ok(())
     }
 
-    pub(crate) fn rollback_owned(&self, _target: &OsStr, _expected_id: FileId, backup: Option<ExistingBackup>) -> RollbackOutcome {
+    pub(crate) fn rollback_owned(&self, _target: &OsStr, _live_handle: File, backup: Option<ExistingBackup>) -> RollbackOutcome {
         // Fallback platforms lack reliable inode identities; preserve any backup.
-        RollbackOutcome::Skipped(backup.map(ExistingBackup::into_name))
+        RollbackOutcome::Skipped { backup_name: backup.map(ExistingBackup::into_name), quarantine_left: None }
     }
 
     pub(crate) fn discard_backup(&self, backup: ExistingBackup) {
