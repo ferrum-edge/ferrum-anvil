@@ -845,6 +845,35 @@ finally:
     m.stop = orig_stop
     m.subprocess.Popen = orig_popen
 
+# 5h. Deadline expiring before Unix quiet confirmation completes reports cleanup_unconfirmed=True and stopped_cleanly=False.
+m.SYSTEM = "Darwin"
+deadline_calls = {"n": 0}
+app_700 = {"pid": 700, "ppid": 1, "start": "Sat Nov 28 06:00:00 2026", "name": "anvil-desktop", "rss": 10}
+wk_701 = {"pid": 701, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.WebContent", "rss": 20}
+def deadline_procs():
+    deadline_calls["n"] += 1
+    # Pre-launch (1) empty; sampling + pre-stop (2, 3) see live app + WebKit helper; teardown survey sees them gone right at deadline.
+    return [app_700, wk_701] if deadline_calls["n"] in (2, 3) else []
+orig_resp = m.responsible_pid
+m.responsible_pid = lambda pid: 700 if pid in (700, 701) else None
+m.processes = deadline_procs
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: 10
+m.stop = lambda proc, *a, **kw: (True, None)
+m.UNIX_QUIET_CONFIRM_SECONDS = 0.2
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: orig_wait_quiet(before, v, p, timeout=0.0, quiet_seconds=quiet_seconds)
+m.subprocess.Popen = lambda *a, **kw: CleanExitProc()
+try:
+    r_deadline = m.one_run("/bin/true", 0, 0.01, 1)
+    assert r_deadline["stopped_cleanly"] is False and r_deadline["cleanup_unconfirmed"] is True
+    assert "quiet confirmation" in r_deadline["error"], f"unexpected error: {r_deadline.get('error')}"
+finally:
+    m.responsible_pid = orig_resp
+    m.UNIX_QUIET_CONFIRM_SECONDS = orig_quiet_secs
+    m._wait_teardown_quiet = orig_wait_quiet
+    m.stop = orig_stop
+    m.subprocess.Popen = orig_popen
+
 # 6. summarize.py emits missing-lane rows and --require-expected rejects missing/duplicate/unexpected lanes.
 spec2 = importlib.util.spec_from_file_location("s", sys.argv[2])
 s = importlib.util.module_from_spec(spec2); spec2.loader.exec_module(s)

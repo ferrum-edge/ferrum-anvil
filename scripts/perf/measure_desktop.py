@@ -722,13 +722,13 @@ def _wait_teardown_quiet(
     provisional_owned: set[ProcId],
     timeout: float = 30,
     quiet_seconds: float | None = None,
-) -> tuple[set[ProcId], set[ProcId]]:
+) -> tuple[set[ProcId], set[ProcId], bool]:
     """Wait until verified and provisional sets are empty across a quiet window.
 
     On Unix, requires `quiet_seconds` (default `UNIX_QUIET_CONFIRM_SECONDS`)
-    of consecutive empty single-survey checks so a pending WebKit XPC helper
-    cannot appear right after the first empty poll and slip past cleanup.
-    Returns the final `(live_verified, live_provisional)` from one survey.
+    of consecutive empty single-survey checks before confirming teardown so a
+    pending WebKit XPC helper cannot appear right after the first empty poll
+    and slip past cleanup. Returns `(live_verified, live_provisional, quiet_confirmed)`.
     """
     if quiet_seconds is None:
         quiet_seconds = UNIX_QUIET_CONFIRM_SECONDS if SYSTEM in ("Linux", "Darwin") else 0.0
@@ -739,18 +739,18 @@ def _wait_teardown_quiet(
         now = time.monotonic()
         if not live_v and not live_p:
             if quiet_seconds <= 0:
-                return set(), set()
+                return set(), set(), True
             if quiet_since is None:
                 quiet_since = now
             elif now - quiet_since >= quiet_seconds:
-                return set(), set()
+                return set(), set(), True
             if now >= end:
-                return set(), set()
+                return set(), set(), False
             time.sleep(min(0.1, quiet_seconds, max(0.0, end - now)))
             continue
         quiet_since = None
         if now >= end:
-            return live_v, live_p
+            return live_v, live_p, False
         time.sleep(min(0.5, max(0.0, end - now)))
 
 
@@ -1008,19 +1008,23 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
             # discovery + liveness checks across a bounded Unix quiet interval so
             # helpers appearing during shutdown or pending macOS XPC launches
             # cannot slip between discovery and liveness checks.
-            live_v, live_p = _wait_teardown_quiet(before, verified_owned, provisional_owned, timeout=30)
+            live_v, live_p, quiet_ok = _wait_teardown_quiet(before, verified_owned, provisional_owned, timeout=30)
             if live_v:
+                initial_survivors = sorted(pid for pid, _, _ in live_v)
                 bound = force_stop(live_v, pinned_pidfds)
-                live_v, live_p = _wait_teardown_quiet(before, verified_owned, provisional_owned, timeout=15)
+                live_v, live_p, quiet_ok = _wait_teardown_quiet(before, verified_owned, provisional_owned, timeout=15)
                 still_verified = sorted(pid for pid, _, _ in live_v)
-                if bound:
-                    result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in live_v) or sorted(pid for pid, _, _ in verified_owned)} outlived the app's stop (stopped by force)"
+                if bound and not still_verified:
+                    result["error"] = result.get("error") or f"verified processes {initial_survivors} outlived the app's stop (stopped by force)"
+                elif bound:
+                    result["cleanup_unconfirmed"] = True
+                    result["error"] = result.get("error") or f"verified processes {initial_survivors} outlived the app's stop (still running after force-stop: {still_verified})"
                 else:
                     result["cleanup_unconfirmed"] = True
-                    result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in live_v)} outlived the app's stop without a safe termination handle"
+                    result["error"] = result.get("error") or f"verified processes {initial_survivors} outlived the app's stop without a safe termination handle"
                 if still_verified:
                     result["left_running"] = still_verified
-            result["stopped_cleanly"] = not live_v and not live_p and cleanup_error is None
+            result["stopped_cleanly"] = quiet_ok and not live_v and not live_p and cleanup_error is None
             if live_p:
                 still_provisional = sorted(pid for pid, _, _ in live_p)
                 # Never SIGKILL heuristically attributed processes; abort further launches instead.
@@ -1031,6 +1035,10 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                     f"provisional helpers {still_provisional} were still running after stop "
                     "(not force-stopped; aborting further launches)"
                 )
+            elif not quiet_ok and not live_v and cleanup_error is None:
+                result["stopped_cleanly"] = False
+                result["cleanup_unconfirmed"] = True
+                result["error"] = result.get("error") or "teardown deadline elapsed before Unix quiet confirmation completed"
         except Exception as exc:
             cleanup_error = cleanup_error or f"process listing failed while confirming teardown: {exc}"
         finally:

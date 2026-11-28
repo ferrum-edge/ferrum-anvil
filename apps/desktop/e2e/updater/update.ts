@@ -3,7 +3,7 @@
 // `npm run e2e`), against a bundled app (AppImage on Linux, .app on macOS, the
 // NSIS or MSI install on Windows) built with the test-only `e2e` feature, a
 // test minisign key and the manifest endpoint
-// http://127.0.0.1:$ANVIL_E2E_UPDATE_PORT/latest.json.
+// https://127.0.0.1:$ANVIL_E2E_UPDATE_PORT/latest.json.
 //
 // Environment (set by the workflow):
 //   ANVIL_E2E_UPDATE_INSTALLED  what the updater replaces: the AppImage file, the .app folder,
@@ -13,14 +13,20 @@
 //   ANVIL_E2E_UPDATE_OFFERED    the version the update offers (newer than the shipped one)
 //   ANVIL_E2E_UPDATE_FIXTURES   folder with update.bin (the signed updater artifact of the
 //                               offered build), update.sig (its signature from `tauri build`),
-//                               wrong-key.sig (`tauri signer sign` with another key) and, on
-//                               macOS, expected.app (the offered bundle)
+//                               wrong-key.sig (`tauri signer sign` with another key), on
+//                               macOS expected.app (the offered bundle), tls-cert.pem and
+//                               tls-key.pem (the endpoint's certificate, issued by a test CA
+//                               the workflow added to the system trust store),
+//                               untrusted-cert.pem and untrusted-key.pem (from a CA nobody
+//                               trusts) and published-latest.json (the latest.json of the
+//                               newest published release, whose shape every manifest served
+//                               here copies)
 //   ANVIL_E2E_UPDATE_PORT       the port compiled into the endpoint
 //   ANVIL_DATA_DIR              the profile store, kept across the three runs
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer, type Server } from "node:https";
 import { basename, join, relative } from "node:path";
 import { invoke } from "../helpers";
 
@@ -120,16 +126,26 @@ export interface UpdateServer {
   requests: string[];
   /** Serve a manifest offering OFFERED with this signature, and this artifact. */
   offer(signature: string, artifact: Buffer): void;
+  /** Present the certificate from a CA the system does not trust (`true`), or the trusted one. */
+  untrusted(on: boolean): void;
   close(): Promise<void>;
 }
 
-/** The update endpoint the bundle was built with: a static-format latest.json and the artifact. */
+const tls = (cert: string, key: string) => ({ cert: fixture(cert), key: fixture(key) });
+
+/**
+ * The update endpoint the bundle was built with, over HTTPS: a static-format
+ * latest.json and the artifact. Every manifest copies the published
+ * latest.json (its fields and the platform entry's fields) and replaces only
+ * the version, the URL and the signature.
+ */
 export async function startUpdateServer(): Promise<UpdateServer> {
   const port = Number(required("ANVIL_E2E_UPDATE_PORT"));
+  const published = JSON.parse(fixture("published-latest.json").toString("utf8"));
   let manifest: Buffer = Buffer.alloc(0);
   let artifact: Buffer = Buffer.alloc(0);
   const requests: string[] = [];
-  const server: Server = createServer((req, res) => {
+  const server: Server = createServer(tls("tls-cert.pem", "tls-key.pem"), (req, res) => {
     requests.push(req.url ?? "");
     req.resume();
     const body = req.url === "/latest.json" ? manifest : req.url === "/update" ? artifact : undefined;
@@ -148,10 +164,17 @@ export async function startUpdateServer(): Promise<UpdateServer> {
     requests,
     offer(signature, bytes) {
       artifact = bytes;
-      const entry = { signature, url: `http://127.0.0.1:${port}/update` };
-      const platforms = Object.fromEntries(platformKeys().map((k) => [k, entry]));
-      manifest = Buffer.from(JSON.stringify({ version: OFFERED, notes: "REL-003 built-bundle E2E", pub_date: "2026-10-31T00:00:00Z", platforms }));
+      const platforms = Object.fromEntries(
+        platformKeys().map((k) => {
+          if (!published.platforms?.[k]) throw new Error(`the published latest.json has no ${k} entry`);
+          return [k, { ...published.platforms[k], signature, url: `https://127.0.0.1:${port}/update` }];
+        }),
+      );
+      manifest = Buffer.from(JSON.stringify({ ...published, version: OFFERED, platforms }));
       requests.length = 0;
+    },
+    untrusted(on) {
+      server.setSecureContext(on ? tls("untrusted-cert.pem", "untrusted-key.pem") : tls("tls-cert.pem", "tls-key.pem"));
     },
     close: () =>
       new Promise<void>((ok) => {

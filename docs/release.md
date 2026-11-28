@@ -822,30 +822,42 @@ run silently (`setup.exe /S`, a per-user install; `msiexec /i … /qn`, a
 per-machine install), and the specs run against the installed executable:
 
 - the **installed** bundle, at the shipped version, with an extra `--config`
-  that sets only `plugins.updater.pubkey` (the test key), the endpoint
-  `http://127.0.0.1:18797/latest.json` and `dangerousInsecureTransportProtocol`
-  (for that plain-HTTP loopback endpoint); `requireSignedVersion` stays on;
+  that sets only `plugins.updater.pubkey` (the test key) and the endpoint
+  `https://127.0.0.1:18797/latest.json`; `requireSignedVersion` stays on. The
+  endpoint is HTTPS, verified as the shipped app verifies GitHub: its
+  certificate (IP `127.0.0.1`) is issued by a test CA the job adds to the
+  system trust store (`update-ca-certificates`, the macOS System keychain,
+  the Windows `Root` store), which the plugin's rustls platform verifier reads;
 - the **update**, the same config plus `version` set to the next major
   version after the shipped one (0.x → 1.0.0, 1.x → 2.0.0, so it is always
   newer) and `createUpdaterArtifacts`, signed by `tauri build` with the test key.
 
 `scripts/updater-manifest.mjs` checks that the update's signature verifies and
 records that version, and `tauri signer sign` signs the same artifact with the other
-key. The specs in `apps/desktop/e2e/updater/` then run against the installed
-bundle through `wdio.conf.ts` (one WebdriverIO run each, so the app is
-relaunched), serve a static-format `latest.json` and the artifact from the
-endpoint, and call the app's `update_install` command:
+key. The job also downloads the `latest.json`, `release-evidence.json`, and
+published `.sig` sidecars of the newest published release and checks them with
+`checkPublishedManifest`: exactly the seven platform keys Anvil publishes,
+each URL matching the exact asset and architecture recorded in
+`release-evidence.json`, and each inline signature matching the published
+`.sig` sidecar and verifying under the owner's key (`ANVIL_UPDATER_PUBKEY`)
+for the release's version and file type (`scripts/tests/updater-manifest.test.mjs`
+runs the same checks on `anvil-v0.1.9`'s manifest and on tampered or swapped
+copies). The specs in `apps/desktop/e2e/updater/` then run against the
+installed bundle through `wdio.conf.ts` (one WebdriverIO run each, so the app
+is relaunched), serve from the endpoint a `latest.json` that copies the
+published one (keeping its top-level fields and selecting only the current
+lane's platform entries, with the offered version, loopback URL, and run-local
+signature) and the artifact, and call the app's `update_install` command:
 
 | Run | Checks |
 | --- | --- |
-| `rel003-1-refusal` | the bundle reports its own version; an update signed by the other key, one with a corrupted signature and one altered after signing are each refused with the plugin's minisign error after the app requested the manifest and the artifact; during each refusal the bundle (SHA-256, mode, size, inode, mtime of every entry), the version the app reports and the profile files (SHA-256, mode, size, inode, mtime; SQLite's `-shm` read index excluded) are unchanged |
+| `rel003-1-refusal` | the bundle reports its own version; a correctly signed update served with a certificate from a CA the system does not trust is refused before any request reaches the endpoint (`Could not read the update manifest`); an update signed by the other key, one with a corrupted signature and one altered after signing are each refused with the plugin's minisign error after the app requested the manifest and the artifact; during each refusal the bundle (SHA-256, mode, size, inode, mtime of every entry), the version the app reports and the profile files (SHA-256, mode, size, inode, mtime; SQLite's `-shm` read index excluded) are unchanged |
 | `rel003-2-install` | relaunched, the bundle is byte for byte as recorded before the refusals and reports its own version, and the same profile unlocks with the same workspaces (`workspaces_list`); the validly signed update installs: the AppImage file, or the `.app` folder, now holds the offered build, and the profile files (`-shm` excluded) are unchanged during the install. On Windows the plugin starts the verified installer (NSIS `/P /UPDATE`, or msiexec `/i … /passive`) and ends the app, so the spec starts `update_install` without waiting for it and checks from outside: the app downloaded the manifest and the artifact, the installed executable's version becomes the offered one, the installer (the updater's staged `<app>-<version>-installer.exe`, or msiexec) finishes and restarts the app (which the spec stops), and the profile files' contents are unchanged; the spec then drops the WebDriver session the update ended, so the run ends cleanly |
 | `rel003-3-installed` | relaunched, the bundle reports the offered version and unlocks the same profile |
 
 The bundles carry the `e2e` feature (embedded WebDriver) and a debug build,
 so this is not packaging evidence for release-profile bundles without that
-feature, and TLS and the published GitHub `latest.json` are not exercised by
-this workflow. The workflow runs when the update path, its tests or the
+feature. The workflow runs when the update path, its tests or the
 workflow change, weekly and on demand.
 
 ## Clean-install smoke (REL-001)
