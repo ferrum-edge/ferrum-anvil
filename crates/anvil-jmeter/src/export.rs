@@ -1586,6 +1586,13 @@ fn translate_step(
                 "the request follows redirects and sets an Mcp-Session-Id header; Anvil withholds Mcp-Session-Id on cross-origin redirects even when credential forwarding is enabled, whereas JMeter's header manager sends it to every redirect target. Turn off following redirects for this request to export it",
             ));
         }
+        if headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type") || n.eq_ignore_ascii_case("content-length")) {
+            rs.push(reason(
+                rq,
+                "redirect_body_header",
+                "the request follows redirects and sets Content-Type or Content-Length; Anvil strips those headers on bodyless redirect hops, whereas JMeter's header manager sends them to every redirect target. Remove the header or turn off following redirects for this request to export it",
+            ));
+        }
         // JMeter 5.6.3 turns every redirected method except HEAD into GET
         // and drops the body (HTTPSamplerBase), where Anvil keeps a 307/308's
         // method and body.
@@ -1618,6 +1625,9 @@ fn translate_step(
         t.map(
             "redirects of GET and HEAD (followed inside one request)",
             "Follow Redirects (one sample with sub-results; httpsampler.max_redirects)",
+        );
+        t.note(
+            "Redirect limit: when a request exceeds the redirect cap (httpsampler.max_redirects), Anvil returns the last 3xx response, whereas JMeter records an IOException (imported as a transport failure) and skips subsequent steps in a chain.",
         );
     }
 

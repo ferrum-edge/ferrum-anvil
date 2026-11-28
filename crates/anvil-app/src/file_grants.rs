@@ -972,6 +972,90 @@ pub fn open_regular_file(path: &Path) -> std::io::Result<Option<(File, Metadata)
     Ok(meta.is_file().then_some((file, meta)))
 }
 
+fn eq_filename(a: &OsStr, b: &OsStr) -> bool {
+    if cfg!(any(windows, target_os = "macos")) { a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()) } else { a == b }
+}
+
+/// An output destination whose parent folder is pinned via [`Dir`],
+/// so retargeting a parent symlink after validation cannot redirect the final
+/// atomic publish.
+pub struct PinnedOutput {
+    dir: Dir,
+    dir_id: FileId,
+    name: OsString,
+}
+
+impl PinnedOutput {
+    /// Validate and pin `path`'s parent directory without following links,
+    /// refusing a symlink at `path` itself.
+    pub fn open(path: &Path) -> std::io::Result<Self> {
+        if let Ok(meta) = std::fs::symlink_metadata(path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "destination is a symbolic link; refusing to write through or replace a symlink",
+            ));
+        }
+        let name = path
+            .file_name()
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination has no file name"))?
+            .to_os_string();
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let canon_parent = std::fs::canonicalize(parent)?;
+        let dir = Dir::open(&canon_parent)?.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination parent is a symbolic link or not a directory")
+        })?;
+        let dir_id = dir.id()?;
+        Ok(Self { dir, dir_id, name })
+    }
+
+    /// Whether this pinned destination aliases an already-opened input file
+    /// (same directory entry, symlink target, or hard link).
+    pub fn aliases_file(&self, file: &File, meta: &Metadata, file_path: &Path) -> std::io::Result<bool> {
+        let canon = std::fs::canonicalize(file_path).ok();
+        let same_entry = canon
+            .as_deref()
+            .and_then(|p| p.parent().zip(p.file_name()))
+            .and_then(|(parent, name)| Dir::open(parent).ok().flatten().and_then(|d| d.id().ok()).map(|id| (id, name)))
+            .is_some_and(|(id, name)| id == self.dir_id && eq_filename(name, &self.name));
+        if same_entry {
+            return Ok(true);
+        }
+        if let Ok(Some((existing, existing_meta))) = self.dir.open_regular(&self.name) {
+            return Ok(file_id(&existing, &existing_meta)? == file_id(file, meta)?);
+        }
+        Ok(false)
+    }
+
+    /// Whether two pinned destinations target the same directory entry.
+    pub fn aliases_output(&self, other: &Self) -> bool {
+        self.dir_id == other.dir_id && eq_filename(&self.name, &other.name)
+    }
+
+    /// Stage `bytes` into a new file inside the pinned directory and atomically
+    /// rename it into place.
+    pub fn write_atomic(&self, bytes: &[u8]) -> std::io::Result<()> {
+        let tmp = OsString::from(format!(".anvil-{}.partial", Id::new()));
+        let write_tmp = || -> std::io::Result<()> {
+            let mut f = self.dir.create_new(&tmp, false)?;
+            std::io::Write::write_all(&mut f, bytes)?;
+            f.sync_all()?;
+            Ok(())
+        };
+        if let Err(err) = write_tmp() {
+            let _ = self.dir.remove_file(&tmp);
+            return Err(err);
+        }
+        if let Err(err) = self.dir.rename(&tmp, &self.name) {
+            let _ = self.dir.remove_file(&tmp);
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
 fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), GrantError> {
     let Target::Write { dir, id, name } = target else {
         return Err(GrantError::WrongPurpose);

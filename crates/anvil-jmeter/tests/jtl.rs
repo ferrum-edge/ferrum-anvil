@@ -313,7 +313,16 @@ fn load_012_jtl_record_limit_is_exact() {
     let split_reader = SplitAt { inner: Cursor::new(crlf_csv.as_bytes().to_vec()), split: (crlf_hdr.len() - 1) as u64 };
     assert!(matches!(import_jtl(split_reader, &exact).unwrap_err(), JtlError::RecordTooLong { what: "the CSV header row", .. }));
     exact.limits.max_record_bytes = crlf_hdr.len() as u64;
+    let split_ok = SplitAt { inner: Cursor::new(crlf_csv.as_bytes().to_vec()), split: (crlf_hdr.len() - 1) as u64 };
+    assert!(import_jtl(split_ok, &exact).is_ok());
     assert!(import(&crlf_csv, &exact).is_ok());
+    // A literal `"` inside an unquoted field matches `csv-core` (does not enter quoted state and
+    // merge subsequent rows into one record).
+    let unquoted_quote_row = format!("{T0},1,a\"b,200,true,http://h/\r\n");
+    assert!(unquoted_quote_row.len() <= crlf_hdr.len());
+    let two_rows_with_quote = format!("{crlf_hdr}{unquoted_quote_row}{unquoted_quote_row}");
+    let qr = import(&two_rows_with_quote, &exact).unwrap();
+    assert_eq!(qr.requests.started, 2);
     // Unterminated final data row right after a CRLF header at exact max_record_bytes must not be
     // charged for the header's trailing `\n`.
     let exact_row = format!("{T0},1,{},200,true,http://h/", "x".repeat(crlf_hdr.len() - 35));

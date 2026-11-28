@@ -757,7 +757,9 @@ contains `$` or `\` is escaped for JMeter's function parser.
 **Listed** in the export report (`--report FILE`, and printed): dataset row
 order, ramp timing (JMeter starts a ramp's first thread at its start), the
 open model's per-stage rounding and per-arrival cookie jars, weighted-mix
-randomness, `Connection: close` in fresh mode, timeouts and response limits
+randomness, redirect-limit handling (Anvil returns the last 3xx response when
+the cap is reached, whereas JMeter records an `IOException` and skips later
+chain steps), `Connection: close` in fresh mode, timeouts and response limits
 JMeter does not enforce, header assertions (any line vs Anvil's first value),
 body evaluation beyond Anvil's 1 MiB load capture, the encoding of
 per-iteration values in queries (`+` vs `%20` for a space), Basic credential
@@ -787,7 +789,12 @@ becomes a saved `LoadReport`. Its engine is `apache-jmeter`, and its engine
 version is `jmeter/<version>+jtl-<format>`. Each top-level sample is one HTTP
 request unit, classified by the unit ledger's rules: a 3-digit status is a
 complete response; 400 or above is an application failure; a failed assertion
-is an assertion failure. `Non HTTP response code: …` is a transport failure,
+is an assertion failure when JTL includes assertion detail (`failureMessage` in
+CSV, or `<assertionResult>` in XML when `jmeter.save.saveservice.assertions=true`).
+Because the default exported run command sets
+`-Jjmeter.save.saveservice.assertions=false` to keep response data out of XML
+JTL files, a failed assertion on a 2xx/3xx status under that default command is
+recorded without assertion detail and imported as an application failure. `Non HTTP response code: …` is a transport failure,
 or a censored timeout for socket and connect timeouts. Redirect and embedded
 sub-results are not counted. The report has the usual HDR histograms,
 statuses, bounded failure categories and a timeline. Failure examples carry

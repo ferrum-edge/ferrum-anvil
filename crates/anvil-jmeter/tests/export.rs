@@ -613,6 +613,28 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     with_tls_profile(&mut c_mcp, false);
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_mcp, c_mcp, "mcp-redir")], None)), ["redirect_mcp_session"]);
 
+    let mut ct_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    ct_redir.headers.push(KeyValue::new("Content-Type", "application/json"));
+    ct_redir.settings.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
+    ct_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
+    let (id_ct, mut c_ct) = step(ct_redir);
+    with_tls_profile(&mut c_ct, false);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_ct, c_ct, "ct-redir")], None)), ["redirect_body_header"]);
+
+    // An accepted redirect-following export records the redirect-limit behavioral difference.
+    let mut ok_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    ok_redir.settings.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: false });
+    ok_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
+    let (id_ok, mut c_ok) = step(ok_redir);
+    with_tls_profile(&mut c_ok, false);
+    let exported_redir =
+        Fx::new(iterations(1, 1), vec![(id_ok, c_ok, "ok-redir")], None).export(&ExportOptions::default()).expect("exported");
+    assert!(
+        exported_redir.report.differences.iter().any(|d| d.contains("httpsampler.max_redirects")),
+        "{:?}",
+        exported_redir.report.differences
+    );
+
     // Weighted mix whose total weight exceeds i32::MAX (JMeter RandomVariableConfig limit) is refused.
     let mut a = RequestSpec::http("GET", "http://127.0.0.1:8080/a");
     a.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });

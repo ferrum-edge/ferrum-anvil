@@ -116,9 +116,19 @@ enum Hit {
     CsvRecord(u64),
 }
 
+/// CSV field-quoting state matching `csv-core`: a `"` starts a quoted field
+/// only at the beginning of a field; a `"` inside an unquoted field is literal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CsvState {
+    FieldStart,
+    Unquoted,
+    Quoted,
+    QuotedQuote,
+}
+
 /// A reader that stops at the total size limit and at the per-record limit
 /// (bytes read since the parser last called [`Guard::reset`], plus exact
-/// RFC 4180 physical record byte tracking in CSV mode).
+/// `csv-core`-compatible physical record byte tracking in CSV mode).
 struct Guard<R> {
     inner: R,
     total: u64,
@@ -128,7 +138,7 @@ struct Guard<R> {
     exact_max_record: u64,
     hit: Option<Hit>,
     track_csv_records: bool,
-    csv_in_quotes: bool,
+    csv_state: CsvState,
     csv_saw_cr: bool,
     csv_record_idx: u64,
     csv_record_start: u64,
@@ -147,7 +157,7 @@ impl<R> Guard<R> {
             exact_max_record: limits.max_record_bytes,
             hit: None,
             track_csv_records: false,
-            csv_in_quotes: false,
+            csv_state: CsvState::FieldStart,
             csv_saw_cr: false,
             csv_record_idx: 0,
             csv_record_start: 0,
@@ -194,27 +204,69 @@ impl<R: Read> Read for Guard<R> {
                         self.csv_record_idx += 1;
                         self.csv_record_start = offset + 1;
                         self.csv_record_bytes = 0;
+                        self.csv_state = CsvState::FieldStart;
                         continue;
                     }
                     // Bare CR ended the previous record; `b` is byte 0 of the next record.
                     self.csv_record_idx += 1;
                     self.csv_record_start = offset;
                     self.csv_record_bytes = 0;
+                    self.csv_state = CsvState::FieldStart;
                 }
                 self.csv_record_bytes += 1;
                 if self.csv_record_bytes > self.exact_max_record {
                     return Err(self.record_csv_hit());
                 }
-                if b == b'"' {
-                    self.csv_in_quotes = !self.csv_in_quotes;
-                } else if !self.csv_in_quotes {
-                    if b == b'\n' {
-                        self.csv_record_idx += 1;
-                        self.csv_record_start = offset + 1;
-                        self.csv_record_bytes = 0;
-                    } else if b == b'\r' {
-                        self.csv_saw_cr = true;
+                match self.csv_state {
+                    CsvState::FieldStart => match b {
+                        b'"' => self.csv_state = CsvState::Quoted,
+                        b',' => self.csv_state = CsvState::FieldStart,
+                        b'\n' => {
+                            self.csv_record_idx += 1;
+                            self.csv_record_start = offset + 1;
+                            self.csv_record_bytes = 0;
+                            self.csv_state = CsvState::FieldStart;
+                        }
+                        b'\r' => {
+                            self.csv_saw_cr = true;
+                            self.csv_state = CsvState::FieldStart;
+                        }
+                        _ => self.csv_state = CsvState::Unquoted,
+                    },
+                    CsvState::Unquoted => match b {
+                        b',' => self.csv_state = CsvState::FieldStart,
+                        b'\n' => {
+                            self.csv_record_idx += 1;
+                            self.csv_record_start = offset + 1;
+                            self.csv_record_bytes = 0;
+                            self.csv_state = CsvState::FieldStart;
+                        }
+                        b'\r' => {
+                            self.csv_saw_cr = true;
+                            self.csv_state = CsvState::FieldStart;
+                        }
+                        _ => {}
+                    },
+                    CsvState::Quoted => {
+                        if b == b'"' {
+                            self.csv_state = CsvState::QuotedQuote;
+                        }
                     }
+                    CsvState::QuotedQuote => match b {
+                        b'"' => self.csv_state = CsvState::Quoted,
+                        b',' => self.csv_state = CsvState::FieldStart,
+                        b'\n' => {
+                            self.csv_record_idx += 1;
+                            self.csv_record_start = offset + 1;
+                            self.csv_record_bytes = 0;
+                            self.csv_state = CsvState::FieldStart;
+                        }
+                        b'\r' => {
+                            self.csv_saw_cr = true;
+                            self.csv_state = CsvState::FieldStart;
+                        }
+                        _ => self.csv_state = CsvState::Unquoted,
+                    },
                 }
             }
         }

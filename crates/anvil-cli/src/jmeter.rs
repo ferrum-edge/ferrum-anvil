@@ -317,27 +317,35 @@ pub struct ImportArgs<'a> {
 
 /// Import a JMeter result file as a saved load report.
 pub fn import_jtl(app: &App, a: ImportArgs<'_>) -> Result<i32> {
-    let source_key = destination_key(a.file);
-    let mut output_keys: Vec<(&str, PathBuf)> = Vec::new();
-    for (label, path) in [("--json", a.json), ("--html", a.html)] {
-        let Some(p) = path else { continue };
-        refuse_symlink(label, p)?;
-        let key = destination_key(p);
-        if key == source_key {
+    let (file, meta) = anvil_app::file_grants::open_regular_file(a.file)
+        .with_context(|| format!("opening {}", a.file.display()))?
+        .ok_or_else(|| anyhow!("{} is not a regular file; nothing was imported", a.file.display()))?;
+    // Pin output parent directories BEFORE import so retargeting a parent
+    // symlink while parsing cannot redirect the final rename onto the source JTL.
+    let json_out = match a.json {
+        Some(p) => Some((p, anvil_app::file_grants::PinnedOutput::open(p).with_context(|| format!("preparing --json ({})", p.display()))?)),
+        None => None,
+    };
+    let html_out = match a.html {
+        Some(p) => Some((p, anvil_app::file_grants::PinnedOutput::open(p).with_context(|| format!("preparing --html ({})", p.display()))?)),
+        None => None,
+    };
+    for (label, out) in [("--json", &json_out), ("--html", &html_out)] {
+        if let Some((p, pinned)) = out
+            && pinned.aliases_file(&file, &meta, a.file)?
+        {
             bail!(
                 "{label} ({}) resolves to the same path as --file ({}); refusing to overwrite the source JTL. Nothing was imported",
                 p.display(),
                 a.file.display()
             );
         }
-        if let Some((prev, _)) = output_keys.iter().find(|(_, k)| *k == key) {
-            bail!("{label} and {prev} resolve to the same path ({}); nothing was imported", p.display());
-        }
-        output_keys.push((label, key));
     }
-    let (file, _) = anvil_app::file_grants::open_regular_file(a.file)
-        .with_context(|| format!("opening {}", a.file.display()))?
-        .ok_or_else(|| anyhow!("{} is not a regular file; nothing was imported", a.file.display()))?;
+    if let (Some((jp, j)), Some((_, h))) = (&json_out, &html_out)
+        && j.aliases_output(h)
+    {
+        bail!("--json and --html resolve to the same path ({}); nothing was imported", jp.display());
+    }
     let opts = JtlOptions {
         workspace_id: a.ws,
         plan: a.plan,
@@ -347,11 +355,13 @@ pub fn import_jtl(app: &App, a: ImportArgs<'_>) -> Result<i32> {
         limits: JtlLimits::default(),
     };
     let report = app.import_jtl(&a.ws, file, opts)?;
-    if let Some(f) = a.json {
-        stage_file("--json", f, anvil_load::report::to_json(&report).as_bytes(), false, false)?.publish()?;
+    if let Some((p, pinned)) = &json_out {
+        pinned
+            .write_atomic(anvil_load::report::to_json(&report).as_bytes())
+            .with_context(|| format!("writing --json ({})", p.display()))?;
     }
-    if let Some(f) = a.html {
-        stage_file("--html", f, anvil_load::html::to_html(&report).as_bytes(), false, false)?.publish()?;
+    if let Some((p, pinned)) = &html_out {
+        pinned.write_atomic(anvil_load::html::to_html(&report).as_bytes()).with_context(|| format!("writing --html ({})", p.display()))?;
     }
     let q = &report.requests;
     println!(
