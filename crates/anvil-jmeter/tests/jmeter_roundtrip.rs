@@ -354,7 +354,7 @@ async fn load_012_jmeter_redirect_to_an_untrusted_https_target_is_refused_or_mat
         Ok(_) => panic!("a redirect that can reach an untrusted https target must not be exported"),
         Err(e) => e,
     };
-    assert_eq!(e.reasons.iter().map(|r| r.code).collect::<Vec<_>>(), ["redirect_tls"]);
+    assert_eq!(e.reasons.iter().map(|r| r.code).collect::<Vec<_>>(), ["redirect_destination_policy", "redirect_tls"]);
 
     // Not following: both record the redirect itself, and nothing reaches the https target.
     spec.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });

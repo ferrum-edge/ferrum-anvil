@@ -218,7 +218,7 @@ fn load_012_credentials_that_follow_redirects_are_refused() {
     with_tls_profile(&mut c, false);
     c.var_layers.push(layer("workspace", &[("k", "v", true)]));
     let e = refused(Fx::new(iterations(1, 1), vec![(id, c, "echo")], None).export(&ExportOptions::default()));
-    assert_eq!(codes(&e), ["redirect_credentials"], "{e}");
+    assert_eq!(codes(&e), ["redirect_credentials", "redirect_destination_policy"], "{e}");
 }
 
 #[test]
@@ -354,21 +354,23 @@ fn following(spec: &mut RequestSpec) {
 
 #[test]
 fn load_012_redirects_that_can_reach_https_are_refused_unless_https_behaves_alike() {
-    // A cleartext request that follows redirects: a redirect can lead to
-    // https, which Anvil verifies and JMeter would not.
+    // A cleartext request that follows redirects: refused both because JMeter
+    // cannot enforce Anvil's per-hop destination network-zone policy AND
+    // because a redirect can lead to https, which Anvil verifies and JMeter would not.
     let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/redirect");
     following(&mut spec);
     let (id, c) = step(spec.clone());
-    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "r")], None)), ["redirect_tls"]);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "r")], None)), ["redirect_destination_policy", "redirect_tls"]);
     // A TLS profile that verifies is not enough, nor HTTP/1.1 alone.
     spec.settings.http_version = Some(HttpVersionPolicy::Http1Only);
     let (id, mut c) = step(spec.clone());
     with_tls_profile(&mut c, true);
-    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "r")], None)), ["redirect_tls"]);
-    // Verification off and HTTP/1.1 only: every hop behaves as in JMeter.
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "r")], None)), ["redirect_destination_policy", "redirect_tls"]);
+    // Even with verification off and HTTP/1.1 only, redirect-following is still
+    // refused because JMeter cannot enforce Anvil's per-hop destination policy.
     let (id, mut c) = step(spec);
     with_tls_profile(&mut c, false);
-    assert!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "r")], None)).is_empty());
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "r")], None)), ["redirect_destination_policy"]);
 }
 
 #[test]
@@ -379,7 +381,7 @@ fn load_012_redirected_methods_other_than_get_and_head_are_refused() {
     spec.settings.http_version = Some(HttpVersionPolicy::Http1Only);
     let (id, mut c) = step(spec);
     with_tls_profile(&mut c, false);
-    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "post")], None)), ["redirect_method"]);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "post")], None)), ["redirect_destination_policy", "redirect_method"]);
 }
 
 #[test]
@@ -409,17 +411,13 @@ fn load_012_open_workloads_need_a_cap_that_never_binds_and_fresh_connections() {
         f.plan.connection_mode = mode;
         f
     };
-    // 10/s × 2 s = 20 in flight at most.
+    // 10/s for 5 s = 50 total possible arrivals. JMeter's socket read timeout
+    // does not bound a slow-streaming response, so 20 (10/s * 2s) is NOT safe;
+    // only a cap >= 50 guarantees Anvil's cap never binds.
     assert_eq!(export_codes(&fx(5, ConnectionMode::Fresh)), ["open_cap"]);
-    assert!(export_codes(&fx(20, ConnectionMode::Fresh)).is_empty());
-    assert_eq!(export_codes(&fx(20, ConnectionMode::Persistent)), ["open_connections"]);
-    // Without a total deadline the cap cannot be shown never to bind.
-    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/");
-    spec.settings.timeouts = Some(TimeoutOverrides { total_ms: Some(None), ..Default::default() });
-    let (id2, c2) = step(spec);
-    let mut f = Fx::new(open(10_000), vec![(id2, c2, "root")], None);
-    f.plan.connection_mode = ConnectionMode::Fresh;
-    assert_eq!(export_codes(&f), ["open_cap"]);
+    assert_eq!(export_codes(&fx(20, ConnectionMode::Fresh)), ["open_cap"]);
+    assert!(export_codes(&fx(50, ConnectionMode::Fresh)).is_empty());
+    assert_eq!(export_codes(&fx(50, ConnectionMode::Persistent)), ["open_connections"]);
 }
 
 #[test]
@@ -507,7 +505,7 @@ fn load_012_sensitive_dataset_and_extraction_values_trigger_redirect_refusal() {
     let e = refused(
         Fx::new(iterations(1, 1), vec![(id, c, "ds")], Some(ds)).export(&ExportOptions { include_secrets: true, ..Default::default() }),
     );
-    assert_eq!(codes(&e), ["redirect_credentials"], "{e}");
+    assert_eq!(codes(&e), ["redirect_credentials", "redirect_destination_policy"], "{e}");
 
     // A normally-named header carrying a sensitive extraction from an earlier
     // chain step must also be refused when redirects are followed.
@@ -526,7 +524,7 @@ fn load_012_sensitive_dataset_and_extraction_values_trigger_redirect_refusal() {
     let (id2, mut c2) = step(step2);
     with_tls_profile(&mut c2, false);
     let e = refused(Fx::new(iterations(1, 1), vec![(id1, c1, "login"), (id2, c2, "profile")], None).export(&ExportOptions::default()));
-    assert_eq!(codes(&e), ["redirect_credentials"], "{e}");
+    assert_eq!(codes(&e), ["redirect_credentials", "redirect_destination_policy"], "{e}");
 }
 
 #[test]
@@ -570,7 +568,10 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     spec.settings.http_version = Some(HttpVersionPolicy::Http1Only);
     let (id, mut c) = step(spec);
     with_tls_profile(&mut c, false);
-    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "qauth")], None)), ["redirect_query_auth"]);
+    assert_eq!(
+        export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "qauth")], None)),
+        ["redirect_destination_policy", "redirect_query_auth"]
+    );
 
     // Same query API key with follow=false exports cleanly.
     let mut no_follow = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
@@ -593,17 +594,56 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
         ),
     );
     with_tls_profile(&mut c_inh, false);
-    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_inh, c_inh, "qauth-inh")], None)), ["redirect_query_auth"]);
+    assert_eq!(
+        export_codes(&Fx::new(iterations(1, 1), vec![(id_inh, c_inh, "qauth-inh")], None)),
+        ["redirect_destination_policy", "redirect_query_auth"]
+    );
 
     // Explicit Host and Mcp-Session-Id headers are stripped by Anvil on redirect hops
     // (Host on every hop, Mcp-Session-Id on cross-origin hops even with credential forwarding).
     let mut host_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
-    host_redir.headers.push(KeyValue::new("Host", "api.example.test"));
+    host_redir.headers.push(KeyValue::new("Host", "api.example.test:8080"));
     host_redir.settings.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
     host_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
     let (id_host, mut c_host) = step(host_redir);
     with_tls_profile(&mut c_host, false);
-    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_host, c_host, "host-redir")], None)), ["redirect_host_header"]);
+    assert_eq!(
+        export_codes(&Fx::new(iterations(1, 1), vec![(id_host, c_host, "host-redir")], None)),
+        ["redirect_destination_policy", "redirect_host_header"]
+    );
+
+    // Even with redirects disabled, an explicit Host that HttpClient 4 would
+    // rewrite (portless on non-default port, explicit default port, or templated)
+    // is refused, while Host matching HC4's wire form exports cleanly.
+    let mut host_portless = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    host_portless.headers.push(KeyValue::new("Host", "api.example.test"));
+    host_portless.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_hp, c_hp) = step(host_portless);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_hp, c_hp, "host-portless")], None)), ["host_header"]);
+
+    let mut host_default_port = RequestSpec::http("GET", "http://127.0.0.1:80/items");
+    host_default_port.headers.push(KeyValue::new("Host", "api.example.test:80"));
+    host_default_port.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_hdp, c_hdp) = step(host_default_port);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_hdp, c_hdp, "host-defport")], None)), ["host_header"]);
+
+    let mut host_tmpl = RequestSpec::http("GET", "http://127.0.0.1:80/items");
+    host_tmpl.headers.push(KeyValue::new("Host", "t-{{anvil.iteration}}.example.test"));
+    host_tmpl.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_ht, c_ht) = step(host_tmpl);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_ht, c_ht, "host-tmpl")], None)), ["host_header"]);
+
+    let mut host_ok_nondef = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    host_ok_nondef.headers.push(KeyValue::new("Host", "api.example.test:8080"));
+    host_ok_nondef.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_hok1, c_hok1) = step(host_ok_nondef);
+    assert!(Fx::new(iterations(1, 1), vec![(id_hok1, c_hok1, "host-ok1")], None).export(&ExportOptions::default()).is_ok());
+
+    let mut host_ok_def = RequestSpec::http("GET", "http://127.0.0.1:80/items");
+    host_ok_def.headers.push(KeyValue::new("Host", "api.example.test"));
+    host_ok_def.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_hok2, c_hok2) = step(host_ok_def);
+    assert!(Fx::new(iterations(1, 1), vec![(id_hok2, c_hok2, "host-ok2")], None).export(&ExportOptions::default()).is_ok());
 
     let mut mcp_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/mcp");
     mcp_redir.headers.push(KeyValue::new("Mcp-Session-Id", "sess-123"));
@@ -611,7 +651,10 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     mcp_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
     let (id_mcp, mut c_mcp) = step(mcp_redir);
     with_tls_profile(&mut c_mcp, false);
-    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_mcp, c_mcp, "mcp-redir")], None)), ["redirect_mcp_session"]);
+    assert_eq!(
+        export_codes(&Fx::new(iterations(1, 1), vec![(id_mcp, c_mcp, "mcp-redir")], None)),
+        ["redirect_destination_policy", "redirect_mcp_session"]
+    );
 
     // Basic auth with redirects followed is refused because JMeter scopes AuthManager
     // to the initial origin rather than matching Anvil's cross-origin/sticky stripping rules.
@@ -621,7 +664,10 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     basic_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
     let (id_basic, mut c_basic) = step(basic_redir);
     with_tls_profile(&mut c_basic, false);
-    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_basic, c_basic, "basic-redir")], None)), ["redirect_basic_auth"]);
+    assert_eq!(
+        export_codes(&Fx::new(iterations(1, 1), vec![(id_basic, c_basic, "basic-redir")], None)),
+        ["redirect_destination_policy", "redirect_basic_auth"]
+    );
 
     // Explicit Content-Length is discarded by JMeter's HttpClient 4 sampler even with redirects off.
     let mut cl_no_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
@@ -636,38 +682,69 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     ct_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
     let (id_ct, mut c_ct) = step(ct_redir);
     with_tls_profile(&mut c_ct, false);
-    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_ct, c_ct, "ct-redir")], None)), ["redirect_content_type"]);
-
-    // An accepted redirect-following export records the redirect-limit and 3xx-without-Location differences.
-    let mut ok_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
-    ok_redir.settings.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: false });
-    ok_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
-    let (id_ok, mut c_ok) = step(ok_redir);
-    with_tls_profile(&mut c_ok, false);
-    let exported_redir =
-        Fx::new(iterations(1, 1), vec![(id_ok, c_ok, "ok-redir")], None).export(&ExportOptions::default()).expect("exported");
-    assert!(
-        exported_redir.report.differences.iter().any(|d| d.contains("httpsampler.max_redirects")),
-        "{:?}",
-        exported_redir.report.differences
-    );
-    assert!(
-        exported_redir.report.differences.iter().any(|d| d.contains("Redirect responses without Location")),
-        "{:?}",
-        exported_redir.report.differences
+    assert_eq!(
+        export_codes(&Fx::new(iterations(1, 1), vec![(id_ct, c_ct, "ct-redir")], None)),
+        ["redirect_destination_policy", "redirect_content_type"]
     );
 
-    // Basic auth replaces any explicit Authorization header in Anvil; JMeter's
-    // HttpClient skips AuthManager if Authorization is present, so the export omits it.
+    // Redirect-following is refused even on a clean GET with unverified TLS
+    // because JMeter cannot enforce Anvil's per-hop destination network-zone policy;
+    // with redirects off, the 3xx-without-Location difference is still reported.
+    let mut ok_no_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    ok_no_redir.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_ok, c_ok) = step(ok_no_redir);
+    let exported_no_redir =
+        Fx::new(iterations(1, 1), vec![(id_ok, c_ok, "ok-no-redir")], None).export(&ExportOptions::default()).expect("exported");
+    assert!(
+        exported_no_redir.report.differences.iter().any(|d| d.contains("Redirect responses without Location")),
+        "{:?}",
+        exported_no_redir.report.differences
+    );
+
+    // Basic auth replaces any explicit Authorization header in Anvil (even a
+    // mixed-template stale value like `stale-{{anvil.iteration}}`); export must
+    // neither refuse with `secret_mixed` nor emit an Authorization HeaderManager entry.
     let mut basic_override = RequestSpec::http("GET", "http://127.0.0.1:8080/auth/basic");
     basic_override.auth = AuthConfig::Basic { username: "ann".into(), password: SensitiveValue::template("pw") };
-    basic_override.headers.push(KeyValue::new("Authorization", "Bearer stale-header"));
+    basic_override.headers.push(KeyValue::new("Authorization", "stale-{{anvil.iteration}}"));
+    basic_override.headers.push(KeyValue::new("X-Keep", "yes"));
     basic_override.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
     let (id_bo, c_bo) = step(basic_override);
     let out_bo =
         Fx::new(iterations(1, 1), vec![(id_bo, c_bo, "basic-override")], None).export(&ExportOptions::default()).expect("exported");
-    assert!(!out_bo.jmx.contains("stale-header"), "overridden Authorization header must not be exported alongside Basic AuthManager");
+    let doc_bo = Doc::parse(&out_bo.jmx);
+    let emitted_header_names: Vec<String> = doc_bo
+        .all("elementProp")
+        .into_iter()
+        .filter(|n| n.attribute("elementType") == Some("Header"))
+        .map(|n| doc_bo.prop(n, "Header.name"))
+        .collect();
+    assert!(
+        !emitted_header_names.iter().any(|h| h.eq_ignore_ascii_case("authorization")),
+        "overridden Authorization header must not appear in HeaderManager: {emitted_header_names:?}"
+    );
+    assert!(emitted_header_names.iter().any(|h| h == "X-Keep"));
     assert!(out_bo.jmx.contains("AuthManager"));
+
+    // CSVDataSet is scoped inside each load ThreadGroup (not at TestPlan or
+    // SetupThreadGroup scope) so the secrets check never consumes dataset row 0.
+    let ds = dataset("item\nfirst\nsecond\n");
+    let mut ds_sec = RequestSpec::http("GET", "http://127.0.0.1:8080/items/{{item}}");
+    ds_sec.auth = AuthConfig::Bearer { token: SensitiveValue::template("tok"), prefix: "Bearer".into() };
+    ds_sec.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_ds, c_ds) = step(ds_sec);
+    let out_ds = Fx::new(iterations(1, 1), vec![(id_ds, c_ds, "ds-sec")], Some(ds)).export(&ExportOptions::default()).expect("exported");
+    let doc_ds = Doc::parse(&out_ds.jmx);
+    assert!(doc_ds.all("SetupThreadGroup").len() == 1, "secrets check SetupThreadGroup present");
+    let csv_node = doc_ds.first("CSVDataSet");
+    // In JMX XML, a child of ThreadGroup sits inside the <hashTree> that immediately
+    // follows <ThreadGroup> (whose parent <hashTree> holds ThreadGroup and SetupThreadGroup).
+    let csv_parent_prev_tag = csv_node.parent().and_then(|ht| ht.prev_sibling_element()).map(|el| el.tag_name().name().to_string());
+    assert_eq!(
+        csv_parent_prev_tag.as_deref(),
+        Some("ThreadGroup"),
+        "CSVDataSet must be scoped inside load ThreadGroup, not TestPlan or SetupThreadGroup"
+    );
 
     // JSONPath extraction with a semicolon is refused because JMeter's JSONPostProcessor
     // splits jsonPathExprs on ';'.
@@ -679,6 +756,22 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     });
     let (id_jp, c_jp) = step(semi_jp);
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_jp, c_jp, "semi-jp")], None)), ["extraction"]);
+
+    // Large u64 weighted-mix seed is formatted as a signed Java long so JMeter
+    // preserves the bit pattern instead of falling back to an unseeded RNG.
+    let mut s1 = RequestSpec::http("GET", "http://127.0.0.1:8080/a");
+    s1.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let mut s2 = RequestSpec::http("GET", "http://127.0.0.1:8080/b");
+    s2.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (ids1, cs1) = step(s1);
+    let (ids2, cs2) = step(s2);
+    let mut fx_seed = Fx::new(iterations(2, 1), vec![(ids1, cs1, "a"), (ids2, cs2, "b")], None);
+    fx_seed.plan.chain.clear();
+    fx_seed.plan.mix = vec![WeightedStep { request_id: ids1, weight: 1 }, WeightedStep { request_id: ids2, weight: 1 }];
+    fx_seed.plan.seed = u64::MAX;
+    let out_seed = fx_seed.export(&ExportOptions::default()).expect("exported");
+    let doc_seed = Doc::parse(&out_seed.jmx);
+    assert_eq!(doc_seed.prop(doc_seed.first("RandomVariableConfig"), "randomSeed"), "-1");
 
     // Weighted mix whose total weight exceeds i32::MAX (JMeter RandomVariableConfig limit) is refused.
     let mut a = RequestSpec::http("GET", "http://127.0.0.1:8080/a");

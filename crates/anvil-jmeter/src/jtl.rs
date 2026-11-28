@@ -131,6 +131,7 @@ enum CsvState {
 /// `csv-core`-compatible physical record byte tracking in CSV mode).
 struct Guard<R> {
     inner: R,
+    hasher: sha2::Sha256,
     total: u64,
     since_reset: u64,
     max_total: u64,
@@ -148,9 +149,11 @@ struct Guard<R> {
 
 impl<R> Guard<R> {
     fn new(inner: R, limits: &JtlLimits) -> Self {
+        use sha2::Digest;
         // A buffered parser reads ahead by one buffer; allow for it.
         Guard {
             inner,
+            hasher: sha2::Sha256::new(),
             total: 0,
             since_reset: 0,
             max_total: limits.max_bytes,
@@ -165,6 +168,11 @@ impl<R> Guard<R> {
             csv_record_start: 0,
             csv_record_bytes: 0,
         }
+    }
+
+    fn digest(&self) -> [u8; 32] {
+        use sha2::Digest;
+        self.hasher.clone().finalize().into()
     }
 
     fn new_csv(inner: R, limits: &JtlLimits) -> Self {
@@ -299,12 +307,17 @@ impl<R: Read> Read for Guard<R> {
         const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
         if self.track_csv_records && before == 0 && n > 0 && n < 4 && buf.len() >= 4 {
             while n < 4 && buf[..n.min(3)] == BOM[..n.min(3)] {
-                let k = self.inner.read(&mut buf[n..4])?;
-                if k == 0 {
-                    break;
+                match self.inner.read(&mut buf[n..4]) {
+                    Ok(0) => break,
+                    Ok(k) => n += k,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
                 }
-                n += k;
             }
+        }
+        {
+            use sha2::Digest;
+            self.hasher.update(&buf[..n]);
         }
         self.total += n as u64;
         self.since_reset += n as u64;
@@ -406,13 +419,14 @@ fn check_http(url: &str, at: &str) -> Result<(), JtlError> {
     }
 }
 
-/// Stream the samples of a result file.
+/// Stream the samples of a result file, returning pass statistics and a
+/// streaming SHA-256 fingerprint over all bytes read in the pass.
 fn for_each_sample<R: Read>(
     r: R,
     format: JtlFormat,
     limits: &JtlLimits,
     f: &mut dyn FnMut(Sample) -> Result<(), JtlError>,
-) -> Result<Stats, JtlError> {
+) -> Result<(Stats, [u8; 32]), JtlError> {
     match format {
         JtlFormat::Csv => csv_samples(r, limits, f),
         JtlFormat::Xml => xml_samples(r, limits, f),
@@ -426,7 +440,11 @@ struct Stats {
     sub_results: u64,
 }
 
-fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> Result<(), JtlError>) -> Result<Stats, JtlError> {
+fn csv_samples<R: Read>(
+    r: R,
+    limits: &JtlLimits,
+    f: &mut dyn FnMut(Sample) -> Result<(), JtlError>,
+) -> Result<(Stats, [u8; 32]), JtlError> {
     let mut rdr = csv::ReaderBuilder::new().has_headers(true).flexible(false).from_reader(Guard::new_csv(r, limits));
     let headers = match rdr.headers().cloned() {
         Ok(h) => h,
@@ -494,7 +512,7 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
             destination: origin(url),
         })?;
     }
-    Ok(Stats::default())
+    Ok((Stats::default(), rdr.get_ref().digest()))
 }
 
 /// The text of the assertion child element being read.
@@ -506,7 +524,11 @@ enum Field {
     Url,
 }
 
-fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> Result<(), JtlError>) -> Result<Stats, JtlError> {
+fn xml_samples<R: Read>(
+    r: R,
+    limits: &JtlLimits,
+    f: &mut dyn FnMut(Sample) -> Result<(), JtlError>,
+) -> Result<(Stats, [u8; 32]), JtlError> {
     use quick_xml::events::{BytesStart, Event};
     let mut reader = quick_xml::Reader::from_reader(BufReader::new(Guard::new(r, limits)));
     {
@@ -716,7 +738,7 @@ fn xml_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
             "the file ends before </testResults>: it is truncated (an interrupted or still running JMeter test?), so it is not imported as a completed run".into(),
         ));
     }
-    Ok(stats)
+    Ok((stats, reader.get_ref().get_ref().digest()))
 }
 
 /// Append captured text, keeping at most [`MAX_CAPTURE_BYTES`]. Returns `true`
@@ -917,7 +939,7 @@ pub fn import_jtl<R: Read + Seek>(mut r: R, opts: &JtlOptions) -> Result<LoadRep
 
     // ---- pass 1: validate and find the time span ----
     let mut span = Span { first_ts: i64::MAX, last_end: i64::MIN, ..Default::default() };
-    for_each_sample(&mut r, format, limits, &mut |s: Sample| {
+    let (_, pass1_digest) = for_each_sample(&mut r, format, limits, &mut |s: Sample| {
         span.samples += 1;
         if span.samples > limits.max_samples {
             return Err(JtlError::TooManySamples { limit: limits.max_samples });
@@ -948,7 +970,7 @@ pub fn import_jtl<R: Read + Seek>(mut r: R, opts: &JtlOptions) -> Result<LoadRep
     let mut total_bytes_received = 0u64;
     let mut warmup_sends = 0u64;
     let mut seen = 0u64;
-    let stats = for_each_sample(&mut r, format, limits, &mut |s: Sample| {
+    let (stats, pass2_digest) = for_each_sample(&mut r, format, limits, &mut |s: Sample| {
         seen += 1;
         if seen > span.samples {
             return Err(JtlError::Invalid("the file changed while it was imported".into()));
@@ -988,7 +1010,7 @@ pub fn import_jtl<R: Read + Seek>(mut r: R, opts: &JtlOptions) -> Result<LoadRep
         }
         Ok(())
     })?;
-    if seen != span.samples {
+    if seen != span.samples || pass2_digest != pass1_digest {
         return Err(JtlError::Invalid("the file changed while it was imported".into()));
     }
     Ok(assemble(opts, format, span, stats, warmup_secs, warmup_end, width, buckets, metrics, req, warmup_sends))

@@ -632,30 +632,18 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
         t.map("cookie jar per virtual user", "HTTP Cookie Manager per thread (kept across iterations)");
     }
 
-    // Render every thread group, recording which markers are used.
-    let used: RefCell<BTreeSet<usize>> = RefCell::new(BTreeSet::new());
-    let mut group_nodes = Vec::new();
-    for (gi, g) in groups.iter().enumerate() {
-        let r = Render { markers: &t.markers, secrets: &t.secrets, vu_offset: g.vu_offset, used: &used };
-        let body = iteration_body(chain, &specs, &mix, total_weight, &r);
-        group_nodes.push(thread_group_node(gi, g, body, use_cookies));
-    }
-    let used = used.into_inner();
-    let used_marks: Vec<&Mark> = used.iter().map(|i| &t.markers.list[*i]).collect();
-    let mut used_secrets: Vec<usize> = used_marks.iter().filter_map(|m| if let Mark::Secret(s) = m { Some(*s) } else { None }).collect();
-    used_secrets.sort_unstable();
-    used_secrets.dedup();
-    let uses_iteration = used_marks.iter().any(|m| matches!(m, Mark::Var(v) if v == ITERATION_VAR));
-    let uses_vu = used_marks.iter().any(|m| matches!(m, Mark::Vu));
-
-    let mut plan_children = Vec::new();
     // ---- dataset ----
+    // Build the CSV Data Set Config up front and attach it inside each load
+    // thread group (with `shareMode.all` and the shared filename) rather than
+    // at TestPlan scope so the `SetupThreadGroup` secrets check never advances
+    // the CSV cursor past row 0 before load traffic starts.
     let mut dataset_report = None;
     let mut dataset_csv = None;
+    let mut dataset_node = None;
     if let Some(d) = dataset {
         let csv = dataset_to_csv(d);
         let vars: Vec<String> = (0..d.columns.len()).map(|i| format!("anvil_ds_{i}")).collect();
-        plan_children.push(Node::new(
+        dataset_node = Some(Node::new(
             "CSVDataSet",
             "TestBeanGUI",
             "Anvil dataset",
@@ -680,12 +668,33 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             sensitive_columns: d.sensitive_columns.clone(),
         });
         dataset_csv = Some(csv);
-        t.map("dataset (row = iteration mod rows)", "CSV Data Set Config shared by all threads, recycled at the end of the file");
+        t.map(
+            "dataset (row = iteration mod rows)",
+            "CSV Data Set Config shared by all load thread groups, recycled at the end of the file",
+        );
         t.note("Dataset rows: Anvil gives iteration k the row k mod rows; JMeter's CSV Data Set hands the next row to whichever thread asks, so the same rows are used in the same proportions but not by the same iteration numbers.");
         if !d.sensitive_columns.is_empty() {
             t.note("The dataset has sensitive columns. Their values are in the dataset file (secret export only), and JMeter does not redact them in its log or result files.");
         }
     }
+
+    // Render every thread group, recording which markers are used.
+    let used: RefCell<BTreeSet<usize>> = RefCell::new(BTreeSet::new());
+    let mut group_nodes = Vec::new();
+    for (gi, g) in groups.iter().enumerate() {
+        let r = Render { markers: &t.markers, secrets: &t.secrets, vu_offset: g.vu_offset, used: &used };
+        let body = iteration_body(chain, &specs, &mix, total_weight, &r);
+        group_nodes.push(thread_group_node(gi, g, body, use_cookies, dataset_node.clone()));
+    }
+    let used = used.into_inner();
+    let used_marks: Vec<&Mark> = used.iter().map(|i| &t.markers.list[*i]).collect();
+    let mut used_secrets: Vec<usize> = used_marks.iter().filter_map(|m| if let Mark::Secret(s) = m { Some(*s) } else { None }).collect();
+    used_secrets.sort_unstable();
+    used_secrets.dedup();
+    let uses_iteration = used_marks.iter().any(|m| matches!(m, Mark::Var(v) if v == ITERATION_VAR));
+    let uses_vu = used_marks.iter().any(|m| matches!(m, Mark::Vu));
+
+    let mut plan_children = Vec::new();
     if uses_iteration {
         plan_children.push(Node::new(
             "CounterConfig",
@@ -719,7 +728,7 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
                 Prop::s("outputFormat", ""),
                 Prop::s("minimumValue", "1"),
                 Prop::s("maximumValue", total_weight.to_string()),
-                Prop::s("randomSeed", plan.seed.to_string()),
+                Prop::s("randomSeed", (plan.seed as i64).to_string()),
                 Prop::Bool("perThread", false),
             ],
         ));
@@ -1206,14 +1215,18 @@ fn translate_step(
             Err(r) => rs.push(r),
         }
     }
+    let auth_overrides_authorization = matches!(ctx.effective_auth(), AuthConfig::Basic { .. } | AuthConfig::Bearer { .. });
     for (i, h) in spec.headers.iter_mut().enumerate().filter(|(_, h)| h.enabled) {
         let original = h.value.clone();
+        let overridden_auth = auth_overrides_authorization && h.name.trim().eq_ignore_ascii_case("authorization");
         h.name = mask_helpers(&h.name, &mut t.markers);
         h.value = mask_helpers(&h.value, &mut t.markers);
-        match credential_field(t, pos, ctx, &resolver, name, "header", i, &h.name, &h.value, &original, h.sensitive) {
-            Ok(Some(m)) => h.value = m,
-            Ok(None) => {}
-            Err(r) => rs.push(r),
+        if !overridden_auth {
+            match credential_field(t, pos, ctx, &resolver, name, "header", i, &h.name, &h.value, &original, h.sensitive) {
+                Ok(Some(m)) => h.value = m,
+                Ok(None) => {}
+                Err(r) => rs.push(r),
+            }
         }
     }
     match &mut spec.body {
@@ -1564,6 +1577,17 @@ fn translate_step(
             "the request sets an explicit Content-Length header; JMeter's HttpClient 4 sampler discards Content-Length from the HTTP Header Manager and computes it from the request body. Remove the explicit Content-Length header to export it",
         ));
     }
+    if headers.iter().any(|(n, v)| {
+        n.eq_ignore_ascii_case("host")
+            && (v.0.iter().any(|(s, _)| t.markers.has_marks(s))
+                || host_header_rewritten_by_hc4(&v.0.iter().map(|(s, _)| s.as_str()).collect::<String>(), &target.scheme, target.port))
+    }) {
+        rs.push(reason(
+            rq,
+            "host_header",
+            "the request sets an explicit Host header whose wire form JMeter's HttpClient 4 sampler would rewrite (appending a non-default sampler port to a portless Host, stripping an explicit default port, or resolving a dynamic template). Remove the Host header or match the sampler's port rule to export it",
+        ));
+    }
     let follow = settings.redirects.follow;
     if follow && !settings.redirects.forward_credentials_cross_origin && carries_credentials {
         rs.push(reason(
@@ -1573,6 +1597,11 @@ fn translate_step(
         ));
     }
     if follow {
+        rs.push(reason(
+            rq,
+            "redirect_destination_policy",
+            "the request follows redirects; Anvil enforces its per-hop destination network-zone policy on every redirect (preventing redirects into private, loopback, or other unapproved network zones), whereas JMeter follows redirects to any host without network-zone enforcement. Turn off following redirects for this request to export it",
+        ));
         if matches!(auth, AuthConfig::Basic { .. }) {
             rs.push(reason(
                 rq,
@@ -2101,33 +2130,30 @@ fn thread_groups(t: &mut Translator<'_>) -> Vec<Group> {
             vec![Group { kind: GroupKind::Iterations { threads, loops, gate }, vu_offset: 0 }]
         }
         Workload::OpenArrivalRate { stages, max_in_flight } => {
-            // JMeter's open model has no in-flight cap: it starts every
-            // arrival. Exported only when Anvil's cap can never bind, so no
-            // arrival Anvil would drop is started by JMeter: the cap is at
-            // least the peak rate times the longest an iteration can take
-            // (the sum of its steps' total deadlines; the longest step for a mix).
-            let deadlines: Vec<Option<u64>> =
-                t.contexts.iter().map(|c| anvil_engine::settings::resolve(&c.settings_layers).timeouts.total_ms).collect();
-            let peak = stages.iter().map(|s| s.target).max().unwrap_or(0);
-            if deadlines.iter().any(Option::is_none) {
+            // JMeter's open model has no in-flight cap and its socket read
+            // timeout is an idle timeout (not a total request deadline), so a
+            // slow-streaming response can outlive Anvil's `total_ms`. Export
+            // only when `max_in_flight` covers the schedule's total possible
+            // arrivals, so Anvil's cap can never bind regardless of response
+            // duration.
+            let mut prev_rate = 0u128;
+            let mut total_arrivals = 0u128;
+            for s in stages {
+                let target = u128::from(s.target);
+                let dur = u128::from(s.duration_secs);
+                if dur > 0 {
+                    total_arrivals = total_arrivals.saturating_add(prev_rate.saturating_add(target).saturating_mul(dur).div_ceil(2));
+                }
+                prev_rate = target;
+            }
+            if u128::from(*max_in_flight) < total_arrivals {
                 t.reasons.push(reason(
                     None,
                     "open_cap",
-                    "an open workload's request has no total deadline, so Anvil's in-flight cap could drop arrivals that JMeter's open model (which has no cap) would start. Give the plan's requests a total timeout to export it",
+                    format!(
+                        "the open workload caps in-flight iterations at {max_in_flight}, and Anvil drops arrivals beyond it; JMeter's open model has no cap and its socket timeout does not bound a slow-streaming response. Raise max_in_flight to at least the schedule's total possible arrivals ({total_arrivals}) for the export to behave the same"
+                    ),
                 ));
-            } else {
-                let ms: Vec<u64> = deadlines.into_iter().flatten().collect();
-                let iteration_ms = if plan.mix.is_empty() { ms.iter().sum::<u64>() } else { ms.iter().copied().max().unwrap_or(0) };
-                let bound = (peak.saturating_mul(iteration_ms)).div_ceil(1000);
-                if *max_in_flight < bound {
-                    t.reasons.push(reason(
-                        None,
-                        "open_cap",
-                        format!(
-                            "the open workload caps in-flight iterations at {max_in_flight}, and Anvil drops arrivals beyond it; JMeter's open model has no cap and would start them. The cap must be at least the peak rate times an iteration's total deadline ({peak}/s × {iteration_ms} ms = {bound}) for the export to behave the same: raise the cap or lower the requests' total timeout"
-                        ),
-                    ));
-                }
             }
             if plan.connection_mode == ConnectionMode::Persistent {
                 t.reasons.push(reason(
@@ -2150,7 +2176,7 @@ fn thread_groups(t: &mut Translator<'_>) -> Vec<Group> {
                 "Open Model Thread Group: even_arrivals between the stages' rates, one new thread per arrival",
             );
             t.note(format!(
-                "Open workload: the in-flight cap ({max_in_flight}) covers the peak rate times an iteration's deadline, so Anvil never drops an arrival and JMeter's uncapped open model starts the same arrivals; each JMeter arrival is a new thread with its own cookie jar."
+                "Open workload: the in-flight cap ({max_in_flight}) covers all {total_arrivals} scheduled arrivals, so Anvil never drops an arrival and JMeter's uncapped open model starts the same arrivals; each JMeter arrival is a new thread with its own cookie jar."
             ));
             t.note("Arrival counts: Anvil schedules arrivals on the integral of the rate across stages; JMeter rounds each stage's arrivals down separately, so a multi-stage schedule may differ by one arrival per stage.");
             vec![Group { kind: GroupKind::Open { schedule }, vu_offset: 0 }]
@@ -2383,8 +2409,11 @@ fn thread_group_props(threads: u64, ramp: u64, loops: i64, scheduler: bool, dura
     ]
 }
 
-fn thread_group_node(index: usize, g: &Group, body: Vec<Node>, cookies: bool) -> Node {
+fn thread_group_node(index: usize, g: &Group, body: Vec<Node>, cookies: bool, dataset: Option<Node>) -> Node {
     let mut children = Vec::new();
+    if let Some(ds) = dataset {
+        children.push(ds);
+    }
     if cookies {
         children.push(cookie_manager());
     }
@@ -2453,6 +2482,37 @@ fn resolve_secret(t: &Translator<'_>, source: &SecretSource) -> Result<Zeroizing
         }
         SecretSource::Vault { step, secret } => t.contexts[*step].secrets.resolve(secret),
         SecretSource::Literal(value) => Ok(Zeroizing::new(value.clone())),
+    }
+}
+
+/// Whether JMeter's HttpClient 4 sampler would rewrite an explicit static
+/// `Host` header value (appending a non-default sampler port when the header
+/// has no port, or stripping an explicit default port `:80`/`:443`).
+fn host_header_rewritten_by_hc4(raw: &str, scheme: &str, target_port: u16) -> bool {
+    let s = raw.trim();
+    if s.is_empty() {
+        return true;
+    }
+    let explicit_port: Option<u16> = if let Some(rest) = s.strip_prefix('[') {
+        let Some((_, after)) = rest.split_once(']') else { return true };
+        if after.is_empty() {
+            None
+        } else if let Some(p) = after.strip_prefix(':') {
+            let Ok(port) = p.parse::<u16>() else { return true };
+            Some(port)
+        } else {
+            return true;
+        }
+    } else if let Some((_, p)) = s.split_once(':') {
+        let Ok(port) = p.parse::<u16>() else { return true };
+        Some(port)
+    } else {
+        None
+    };
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    match explicit_port {
+        None => target_port != default_port,
+        Some(p) => p == default_port,
     }
 }
 

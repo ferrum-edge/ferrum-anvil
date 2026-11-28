@@ -700,6 +700,33 @@ fn load_012_write_jmeter_export_preserves_existing_plan_when_secrets_grant_inval
     assert_eq!(std::fs::read(&occupied).unwrap(), b"existing-secrets");
 }
 
+#[cfg(target_vendor = "apple")]
+#[test]
+fn load_012_macos_owner_only_export_strips_inherited_acl() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let dir = tempfile::tempdir().unwrap();
+    let status =
+        Command::new("/bin/chmod").args(["+a", "everyone allow read,file_inherit"]).arg(dir.path()).status().expect("run chmod +a");
+    assert!(status.success(), "chmod +a on tempdir failed");
+
+    let plan_path = dir.path().join("plan.jmx");
+    let sec_path = dir.path().join("plan.secrets.properties");
+    let grants = FileGrants::default();
+    let g = grants.grant_write(FilePurpose::JmeterExport, &plan_path).unwrap();
+    let sg = grants.grant_write(FilePurpose::JmeterSecretsExport, &sec_path).unwrap();
+    grants
+        .write_jmeter_export(&g.token, b"<jmeterTestPlan/>", None, false, Some((&sg.token, b"k=secret\n")))
+        .expect("export with secrets into ACL-inheriting directory");
+
+    let meta = std::fs::metadata(&sec_path).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o7777, 0o600);
+    let ls = Command::new("/bin/ls").args(["-le"]).arg(&sec_path).output().expect("ls -le");
+    let stdout = String::from_utf8_lossy(&ls.stdout);
+    assert!(!stdout.contains("everyone allow read"), "inherited macOS ACL must be cleared from owner-only secrets file: {stdout}");
+}
+
 #[cfg(not(unix))]
 #[test]
 fn load_012_secret_output_is_refused_where_no_owner_only_file_can_be_created() {

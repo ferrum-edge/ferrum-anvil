@@ -174,12 +174,21 @@ impl Dir {
 
     /// Create `name` in this folder for writing. Anything already there under
     /// that name, a link included, makes it fail: nothing existing is opened
-    /// or followed.
+    /// or followed. When `owner_only` is true, enforces `0o600` on the open
+    /// descriptor, clears any inherited macOS extended ACL, and verifies
+    /// effective owner-only permissions before returning (failing closed and
+    /// unlinking the newly created file if privacy cannot be established).
     pub(crate) fn create_new(&self, name: &OsStr, owner_only: bool) -> io::Result<File> {
         use rustix::fs::{Mode, OFlags};
         let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let mode = Mode::from_raw_mode(if owner_only { 0o600 } else { 0o666 });
-        Ok(File::from(rustix::fs::openat(&self.fd, name, flags, mode)?))
+        let file = File::from(rustix::fs::openat(&self.fd, name, flags, mode)?);
+        if owner_only && let Err(err) = enforce_owner_only(&file) {
+            drop(file);
+            let _ = self.remove_file(name);
+            return Err(err);
+        }
+        Ok(file)
     }
 
     /// Rename `from` to `to` within this folder. A link at `to` is replaced,
@@ -218,6 +227,93 @@ impl Dir {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Enforce owner-only permissions on a newly created open file descriptor
+/// before any secret bytes are written: `fchmod(0o600)` (which also zeroes
+/// Linux POSIX `ACL_MASK`), clear any inherited macOS extended ACL, and verify
+/// both the resulting mode and absence of ACL entries. Fails closed if privacy
+/// cannot be established.
+#[cfg(unix)]
+fn enforce_owner_only(file: &File) -> io::Result<()> {
+    use rustix::fs::Mode;
+    use std::os::unix::fs::PermissionsExt;
+
+    rustix::fs::fchmod(file, Mode::from_raw_mode(0o600))?;
+    #[cfg(target_vendor = "apple")]
+    clear_and_verify_macos_acl(file)?;
+
+    let mode = file.metadata()?.permissions().mode() & 0o7777;
+    if mode != 0o600 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("cannot verify owner-only permissions on new file (mode {:04o})", mode),
+        ));
+    }
+    Ok(())
+}
+
+/// Clear any inherited extended ACL on `file` and confirm no ACL entries
+/// remain. Fails closed on unexpected errors so an inherited macOS ACL can
+/// never grant another user read access to a secret file.
+#[cfg(target_vendor = "apple")]
+#[allow(unsafe_code)]
+fn clear_and_verify_macos_acl(file: &File) -> io::Result<()> {
+    use std::ffi::{c_int, c_void};
+    use std::os::fd::AsRawFd;
+
+    const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
+    const ACL_FIRST_ENTRY: c_int = 0;
+    const ENOENT: i32 = 2;
+    const ENOTSUP: i32 = 45;
+
+    unsafe extern "C" {
+        fn acl_init(count: c_int) -> *mut c_void;
+        fn acl_set_fd_np(fd: c_int, acl: *mut c_void, acl_type: c_int) -> c_int;
+        fn acl_get_fd_np(fd: c_int, acl_type: c_int) -> *mut c_void;
+        fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry_p: *mut *mut c_void) -> c_int;
+        fn acl_free(obj_p: *mut c_void) -> c_int;
+    }
+
+    let fd = file.as_raw_fd();
+    // SAFETY: `acl_init(0)` allocates an empty macOS `acl_t` (or NULL on OOM).
+    let empty = unsafe { acl_init(0) };
+    if empty.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a valid open descriptor and `empty` is a valid `acl_t`;
+    // `acl_free` releases `empty` unconditionally afterwards.
+    let set_rc = unsafe { acl_set_fd_np(fd, empty, ACL_TYPE_EXTENDED) };
+    let set_err = if set_rc != 0 { Some(io::Error::last_os_error()) } else { None };
+    unsafe {
+        acl_free(empty);
+    }
+    if let Some(err) = set_err
+        && err.raw_os_error() != Some(ENOTSUP)
+    {
+        return Err(err);
+    }
+
+    // Verify no extended ACL entries remain on the descriptor.
+    // SAFETY: `fd` is open; a non-NULL `acl` is freed before returning.
+    let current = unsafe { acl_get_fd_np(fd, ACL_TYPE_EXTENDED) };
+    if current.is_null() {
+        let err = io::Error::last_os_error();
+        if matches!(err.raw_os_error(), Some(ENOENT | ENOTSUP)) {
+            return Ok(());
+        }
+        return Err(err);
+    }
+    let mut entry: *mut c_void = std::ptr::null_mut();
+    // SAFETY: `current` is a valid `acl_t` returned by `acl_get_fd_np`.
+    let has_entry = unsafe { acl_get_entry(current, ACL_FIRST_ENTRY, &mut entry) == 0 };
+    unsafe {
+        acl_free(current);
+    }
+    if has_entry {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "cannot clear inherited ACL on owner-only file"));
+    }
+    Ok(())
 }
 
 /// The file just opened without following a link, if it is a regular file;
@@ -315,10 +411,25 @@ impl Dir {
     }
 
     /// Atomically publish `from` at `to` within this folder only if `to` does
-    /// not already exist.
+    /// not already exist. Uses a same-volume `MoveFileExW` without
+    /// `MOVEFILE_REPLACE_EXISTING` so it works on NTFS, ReFS, exFAT, and FAT32
+    /// (unlike `hard_link`, which fails on exFAT/FAT32).
+    #[allow(unsafe_code)]
     pub(crate) fn publish_no_clobber(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
-        std::fs::hard_link(self.path.join(from), self.path.join(to))?;
-        let _ = self.remove_file(from);
+        use std::os::windows::ffi::OsStrExt;
+
+        unsafe extern "system" {
+            fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+        }
+
+        let src: Vec<u16> = self.path.join(from).as_os_str().encode_wide().chain(Some(0)).collect();
+        let dst: Vec<u16> = self.path.join(to).as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: `src` and `dst` are valid NUL-terminated UTF-16 paths; flags=0
+        // requests a same-volume rename that fails with ERROR_ALREADY_EXISTS if
+        // `dst` already exists.
+        if unsafe { MoveFileExW(src.as_ptr(), dst.as_ptr(), 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
         Ok(())
     }
 
