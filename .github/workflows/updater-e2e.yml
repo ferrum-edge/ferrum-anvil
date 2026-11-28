@@ -28,6 +28,9 @@ on:
       # The NSIS template the Windows lanes install and update through.
       - "apps/desktop/src-tauri/windows/installer.nsi"
       - "apps/desktop/src-tauri/Cargo.toml"
+      # Release lanes create a profile with the CLI and unlock through LockScreen.
+      - "apps/desktop/src/LockScreen.tsx"
+      - "crates/anvil-cli/src/main.rs"
       - "apps/desktop/e2e/updater/**"
       - "apps/desktop/e2e/helpers.ts"
       - "apps/desktop/wdio.conf.ts"
@@ -46,6 +49,9 @@ on:
       # The NSIS template the Windows lanes install and update through.
       - "apps/desktop/src-tauri/windows/installer.nsi"
       - "apps/desktop/src-tauri/Cargo.toml"
+      # Release lanes create a profile with the CLI and unlock through LockScreen.
+      - "apps/desktop/src/LockScreen.tsx"
+      - "crates/anvil-cli/src/main.rs"
       - "apps/desktop/e2e/updater/**"
       - "apps/desktop/e2e/helpers.ts"
       - "apps/desktop/wdio.conf.ts"

@@ -861,7 +861,7 @@ no embedded WebDriver, no environment-driven unlock): the AppImage on Ubuntu
 26.04 and the NSIS and MSI installs on Windows 2025. They are driven through
 `wdio.release.conf.ts`, the `@wdio/tauri-service` "external" provider: the
 official `tauri-driver` 2.1.0 (installed with `cargo install --locked`), which
-starts the platform's WebDriver (WebKitWebDriver from `webkit2gtk-driver` on
+starts the platform's WebDriver (WebKitWebDriver from `webkitgtk-webdriver` on
 Linux; msedgedriver matched to the WebView2 runtime on Windows) and enables
 webview automation for the process it launches (Tauri's
 `TAURI_WEBVIEW_AUTOMATION`); Anvil's code is the release code. The profile is
