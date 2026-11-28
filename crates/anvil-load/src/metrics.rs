@@ -286,11 +286,11 @@ pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObse
         obs.latency_us = wall_us;
         obs.setup_us = 0;
         count_attempts(&mut obs, &out.session_attempts);
-        if obs.terminal == Terminal::Completed
-            && let Some(aux) = &out.session_auxiliary_outcome
-        {
+        if let Some(aux) = &out.session_auxiliary_outcome {
             let aux_terminal = classify_transport(aux.transport, aux.failure.as_ref());
-            if aux_terminal != Terminal::Completed {
+            let apply_aux = aux_terminal != Terminal::Completed
+                && (obs.terminal == Terminal::Completed || aux.exchange == anvil_engine::McpAuxiliaryExchange::InitializedNotification);
+            if apply_aux {
                 obs.terminal = aux_terminal;
                 obs.application_failure = false;
                 obs.assertion_failure = false;

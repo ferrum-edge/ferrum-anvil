@@ -457,7 +457,7 @@ pub async fn run(plan: &UdpPlan, events: &EventCtx, cancel: &CancellationToken, 
     let obs = finish_attempt(rec, obs, events);
     let ps = ProtocolStatus::Udp { datagrams_sent: sent, datagrams_received: received, window_ms: plan.response_window_ms, masque: None };
     SessionOutput::single(
-        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured: false },
+        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None },
         Some(tr.finish()),
         ps,
         facts,

@@ -134,7 +134,7 @@ pub struct ProblemDetails {
 /// A JSON-RPC 2.0 error, as the response carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonRpcError {
-    pub code: i64,
+    pub code: i128,
     /// Redacted excerpt.
     pub message: String,
     /// `error.data.gateway` (Ferrum Edge marks the errors its MCP and A2A
@@ -275,7 +275,7 @@ fn jsonrpc_error(obj: &serde_json::Map<String, serde_json::Value>, redact: Redac
         return None;
     }
     let e = obj.get("error")?.as_object()?;
-    let code = e.get("code")?.as_i64()?;
+    let code = e.get("code").and_then(|v| v.as_i64().map(i128::from).or_else(|| v.as_u64().map(i128::from)))?;
     let message = excerpt(redact, e.get("message").and_then(|m| m.as_str()).unwrap_or(""), 300);
     let gateway = e.get("data").and_then(|d| d.get("gateway")).and_then(|g| g.as_str()).map(|g| excerpt(redact, g, 64));
     Some(JsonRpcError { code, message, gateway })
@@ -514,6 +514,10 @@ mod tests {
             br#"[{"jsonrpc":"2.0","id":1,"result":{}},{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}]"#;
         let f = body_facts_redacted(Some("application/json"), batch, None);
         assert_eq!(f.jsonrpc_error.as_ref().map(|e| e.code), Some(-32601));
+        // Unsigned JSON-RPC integer codes above i64::MAX are also recognized as application failures.
+        let big_u64 = br#"{"jsonrpc":"2.0","id":2,"error":{"code":9223372036854775808,"message":"large unsigned"}}"#;
+        let f_big = body_facts_redacted(Some("application/json"), big_u64, None);
+        assert_eq!(f_big.jsonrpc_error.as_ref().map(|e| e.code), Some(9_223_372_036_854_775_808i128));
         let tool = br#"[{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"broke"}]}}]"#;
         let f = body_facts_redacted(Some("application/json"), tool, None);
         assert_eq!(f.mcp_tool_error.as_ref().map(|t| t.text.as_str()), Some("broke"));

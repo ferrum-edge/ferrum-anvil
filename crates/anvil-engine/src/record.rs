@@ -171,19 +171,27 @@ struct BodyDecoding {
     detail: Option<String>,
 }
 
-fn decode_body(r: &ResponseRecord, raw: &[u8], limit: u64, session: bool, answer_captured: bool) -> BodyDecoding {
+fn decode_body(r: &ResponseRecord, raw: &[u8], limit: u64, session: bool, answer_captured_len: Option<usize>) -> BodyDecoding {
+    let answer_prefix = answer_captured_len
+        .filter(|&n| n <= raw.len() && matches!(r.body.completeness, BodyCompleteness::Complete | BodyCompleteness::StoppedAfterAnswer))
+        .map(|n| &raw[..n]);
+    let has_coding =
+        r.body.content_encoding.as_deref().is_some_and(|ce| !ce.trim().is_empty() && !ce.trim().eq_ignore_ascii_case("identity"));
     // Reading stopped once the body held the answer: the coded stream has no
     // end yet, and what arrived decodes as a prefix (including when trailing
     // probe frames pushed wire_bytes past capture_bytes after the watched
     // answer had already been captured whole).
-    let incremental_answer = (r.body.completeness == BodyCompleteness::StoppedAfterAnswer && !r.body.display_truncated)
-        || (answer_captured
-            && r.body.display_truncated
-            && matches!(r.body.completeness, BodyCompleteness::Complete | BodyCompleteness::StoppedAfterAnswer));
-    if incremental_answer
-        && r.body.content_encoding.as_deref().is_some_and(|ce| !ce.trim().is_empty() && !ce.trim().eq_ignore_ascii_case("identity"))
+    let incremental_slice = if r.body.completeness == BodyCompleteness::StoppedAfterAnswer && !r.body.display_truncated {
+        Some(raw)
+    } else if r.body.display_truncated {
+        answer_prefix
+    } else {
+        None
+    };
+    if let Some(slice) = incremental_slice
+        && has_coding
         && let Some(mut d) = decode::IncrementalDecoder::new(r.body.content_encoding.as_deref(), limit)
-        && let Ok(bytes) = d.push(raw)
+        && let Ok(bytes) = d.push(slice)
     {
         return BodyDecoding {
             bytes: Some(Bytes::from(bytes)),
@@ -196,7 +204,7 @@ fn decode_body(r: &ResponseRecord, raw: &[u8], limit: u64, session: bool, answer
         DecodeOutcome::Identity => BodyDecoding::default(),
         // A capture cut short is not the whole encoded body, even when its
         // bytes decode cleanly (the cut can fall between two gzip members).
-        DecodeOutcome::Decoded { bytes, truncated_at_limit: false } if capture_gap(&r.body, session, answer_captured).is_some() => {
+        DecodeOutcome::Decoded { bytes, truncated_at_limit: false } if capture_gap(&r.body, session, answer_prefix.is_some()).is_some() => {
             let captured = format!("only {} bytes of the body were captured", raw.len());
             // A local limit (capture or response size) leaves a decoded
             // prefix; a body the peer or a cancel cut short is not decoded.
@@ -217,11 +225,27 @@ fn decode_body(r: &ResponseRecord, raw: &[u8], limit: u64, session: bool, answer
         DecodeOutcome::Decoded { bytes, truncated_at_limit: false } => {
             BodyDecoding { bytes: Some(Bytes::from(bytes)), status: Some(ContentDecoding::Complete), detail: None }
         }
-        DecodeOutcome::Decoded { bytes, truncated_at_limit: true } => BodyDecoding {
-            bytes: Some(Bytes::from(bytes)),
-            status: Some(ContentDecoding::TruncatedAtLimit),
-            detail: Some(format!("decoding stopped at the local limit of {limit} decoded bytes")),
-        },
+        DecodeOutcome::Decoded { bytes, truncated_at_limit: true } => {
+            // If trailing probe frames pushed the decoded body past `limit`
+            // after the watched answer was already captured whole, decode the
+            // exact answer prefix incrementally so assertions/extractions run.
+            if let Some(prefix) = answer_prefix
+                && has_coding
+                && let Some(mut d) = decode::IncrementalDecoder::new(r.body.content_encoding.as_deref(), limit)
+                && let Ok(ans_bytes) = d.push(prefix)
+            {
+                return BodyDecoding {
+                    bytes: Some(Bytes::from(ans_bytes)),
+                    status: Some(ContentDecoding::Complete),
+                    detail: Some("decoded up to where reading stopped, after the answer had arrived".into()),
+                };
+            }
+            BodyDecoding {
+                bytes: Some(Bytes::from(bytes)),
+                status: Some(ContentDecoding::TruncatedAtLimit),
+                detail: Some(format!("decoding stopped at the local limit of {limit} decoded bytes")),
+            }
+        }
         DecodeOutcome::Unsupported { coding } => BodyDecoding {
             bytes: None,
             status: Some(ContentDecoding::Unsupported),
@@ -276,11 +300,11 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     let Assembly { ctx, started_at, attempts, last, redactor, .. } = a;
     let response = last.response.clone();
     let raw_body = last.body.clone();
-    let answer_captured = last.answer_captured;
+    let answer_captured_len = last.answer_captured_len;
     // Decode for display/assertions; the raw captured bytes stay the evidence.
     let BodyDecoding { bytes: decoded, status: decoding_status, detail: decoding_detail } = match &response {
         Some(r) if a.settings.decompress && !raw_body.is_empty() => {
-            decode_body(r, &raw_body, a.settings.limits.max_decoded_bytes, a.stream.is_some(), answer_captured)
+            decode_body(r, &raw_body, a.settings.limits.max_decoded_bytes, a.stream.is_some(), answer_captured_len)
         }
         _ => BodyDecoding::default(),
     };
@@ -302,7 +326,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
     // prefix.
     let body_unavailable: Option<String> = response
         .as_ref()
-        .and_then(|r| capture_gap(&r.body, a.stream.is_some(), answer_captured && viewed.is_some()))
+        .and_then(|r| capture_gap(&r.body, a.stream.is_some(), answer_captured_len.is_some() && viewed.is_some()))
         .or_else(|| decoding_gap.clone());
     let mut response = response;
     if let Some(r) = response.as_mut() {
@@ -750,28 +774,36 @@ mod tests {
 
     #[test]
     fn a_capture_cut_short_is_never_labelled_completely_decoded() {
-        let whole = decode_body(&gzip_response(BodyCompleteness::Complete, 25, false), &GZIP_HELLO, 1024, false, false);
+        let whole = decode_body(&gzip_response(BodyCompleteness::Complete, 25, false), &GZIP_HELLO, 1024, false, None);
         assert_eq!(whole.status, Some(ContentDecoding::Complete));
         // The capture ends between two gzip members: its bytes decode
         // cleanly, but they are not the whole body.
-        let captured = decode_body(&gzip_response(BodyCompleteness::Complete, 50, true), &GZIP_HELLO, 1024, false, false);
+        let captured = decode_body(&gzip_response(BodyCompleteness::Complete, 50, true), &GZIP_HELLO, 1024, false, None);
         assert_eq!(captured.status, Some(ContentDecoding::TruncatedAtLimit));
         assert_eq!(captured.bytes.as_deref(), Some(&b"hello"[..]), "the decoded prefix stays viewable");
         assert!(captured.detail.as_deref().is_some_and(|d| d.contains("only 25 bytes")), "{:?}", captured.detail);
-        let limited = decode_body(&gzip_response(BodyCompleteness::StoppedAtLocalLimit, 25, false), &GZIP_HELLO, 1024, false, false);
+        let limited = decode_body(&gzip_response(BodyCompleteness::StoppedAtLocalLimit, 25, false), &GZIP_HELLO, 1024, false, None);
         assert_eq!(limited.status, Some(ContentDecoding::TruncatedAtLimit));
         for cut in [BodyCompleteness::Incomplete, BodyCompleteness::Canceled] {
-            let d = decode_body(&gzip_response(cut, 25, false), &GZIP_HELLO, 1024, false, false);
+            let d = decode_body(&gzip_response(cut, 25, false), &GZIP_HELLO, 1024, false, None);
             assert_eq!(d.status, Some(ContentDecoding::Failed), "{cut:?}");
             assert!(d.bytes.is_none(), "{cut:?}");
         }
         // A session ends on its own terms; only the capture limit counts there.
-        let session = decode_body(&gzip_response(BodyCompleteness::Incomplete, 25, false), &GZIP_HELLO, 1024, true, false);
+        let session = decode_body(&gzip_response(BodyCompleteness::Incomplete, 25, false), &GZIP_HELLO, 1024, true, None);
         assert_eq!(session.status, Some(ContentDecoding::Complete));
-        // An answer already captured whole before trailing probe bytes overflowed capture_bytes still decodes cleanly.
-        let probe_truncated = decode_body(&gzip_response(BodyCompleteness::StoppedAfterAnswer, 50, true), &GZIP_HELLO, 1024, false, true);
+        // An answer captured whole before trailing probe bytes overflowed capture_bytes
+        // or max_decoded_bytes still decodes its exact answer prefix cleanly.
+        let mut two_members = Vec::from(GZIP_HELLO);
+        two_members.extend_from_slice(&GZIP_HELLO);
+        let probe_truncated =
+            decode_body(&gzip_response(BodyCompleteness::StoppedAfterAnswer, 60, true), &two_members, 6, false, Some(GZIP_HELLO.len()));
         assert_eq!(probe_truncated.status, Some(ContentDecoding::Complete));
         assert_eq!(probe_truncated.bytes.as_deref(), Some(&b"hello"[..]));
+        let probe_over_decoded_limit =
+            decode_body(&gzip_response(BodyCompleteness::Complete, 50, false), &two_members, 6, false, Some(GZIP_HELLO.len()));
+        assert_eq!(probe_over_decoded_limit.status, Some(ContentDecoding::Complete));
+        assert_eq!(probe_over_decoded_limit.bytes.as_deref(), Some(&b"hello"[..]));
     }
 
     #[test]
@@ -830,7 +862,7 @@ mod tests {
                 observation: anvil_transport::session::new_attempt(0, AttemptReason::Initial, "GET", "https://example.test/"),
                 response: Some(response),
                 body: Bytes::from_static(b"body"),
-                answer_captured: false,
+                answer_captured_len: None,
             },
             trust: FerrumTrust::NotConfigured,
             credentials_stripped: false,

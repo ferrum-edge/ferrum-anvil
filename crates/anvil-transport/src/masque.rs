@@ -1248,7 +1248,7 @@ pub async fn run(plan: &MasquePlan, events: &EventCtx, cancel: &CancellationToke
         masque: Some(tunnel),
     };
     SessionOutput::single(
-        AttemptOutput { observation: obs, response: Some(response), body: Bytes::new(), answer_captured: false },
+        AttemptOutput { observation: obs, response: Some(response), body: Bytes::new(), answer_captured_len: None },
         Some(tr.finish()),
         ps,
         facts,

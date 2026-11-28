@@ -972,7 +972,7 @@ fn fail_attempt(
     if let Some(t) = track {
         obs.early_data = Some(t.finish());
     }
-    AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured: false }
+    AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None }
 }
 
 /// DNS for a QUIC destination (there is no TCP connect phase).
@@ -2053,7 +2053,7 @@ impl H3Transport {
             })
         });
         let mut answer_probe_deadline: Option<tokio::time::Instant> = None;
-        let mut answer_captured = false;
+        let mut answer_captured_len: Option<usize> = None;
         loop {
             let idle_deadline = idle.map(|d| Instant::now() + d);
             tokio::select! {
@@ -2077,7 +2077,7 @@ impl H3Transport {
                         if let Some(w) = watch.as_mut()
                             && w.feed(&data)
                         {
-                            answer_captured = wire <= plan.limits.capture_bytes;
+                            answer_captured_len = (wire <= plan.limits.capture_bytes).then_some(captured.len());
                             let probe_deadline = tokio::time::Instant::now() + Duration::from_millis(20);
                             answer_probe_deadline = Some(probe_deadline);
                             loop {
@@ -2274,7 +2274,7 @@ impl H3Transport {
                 blob_sha256: if captured.is_empty() { None } else { Some(crate::certs::sha256_hex(&captured)) },
             },
         };
-        (AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured }, None)
+        (AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured_len }, None)
     }
 }
 

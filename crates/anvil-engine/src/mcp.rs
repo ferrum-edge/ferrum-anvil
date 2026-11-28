@@ -451,11 +451,12 @@ impl BodyWatch for AnswerWatch {
         let parse_err = self.parser.feed_limited(&decoded, &mut events, MAX_SSE_EVENTS.saturating_sub(self.events)).is_err();
         self.events += events.len();
         let values = events.iter().filter_map(|e| serde_json::from_str::<Value>(&e.data).ok());
+        let is_batch = matches!(self.wanted, Wanted::Batch(_));
         let before = self.responses.len();
         self.responses.extend(
             values
                 .flat_map(|v| match v {
-                    Value::Array(a) => a,
+                    Value::Array(a) if is_batch => a,
                     other => vec![other],
                 })
                 .filter(is_response),
@@ -1472,6 +1473,21 @@ mod tests {
         assert!(
             watch.feed(b"data: {\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid Request\"}}\n\n"),
             "lone null-id refusal must trigger early stop"
+        );
+    }
+
+    #[test]
+    fn single_request_watch_does_not_stop_on_array_event() {
+        let stop = stop_at_answer(Wanted::Response(OPERATION_ID), Arc::new(Mutex::new(None)), true, 64 * 1024);
+        let mut watch = stop(&BodyStart { request_body: b"{}", content_type: Some("text/event-stream"), content_encoding: None })
+            .expect("watch installed");
+        assert!(
+            !watch.feed(format!("data: [{{\"jsonrpc\":\"2.0\",\"id\":{OPERATION_ID},\"result\":{{}}}}]\n\n").as_bytes()),
+            "array event must not stop a single-request watcher"
+        );
+        assert!(
+            watch.feed(format!("data: {{\"jsonrpc\":\"2.0\",\"id\":{OPERATION_ID},\"result\":{{}}}}\n\n").as_bytes()),
+            "top-level response object must stop single-request watcher"
         );
     }
 

@@ -493,7 +493,7 @@ pub async fn run(plan: &TcpPlan, events: &EventCtx, cancel: &CancellationToken, 
     let obs = finish_attempt(rec, obs, events);
     let ps = ProtocolStatus::Tcp { bytes_sent, bytes_received, half_closed, closed_by };
     SessionOutput::single(
-        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured: false },
+        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None },
         Some(tr.finish()),
         ps,
         facts,

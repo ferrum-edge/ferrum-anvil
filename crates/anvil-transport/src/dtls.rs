@@ -642,7 +642,7 @@ async fn run_direct(
         None => (None, ProtocolStatus::None),
     };
     SessionOutput::single(
-        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured: false },
+        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None },
         transcript,
         status,
         facts,
@@ -691,7 +691,7 @@ async fn run_tunneled(
         masque: Some(tunnel),
     };
     SessionOutput::single(
-        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured: false },
+        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None },
         transcript,
         status,
         facts,
@@ -752,7 +752,7 @@ async fn run_hbone(
         None => (None, 0, 0),
     };
     SessionOutput::single(
-        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured: false },
+        AttemptOutput { observation: obs, response: None, body: Bytes::new(), answer_captured_len: None },
         transcript,
         status(sent, received),
         facts,

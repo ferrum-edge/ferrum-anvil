@@ -448,9 +448,9 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
     if exact.is_empty()
         && passthrough.is_empty()
         && let Some(e) = &ctx.body.jsonrpc_error
+        && let Ok(code) = i64::try_from(e.code)
     {
-        let signal =
-            JsonRpcSignal { status: r.status, token: token.as_deref(), code: e.code, message: &e.message, gateway: e.gateway.as_deref() };
+        let signal = JsonRpcSignal { status: r.status, token: token.as_deref(), code, message: &e.message, gateway: e.gateway.as_deref() };
         jsonrpc_outcomes(ctx, cat, &signal, body_ceiling, out);
         return;
     }

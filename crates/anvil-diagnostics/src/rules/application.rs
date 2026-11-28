@@ -95,7 +95,7 @@ pub fn rules(ctx: &Ctx<'_>, out: &mut Vec<Draft>, warnings: &mut Vec<OutcomeWarn
 /// What a JSON-RPC 2.0 error code means by itself (JSON-RPC 2.0 §5.1). The
 /// application-defined range carries no meaning without the server's own
 /// documentation.
-fn jsonrpc_code_meaning(code: i64) -> &'static str {
+fn jsonrpc_code_meaning(code: i128) -> &'static str {
     match code {
         -32700 => "the server could not parse the request as JSON (parse error)",
         -32600 => "the request is not a valid JSON-RPC request (invalid request)",

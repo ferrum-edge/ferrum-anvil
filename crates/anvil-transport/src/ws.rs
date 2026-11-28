@@ -763,7 +763,7 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
         let captured = captured.freeze();
         let response = response_record(status, http::Version::HTTP_3, headers, body_capture(completeness, wire, &captured, content_type));
         return SessionOutput::single(
-            crate::http::AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured: false },
+            crate::http::AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured_len: None },
             None,
             ws_status(ClosedBy::NotClosed, None),
             facts,
@@ -785,7 +785,7 @@ async fn run_h3(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, co
             obs.failure = Some(f);
             let obs = finish_attempt(rec, obs, events);
             return SessionOutput::single(
-                crate::http::AttemptOutput { observation: obs, response: Some(response), body: Bytes::new(), answer_captured: false },
+                crate::http::AttemptOutput { observation: obs, response: Some(response), body: Bytes::new(), answer_captured_len: None },
                 None,
                 ws_status(ClosedBy::NotClosed, extensions),
                 facts,
@@ -1053,7 +1053,7 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
             extensions: None,
         };
         return SessionOutput::single(
-            crate::http::AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured: false },
+            crate::http::AttemptOutput { observation: obs, response: Some(response), body: captured, answer_captured_len: None },
             None,
             ps,
             facts,
@@ -1061,29 +1061,31 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
     }
 
     let response = response_record(status, version, headers.clone(), body_capture(BodyCompleteness::NoBody, 0, &[], content_type));
-    let handshake_fail = |rec: Recorder,
-                          mut obs: AttemptObservation,
-                          msg: String,
-                          facts: SessionFacts,
-                          extensions: Option<WsExtensions>| {
-        let mut f = TransportFailure::new(Phase::ProtocolHandshake, FailureKind::WsProtocolError, msg);
-        f.status = Some(status);
-        obs.failure = Some(f);
-        let obs = finish_attempt(rec, obs, events);
-        let ps = ProtocolStatus::WebSocket {
-            handshake_status: Some(status),
-            close_code: None,
-            close_reason: String::new(),
-            closed_by: ClosedBy::NotClosed,
-            extensions,
+    let handshake_fail =
+        |rec: Recorder, mut obs: AttemptObservation, msg: String, facts: SessionFacts, extensions: Option<WsExtensions>| {
+            let mut f = TransportFailure::new(Phase::ProtocolHandshake, FailureKind::WsProtocolError, msg);
+            f.status = Some(status);
+            obs.failure = Some(f);
+            let obs = finish_attempt(rec, obs, events);
+            let ps = ProtocolStatus::WebSocket {
+                handshake_status: Some(status),
+                close_code: None,
+                close_reason: String::new(),
+                closed_by: ClosedBy::NotClosed,
+                extensions,
+            };
+            SessionOutput::single(
+                crate::http::AttemptOutput {
+                    observation: obs,
+                    response: Some(response.clone()),
+                    body: Bytes::new(),
+                    answer_captured_len: None,
+                },
+                None,
+                ps,
+                facts,
+            )
         };
-        SessionOutput::single(
-            crate::http::AttemptOutput { observation: obs, response: Some(response.clone()), body: Bytes::new(), answer_captured: false },
-            None,
-            ps,
-            facts,
-        )
-    };
     if !h2 && let Err(e) = validate_upgrade(resp.headers(), &key) {
         return handshake_fail(rec, obs, format!("invalid WebSocket handshake response: {e}"), facts, None);
     }
@@ -1119,7 +1121,7 @@ pub async fn run(plan: &WsPlan, events: &EventCtx, cancel: &CancellationToken, c
                 extensions,
             };
             return SessionOutput::single(
-                crate::http::AttemptOutput { observation: obs, response: Some(response), body: Bytes::new(), answer_captured: false },
+                crate::http::AttemptOutput { observation: obs, response: Some(response), body: Bytes::new(), answer_captured_len: None },
                 None,
                 ps,
                 facts,
@@ -1575,7 +1577,7 @@ where
         extensions,
     };
     SessionOutput::single(
-        crate::http::AttemptOutput { observation: obs, response: Some(response), body: Bytes::new(), answer_captured: false },
+        crate::http::AttemptOutput { observation: obs, response: Some(response), body: Bytes::new(), answer_captured_len: None },
         Some(tr.finish()),
         ps,
         facts,
