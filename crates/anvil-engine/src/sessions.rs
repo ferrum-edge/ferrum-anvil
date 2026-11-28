@@ -21,7 +21,7 @@ use anvil_auth::ResolvedAuth;
 use anvil_diagnostics::{Draft, FerrumTrust};
 use anvil_domain::Id;
 use anvil_domain::Timestamp;
-use anvil_domain::diagnostics::{Confidence, EvidenceSource, Owner, Remediation, Severity, SourceScope};
+use anvil_domain::diagnostics::{Confidence, EvidenceSource, Owner, Severity, SourceScope};
 use anvil_domain::events::SessionCommand;
 use anvil_domain::execution::*;
 use anvil_domain::integration::DiagnosticDetailAccess;
@@ -1757,8 +1757,7 @@ async fn prepare_masque(
 }
 
 /// Findings the engine derives from session facts: adapter observations,
-/// not generic rules. Most are worded here; `grpc_web.no_trailer_frame` and
-/// `grpc.framing_invalid` are worded in the diagnostics catalog.
+/// not generic rules. All are worded in the diagnostics catalog.
 fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStatus) -> Vec<Draft> {
     let mut out = Vec::new();
     if let Some(problem) = &facts.grpc_framing_error
@@ -1821,7 +1820,7 @@ fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStat
     if let Some(r) = &facts.grpc_reflection
         && !r.succeeded
     {
-        let mut d = Draft::new(
+        let d = Draft::new(
             "grpc.reflection_unavailable",
             "protocol.grpc",
             Confidence::Confirmed,
@@ -1831,26 +1830,18 @@ fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStat
         )
         .ev(EvidenceSource::GrpcStatus, "reflection.service", r.service.clone())
         .ev(EvidenceSource::GrpcStatus, "reflection.grpc_status", r.grpc_status.map(|s| s.to_string()).unwrap_or_else(|| "missing".into()))
-        .not_proven("That the service or method itself is unavailable — only schema discovery by reflection failed.");
-        d.catalog_text = Some((
-            "Server reflection did not provide a schema".into(),
-            format!(
-                "{} The method was not called. This concerns schema discovery only; the service may work normally with a local schema.",
-                r.problem.clone().unwrap_or_else(|| "Server reflection failed.".into())
-            ),
-        ));
+        .var("problem", r.problem.clone().unwrap_or_else(|| "Server reflection failed.".into()));
         // A reflection request auth could not sign was never sent: the server
         // did not refuse reflection, so allowing it would change nothing.
-        let text = if r.auth_failed {
+        let fix = if r.auth_failed {
             "Fix the request's auth profile so it can sign the reflection request, or import the service's .proto files or a descriptor set and call it without reflection."
         } else {
             "Import the service's .proto files or a descriptor set and call it without reflection, or ask the operator to allow reflection for this caller."
         };
-        d.extra_remediation.push(Remediation { text: text.into(), owner: Owner::Caller });
-        out.push(d);
+        out.push(d.var("fix", fix));
     }
     if facts.icmp_port_unreachable && protocol == Protocol::Udp {
-        let mut d = Draft::new(
+        let d = Draft::new(
             "udp.icmp_port_unreachable",
             "protocol.streams",
             Confidence::Likely,
@@ -1858,18 +1849,11 @@ fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStat
             Owner::Unknown,
             Severity::Warning,
         )
-        .ev(EvidenceSource::NativeTransport, "icmp", "port unreachable reported to the socket")
-        .alt("A firewall or gateway generated the ICMP message on behalf of the destination.")
-        .not_proven("That the destination host is down.");
-        d.catalog_text = Some((
-            "The destination reported the UDP port unreachable".into(),
-            "The operating system received an ICMP port-unreachable for this destination, which usually means nothing is listening on that UDP port."
-                .into(),
-        ));
+        .ev(EvidenceSource::NativeTransport, "icmp", "port unreachable reported to the socket");
         out.push(d);
     }
     if facts.repeated_datagrams > 0 {
-        let mut d = Draft::new(
+        let d = Draft::new(
             "udp.repeated_payloads",
             "protocol.streams",
             Confidence::Confirmed,
@@ -1878,16 +1862,7 @@ fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStat
             Severity::Info,
         )
         .ev(EvidenceSource::NativeTransport, "udp.repeated_payloads", facts.repeated_datagrams.to_string())
-        .alt("The network duplicated datagrams.")
-        .alt("The peer sent identical replies on purpose.")
-        .not_proven("Which datagrams were duplicated — UDP has no sequence numbers unless the application protocol adds them.");
-        d.catalog_text = Some((
-            "Some received datagrams repeated earlier payloads".into(),
-            format!(
-                "{} received datagram(s) were byte-identical to an earlier received datagram. Anvil counts this as an observation, not as proof of duplicate delivery.",
-                facts.repeated_datagrams
-            ),
-        ));
+        .var("count", facts.repeated_datagrams.to_string());
         out.push(d);
     }
     out
