@@ -675,8 +675,9 @@ if os.name == "posix":
     finally:
         m.os.killpg = orig_killpg
 
-# 5b. Linux early exit with a reparented WebKitGTK orphan marks cleanup unconfirmed.
+# 5b. Linux early exit (even when app still has a zombie row) catches reparented WebKitGTK orphan and never adopts recycled app PID.
 m.SYSTEM = "Linux"
+zombie_app = {"pid": 101, "ppid": 1, "start": "Sat Nov 28 06:00:00 2026", "name": "unrelated-reused", "rss": 10}
 linux_orphan = {"pid": 901, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "WebKitWebProcess", "rss": 20}
 m.log_size = lambda: {}
 m.ready_line = lambda sizes, pid: None
@@ -684,17 +685,18 @@ m.wait_gone = lambda expected, timeout=30: False if expected else True
 lin_calls = {"n": 0}
 def linux_early_procs():
     lin_calls["n"] += 1
-    return [] if lin_calls["n"] == 1 else [linux_orphan]
+    return [] if lin_calls["n"] == 1 else [zombie_app, linux_orphan]
 m.processes = linux_early_procs
 m.subprocess.Popen = lambda *a, **kw: EarlyProc()
 r_lin = m.one_run("/bin/true", 0, 0.05, 1)
 assert r_lin["stopped_cleanly"] is False and r_lin["cleanup_unconfirmed"] is True
 assert r_lin.get("provisional_left_running") == [901]
+assert "left_running" not in r_lin, "reused app PID must never enter verified_owned"
 m.subprocess.Popen = orig_popen
 
-# 5c. macOS partial procinfo failure keeps unresolved new WebKit helpers in provisional_out.
+# 5c. macOS partial procinfo failure keeps unresolved new WebKit helpers in provisional_out even alongside verified helpers.
 m.SYSTEM = "Darwin"
-m.responsible_pid = lambda pid: 100 if pid == 100 else (555 if pid == 202 else None)
+m.responsible_pid = lambda pid: 100 if pid in (100, 202) else None
 prov = set()
 mfound, _, mver = m.helpers(
     [
@@ -707,12 +709,43 @@ mfound, _, mver = m.helpers(
     known_app_owner=100,
     provisional_out=prov,
 )
-assert mver is False and [h["pid"] for h in mfound] == [203] and (203, "Sat Nov 28 06:00:01 2026", "com.apple.WebKit.Networking") in prov
+assert mver is True and [h["pid"] for h in mfound] == [202]
+assert (203, "Sat Nov 28 06:00:01 2026", "com.apple.WebKit.Networking") in prov
 
-# 5d. Non-Linux force_stop never signals raw numeric PIDs and returns False so cleanup is unconfirmed.
+# 5d. Linux force_stop signals ONLY already-pinned pidfds and returns False if any survivor is unpinned; non-Linux returns False.
+m.SYSTEM = "Linux"
+m.processes = lambda: [
+    {"pid": 888, "ppid": 1, "start": "T1", "name": "WebKitWebProcess", "rss": 10},
+    {"pid": 889, "ppid": 1, "start": "T1", "name": "WebKitGPUProcess", "rss": 10},
+]
+sent_sigs = []
+orig_pidfd_send = getattr(m.signal, "pidfd_send_signal", None)
+m.signal.pidfd_send_signal = lambda fd, sig: sent_sigs.append((fd, sig))
+try:
+    id_a = (888, "T1", "WebKitWebProcess")
+    id_b = (889, "T1", "WebKitGPUProcess")
+    assert m.force_stop({id_a}, {id_a: 42}) is True
+    assert sent_sigs == [(42, m.signal.SIGKILL)]
+    sent_sigs.clear()
+    assert m.force_stop({id_a, id_b}, {id_a: 42}) is False
+    assert sent_sigs == [(42, m.signal.SIGKILL)]
+finally:
+    if orig_pidfd_send is None:
+        delattr(m.signal, "pidfd_send_signal")
+    else:
+        m.signal.pidfd_send_signal = orig_pidfd_send
+
 m.SYSTEM = "Darwin"
-m.processes = lambda: [{"pid": 888, "ppid": 1, "start": "T1", "name": "anvil-desktop", "rss": 10}]
-assert m.force_stop({(888, "T1", "anvil-desktop")}) is False
+assert m.force_stop({(888, "T1", "WebKitWebProcess")}) is False
+
+# 5e. Windows job launch failure never falls back to unsuspended Popen.
+m.SYSTEM = "Windows"
+m.processes = lambda: []
+popen_called = []
+m.subprocess.Popen = lambda *a, **kw: popen_called.append(a)
+r_win_fail = m.one_run("anvil-desktop.exe", 0, 0.05, 1)
+assert popen_called == [] and r_win_fail["cleanup_unconfirmed"] is True and "Windows Job Object" in r_win_fail["error"]
+m.subprocess.Popen = orig_popen
 
 # 6. summarize.py emits missing-lane rows and --require-expected rejects missing/duplicate/unexpected lanes.
 spec2 = importlib.util.spec_from_file_location("s", sys.argv[2])

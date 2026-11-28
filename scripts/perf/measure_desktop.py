@@ -249,10 +249,11 @@ class _WinJob:
     def __init__(self) -> None:
         self.handle: int | None = None
         self.assigned: bool = False
+        self.last_error: int = 0
         self._kernel32 = None
-        if SYSTEM != "Windows" or not hasattr(ctypes, "windll"):
+        if SYSTEM != "Windows" or not hasattr(ctypes, "WinDLL"):
             return
-        k32 = ctypes.windll.kernel32
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
         k32.CreateJobObjectW.restype = ctypes.c_void_p
         k32.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
@@ -324,12 +325,14 @@ class _WinJob:
 
         h = k32.CreateJobObjectW(None, None)
         if not h:
+            self.last_error = ctypes.get_last_error()
             return
         info = _ExtendedLimit()
         info.BasicLimitInformation.LimitFlags = self.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         if not k32.SetInformationJobObject(
             h, self.JOB_OBJECT_EXTENDED_LIMIT_INFO, ctypes.byref(info), ctypes.sizeof(info)
         ):
+            self.last_error = ctypes.get_last_error()
             k32.CloseHandle(h)
             return
         self.handle = h
@@ -390,15 +393,18 @@ class _WinJob:
             ctypes.byref(pi),
         )
         if not ok:
+            self.last_error = ctypes.get_last_error()
             return None
         assigned = bool(self._kernel32.AssignProcessToJobObject(self.handle, pi.hProcess))
         if not assigned:
+            self.last_error = ctypes.get_last_error()
             self._kernel32.TerminateProcess(pi.hProcess, 1)
             self._kernel32.CloseHandle(pi.hThread)
             self._kernel32.CloseHandle(pi.hProcess)
             return None
         self.assigned = True
         if self._kernel32.ResumeThread(pi.hThread) == 0xFFFFFFFF:
+            self.last_error = ctypes.get_last_error()
             self._kernel32.TerminateJobObject(self.handle, 1)
             self._kernel32.CloseHandle(pi.hThread)
             self._kernel32.CloseHandle(pi.hProcess)
@@ -497,6 +503,7 @@ def helpers(
     known_app_owner: int | None = None,
     win_job: _WinJob | None = None,
     provisional_out: set[ProcId] | None = None,
+    root_exited: bool = False,
 ) -> tuple[list[dict], str, bool]:
     """The app's webview processes, attribution label, and whether ownership is verified per-launch.
 
@@ -555,15 +562,18 @@ def helpers(
             "process tree (msedgewebview2.exe descendants verified by creation time and prelaunch baseline)",
             True,
         )
+    if root_exited or not any(r["pid"] == app_pid for r in rows):
+        # App already exited (possibly still visible as a zombie or reaped and
+        # recycled) so Linux has reparented surviving children: never trust
+        # descendants of `app_pid`, and track newly observed WebKitGTK helpers
+        # provisionally so cleanup cannot report success while an orphan runs.
+        if provisional_out is not None:
+            provisional_out |= {
+                proc_identity(r) for r in rows if r["name"] in LINUX_WEBVIEW and proc_identity(r) not in before
+            }
+        return [], "process tree (app exited; WebKitGTK ancestry unavailable)", False
     tree = descendants(rows, app_pid, before=before, require_creation_order=True)
     found = [r for r in tree if r["name"] in LINUX_WEBVIEW]
-    if provisional_out is not None and not any(r["pid"] == app_pid for r in rows):
-        # App already exited and any surviving WebKitGTK children were reparented:
-        # track newly observed WebKitGTK helpers provisionally so cleanup cannot
-        # report success while an orphan still runs.
-        provisional_out |= {
-            proc_identity(r) for r in rows if r["name"] in LINUX_WEBVIEW and proc_identity(r) not in before
-        }
     return found, "process tree (WebKitGTK processes descending from the app)", True
 
 
@@ -630,41 +640,68 @@ def wait_gone(expected: set[ProcId], timeout: float = 30) -> bool:
     return False
 
 
-def force_stop(verified_expected: set[ProcId]) -> bool:
-    """Force-stop ONLY verified processes bound to an OS handle/pidfd checked after opening.
+def _linux_proc_starttime(pid: int) -> str | None:
+    """Kernel-tick start time from /proc/<pid>/stat (field 22), or None outside Linux."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        after_comm = stat.rsplit(")", 1)[1].split()
+        return after_comm[19]  # field 22 (1-indexed) minus 3 (pid, comm, state-index)
+    except (OSError, IndexError, ValueError):
+        return None
 
-    Returns True only when every surviving process could be signaled through a
-    race-free handle (Linux `pidfd_open` + re-check + `pidfd_send_signal`). On
-    platforms without race-free PID handles, never signals raw numeric PIDs;
-    returns False so teardown marks cleanup unconfirmed instead.
+
+def pin_linux_pidfd(proc_id: ProcId, pinned: dict[ProcId, int]) -> None:
+    """Open and retain a Linux pidfd while ownership is live, re-checking kernel starttime."""
+    if SYSTEM != "Linux" or proc_id in pinned:
+        return
+    pidfd_open = getattr(os, "pidfd_open", None)
+    if pidfd_open is None:
+        return
+    pid = proc_id[0]
+    before_ticks = _linux_proc_starttime(pid)
+    fd = None
+    try:
+        fd = pidfd_open(pid, 0)
+        after_ticks = _linux_proc_starttime(pid)
+        if before_ticks is not None and after_ticks == before_ticks and proc_id in alive({proc_id}):
+            pinned[proc_id] = fd
+            fd = None
+    except OSError:
+        pass
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def force_stop(verified_expected: set[ProcId], pinned_pidfds: dict[ProcId, int] | None = None) -> bool:
+    """Force-stop ONLY verified processes already bound to a pinned Linux pidfd.
+
+    Never opens a fresh pidfd or signals a numeric PID after teardown begins.
+    Returns True only when every surviving verified identity had a pinned fd
+    and was signaled through `pidfd_send_signal`. Any unbound survivor causes
+    teardown to mark `cleanup_unconfirmed=True` instead of risking PID reuse.
     """
     still_live = alive(verified_expected)
     if not still_live:
         return True
-    pidfd_open = getattr(os, "pidfd_open", None)
     pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
-    if SYSTEM != "Linux" or pidfd_open is None or pidfd_send_signal is None:
+    if SYSTEM != "Linux" or pidfd_send_signal is None or not pinned_pidfds:
         return False
     all_bound = True
     for expected_id in sorted(still_live):
-        pid = expected_id[0]
-        fd = None
+        fd = pinned_pidfds.get(expected_id)
+        if fd is None:
+            all_bound = False
+            continue
         try:
-            fd = pidfd_open(pid, 0)
-            # While `fd` is held open, the kernel cannot reassign `pid`.
-            # Re-verify identity before signaling through `fd`.
-            if expected_id in alive({expected_id}):
-                pidfd_send_signal(fd, signal.SIGKILL)
-        except (ProcessLookupError, FileNotFoundError):
+            pidfd_send_signal(fd, signal.SIGKILL)
+        except ProcessLookupError:
             pass
         except OSError:
             all_bound = False
-        finally:
-            if fd is not None:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
     return all_bound
 
 
@@ -677,22 +714,37 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
     before = {proc_identity(r) for r in processes()}
     sizes = log_size()
     kwargs: dict = {"env": env, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-    if SYSTEM == "Windows":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
+    if SYSTEM != "Windows":
         kwargs["start_new_session"] = True
     win_job = _WinJob() if SYSTEM == "Windows" else None
     t0 = time.monotonic()
     proc: subprocess.Popen | _WinProcess | None = None
-    if win_job is not None and win_job.handle is not None:
+    if win_job is not None:
+        if win_job.handle is None:
+            shutil.rmtree(data_dir, ignore_errors=True)
+            return {
+                "run": index,
+                "error": f"failed to create Windows Job Object (win32 error {win_job.last_error})",
+                "stopped_cleanly": False,
+                "cleanup_unconfirmed": True,
+            }
         proc = win_job.spawn_suspended_and_assign(app, env)
-    if proc is None:
+        if proc is None:
+            err_code = win_job.last_error
+            win_job.close()
+            shutil.rmtree(data_dir, ignore_errors=True)
+            return {
+                "run": index,
+                "error": f"failed to launch app suspended inside Windows Job Object (win32 error {err_code})",
+                "stopped_cleanly": False,
+                "cleanup_unconfirmed": True,
+            }
+    else:
         proc = subprocess.Popen([app], **kwargs)
-        if win_job is not None:
-            win_job.assign(proc)
     result: dict = {"run": index, "pid": proc.pid}
     verified_owned: set[ProcId] = set()
     provisional_owned: set[ProcId] = set()
+    pinned_pidfds: dict[ProcId, int] = {}
     app_responsible_pid: int | None = None
     try:
         try:
@@ -715,24 +767,28 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
             result["ready_ms"] = round(ready_s * 1000)
             result["startup_ms_in_process"] = startup_ms
             # Capture the app's stable identity and macOS responsible pid while
-            # it is live, after readiness has already been timed.
+            # it is live (unreaped), after readiness has already been timed.
             if proc.poll() is None:
                 try:
                     post_ready_rows = processes()
-                    app_row = next((r for r in post_ready_rows if r["pid"] == proc.pid), None)
-                    if app_row is not None and proc_identity(app_row) not in before:
-                        verified_owned.add(proc_identity(app_row))
+                    if proc.poll() is None:
+                        app_row = next((r for r in post_ready_rows if r["pid"] == proc.pid), None)
+                        if app_row is not None and proc_identity(app_row) not in before:
+                            app_id = proc_identity(app_row)
+                            verified_owned.add(app_id)
+                            pin_linux_pidfd(app_id, pinned_pidfds)
                 except Exception:
                     pass
-                if SYSTEM == "Darwin":
+                if SYSTEM == "Darwin" and proc.poll() is None:
                     app_responsible_pid = responsible_pid(proc.pid)
             time.sleep(idle)
             if proc.poll() is not None:
                 result["error"] = "the app exited while idle"
                 return result
             rows = processes()
-            app_row = next((r for r in rows if r["pid"] == proc.pid), None)
-            if SYSTEM == "Darwin" and app_responsible_pid is None and proc.poll() is None:
+            root_exited = proc.poll() is not None
+            app_row = None if root_exited else next((r for r in rows if r["pid"] == proc.pid), None)
+            if SYSTEM == "Darwin" and app_responsible_pid is None and not root_exited:
                 app_responsible_pid = responsible_pid(proc.pid)
             found, method, verified = helpers(
                 rows,
@@ -741,11 +797,18 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                 known_app_owner=app_responsible_pid,
                 win_job=win_job,
                 provisional_out=provisional_owned,
+                root_exited=root_exited,
             )
             if app_row is not None and proc_identity(app_row) not in before:
-                verified_owned.add(proc_identity(app_row))
+                app_id = proc_identity(app_row)
+                verified_owned.add(app_id)
+                pin_linux_pidfd(app_id, pinned_pidfds)
             if verified:
-                verified_owned |= {proc_identity(h) for h in found}
+                for h in found:
+                    hid = proc_identity(h)
+                    verified_owned.add(hid)
+                    if not root_exited:
+                        pin_linux_pidfd(hid, pinned_pidfds)
             else:
                 provisional_owned |= {proc_identity(h) for h in found}
             result["attribution"] = method
@@ -778,15 +841,20 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
             return result
     finally:
         cleanup_error = None
-        # Discover any additional helpers before stopping, without letting a
-        # process-listing error block stopping the app.
+        # Discover any additional helpers before stopping, without adopting a
+        # recycled PID if the app already exited and without letting a listing
+        # error block stopping the app.
         try:
             pre_stop_rows = processes()
-            app_row = next((r for r in pre_stop_rows if r["pid"] == proc.pid), None)
-            if app_row is not None and proc_identity(app_row) not in before:
-                verified_owned.add(proc_identity(app_row))
-            if SYSTEM == "Darwin" and app_responsible_pid is None and getattr(proc, "returncode", None) is None and proc.poll() is None:
-                app_responsible_pid = responsible_pid(proc.pid)
+            root_exited = getattr(proc, "returncode", None) is not None or proc.poll() is not None
+            if not root_exited:
+                app_row = next((r for r in pre_stop_rows if r["pid"] == proc.pid), None)
+                if app_row is not None and proc_identity(app_row) not in before:
+                    app_id = proc_identity(app_row)
+                    verified_owned.add(app_id)
+                    pin_linux_pidfd(app_id, pinned_pidfds)
+                if SYSTEM == "Darwin" and app_responsible_pid is None:
+                    app_responsible_pid = responsible_pid(proc.pid)
             later, _method, verified = helpers(
                 pre_stop_rows,
                 proc.pid,
@@ -794,9 +862,13 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                 known_app_owner=app_responsible_pid,
                 win_job=win_job,
                 provisional_out=provisional_owned,
+                root_exited=root_exited,
             )
-            if verified:
-                verified_owned |= {proc_identity(h) for h in later}
+            if verified and not root_exited:
+                for h in later:
+                    hid = proc_identity(h)
+                    verified_owned.add(hid)
+                    pin_linux_pidfd(hid, pinned_pidfds)
             else:
                 provisional_owned |= {proc_identity(h) for h in later}
         except Exception as exc:
@@ -814,12 +886,24 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                 win_job.close()
 
         try:
+            # Post-stop scan catches any Linux/macOS webview helper orphaned by
+            # a zombie/early exit that did not appear in the pre-stop tree.
+            if SYSTEM in ("Linux", "Darwin"):
+                post_stop_rows = processes()
+                for r in post_stop_rows:
+                    rid = proc_identity(r)
+                    if rid in before or rid in verified_owned:
+                        continue
+                    if (SYSTEM == "Linux" and r["name"] in LINUX_WEBVIEW) or (
+                        SYSTEM == "Darwin" and is_mac_webkit(r["name"])
+                    ):
+                        provisional_owned.add(rid)
             verified_gone = wait_gone(verified_owned)
             provisional_gone = wait_gone(provisional_owned)
             result["stopped_cleanly"] = verified_gone and provisional_gone and cleanup_error is None
             if not verified_gone:
                 left_verified = alive(verified_owned)
-                bound = force_stop(left_verified)
+                bound = force_stop(left_verified, pinned_pidfds)
                 verified_gone = wait_gone(verified_owned, 15)
                 still_verified = sorted(pid for pid, _, _ in alive(verified_owned)) if not verified_gone else []
                 if bound:
@@ -841,6 +925,13 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                     )
         except Exception as exc:
             cleanup_error = cleanup_error or f"process listing failed while confirming teardown: {exc}"
+        finally:
+            for fd in pinned_pidfds.values():
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            pinned_pidfds.clear()
 
         if cleanup_error is not None:
             result["stopped_cleanly"] = False
