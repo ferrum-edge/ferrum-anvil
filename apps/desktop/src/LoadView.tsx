@@ -1137,19 +1137,28 @@ export type JmeterShell = "posix" | "powershell";
 /** Quote `s` verbatim for POSIX `sh` (`'...'`, no `$` or backtick expansion). */
 export const quotePosix = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
-/** Quote `s` verbatim for Windows PowerShell (`'...'`, no `$` or backtick expansion). */
-export const quotePowerShell = (s: string) => `'${s.replace(/'/g, "''")}'`;
+/**
+ * Quote `s` verbatim for Windows PowerShell (`'...'`, no `$` or backtick
+ * expansion). PowerShell treats ASCII and Unicode typographic apostrophes as
+ * single-quote delimiters, so all five are doubled.
+ */
+export const quotePowerShell = (s: string) => `'${s.replace(/['\u2018\u2019\u201a\u201b]/g, "$&$&")}'`;
 
 export function defaultJmeterShell(): JmeterShell {
   return typeof navigator !== "undefined" && /win/i.test(navigator.platform || navigator.userAgent || "") ? "powershell" : "posix";
 }
 
 /** Fresh per-run result filename so repeated JMeter runs never append to an earlier file. */
-export function freshJtlName(planFile = "plan.jmx", now = new Date()): string {
+export function freshJtlName(planFile = "plan.jmx", now = new Date(), nonce?: string): string {
   const stem = planFile.replace(/\.jmx$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "results";
   const pad = (n: number) => String(n).padStart(2, "0");
   const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}-${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
-  return `${stem}-results-${stamp}.jtl`;
+  const unique =
+    nonce ??
+    (typeof globalThis.crypto?.randomUUID === "function"
+      ? globalThis.crypto.randomUUID().slice(-8)
+      : Math.random().toString(16).slice(2, 10));
+  return `${stem}-results-${stamp}-${unique}.jtl`;
 }
 
 /**

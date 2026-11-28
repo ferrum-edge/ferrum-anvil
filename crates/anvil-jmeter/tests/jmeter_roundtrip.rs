@@ -387,16 +387,22 @@ async fn load_012_default_export_properties_do_not_write_url_credentials_to_jtl(
     let mut spec = RequestSpec::http("GET", &f.url("/echo/{{secret_seg}}"));
     spec.auth = AuthConfig::ApiKey { name: "api_key".into(), value: SensitiveValue::template("{{qkey}}"), location: KeyLocation::Query };
     spec.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    // Also attach a failing body assertion on the echoed response (which echoes
+    // both secrets) to prove default XML save properties write neither URLs,
+    // response messages, nor assertion failure messages into the JTL.
+    spec.assertions.push(assertion(AssertionKind::BodyContains { value: "NEVER-MATCHES".into(), case_sensitive: true }));
     let (id, mut c) = step(spec);
     c.var_layers.push(layer("workspace", &[("secret_seg", path_secret, true), ("qkey", query_secret, true)]));
     let plan = Fx::new(iterations(3, 1), vec![(id, c, "url-secret")], None);
     let out = plan.export(&export_opts(true)).expect("exported");
     assert!(!out.jmx.contains("SENSITIVE"), "no secret material in .jmx");
-    // Run JMeter using ONLY the default exported jmeter_properties (XML + url=false).
+    // Run JMeter using ONLY the default exported jmeter_properties (XML + url=false + response_message=false + assertion_results=none).
     let run = run_jmeter(&out, "", true).await;
     let raw_jtl = std::fs::read_to_string(run.jtl()).expect("JMeter wrote results.jtl");
     assert!(!raw_jtl.contains(path_secret), "URL path secret leaked into JTL: {raw_jtl}");
     assert!(!raw_jtl.contains(query_secret), "query API key leaked into JTL: {raw_jtl}");
+    assert!(!raw_jtl.contains("<assertionResult>"), "assertion result body leaked into JTL: {raw_jtl}");
+    assert!(!raw_jtl.contains(" rm="), "response message attribute leaked into JTL: {raw_jtl}");
     let report = import(&run, &plan);
     assert_eq!((report.requests.started, report.requests.completed), (3, 3));
     assert!(report.engine_version.ends_with("+jtl-xml"));

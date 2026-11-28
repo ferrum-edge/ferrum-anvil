@@ -227,5 +227,24 @@ fn load_012_cli_exports_a_plan_refuses_strict_tls_and_imports_results() {
         let after_t = line.split(" -t ").nth(1).unwrap().split(" -l ").next().unwrap();
         let evaluated = std::process::Command::new("sh").arg("-c").arg(format!("printf %s {after_t}")).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&evaluated.stdout), tricky.to_string_lossy());
+        let first_jtl = line.split(" -l ").nth(1).unwrap().split(' ').next().unwrap().to_string();
+
+        // Back-to-back export of the same plan produces a distinct fresh JTL name.
+        let o2 = anvil(data, &["load", "export-jmx", "Shop", "echo", "--out", tricky.to_str().unwrap()]);
+        assert_eq!(o2.status.code(), Some(0), "{}", text(&o2));
+        let line2 = text(&o2).lines().find(|l| l.contains("run (sh): ")).unwrap().to_string();
+        let second_jtl = line2.split(" -l ").nth(1).unwrap().split(' ').next().unwrap().to_string();
+        assert_ne!(first_jtl, second_jtl, "repeated exports must generate distinct JTL filenames");
+
+        // An invalid --out (an existing directory) must fail BEFORE publishing --secrets-file.
+        let out_dir = out.path().join("already-a-dir");
+        std::fs::create_dir(&out_dir).unwrap();
+        let secrets = out.path().join("must-not-exist.properties");
+        let o = anvil(
+            data,
+            &["load", "export-jmx", "Shop", "secret", "--out", out_dir.to_str().unwrap(), "--secrets-file", secrets.to_str().unwrap()],
+        );
+        assert!(!o.status.success() && text(&o).contains("directory"), "{}", text(&o));
+        assert!(!secrets.exists(), "invalid --out must not leave secrets sidecar behind");
     }
 }

@@ -20,7 +20,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 import { listen } from "@tauri-apps/api/event";
 import type { LoadPlanCheck, LoadPreflight } from "./api";
 import type { Dataset, LatencySummary, LoadPlan, LoadReport, ProtocolLoadMetrics, RequestCounts, UnitSemantics } from "./generated/contracts";
-import { LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox, jmeterCommand } from "./LoadView";
+import { LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox, freshJtlName, jmeterCommand, quotePowerShell } from "./LoadView";
 
 const notify = vi.fn();
 
@@ -1270,7 +1270,7 @@ describe("LOAD-012 JMeter adapter", () => {
     expect(calls("load_export_jmx")).toEqual([{ planId: "plan-1", grant: "fg-jmx", secretsGrant: null, replaceDataset: false }]);
     expect(done.textContent).toContain("Exported to Sockets.jmx");
     const cmd = screen.getByTestId("jmx-command").textContent ?? "";
-    expect(cmd).toMatch(/^jmeter -n -t 'Sockets\.jmx' -l 'Sockets-results-\d{8}-\d{6}\.jtl' '-Jhttpsampler\.max_redirects=10'$/);
+    expect(cmd).toMatch(/^jmeter -n -t 'Sockets\.jmx' -l 'Sockets-results-\d{8}-\d{6}-[0-9a-f]{8}\.jtl' '-Jhttpsampler\.max_redirects=10'$/);
     expect(done.textContent).toContain("anvil.secret.var.token");
     expect(screen.getByTestId("jmx-differences").textContent).toContain("Dataset rows");
   });
@@ -1402,5 +1402,10 @@ describe("LOAD-012 jmeterCommand", () => {
     expect(pwsh).toBe(
       `jmeter -n -t 'Checkout $HOME ''run''.jmx' -l 'checkout-results-20261128-000000.jtl' -q '<full path of odd "$(whoami)" \`x\` ''s''.properties>'`,
     );
+    // PowerShell also treats typographic single quotes as string delimiters.
+    expect(quotePowerShell("a\u2018b\u2019c\u201ad\u201be")).toBe("'a\u2018\u2018b\u2019\u2019c\u201a\u201ad\u201b\u201be'");
+    // Two exports of the same stem in the same second produce distinct JTL names.
+    const same = new Date("2026-11-28T12:00:00Z");
+    expect(freshJtlName("plan.jmx", same)).not.toBe(freshJtlName("plan.jmx", same));
   });
 });

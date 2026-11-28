@@ -310,6 +310,9 @@ enum SecretSource {
     Template { step: usize, template: String },
     /// A vault reference.
     Vault { step: usize, secret: SecretRef },
+    /// A literal credential fragment (e.g., an unrecognized Bearer auth prefix)
+    /// that must never be copied into the JMX.
+    Literal(String),
 }
 
 struct SecretProp {
@@ -521,10 +524,11 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             )));
         }
     }
-    // Default JMeter save settings write XML JTL without the request URL or
-    // failure messages, so resolved URL credentials (path secrets or query API
-    // keys) and response bodies are never written to the result file while
-    // `<httpSample>` still identifies every sample as an HTTP request.
+    // Default JMeter save settings write XML JTL without the request URL,
+    // response message, or assertion results/failure messages, so resolved URL
+    // credentials (path secrets or query API keys), missing-Location redirect
+    // request lines, and echoed response bodies are never written to the result
+    // file while `<httpSample>` still identifies every sample as an HTTP request.
     let mut t = Translator {
         input,
         opts,
@@ -537,6 +541,8 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
         jmeter_properties: vec![
             ("jmeter.save.saveservice.output_format".into(), "xml".into()),
             ("jmeter.save.saveservice.url".into(), "false".into()),
+            ("jmeter.save.saveservice.response_message".into(), "false".into()),
+            ("jmeter.save.saveservice.assertion_results".into(), "none".into()),
             ("jmeter.save.saveservice.assertion_results_failure_message".into(), "false".into()),
         ],
         contexts: contexts.clone(),
@@ -1383,11 +1389,15 @@ fn translate_step(
         .iter()
         .filter(|h| h.enabled)
         .any(|h| resolver.resolve(h.name.trim(), "header").is_ok_and(|n| n.trim().eq_ignore_ascii_case("accept-encoding")));
-    if let Some((_, v)) = headers.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
+    let mut noted_inferred_ae = false;
+    for (_, v) in headers.iter_mut().filter(|(n, _)| n.eq_ignore_ascii_case("accept-encoding")) {
         let text = v.0.iter().map(|(s, _)| s.as_str()).collect::<String>();
         if !explicit_ae {
             *v = Tmpl::raw("gzip, deflate, br");
-            t.note("Accept-Encoding: Anvil's inferred header offers gzip, deflate, br and zstd; JMeter 5.6.3 cannot decode zstd, so the test plan offers gzip, deflate and br.");
+            if !noted_inferred_ae {
+                t.note("Accept-Encoding: Anvil's inferred header offers gzip, deflate, br and zstd; JMeter 5.6.3 cannot decode zstd, so the test plan offers gzip, deflate and br.");
+                noted_inferred_ae = true;
+            }
         } else if t.markers.has_marks(&text) {
             rs.push(reason(rq, "accept_encoding", "the Accept-Encoding header comes from a per-iteration value or a secret"));
         } else {
@@ -1454,7 +1464,20 @@ fn translate_step(
         AuthConfig::Bearer { token, prefix } => {
             match sensitive_value(t, pos, ctx, &resolver, name, token, "auth.token", format!("auth.{request_slug}.token")) {
                 Ok(tok) => {
-                    let v = if prefix.is_empty() { tok } else { format!("{prefix} {tok}") };
+                    let v = if prefix.is_empty() {
+                        tok
+                    } else if !prefix.chars().any(char::is_whitespace) && is_recognized_auth_scheme(prefix) {
+                        format!("{prefix} {tok}")
+                    } else {
+                        let key = format!("field:{}:auth.prefix", ctx.request_id.map(|i| i.to_string()).unwrap_or_else(|| pos.to_string()));
+                        let idx = t.secrets.add(
+                            key,
+                            format!("auth.{request_slug}.prefix"),
+                            format!("auth.prefix of request '{name}'"),
+                            SecretSource::Literal(prefix.clone()),
+                        );
+                        format!("{} {tok}", t.markers.add(Mark::Secret(idx)))
+                    };
                     set_header(&mut headers, "Authorization", Tmpl::raw(v));
                     credential_headers = true;
                     t.map("Bearer auth", "Authorization header in the sampler's HTTP Header Manager");
@@ -2367,6 +2390,7 @@ fn resolve_secret(t: &Translator<'_>, source: &SecretSource) -> Result<Zeroizing
             real(ctx).resolve(template, "credential").map(Zeroizing::new).map_err(|f| f.message)
         }
         SecretSource::Vault { step, secret } => t.contexts[*step].secrets.resolve(secret),
+        SecretSource::Literal(value) => Ok(Zeroizing::new(value.clone())),
     }
 }
 

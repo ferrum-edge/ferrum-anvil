@@ -15,15 +15,24 @@ pub fn dataset_path(out: &Path) -> PathBuf {
     out.with_file_name(format!("{stem}.dataset.csv"))
 }
 
-/// Create a temporary file beside `dest`, write+sync `bytes`, and publish it
-/// atomically to `dest`:
-/// - `no_clobber == true`: uses `hard_link` + `remove_file`, failing with
-///   `AlreadyExists` if `dest` (file, folder, or symlink, even dangling) exists.
-/// - `no_clobber == false`: uses `rename`, replacing `dest` atomically without
-///   following a symlink or truncating an existing inode.
-/// - `owner_only == true`: creates the staged file with mode `0o600` (Unix
-///   only; refused on non-Unix).
-fn write_staged(dest: &Path, bytes: &[u8], owner_only: bool, no_clobber: bool) -> Result<()> {
+/// A temporary file staged beside its final destination, ready to publish
+/// atomically once every output has been staged without error.
+struct StagedFile<'a> {
+    label: &'a str,
+    dest: &'a Path,
+    tmp: PathBuf,
+    no_clobber: bool,
+}
+
+impl Drop for StagedFile<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.tmp);
+    }
+}
+
+/// Stage `bytes` into a new temporary file beside `dest`, writing and syncing
+/// before any destination is published.
+fn stage_file<'a>(label: &'a str, dest: &'a Path, bytes: &[u8], owner_only: bool, no_clobber: bool) -> Result<StagedFile<'a>> {
     if owner_only && !secret_output_supported() {
         bail!("{}: secret output is written only where an owner-only file can be created (macOS and Linux)", dest.display());
     }
@@ -39,7 +48,7 @@ fn write_staged(dest: &Path, bytes: &[u8], owner_only: bool, no_clobber: bool) -
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut f = opts.open(&tmp).with_context(|| format!("staging {}", dest.display()))?;
+        let mut f = opts.open(&tmp).with_context(|| format!("staging {label} ({})", dest.display()))?;
         f.write_all(bytes)?;
         f.sync_all()?;
         Ok(())
@@ -48,18 +57,25 @@ fn write_staged(dest: &Path, bytes: &[u8], owner_only: bool, no_clobber: bool) -
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    let publish = if no_clobber {
-        std::fs::hard_link(&tmp, dest).map(|()| {
-            let _ = std::fs::remove_file(&tmp);
-        })
-    } else {
-        std::fs::rename(&tmp, dest)
-    };
-    if let Err(e) = publish {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("publishing {}", dest.display()));
+    Ok(StagedFile { label, dest, tmp, no_clobber })
+}
+
+impl StagedFile<'_> {
+    /// Publish the staged temp file atomically to `self.dest`:
+    /// - `no_clobber == true`: `hard_link` + `remove_file`, failing with
+    ///   `AlreadyExists` if `dest` (file, folder, or symlink, even dangling) exists.
+    /// - `no_clobber == false`: `rename`, replacing `dest` atomically without
+    ///   following a symlink or truncating an existing inode.
+    fn publish(self) -> Result<()> {
+        let res = if self.no_clobber {
+            std::fs::hard_link(&self.tmp, self.dest).map(|()| {
+                let _ = std::fs::remove_file(&self.tmp);
+            })
+        } else {
+            std::fs::rename(&self.tmp, self.dest)
+        };
+        res.with_context(|| format!("publishing {} ({})", self.label, self.dest.display()))
     }
-    Ok(())
 }
 
 /// Whether this platform writes owner-only secret files (on Windows a new
@@ -104,13 +120,23 @@ pub fn shell_quote_posix(s: &str) -> String {
 }
 
 /// `s` quoted for Windows PowerShell (`'...'`, verbatim single-quoted string
-/// where `$`, `` ` ``, and `"` are never expanded; embedded single quotes are
-/// doubled `''`).
+/// where `$`, `` ` ``, and `"` are never expanded; ASCII and Unicode
+/// typographic apostrophes PowerShell treats as single-quote delimiters are
+/// doubled).
 pub fn shell_quote_powershell(s: &str) -> String {
     if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "_./:-+=\\".contains(c)) {
         return s.to_string();
     }
-    format!("'{}'", s.replace('\'', "''"))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        out.push(c);
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// `s` quoted for the current platform's labeled shell (PowerShell on Windows,
@@ -120,7 +146,8 @@ pub fn shell_quote(s: &str) -> String {
 }
 
 /// A fresh result filename per export so repeated JMeter runs do not append
-/// into the same JTL file.
+/// into the same JTL file. Uses the 48-bit random tail of UUIDv7 so exports in
+/// the same second never collide.
 fn fresh_results_name(out: &Path) -> String {
     let stem: String = out
         .file_stem()
@@ -132,7 +159,7 @@ fn fresh_results_name(out: &Path) -> String {
         .collect();
     let stem = if stem.is_empty() { "results" } else { stem.as_str() };
     let id = Id::new().to_string();
-    let suffix = id.split('-').next().unwrap_or("run");
+    let suffix = id.rsplit('-').next().unwrap_or(&id);
     format!("{stem}-results-{suffix}.jtl")
 }
 
@@ -185,6 +212,11 @@ pub fn export_jmx(
     }
     for (label, p) in &destinations {
         refuse_symlink(label, p)?;
+        if let Ok(meta) = std::fs::symlink_metadata(p)
+            && meta.is_dir()
+        {
+            bail!("{label} ({}) is a directory; nothing was written", p.display());
+        }
     }
     for (i, (a, pa)) in destinations.iter().enumerate() {
         for (b, pb) in &destinations[i + 1..] {
@@ -204,18 +236,32 @@ pub fn export_jmx(
     {
         bail!("the secrets file already exists; it is never written over an existing file. Nothing was written");
     }
-    // Publish no-clobber outputs first (secrets, unforced dataset) so a race
-    // never leaves a replaced plan paired with a missing/stale sidecar.
+    // Stage every output before publishing any destination so a staging error
+    // (bad directory, permission error, disk full) leaves nothing behind.
+    let report_json = report_file.map(|_| json_safe(&serde_json::to_string_pretty(&export.report).unwrap_or_default()) + "\n");
+    let mut staged: Vec<StagedFile<'_>> = Vec::with_capacity(4);
     if let (Some(p), Some(props)) = (secrets_file, &export.secrets_properties) {
-        write_staged(p, props.as_bytes(), true, true)?;
+        staged.push(stage_file("--secrets-file", p, props.as_bytes(), true, true)?);
     }
     if let Some(csv) = &export.dataset_csv {
-        write_staged(&dataset, csv, sensitive_dataset, !force)?;
+        staged.push(stage_file("the dataset file", &dataset, csv, sensitive_dataset, !force)?);
     }
-    write_staged(out, export.jmx.as_bytes(), false, false)?;
-    if let Some(p) = report_file {
-        let json = json_safe(&serde_json::to_string_pretty(&export.report)?) + "\n";
-        write_staged(p, json.as_bytes(), false, false)?;
+    staged.push(stage_file("--out", out, export.jmx.as_bytes(), false, false)?);
+    if let (Some(p), Some(json)) = (report_file, &report_json) {
+        staged.push(stage_file("--report", p, json.as_bytes(), false, false)?);
+    }
+    // Publish no-clobber sidecars first, then the plan and optional report.
+    // Remaining staged files are cleaned up on Drop if any publish fails.
+    let mut published: Vec<String> = Vec::new();
+    for item in staged {
+        let note = format!("{} ({})", item.label, item.dest.display());
+        if let Err(err) = item.publish() {
+            if published.is_empty() {
+                return Err(err.context("nothing was written"));
+            }
+            return Err(err.context(format!("already written: {}", published.join(", "))));
+        }
+        published.push(note);
     }
     let r = &export.report;
     println!(

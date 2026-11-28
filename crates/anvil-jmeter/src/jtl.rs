@@ -288,8 +288,19 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
     loop {
         rdr.get_mut().reset();
         match rdr.read_record(&mut record) {
-            Ok(false) => break,
-            Ok(true) => {}
+            Ok(false) => {
+                // For CRLF headers, `csv::Reader::headers()` stops at `\r` and
+                // consumes the trailing `\n` on the first `read_record` call.
+                if line == 1 && rdr.position().byte() > limits.max_record_bytes {
+                    return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
+                }
+                break;
+            }
+            Ok(true) => {
+                if line == 1 && record.position().is_some_and(|p| p.byte() > limits.max_record_bytes) {
+                    return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
+                }
+            }
             Err(e) => {
                 return Err(limit_error(rdr.get_ref(), limits, "a CSV record").unwrap_or_else(|| match e.kind() {
                     csv::ErrorKind::Utf8 { .. } => JtlError::Invalid(format!("the CSV record after line {line} is not UTF-8")),

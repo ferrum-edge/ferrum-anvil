@@ -536,4 +536,26 @@ fn load_012_templated_accept_encoding_header_is_validated_not_overwritten() {
     let (id, mut c) = step(spec);
     c.var_layers.push(layer("workspace", &[("ae_header", "Accept-Encoding", false)]));
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "ae")], None)), ["accept_encoding"]);
+
+    // A second Accept-Encoding header offering zstd must also be validated and refused.
+    let mut dup = RequestSpec::http("GET", "http://127.0.0.1:8080/");
+    dup.headers.push(KeyValue::new("Accept-Encoding", "gzip"));
+    dup.headers.push(KeyValue::new("Accept-Encoding", "zstd"));
+    let (id2, c2) = step(dup);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id2, c2, "dup-ae")], None)), ["accept_encoding"]);
+}
+
+#[test]
+fn load_012_bearer_unrecognized_prefix_moves_to_secret_property() {
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/");
+    spec.auth = AuthConfig::Bearer { token: SensitiveValue::template("{{tok}}"), prefix: "CustomSecretPrefix-SENSITIVE".into() };
+    let (id, mut c) = step(spec);
+    c.var_layers.push(layer("workspace", &[("tok", "secret-val", true)]));
+    let out = Fx::new(iterations(1, 1), vec![(id, c, "bearer")], None)
+        .export(&ExportOptions { include_secrets: true, ..Default::default() })
+        .expect("exported");
+    assert!(!out.jmx.contains("CustomSecretPrefix"), "unrecognized Bearer prefix leaked into JMX");
+    assert!(!out.jmx.contains("SENSITIVE"), "secret text leaked into JMX");
+    let props = out.secrets_properties.as_deref().expect("secrets properties");
+    assert!(props.contains("CustomSecretPrefix-SENSITIVE"), "prefix must be resolved into secrets.properties");
 }

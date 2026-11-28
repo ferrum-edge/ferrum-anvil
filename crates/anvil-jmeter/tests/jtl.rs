@@ -284,9 +284,16 @@ fn load_012_jtl_record_limit_is_exact() {
     let tag = |n: usize| format!(r#"<testResults><httpSample t="1" ts="{T0}" s="true" lb="{}" rc="200"/></testResults>"#, "x".repeat(n));
     assert!(import(&tag(900), &o).is_ok());
     assert!(matches!(import(&tag(1_000), &o).unwrap_err(), JtlError::RecordTooLong { limit: 1_000, .. }));
-    // The CSV header row itself obeys max_record_bytes.
+    // The CSV header row itself obeys max_record_bytes (both LF and exact CRLF boundary).
     let huge_header = format!("timeStamp,elapsed,label,responseCode,success,URL,{}\n{T0},1,a,200,true,http://h/,v\n", "c".repeat(1_000));
     assert!(matches!(import(&huge_header, &o).unwrap_err(), JtlError::RecordTooLong { limit: 1_000, .. }));
+    let crlf_hdr = "timeStamp,elapsed,label,responseCode,success,URL\r\n";
+    let mut exact = opts();
+    exact.limits.max_record_bytes = (crlf_hdr.len() - 1) as u64;
+    let crlf_csv = format!("{crlf_hdr}{T0},1,a,200,true,http://h/\r\n");
+    assert!(matches!(import(&crlf_csv, &exact).unwrap_err(), JtlError::RecordTooLong { .. }));
+    exact.limits.max_record_bytes = crlf_hdr.len() as u64;
+    assert!(import(&crlf_csv, &exact).is_ok());
 }
 
 #[test]
