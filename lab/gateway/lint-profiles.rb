@@ -121,7 +121,7 @@ PLUGIN_KEYS = {
   'key_auth' => %w[key_location hide_credentials],                                    # key_auth.rs:55-66
   'basic_auth' => %w[hide_credentials],                                               # basic_auth.rs:72-93
   'jwt_auth' => %w[token_lookup consumer_claim_field require_exp require_nbf expected_issuer
-                   expected_issuers audiences leeway_secs],                           # jwt_auth.rs:170-187
+                   expected_issuers audiences leeway_secs hide_credentials],                           # jwt_auth.rs:170-187
   'hmac_auth' => %w[clock_skew_seconds signing_profile replay_scope
                     replay_max_entries] + REDIS,                                      # hmac_auth.rs:177-183 (allow_unsafe_replayable_v1 removed after v0.9.20)
   'jwks_auth' => %w[providers scope_claim role_claim consumer_identity_claim consumer_header_claim
@@ -133,6 +133,24 @@ PLUGIN_KEYS = {
   'request_size_limiting' => %w[max_bytes],                                           # request_size_limiting.rs:34
   'response_size_limiting' => %w[max_bytes require_buffered_check],                   # response_size_limiting.rs:45
   'response_transformer' => %w[rules apply_route_overrides runtime_overlay_scope default_enabled],
+  # v0.9.21 keys (OpenAPI RequestTransformerConfig, BodyValidatorConfig, AiPromptShieldConfig,
+  # RequestDeduplicationConfig), used by the EXT-E21-* routes.
+  'request_transformer' => %w[rules apply_route_overrides runtime_overlay_scope default_enabled],
+  'body_validator' => %w[json_schema json_schema_draft required_fields validate_xml required_xml_elements
+                         xml_max_entities xml_reject_nested_entities content_types response_json_schema
+                         response_required_fields response_validate_xml response_required_xml_elements
+                         response_content_types response_status_codes enforcement_mode
+                         reject_unsupported_media_types protobuf_descriptor_path protobuf_request_type
+                         protobuf_response_type protobuf_method_messages protobuf_reject_unknown_fields
+                         grpc_max_decompressed_size_bytes],
+  'ai_prompt_shield' => %w[action patterns custom_patterns scan_fields exclude_roles redaction_placeholder
+                           max_scan_bytes],
+  'request_deduplication' => %w[header_name ttl_seconds inflight_ttl_seconds max_entries max_inflight_entries
+                                max_entry_size_bytes max_total_size_bytes applicable_methods scope_by_consumer
+                                anonymous_caller_scope caller_partition enforce_required sync_mode redis_url
+                                redis_tls redis_key_prefix redis_pool_size redis_connect_timeout_seconds
+                                redis_health_check_interval_seconds redis_username redis_password
+                                on_redis_unavailable],
   'adaptive_concurrency' => %w[key_by max_tracked_keys min_limit initial_limit max_limit min_samples
                                target_latency_multiplier decrease_ratio increase_step shadow_mode
                                expose_headers],                                       # adaptive_concurrency.rs:141-153
@@ -141,7 +159,8 @@ PLUGIN_KEYS = {
               deny_body deny_headers fail_closed_status fail_closed_body fail_closed_headers
               decision_pointer include_method include_path include_query include_query_credentials
               include_headers include_body max_body_bytes include_consumer include_client_ip
-              include_service query_ambiguity_policy redact_headers redact_query_keys],  # opa.rs:40-67 (prefix)
+              include_service query_ambiguity_policy redact_headers redact_query_keys
+              decision_request_headers],                                              # opa.rs:40-67 (prefix)
   'waf' => %w[mode default_rule_action paranoia_level request_inspection request_body_inspection
               response_inspection response_body_inspection log_to_metadata log_to_stdout scan_budget_ms
               max_scan_bytes on_scan_timeout on_body_too_large include_default_rules disabled_default_rules
@@ -190,6 +209,7 @@ PLUGIN_KEYS = {
 }.freeze
 NESTED = {
   %w[response_transformer rules] => %w[operation target key value new_key],           # response_transformer.rs:156
+  %w[request_transformer rules] => %w[operation target key value new_key],
   %w[waf custom_rules] => %w[id name category severity target match_kind pattern action fp_filters
                              paranoia_min score conditions],                          # waf/rules.rs:11-24
   %w[jwks_auth providers] => %w[jwks_uri discovery_url jwks issuer audiences from_headers

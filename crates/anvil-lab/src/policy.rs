@@ -116,6 +116,149 @@ fn catalog_match(c: &mut Checks, o: &ExecutionOutput, trusted: bool, outcome: &s
     caveat(c, o, "ferrum.outcome", "identical");
 }
 
+/// Trusted: the response matched exactly `outcome` in the release's catalog,
+/// at most `likely`, with the identical-bytes caveat. Untrusted: the harness
+/// asserts no `ferrum.outcome*` finding.
+fn e21_catalog(c: &mut Checks, o: &ExecutionOutput, trusted: bool, outcome: &str) {
+    if !trusted {
+        return;
+    }
+    let got = catalog_outcome(o);
+    c.add(CheckKind::Diagnosis, format!("catalog outcome {outcome}"), got.as_deref() == Some(outcome), format!("{got:?}; {:?}", codes(o)));
+    c.max_confidence(o, "ferrum.outcome", Confidence::Likely);
+    caveat(c, o, "ferrum.outcome", "identical");
+}
+
+/// The JSON body of a response as a value (`None` when it is not JSON).
+fn e21_json(o: &ExecutionOutput) -> Option<serde_json::Value> {
+    serde_json::from_str(body_text(o).trim()).ok()
+}
+
+/// EXT-E21-REQ-DUP: request_transformer with a JSON body rule refuses a
+/// request body that repeats a member name (v0.9.21, #7469).
+fn e21_req_dup(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = env.mark();
+        let before = env.fixtures.echo.log.count_requests();
+        let o = env.post_json("/e21/req-dup/echo", r#"{"a":1,"a":2}"#).await;
+        c.status_in(&o, &[400]);
+        let expected = "Request body contains duplicate JSON object member names or a JSON document the gateway could not evaluate";
+        let got = e21_json(&o).and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_default();
+        c.add(CheckKind::GroundTruth, "the transformer's refusal body", got == expected, got);
+        c.add(CheckKind::GroundTruth, "no X-Gateway-Error on the plugin refusal", header(&o, "x-gateway-error").is_empty(), "");
+        backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "refused before dispatch", &mut c);
+        e21_catalog(&mut c, &o, env.trusted, "plugin.request_transformer.ambiguous_json_body");
+        let ops = env.op(from, "e21-req-dup").await;
+        let r = env.post_json("/e21/req-dup/echo", r#"{"a":1}"#).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+    })
+}
+
+/// EXT-E21-RESP-DUP: response_transformer with a JSON body rule replaces a
+/// backend body that repeats a member name with a 502 (v0.9.21, #7469).
+fn e21_resp_dup(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = env.mark();
+        let before = env.fixtures.echo.log.count_requests();
+        let o = env.get(&format!("/e21/resp-dup/status/200?body={}", enc(r#"{"a":1,"a":2}"#))).await;
+        c.status_in(&o, &[502]);
+        let expected =
+            "Backend response body contains duplicate JSON object member names or a JSON document the gateway could not evaluate";
+        let got = e21_json(&o).and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_default();
+        c.add(CheckKind::GroundTruth, "the transformer's replacement body", got == expected, got);
+        backend_hits(before, env.fixtures.echo.log.count_requests(), 1, "the backend answered", &mut c);
+        c.token(&o, "ferrum.token.backend_error", env.trusted);
+        e21_catalog(&mut c, &o, env.trusted, "plugin.response_transformer.ambiguous_json_body");
+        let ops = env.op(from, "e21-resp-dup").await;
+        let r = env.get(&format!("/e21/resp-dup/status/200?body={}", enc(r#"{"a":1}"#))).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+    })
+}
+
+/// EXT-E21-SHIELD-DUP: ai_prompt_shield (reject) refuses a JSON body that
+/// repeats a member name, in every scan mode (v0.9.21, GHSA-49cr-v28q-9hgp).
+fn e21_shield_dup(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = env.mark();
+        let before = env.fixtures.echo.log.count_requests();
+        let o = env.post_json("/e21/shield-dup/echo", r#"{"model":"m","model":"n","messages":[{"role":"user","content":"hi"}]}"#).await;
+        c.status_in(&o, &[400]);
+        let v = e21_json(&o).unwrap_or_default();
+        let got = format!("{} / {}", v["error"].as_str().unwrap_or_default(), v["message"].as_str().unwrap_or_default());
+        c.add(
+            CheckKind::GroundTruth,
+            "the shield's duplicate-member refusal",
+            got == "Request body could not be inspected / Request blocked because the JSON request body has duplicate member names.",
+            got,
+        );
+        backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "refused before dispatch", &mut c);
+        e21_catalog(&mut c, &o, env.trusted, "plugin.ai_prompt_shield.uninspectable");
+        let ops = env.op(from, "e21-shield-dup").await;
+        let r = env.post_json("/e21/shield-dup/echo", r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+    })
+}
+
+/// EXT-E21-BODYVAL-RESP: body_validator response validation replaces a
+/// backend body that lacks a required field; v0.9.21 reports a fixed detail
+/// that never names the field (GHSA-84xq-rr63-39pw).
+fn e21_bodyval_resp(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let from = env.mark();
+        let before = env.fixtures.echo.log.count_requests();
+        let o = env.get(&format!("/e21/bodyval-resp/status/200?body={}", enc(r#"{"x":1}"#))).await;
+        c.status_in(&o, &[502]);
+        let v = e21_json(&o).unwrap_or_default();
+        let got = format!("{} / {}", v["error"].as_str().unwrap_or_default(), v["details"].as_str().unwrap_or_default());
+        c.add(
+            CheckKind::GroundTruth,
+            "the validator's fixed response detail",
+            got == "Response body validation failed / Response body is missing a required field",
+            got,
+        );
+        backend_hits(before, env.fixtures.echo.log.count_requests(), 1, "the backend answered", &mut c);
+        c.token(&o, "ferrum.token.backend_error", env.trusted);
+        e21_catalog(&mut c, &o, env.trusted, "plugin.body_validator.response_validation_failed");
+        let ops = env.op(from, "e21-bodyval-resp").await;
+        let r = env.get(&format!("/e21/bodyval-resp/status/200?body={}", enc(r#"{"id":1}"#))).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: ops }
+    })
+}
+
+/// EXT-E21-CT-LIST: a Content-Type value listing two media types is refused
+/// before routing with a JSON 400 (v0.9.21, #7064).
+fn e21_ct_list(env: &Env) -> Fut<'_> {
+    Box::pin(async move {
+        let mut c = Checks::new();
+        let before = env.fixtures.echo.log.count_requests();
+        let mut req = env.req("POST", "/ok/echo");
+        req.spec.body = Body::Raw { text: r#"{"a":1}"#.into(), content_type: Some("application/json, text/plain".into()) };
+        req.send_anyway = true;
+        let o = env.send(&req).await;
+        c.status_in(&o, &[400]);
+        let got = e21_json(&o).and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_default();
+        c.add(
+            CheckKind::GroundTruth,
+            "the protocol guard's refusal body",
+            got == "Content-Type header contains more than one media type",
+            got,
+        );
+        backend_hits(before, env.fixtures.echo.log.count_requests(), 0, "refused before routing", &mut c);
+        e21_catalog(&mut c, &o, env.trusted, "frontend_parse.protocol_header_violation");
+        let r = env.post_json("/ok/echo", r#"{"a":1}"#).await;
+        c.success(CheckKind::Recovery, &r);
+        Outcome { main: Some(o), recovery: Some(r), checks: c, operator_log: vec![] }
+    })
+}
+
 fn backend_hits(before: usize, after: usize, expected: usize, what: &str, c: &mut Checks) {
     c.add(
         CheckKind::GroundTruth,
@@ -973,6 +1116,11 @@ pub fn all() -> Vec<Def> {
         Def { id: "GW-019-FORGED", title: "Backend forges gateway headers on a 200", run: gw019_forged },
         Def { id: "GW-019-REJECT-UNKNOWN", title: "Reject-path hook adds an unknown X-Gateway-Error value", run: gw019_reject_unknown },
         Def { id: "GW-019-REJECT-KNOWN", title: "Reject-path hook adds a known token to a 403", run: gw019_reject_known },
+        Def { id: "EXT-E21-REQ-DUP", title: "request_transformer refuses a duplicate-member JSON request (v0.9.21)", run: e21_req_dup },
+        Def { id: "EXT-E21-RESP-DUP", title: "response_transformer replaces a duplicate-member backend body (v0.9.21)", run: e21_resp_dup },
+        Def { id: "EXT-E21-SHIELD-DUP", title: "ai_prompt_shield refuses a duplicate-member JSON body (v0.9.21)", run: e21_shield_dup },
+        Def { id: "EXT-E21-BODYVAL-RESP", title: "body_validator response 502 with a fixed detail (v0.9.21)", run: e21_bodyval_resp },
+        Def { id: "EXT-E21-CT-LIST", title: "Content-Type listing two media types refused before routing (v0.9.21)", run: e21_ct_list },
     ]
 }
 

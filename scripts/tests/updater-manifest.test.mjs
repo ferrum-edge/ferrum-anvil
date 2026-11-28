@@ -7,7 +7,8 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { test } from "node:test";
-import { checkSignedVersion, decodePublicKey, signedVersion, verifyUpdaterSignature } from "../updater-manifest.mjs";
+import { readFileSync } from "node:fs";
+import { checkPublishedManifest, checkSignedVersion, decodePublicKey, signedVersion, verifyTrustedComment, verifyUpdaterSignature } from "../updater-manifest.mjs";
 
 const b64 = (b) => Buffer.from(b).toString("base64");
 
@@ -81,4 +82,150 @@ test("checkSignedVersion refuses a signature for another version or with none", 
   assert.throws(() => checkSignedVersion(trusted, "1.2.3"), /signed for version 1\.2\.2, not 1\.2\.3/);
   const legacy = verifyUpdaterSignature(artifact, signFile(key, artifact, { trusted: "timestamp:1790000000\tfile:app.AppImage" }), key.pubkey);
   assert.throws(() => checkSignedVersion(legacy, "1.2.3"), /records no version/);
+});
+
+// The published latest.json shape (REL-003): anvil-v0.1.9's manifest as
+// GitHub serves it, and the owner's updater public key (minisign key
+// BFE08514FEC0E65A, also in the repository variable ANVIL_UPDATER_PUBKEY).
+const fixture = (name) => readFileSync(new URL(`fixtures/updater/${name}`, import.meta.url), "utf8");
+const PUBLISHED = JSON.parse(fixture("latest-anvil-v0.1.9.json"));
+const OWNER_PUBKEY = fixture("updater-pubkey-BFE08514FEC0E65A.txt").trim();
+const published = { repo: "ferrum-edge/ferrum-anvil", tag: "anvil-v0.1.9", version: "0.1.9", pubkey: OWNER_PUBKEY };
+
+test("the published anvil-v0.1.9 latest.json has the shape and signatures the app accepts", () => {
+  assert.equal(decodePublicKey(OWNER_PUBKEY).displayId, "BFE08514FEC0E65A");
+  assert.deepEqual(checkPublishedManifest(PUBLISHED, published), [
+    "darwin-aarch64",
+    "darwin-aarch64-app",
+    "darwin-x86_64",
+    "darwin-x86_64-app",
+    "linux-x86_64-appimage",
+    "windows-x86_64-msi",
+    "windows-x86_64-nsis",
+  ]);
+  for (const entry of Object.values(PUBLISHED.platforms)) assert.equal(signedVersion(verifyTrustedComment(entry.signature, OWNER_PUBKEY)), "0.1.9");
+});
+
+test("a published latest.json that the app would misread or refuse is rejected", () => {
+  const clone = () => JSON.parse(JSON.stringify(PUBLISHED));
+  const bad = [
+    [(m) => (m.version = "0.1.8"), /version "0\.1\.8" is not 0\.1\.9/],
+    [(m) => (m.pub_date = "yesterday"), /pub_date/],
+    [(m) => (m.pub_date = "2026-02-30T00:00:00Z"), /pub_date/],
+    [(m) => (m.platforms["linux-x86_64-appimage"].signature = `${m.platforms["linux-x86_64-appimage"].signature}\n`), /must not contain whitespace/],
+    [(m) => delete m.platforms["windows-x86_64-msi"], /platforms are/],
+    [(m) => (m.platforms["linux-x86_64"] = m.platforms["linux-x86_64-appimage"]), /platforms are/],
+    [(m) => (m.platforms["linux-x86_64-appimage"].url = m.platforms["linux-x86_64-appimage"].url.replace("anvil-v0.1.9", "anvil-v0.1.8")), /not an asset of anvil-v0\.1\.9/],
+    [(m) => (m.platforms["windows-x86_64-msi"].url = m.platforms["windows-x86_64-nsis"].url), /not that platform's updater file/],
+    [(m) => (m.platforms["windows-x86_64-msi"].signature = m.platforms["windows-x86_64-nsis"].signature), /signature signed file .* does not match/],
+    [
+      (m) => {
+        m.platforms["darwin-aarch64"].url = m.platforms["darwin-x86_64"].url;
+        m.platforms["darwin-aarch64-app"].url = m.platforms["darwin-x86_64-app"].url;
+      },
+      /does not match architecture darwin-aarch64/,
+    ],
+    [
+      (m) => {
+        m.platforms["darwin-aarch64"].signature = m.platforms["darwin-x86_64"].signature;
+        m.platforms["darwin-aarch64-app"].signature = m.platforms["darwin-x86_64-app"].signature;
+      },
+      /must not share a url or signature/,
+    ],
+    [(m) => (m.platforms["darwin-aarch64"].signature = m.platforms["linux-x86_64-appimage"].signature.slice(0, -8)), /darwin-aarch64:/],
+  ];
+  for (const [mutate, message] of bad) {
+    const m = clone();
+    mutate(m);
+    assert.throws(() => checkPublishedManifest(m, published), message);
+  }
+  // Exact evidence + sidecar signature binding catches a same-version swap
+  // even when trusted-comment filenames match (as on darwin-aarch64 vs
+  // darwin-x86_64), and rejects evidence whose sidecar filename does not match
+  // the matched asset.
+  const signatures = Object.fromEntries(
+    Object.values(PUBLISHED.platforms).map((entry) => [`${decodeURIComponent(entry.url.split("/").pop())}.sig`, entry.signature]),
+  );
+  const evidence = {
+    updater: { signed: true, manifest: "latest.json", key_id: "BFE08514FEC0E65A" },
+    targets: [
+      {
+        target: "aarch64-apple-darwin",
+        updater: {
+          artifacts: [
+            {
+              name: "Ferrum-Anvil_0.1.9_aarch64.app.tar.gz",
+              signature: "Ferrum-Anvil_0.1.9_aarch64.app.tar.gz.sig",
+              platforms: ["darwin-aarch64-app", "darwin-aarch64"],
+            },
+          ],
+        },
+      },
+      {
+        target: "x86_64-apple-darwin",
+        updater: {
+          artifacts: [
+            {
+              name: "Ferrum-Anvil_0.1.9_x64.app.tar.gz",
+              signature: "Ferrum-Anvil_0.1.9_x64.app.tar.gz.sig",
+              platforms: ["darwin-x86_64-app", "darwin-x86_64"],
+            },
+          ],
+        },
+      },
+      {
+        target: "x86_64-unknown-linux-gnu",
+        updater: {
+          artifacts: [
+            {
+              name: "Ferrum-Anvil_0.1.9_amd64.AppImage",
+              signature: "Ferrum-Anvil_0.1.9_amd64.AppImage.sig",
+              platforms: ["linux-x86_64-appimage"],
+            },
+          ],
+        },
+      },
+      {
+        target: "x86_64-pc-windows-msvc",
+        updater: {
+          artifacts: [
+            {
+              name: "Ferrum-Anvil_0.1.9_x64-setup.exe",
+              signature: "Ferrum-Anvil_0.1.9_x64-setup.exe.sig",
+              platforms: ["windows-x86_64-nsis"],
+            },
+            {
+              name: "Ferrum-Anvil_0.1.9_x64_en-US.msi",
+              signature: "Ferrum-Anvil_0.1.9_x64_en-US.msi.sig",
+              platforms: ["windows-x86_64-msi"],
+            },
+          ],
+        },
+      },
+    ],
+  };
+  assert.doesNotThrow(() => checkPublishedManifest(PUBLISHED, { ...published, evidence, signatures }));
+  const swappedMac = clone();
+  const armSig = swappedMac.platforms["darwin-aarch64"].signature;
+  const x64Sig = swappedMac.platforms["darwin-x86_64"].signature;
+  swappedMac.platforms["darwin-aarch64"].signature = x64Sig;
+  swappedMac.platforms["darwin-aarch64-app"].signature = x64Sig;
+  swappedMac.platforms["darwin-x86_64"].signature = armSig;
+  swappedMac.platforms["darwin-x86_64-app"].signature = armSig;
+  assert.throws(() => checkPublishedManifest(swappedMac, { ...published, evidence, signatures }), /inline signature differs from/);
+  const swappedEvidence = JSON.parse(JSON.stringify(evidence));
+  swappedEvidence.targets[0].updater.artifacts[0].signature = "Ferrum-Anvil_0.1.9_x64.app.tar.gz.sig";
+  swappedEvidence.targets[1].updater.artifacts[0].signature = "Ferrum-Anvil_0.1.9_aarch64.app.tar.gz.sig";
+  assert.throws(() => checkPublishedManifest(swappedMac, { ...published, evidence: swappedEvidence, signatures }), /sidecar .* does not match/);
+  // Signed by another key, or for another version.
+  const other = keyPair();
+  const m = clone();
+  m.platforms["linux-x86_64-appimage"].signature = signFile(other, Buffer.from("x"), { version: "0.1.9" });
+  assert.throws(() => checkPublishedManifest(m, published), /different key/);
+  assert.throws(() => checkPublishedManifest(PUBLISHED, { ...published, version: "0.2.0", tag: "anvil-v0.1.9" }), /version "0\.1\.9" is not 0\.2\.0/);
+  // A trusted comment edited after signing no longer verifies.
+  const forged = clone();
+  const sig = Buffer.from(forged.platforms["linux-x86_64-appimage"].signature, "base64").toString("utf8").replace("version:0.1.9", "version:0.2.0");
+  forged.platforms["linux-x86_64-appimage"].signature = Buffer.from(sig).toString("base64");
+  assert.throws(() => checkPublishedManifest(forged, published), /trusted comment signature does not verify/);
 });

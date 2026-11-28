@@ -89,7 +89,7 @@ receive the gateway diagnosis, plus a positive recovery.
 "Lookalike" means an application-authored response through the plain `/ok` route. It is
 byte-identical where noted.
 
-### `policy` (24 scenarios per pass, plus 1 skip)
+### `policy` (29 scenarios per pass, plus 1 skip)
 
 | ID | Matrix | What it proves |
 |---|---|---|
@@ -117,6 +117,11 @@ byte-identical where noted.
 | GW-019-FORGED | GW-019, TRUST-011 | The **backend** forges both headers on a 200 (ground truth: fixture). Same result as GW-019-OK. |
 | GW-019-REJECT-UNKNOWN | GW-019, TRUST-003 | A reject-path hook adds `X-Gateway-Error: lab-future-token` to an IP-deny 403, and it reaches the client. Anvil reports `ferrum.marker.unknown_token` (unknown) and no token meaning. |
 | GW-019-REJECT-KNOWN | GW-019, TRUST-011 | A reject-path hook adds a **known** token (`overload`) to an IP-deny 403. Anvil reports `ferrum.marker.inconsistent` (conflicting evidence), with no token finding and no overload or CPU claim (§4). |
+| EXT-E21-REQ-DUP | Lab extension, no matrix seed (v0.9.21) | **request_transformer duplicate members** (#7469). A JSON body rule on the route; the request body `{"a":1,"a":2}` gets 400 `{"error":"Request body contains duplicate JSON object member names or a JSON document the gateway could not evaluate"}` with no `X-Gateway-Error`. Ground truth: 0 backend hits. Anvil reports `ferrum.outcome` = `plugin.request_transformer.ambiguous_json_body` (≤ likely, identical-bytes caveat). Recovery: `{"a":1}` returns 200. |
+| EXT-E21-RESP-DUP | Lab extension, no matrix seed (v0.9.21) | **response_transformer duplicate members** (#7469). The origin answers 200 with `{"a":1,"a":2}` (ground truth: 1 backend hit); the gateway replaces it with 502 `{"error":"Backend response body contains duplicate JSON object member names or a JSON document the gateway could not evaluate"}` and stamps `backend_error`. Anvil reports `ferrum.token.backend_error` and `ferrum.outcome` = `plugin.response_transformer.ambiguous_json_body` (≤ likely). This settles the 502 `backend_error` signal the v0.9.21 audit had only read in source. Recovery: `{"a":1}` returns 200. |
+| EXT-E21-SHIELD-DUP | Lab extension, no matrix seed (v0.9.21) | **ai_prompt_shield duplicate members** (`action: reject`, GHSA-49cr-v28q-9hgp). A chat body that repeats `model` gets 400 with `error` "Request body could not be inspected" and `message` "Request blocked because the JSON request body has duplicate member names." Ground truth: 0 backend hits. Anvil reports `plugin.ai_prompt_shield.uninspectable` (≤ likely). Recovery: the same body without the repeat returns 200. |
+| EXT-E21-BODYVAL-RESP | Lab extension, no matrix seed (v0.9.21) | **body_validator response detail** (`response_required_fields: [id]`, GHSA-84xq-rr63-39pw). The origin answers `{"x":1}` (ground truth: 1 backend hit); the gateway replaces it with 502 `error` "Response body validation failed" and the fixed `details` "Response body is missing a required field", which never names the field, and stamps `backend_error`. Anvil reports the token and `plugin.body_validator.response_validation_failed` (≤ likely). Recovery: `{"id":1}` returns 200. |
+| EXT-E21-CT-LIST | Lab extension, no matrix seed (v0.9.21) | **Content-Type singleton guard** (#7064). Anvil sends, on explicit request (`send_anyway`), a POST whose Content-Type lists `application/json, text/plain`; the gateway refuses it before routing with 400 `{"error":"Content-Type header contains more than one media type"}`. Ground truth: 0 backend hits. Anvil reports `frontend_parse.protocol_header_violation` (≤ likely). Recovery: a single media type returns 200. |
 | GW-014-GEO | GW-014 | **Skipped.** `geo_restriction` needs a readable MaxMind country `.mmdb`. `ferrum-edge validate` rejects a missing `db_path` ("not accessible before open"). No database is vendored and the lab may not download one, so neither the country-deny path nor the database-unavailable path is reachable. |
 
 ### `admission` (4 scenarios per pass, plus 2 skips)
