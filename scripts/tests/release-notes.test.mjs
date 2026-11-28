@@ -576,7 +576,11 @@ test("sign-updater signs or self-tests only when it can: a tagged run without th
     });
   };
   const ran = (run) => steps.filter((s) => evaluate(cond(s), run));
-  const signs = (s) => /sign-updater\.sh|updater-manifest\.mjs|upload-artifact/.test(s);
+  // Ignore 6-space YAML comments attached to the preceding step by jobSteps splitting.
+  const signs = (s) =>
+    /sign-updater\.sh|updater-manifest\.mjs|upload-artifact/.test(
+      s.replace(/^ {6}#.*$/gm, '')
+    );
   // A tagged run without the key signs nothing, builds no manifest, uploads
   // nothing and fails no step: publish and the draft release follow.
   assert.deepEqual(ran(runs.taggedWithoutKey).filter(signs), []);
