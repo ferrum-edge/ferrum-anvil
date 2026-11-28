@@ -875,9 +875,10 @@ finally:
     m.subprocess.Popen = orig_popen
 
 # 5i. Overdue poll crossing both quiet window and deadline must NOT confirm quiet,
-# and a post-force quiet-timeout preserves BOTH causes in result["error"].
+# slow survey latency must NOT falsely confirm quiet, and quiet-timeout diagnostics
+# are preserved alongside post-force or stop-error failures.
 m.SYSTEM = "Darwin"
-clock_vals = iter([0.0, 29.8, 30.4])
+clock_vals = iter([0.0, 29.8, 29.8, 30.4, 30.4])
 orig_monotonic = m.time.monotonic
 orig_sleep = m.time.sleep
 m.time.monotonic = lambda: next(clock_vals)
@@ -886,6 +887,28 @@ m.processes = lambda: []
 try:
     lv, lp, qok = orig_wait_quiet(set(), set(), set(), timeout=30.0, quiet_seconds=0.5)
     assert lv == set() and lp == set() and qok is False, f"expected quiet_ok=False for overdue poll, got {(lv, lp, qok)}"
+finally:
+    m.time.monotonic = orig_monotonic
+    m.time.sleep = orig_sleep
+
+# Slow survey started at 0.1s and returned at 0.55s cannot satisfy a 0.5s quiet window from 0.0s;
+# the next poll at 0.55s sees the late helper started at 0.30s.
+m.SYSTEM = "Linux"
+late_helper_702 = {"pid": 702, "ppid": 1, "start": "ticks:102", "name": "WebKitWebProcess", "rss": 10}
+sim_clock = [0.0]
+survey_n = [0]
+def slow_survey_procs():
+    survey_n[0] += 1
+    captured = sim_clock[0]
+    if survey_n[0] == 2:
+        sim_clock[0] += 0.45
+    return [late_helper_702] if captured >= 0.3 else []
+m.time.monotonic = lambda: sim_clock[0]
+m.time.sleep = lambda s: sim_clock.__setitem__(0, sim_clock[0] + s)
+m.processes = slow_survey_procs
+try:
+    lv, lp, qok = orig_wait_quiet(set(), set(), set(), timeout=0.6, quiet_seconds=0.5)
+    assert qok is False and lp == {(702, "ticks:102", "WebKitWebProcess")}, f"slow survey missed late helper: {(lv, lp, qok)}"
 finally:
     m.time.monotonic = orig_monotonic
     m.time.sleep = orig_sleep
@@ -916,6 +939,25 @@ try:
     assert "quiet confirmation" in r_pf["error"], f"missing quiet timeout cause: {r_pf.get('error')}"
 finally:
     m.force_stop = orig_force_stop
+    m._wait_teardown_quiet = orig_wait_quiet
+    m.stop = orig_stop
+    m.subprocess.Popen = orig_popen
+
+# Stop raising alongside a quiet timeout still preserves the quiet-timeout diagnostic.
+m.processes = lambda: []
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: None
+def raising_stop(proc, *a, **kw):
+    raise OSError("stop failed")
+m.stop = raising_stop
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: (set(), set(), False)
+m.subprocess.Popen = lambda *a, **kw: CleanExitProc()
+try:
+    r_se = m.one_run("/bin/true", 0, 0.0, 1)
+    assert r_se["stopped_cleanly"] is False and r_se["cleanup_unconfirmed"] is True
+    assert "quiet confirmation" in r_se["error"], f"stop error hid quiet timeout: {r_se.get('error')}"
+    assert "stop failed" in r_se["cleanup_error"]
+finally:
     m._wait_teardown_quiet = orig_wait_quiet
     m.stop = orig_stop
     m.subprocess.Popen = orig_popen

@@ -721,6 +721,7 @@ def _wait_teardown_quiet(
     end = time.monotonic() + timeout
     quiet_since: float | None = None
     while True:
+        survey_start = time.monotonic()
         live_v, live_p = _survey_teardown(before, verified_owned, provisional_owned)
         now = time.monotonic()
         if not live_v and not live_p:
@@ -728,7 +729,7 @@ def _wait_teardown_quiet(
                 return set(), set(), True
             if quiet_since is None:
                 quiet_since = now
-            if now <= end and (now - quiet_since) >= quiet_seconds:
+            if now <= end and (survey_start - quiet_since) >= quiet_seconds:
                 return set(), set(), True
             if now >= end:
                 return set(), set(), False
@@ -1021,7 +1022,7 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                     f"provisional helpers {still_provisional} were still running after stop "
                     "(not force-stopped; aborting further launches)"
                 )
-            elif not quiet_ok and not live_v and cleanup_error is None:
+            elif not quiet_ok and not live_v:
                 result["stopped_cleanly"] = False
                 result["cleanup_unconfirmed"] = True
                 quiet_msg = "teardown deadline elapsed before Unix quiet confirmation completed"
