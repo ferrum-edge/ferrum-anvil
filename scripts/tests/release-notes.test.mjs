@@ -874,6 +874,52 @@ finally:
     m.stop = orig_stop
     m.subprocess.Popen = orig_popen
 
+# 5i. Overdue poll crossing both quiet window and deadline must NOT confirm quiet,
+# and a post-force quiet-timeout preserves BOTH causes in result["error"].
+m.SYSTEM = "Darwin"
+clock_vals = iter([0.0, 29.8, 30.4])
+orig_monotonic = m.time.monotonic
+orig_sleep = m.time.sleep
+m.time.monotonic = lambda: next(clock_vals)
+m.time.sleep = lambda _s: None
+m.processes = lambda: []
+try:
+    lv, lp, qok = orig_wait_quiet(set(), set(), set(), timeout=30.0, quiet_seconds=0.5)
+    assert lv == set() and lp == set() and qok is False, f"expected quiet_ok=False for overdue poll, got {(lv, lp, qok)}"
+finally:
+    m.time.monotonic = orig_monotonic
+    m.time.sleep = orig_sleep
+
+m.SYSTEM = "Linux"
+pf_calls = {"n": 0}
+app_700_l = {"pid": 700, "ppid": 1, "start": "ticks:100", "name": "anvil-desktop", "rss": 10}
+wk_701_l = {"pid": 701, "ppid": 700, "start": "ticks:101", "name": "WebKitWebProcess", "rss": 20}
+def pf_procs():
+    pf_calls["n"] += 1
+    return [app_700_l, wk_701_l] if pf_calls["n"] in (2, 3) else []
+wait_seq = iter([
+    ({(700, "ticks:100", "anvil-desktop")}, set(), False),
+    (set(), set(), False),
+])
+m.processes = pf_procs
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: 10
+m.stop = lambda proc, *a, **kw: (True, None)
+orig_force_stop = m.force_stop
+m.force_stop = lambda live, pinned: True
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: next(wait_seq)
+m.subprocess.Popen = lambda *a, **kw: CleanExitProc()
+try:
+    r_pf = m.one_run("/bin/true", 0, 0.01, 1)
+    assert r_pf["stopped_cleanly"] is False and r_pf["cleanup_unconfirmed"] is True
+    assert "outlived the app's stop" in r_pf["error"], f"missing survivor cause: {r_pf.get('error')}"
+    assert "quiet confirmation" in r_pf["error"], f"missing quiet timeout cause: {r_pf.get('error')}"
+finally:
+    m.force_stop = orig_force_stop
+    m._wait_teardown_quiet = orig_wait_quiet
+    m.stop = orig_stop
+    m.subprocess.Popen = orig_popen
+
 # 6. summarize.py emits missing-lane rows and --require-expected rejects missing/duplicate/unexpected lanes.
 spec2 = importlib.util.spec_from_file_location("s", sys.argv[2])
 s = importlib.util.module_from_spec(spec2); spec2.loader.exec_module(s)

@@ -676,20 +676,6 @@ def alive(expected: set[ProcId]) -> set[ProcId]:
 UNIX_QUIET_CONFIRM_SECONDS = 0.5
 
 
-def wait_gone(expected: set[ProcId], timeout: float = 30, on_poll=None) -> bool:
-    if not expected and on_poll is None:
-        return True
-    end = time.monotonic() + timeout
-    while True:
-        if on_poll is not None:
-            on_poll()
-        if not alive(expected):
-            return True
-        if time.monotonic() >= end:
-            return False
-        time.sleep(0.5)
-
-
 def _survey_teardown(
     before: set[ProcId],
     verified_owned: set[ProcId],
@@ -742,7 +728,7 @@ def _wait_teardown_quiet(
                 return set(), set(), True
             if quiet_since is None:
                 quiet_since = now
-            elif now - quiet_since >= quiet_seconds:
+            if now <= end and (now - quiet_since) >= quiet_seconds:
                 return set(), set(), True
             if now >= end:
                 return set(), set(), False
@@ -1015,7 +1001,7 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                 live_v, live_p, quiet_ok = _wait_teardown_quiet(before, verified_owned, provisional_owned, timeout=15)
                 still_verified = sorted(pid for pid, _, _ in live_v)
                 if bound and not still_verified:
-                    result["error"] = result.get("error") or f"verified processes {initial_survivors} outlived the app's stop (stopped by force)"
+                    result["error"] = result.get("error") or f"verified processes {initial_survivors} outlived the app's stop (exited during forced teardown)"
                 elif bound:
                     result["cleanup_unconfirmed"] = True
                     result["error"] = result.get("error") or f"verified processes {initial_survivors} outlived the app's stop (still running after force-stop: {still_verified})"
@@ -1038,7 +1024,8 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
             elif not quiet_ok and not live_v and cleanup_error is None:
                 result["stopped_cleanly"] = False
                 result["cleanup_unconfirmed"] = True
-                result["error"] = result.get("error") or "teardown deadline elapsed before Unix quiet confirmation completed"
+                quiet_msg = "teardown deadline elapsed before Unix quiet confirmation completed"
+                result["error"] = f"{result['error']}; {quiet_msg}" if result.get("error") else quiet_msg
         except Exception as exc:
             cleanup_error = cleanup_error or f"process listing failed while confirming teardown: {exc}"
         finally:
