@@ -673,6 +673,9 @@ def alive(expected: set[ProcId]) -> set[ProcId]:
     return current & expected
 
 
+UNIX_QUIET_CONFIRM_SECONDS = 0.5
+
+
 def wait_gone(expected: set[ProcId], timeout: float = 30, on_poll=None) -> bool:
     if not expected and on_poll is None:
         return True
@@ -687,25 +690,68 @@ def wait_gone(expected: set[ProcId], timeout: float = 30, on_poll=None) -> bool:
         time.sleep(0.5)
 
 
-def _discover_post_stop_helpers(
+def _survey_teardown(
     before: set[ProcId],
     verified_owned: set[ProcId],
     provisional_owned: set[ProcId],
-) -> bool:
-    """Scan for newly visible Linux/macOS webview helpers not seen pre-launch."""
-    if SYSTEM not in ("Linux", "Darwin"):
-        return False
-    added = False
-    for r in processes():
-        rid = proc_identity(r)
-        if rid in before or rid in verified_owned or rid in provisional_owned:
+) -> tuple[set[ProcId], set[ProcId]]:
+    """Single-survey discovery + liveness check for teardown confirmation.
+
+    Uses one `processes()` snapshot to both discover any newly visible
+    Linux/macOS webview helpers and intersect live identities against
+    `verified_owned` and `provisional_owned`, so a helper observed during the
+    final survey can never slip between discovery and liveness checking.
+    """
+    rows = processes()
+    current = {proc_identity(r) for r in rows}
+    if SYSTEM in ("Linux", "Darwin"):
+        for r in rows:
+            rid = proc_identity(r)
+            if rid in before or rid in verified_owned or rid in provisional_owned:
+                continue
+            if (SYSTEM == "Linux" and r["name"] in LINUX_WEBVIEW) or (
+                SYSTEM == "Darwin" and is_mac_webkit(r["name"])
+            ):
+                provisional_owned.add(rid)
+    return current & verified_owned, current & provisional_owned
+
+
+def _wait_teardown_quiet(
+    before: set[ProcId],
+    verified_owned: set[ProcId],
+    provisional_owned: set[ProcId],
+    timeout: float = 30,
+    quiet_seconds: float | None = None,
+) -> tuple[set[ProcId], set[ProcId]]:
+    """Wait until verified and provisional sets are empty across a quiet window.
+
+    On Unix, requires `quiet_seconds` (default `UNIX_QUIET_CONFIRM_SECONDS`)
+    of consecutive empty single-survey checks so a pending WebKit XPC helper
+    cannot appear right after the first empty poll and slip past cleanup.
+    Returns the final `(live_verified, live_provisional)` from one survey.
+    """
+    if quiet_seconds is None:
+        quiet_seconds = UNIX_QUIET_CONFIRM_SECONDS if SYSTEM in ("Linux", "Darwin") else 0.0
+    end = time.monotonic() + timeout
+    quiet_since: float | None = None
+    while True:
+        live_v, live_p = _survey_teardown(before, verified_owned, provisional_owned)
+        now = time.monotonic()
+        if not live_v and not live_p:
+            if quiet_seconds <= 0:
+                return set(), set()
+            if quiet_since is None:
+                quiet_since = now
+            elif now - quiet_since >= quiet_seconds:
+                return set(), set()
+            if now >= end:
+                return set(), set()
+            time.sleep(min(0.1, quiet_seconds, max(0.0, end - now)))
             continue
-        if (SYSTEM == "Linux" and r["name"] in LINUX_WEBVIEW) or (
-            SYSTEM == "Darwin" and is_mac_webkit(r["name"])
-        ):
-            provisional_owned.add(rid)
-            added = True
-    return added
+        quiet_since = None
+        if now >= end:
+            return live_v, live_p
+        time.sleep(min(0.5, max(0.0, end - now)))
 
 
 def _linux_proc_starttime(pid: int) -> str | None:
@@ -958,40 +1004,33 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                 win_job.close()
 
         try:
-            # Refresh helper discovery on every teardown poll and once more
-            # before reporting success so helpers that appear during shutdown
-            # (or pending macOS XPC launches) never escape cleanup verification.
-            refresh_helpers = lambda: _discover_post_stop_helpers(before, verified_owned, provisional_owned)
-            refresh_helpers()
-            verified_gone = wait_gone(verified_owned, on_poll=refresh_helpers)
-            provisional_gone = wait_gone(provisional_owned, on_poll=refresh_helpers)
-            if verified_gone and provisional_gone and refresh_helpers():
-                provisional_gone = wait_gone(provisional_owned, 5, on_poll=refresh_helpers)
-            result["stopped_cleanly"] = verified_gone and provisional_gone and cleanup_error is None
-            if not verified_gone:
-                left_verified = alive(verified_owned)
-                bound = force_stop(left_verified, pinned_pidfds)
-                verified_gone = wait_gone(verified_owned, 15, on_poll=refresh_helpers)
-                still_verified = sorted(pid for pid, _, _ in alive(verified_owned)) if not verified_gone else []
+            # Wait for all verified and provisional processes using single-survey
+            # discovery + liveness checks across a bounded Unix quiet interval so
+            # helpers appearing during shutdown or pending macOS XPC launches
+            # cannot slip between discovery and liveness checks.
+            live_v, live_p = _wait_teardown_quiet(before, verified_owned, provisional_owned, timeout=30)
+            if live_v:
+                bound = force_stop(live_v, pinned_pidfds)
+                live_v, live_p = _wait_teardown_quiet(before, verified_owned, provisional_owned, timeout=15)
+                still_verified = sorted(pid for pid, _, _ in live_v)
                 if bound:
-                    result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in left_verified)} outlived the app's stop (stopped by force)"
+                    result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in live_v) or sorted(pid for pid, _, _ in verified_owned)} outlived the app's stop (stopped by force)"
                 else:
                     result["cleanup_unconfirmed"] = True
-                    result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in left_verified)} outlived the app's stop without a safe termination handle"
+                    result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in live_v)} outlived the app's stop without a safe termination handle"
                 if still_verified:
                     result["left_running"] = still_verified
-            refresh_helpers()
-            if not provisional_gone or alive(provisional_owned):
-                still_provisional = sorted(pid for pid, _, _ in alive(provisional_owned))
-                if still_provisional:
-                    # Never SIGKILL heuristically attributed processes; abort further launches instead.
-                    result["stopped_cleanly"] = False
-                    result["cleanup_unconfirmed"] = True
-                    result["provisional_left_running"] = still_provisional
-                    result["error"] = result.get("error") or (
-                        f"provisional helpers {still_provisional} were still running after stop "
-                        "(not force-stopped; aborting further launches)"
-                    )
+            result["stopped_cleanly"] = not live_v and not live_p and cleanup_error is None
+            if live_p:
+                still_provisional = sorted(pid for pid, _, _ in live_p)
+                # Never SIGKILL heuristically attributed processes; abort further launches instead.
+                result["stopped_cleanly"] = False
+                result["cleanup_unconfirmed"] = True
+                result["provisional_left_running"] = still_provisional
+                result["error"] = result.get("error") or (
+                    f"provisional helpers {still_provisional} were still running after stop "
+                    "(not force-stopped; aborting further launches)"
+                )
         except Exception as exc:
             cleanup_error = cleanup_error or f"process listing failed while confirming teardown: {exc}"
         finally:

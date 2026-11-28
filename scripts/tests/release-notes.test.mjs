@@ -609,7 +609,8 @@ m.responsible_pid = lambda pid: 99 if pid == 201 else None
 orphan = {"pid": 201, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.WebContent", "rss": 20}
 m.log_size = lambda: {}
 m.ready_line = lambda sizes, pid: None
-m.wait_gone = lambda expected, timeout=30, on_poll=None: (on_poll() if on_poll else None, False if expected else True)[1]
+orig_wait_quiet = m._wait_teardown_quiet
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: orig_wait_quiet(before, v, p, timeout=0.01, quiet_seconds=0.0)
 mac_calls = {"n": 0}
 def mac_early_procs():
     mac_calls["n"] += 1
@@ -681,7 +682,7 @@ zombie_app = {"pid": 101, "ppid": 1, "start": "Sat Nov 28 06:00:00 2026", "name"
 linux_orphan = {"pid": 901, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "WebKitWebProcess", "rss": 20}
 m.log_size = lambda: {}
 m.ready_line = lambda sizes, pid: None
-m.wait_gone = lambda expected, timeout=30, on_poll=None: (on_poll() if on_poll else None, False if expected else True)[1]
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: orig_wait_quiet(before, v, p, timeout=0.01, quiet_seconds=0.0)
 lin_calls = {"n": 0}
 def linux_early_procs():
     lin_calls["n"] += 1
@@ -804,7 +805,7 @@ finally:
     m.os.close = orig_os_close
     m._linux_proc_starttime = orig_linux_st
 
-# 5g. Late-appearing WebKit helper discovered during cleanup confirmation prevents false stopped_cleanly=True.
+# 5g. Late-appearing WebKit helper discovered during the real quiet-window final survey (after empty polls) prevents false stopped_cleanly=True.
 m.SYSTEM = "Darwin"
 class CleanExitProc:
     def __init__(self):
@@ -821,22 +822,26 @@ late_calls = {"n": 0}
 late_helper = {"pid": 777, "ppid": 1, "start": "Sat Nov 28 06:00:02 2026", "name": "com.apple.WebKit.WebContent", "rss": 20}
 def late_darwin_procs():
     late_calls["n"] += 1
-    # Pre-launch (1), pre-stop (2), and initial post-stop scan (3) see no helper; subsequent cleanup confirmation poll sees late_helper.
+    # Pre-launch (1), pre-stop (2), and first quiet-window teardown poll (3) see no helper;
+    # the quiet confirmation follow-up survey (4+) sees the late WebKit XPC helper.
     return [] if late_calls["n"] <= 3 else [late_helper]
-orig_wait_gone = m.wait_gone
 orig_stop = m.stop
+orig_quiet_secs = m.UNIX_QUIET_CONFIRM_SECONDS
 m.processes = late_darwin_procs
 m.log_size = lambda: {}
 m.ready_line = lambda sizes, pid: None
 m.stop = lambda proc, *a, **kw: (True, None)
-m.wait_gone = lambda expected, timeout=30, on_poll=None: (on_poll() if on_poll else None, not m.alive(expected))[1]
+m.UNIX_QUIET_CONFIRM_SECONDS = 0.05
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: orig_wait_quiet(before, v, p, timeout=0.12, quiet_seconds=quiet_seconds)
 m.subprocess.Popen = lambda *a, **kw: CleanExitProc()
 try:
     r_late = m.one_run("/bin/true", 0, 0.01, 1)
+    assert late_calls["n"] >= 4, f"expected quiet confirmation follow-up survey, got {late_calls['n']}"
     assert r_late["stopped_cleanly"] is False and r_late["cleanup_unconfirmed"] is True
     assert r_late.get("provisional_left_running") == [777]
 finally:
-    m.wait_gone = orig_wait_gone
+    m.UNIX_QUIET_CONFIRM_SECONDS = orig_quiet_secs
+    m._wait_teardown_quiet = orig_wait_quiet
     m.stop = orig_stop
     m.subprocess.Popen = orig_popen
 
