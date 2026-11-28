@@ -609,7 +609,7 @@ m.responsible_pid = lambda pid: 99 if pid == 201 else None
 orphan = {"pid": 201, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.WebContent", "rss": 20}
 m.log_size = lambda: {}
 m.ready_line = lambda sizes, pid: None
-m.wait_gone = lambda expected, timeout=30: False if expected else True
+m.wait_gone = lambda expected, timeout=30, on_poll=None: (on_poll() if on_poll else None, False if expected else True)[1]
 mac_calls = {"n": 0}
 def mac_early_procs():
     mac_calls["n"] += 1
@@ -681,7 +681,7 @@ zombie_app = {"pid": 101, "ppid": 1, "start": "Sat Nov 28 06:00:00 2026", "name"
 linux_orphan = {"pid": 901, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "WebKitWebProcess", "rss": 20}
 m.log_size = lambda: {}
 m.ready_line = lambda sizes, pid: None
-m.wait_gone = lambda expected, timeout=30: False if expected else True
+m.wait_gone = lambda expected, timeout=30, on_poll=None: (on_poll() if on_poll else None, False if expected else True)[1]
 lin_calls = {"n": 0}
 def linux_early_procs():
     lin_calls["n"] += 1
@@ -738,14 +738,107 @@ finally:
 m.SYSTEM = "Darwin"
 assert m.force_stop({(888, "T1", "WebKitWebProcess")}) is False
 
-# 5e. Windows job launch failure never falls back to unsuspended Popen.
+# 5e. Windows job launch failure (both no-job and valid-job-handle suspended launch failure) never falls back to unsuspended Popen.
 m.SYSTEM = "Windows"
 m.processes = lambda: []
 popen_called = []
 m.subprocess.Popen = lambda *a, **kw: popen_called.append(a)
 r_win_fail = m.one_run("anvil-desktop.exe", 0, 0.05, 1)
 assert popen_called == [] and r_win_fail["cleanup_unconfirmed"] is True and "Windows Job Object" in r_win_fail["error"]
+
+orig_win_job = m._WinJob
+class FakeWinJob:
+    def __init__(self):
+        self.handle = 1234
+        self.assigned = False
+        self.closed = False
+        self.last_error = 0
+    def spawn_suspended_and_assign(self, app, env):
+        self.last_error = 5
+        return None
+    def close(self):
+        self.closed = True
+        self.handle = None
+fake_jobs = []
+def make_fake_job():
+    j = FakeWinJob()
+    fake_jobs.append(j)
+    return j
+m._WinJob = make_fake_job
+try:
+    r_win_suspended = m.one_run("anvil-desktop.exe", 0, 0.05, 1)
+    assert popen_called == [] and r_win_suspended["cleanup_unconfirmed"] is True
+    assert "win32 error 5" in r_win_suspended["error"]
+    assert len(fake_jobs) == 1 and fake_jobs[0].closed is True
+finally:
+    m._WinJob = orig_win_job
 m.subprocess.Popen = orig_popen
+
+# 5f. Linux pin_linux_pidfd requires exact /proc starttime ticks observed during ancestry verification and closes recycled-PID fds.
+m.SYSTEM = "Linux"
+closed_fds = []
+orig_pidfd_open = getattr(m.os, "pidfd_open", None)
+orig_os_close = m.os.close
+orig_linux_st = m._linux_proc_starttime
+m.os.pidfd_open = lambda pid, flags: 900 + pid
+m.os.close = lambda fd: closed_fds.append(fd)
+try:
+    pinned = {}
+    # Non-tick start token must never pin.
+    m._linux_proc_starttime = lambda pid: "12345"
+    m.pin_linux_pidfd((10, "Sat Nov 28 06:00:00 2026", "WebKitWebProcess"), pinned)
+    assert pinned == {} and closed_fds == []
+    # Recycled PID whose starttime tick changed between survey and pidfd_open must be rejected and closed.
+    m._linux_proc_starttime = lambda pid: "99999"
+    m.pin_linux_pidfd((11, "ticks:12345", "WebKitWebProcess"), pinned)
+    assert pinned == {} and closed_fds == [911]
+    # Exact matching starttime tick is pinned and kept open.
+    m._linux_proc_starttime = lambda pid: "12345"
+    m.pin_linux_pidfd((12, "ticks:12345", "WebKitWebProcess"), pinned)
+    assert pinned == {(12, "ticks:12345", "WebKitWebProcess"): 912} and closed_fds == [911]
+finally:
+    if orig_pidfd_open is None:
+        delattr(m.os, "pidfd_open")
+    else:
+        m.os.pidfd_open = orig_pidfd_open
+    m.os.close = orig_os_close
+    m._linux_proc_starttime = orig_linux_st
+
+# 5g. Late-appearing WebKit helper discovered during cleanup confirmation prevents false stopped_cleanly=True.
+m.SYSTEM = "Darwin"
+class CleanExitProc:
+    def __init__(self):
+        self.pid = 700
+        self.returncode = None
+    def poll(self):
+        return self.returncode
+    def wait(self, timeout=None):
+        self.returncode = 0
+        return 0
+    def kill(self):
+        self.returncode = -9
+late_calls = {"n": 0}
+late_helper = {"pid": 777, "ppid": 1, "start": "Sat Nov 28 06:00:02 2026", "name": "com.apple.WebKit.WebContent", "rss": 20}
+def late_darwin_procs():
+    late_calls["n"] += 1
+    # Pre-launch (1), pre-stop (2), and initial post-stop scan (3) see no helper; subsequent cleanup confirmation poll sees late_helper.
+    return [] if late_calls["n"] <= 3 else [late_helper]
+orig_wait_gone = m.wait_gone
+orig_stop = m.stop
+m.processes = late_darwin_procs
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: None
+m.stop = lambda proc, *a, **kw: (True, None)
+m.wait_gone = lambda expected, timeout=30, on_poll=None: (on_poll() if on_poll else None, not m.alive(expected))[1]
+m.subprocess.Popen = lambda *a, **kw: CleanExitProc()
+try:
+    r_late = m.one_run("/bin/true", 0, 0.01, 1)
+    assert r_late["stopped_cleanly"] is False and r_late["cleanup_unconfirmed"] is True
+    assert r_late.get("provisional_left_running") == [777]
+finally:
+    m.wait_gone = orig_wait_gone
+    m.stop = orig_stop
+    m.subprocess.Popen = orig_popen
 
 # 6. summarize.py emits missing-lane rows and --require-expected rejects missing/duplicate/unexpected lanes.
 spec2 = importlib.util.spec_from_file_location("s", sys.argv[2])

@@ -154,6 +154,45 @@ def processes() -> list[dict]:
             }
             for r in rows
         ]
+    if SYSTEM == "Linux":
+        rows = []
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        try:
+            entries = os.listdir("/proc")
+        except OSError as exc:
+            raise RuntimeError(f"failed to list /proc: {exc}") from exc
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            try:
+                stat = Path(f"/proc/{pid}/stat").read_text()
+                lparen = stat.index("(")
+                rparen = stat.rindex(")")
+                comm = stat[lparen + 1 : rparen]
+                after = stat[rparen + 2 :].split()
+                ppid = int(after[1])
+                start_ticks = after[19]
+                rss_pages = int(after[21])
+            except (OSError, ValueError, IndexError):
+                continue
+            name = comm
+            try:
+                cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+                if cmdline:
+                    argv0 = cmdline.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+                    if argv0:
+                        name = os.path.basename(argv0)
+            except OSError:
+                pass
+            rows.append({
+                "pid": pid,
+                "ppid": ppid,
+                "rss": rss_pages * page_size,
+                "start": f"ticks:{start_ticks}",
+                "name": name,
+            })
+        return rows
     env = dict(os.environ, LC_ALL="C")
     out = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,lstart=,args="], capture_output=True, text=True, check=True, env=env).stdout
     rows = []
@@ -172,6 +211,11 @@ def processes() -> list[dict]:
 def _parse_start(start: str) -> tuple[int, float | str] | None:
     if not start:
         return None
+    if start.startswith("ticks:"):
+        try:
+            return (2, float(int(start[6:])))
+        except ValueError:
+            return None
     if "T" in start and start.endswith("Z"):
         # Windows Win32_Process CreationDate serialized as UTC ISO-8601 ("o").
         return (1, start)
@@ -629,15 +673,39 @@ def alive(expected: set[ProcId]) -> set[ProcId]:
     return current & expected
 
 
-def wait_gone(expected: set[ProcId], timeout: float = 30) -> bool:
-    if not expected:
+def wait_gone(expected: set[ProcId], timeout: float = 30, on_poll=None) -> bool:
+    if not expected and on_poll is None:
         return True
     end = time.monotonic() + timeout
-    while time.monotonic() < end:
+    while True:
+        if on_poll is not None:
+            on_poll()
         if not alive(expected):
             return True
+        if time.monotonic() >= end:
+            return False
         time.sleep(0.5)
-    return False
+
+
+def _discover_post_stop_helpers(
+    before: set[ProcId],
+    verified_owned: set[ProcId],
+    provisional_owned: set[ProcId],
+) -> bool:
+    """Scan for newly visible Linux/macOS webview helpers not seen pre-launch."""
+    if SYSTEM not in ("Linux", "Darwin"):
+        return False
+    added = False
+    for r in processes():
+        rid = proc_identity(r)
+        if rid in before or rid in verified_owned or rid in provisional_owned:
+            continue
+        if (SYSTEM == "Linux" and r["name"] in LINUX_WEBVIEW) or (
+            SYSTEM == "Darwin" and is_mac_webkit(r["name"])
+        ):
+            provisional_owned.add(rid)
+            added = True
+    return added
 
 
 def _linux_proc_starttime(pid: int) -> str | None:
@@ -651,19 +719,23 @@ def _linux_proc_starttime(pid: int) -> str | None:
 
 
 def pin_linux_pidfd(proc_id: ProcId, pinned: dict[ProcId, int]) -> None:
-    """Open and retain a Linux pidfd while ownership is live, re-checking kernel starttime."""
+    """Open and retain a Linux pidfd ONLY if it binds to the exact /proc starttime tick observed during ancestry verification."""
     if SYSTEM != "Linux" or proc_id in pinned:
         return
     pidfd_open = getattr(os, "pidfd_open", None)
     if pidfd_open is None:
         return
-    pid = proc_id[0]
-    before_ticks = _linux_proc_starttime(pid)
+    pid, start_token, _ = proc_id
+    if not start_token.startswith("ticks:"):
+        return
+    expected_ticks = start_token[6:]
+    if not expected_ticks:
+        return
     fd = None
     try:
         fd = pidfd_open(pid, 0)
         after_ticks = _linux_proc_starttime(pid)
-        if before_ticks is not None and after_ticks == before_ticks and proc_id in alive({proc_id}):
+        if after_ticks == expected_ticks:
             pinned[proc_id] = fd
             fd = None
     except OSError:
@@ -886,25 +958,20 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                 win_job.close()
 
         try:
-            # Post-stop scan catches any Linux/macOS webview helper orphaned by
-            # a zombie/early exit that did not appear in the pre-stop tree.
-            if SYSTEM in ("Linux", "Darwin"):
-                post_stop_rows = processes()
-                for r in post_stop_rows:
-                    rid = proc_identity(r)
-                    if rid in before or rid in verified_owned:
-                        continue
-                    if (SYSTEM == "Linux" and r["name"] in LINUX_WEBVIEW) or (
-                        SYSTEM == "Darwin" and is_mac_webkit(r["name"])
-                    ):
-                        provisional_owned.add(rid)
-            verified_gone = wait_gone(verified_owned)
-            provisional_gone = wait_gone(provisional_owned)
+            # Refresh helper discovery on every teardown poll and once more
+            # before reporting success so helpers that appear during shutdown
+            # (or pending macOS XPC launches) never escape cleanup verification.
+            refresh_helpers = lambda: _discover_post_stop_helpers(before, verified_owned, provisional_owned)
+            refresh_helpers()
+            verified_gone = wait_gone(verified_owned, on_poll=refresh_helpers)
+            provisional_gone = wait_gone(provisional_owned, on_poll=refresh_helpers)
+            if verified_gone and provisional_gone and refresh_helpers():
+                provisional_gone = wait_gone(provisional_owned, 5, on_poll=refresh_helpers)
             result["stopped_cleanly"] = verified_gone and provisional_gone and cleanup_error is None
             if not verified_gone:
                 left_verified = alive(verified_owned)
                 bound = force_stop(left_verified, pinned_pidfds)
-                verified_gone = wait_gone(verified_owned, 15)
+                verified_gone = wait_gone(verified_owned, 15, on_poll=refresh_helpers)
                 still_verified = sorted(pid for pid, _, _ in alive(verified_owned)) if not verified_gone else []
                 if bound:
                     result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in left_verified)} outlived the app's stop (stopped by force)"
@@ -913,10 +980,12 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
                     result["error"] = result.get("error") or f"verified processes {sorted(pid for pid, _, _ in left_verified)} outlived the app's stop without a safe termination handle"
                 if still_verified:
                     result["left_running"] = still_verified
-            if not provisional_gone:
+            refresh_helpers()
+            if not provisional_gone or alive(provisional_owned):
                 still_provisional = sorted(pid for pid, _, _ in alive(provisional_owned))
                 if still_provisional:
                     # Never SIGKILL heuristically attributed processes; abort further launches instead.
+                    result["stopped_cleanly"] = False
                     result["cleanup_unconfirmed"] = True
                     result["provisional_left_running"] = still_provisional
                     result["error"] = result.get("error") or (
