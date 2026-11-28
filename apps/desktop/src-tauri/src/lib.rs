@@ -255,6 +255,8 @@ pub fn run() {
             cmd_load::load_report_delete,
             cmd_load::load_report_export,
             cmd_load::load_compare,
+            cmd_load::load_export_jmx,
+            cmd_load::load_import_jtl,
             cmd_load::datasets_list,
             cmd_load::dataset_add,
             cmd_load::dataset_delete,

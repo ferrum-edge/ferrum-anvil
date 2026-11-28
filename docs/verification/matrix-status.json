@@ -5,8 +5,9 @@
   "reason": "Anvil does not ingest or correlate gateway logs; it never confirms anything from temporal proximity. Operator logs are used only as lab ground truth."
  },
  "LOAD-012": {
-  "status": "not_applicable",
-  "reason": "The optional JMeter adapter is not built in this release (plan 14.3: only after native load works). Native load covers the required workloads; see docs/load.md."
+  "status": "partial",
+  "requires": ["integration_test"],
+  "reason": "The Apache JMeter adapter (crates/anvil-jmeter, docs/load.md 'JMeter adapter') exports a declared subset of HTTP load plans as JMeter test plans and imports CSV and XML JTL results. A request that Anvil sends with certificate and host-name verification is refused (JMeter's HTTP samplers accept any certificate), as are HTTP/2 and HTTP/3, other protocol units and every setting JMeter cannot reproduce; the rest of the differences are listed in each export report. Tests: crates/anvil-jmeter/tests/export.rs and tests/jtl.rs (CI), crates/anvil-cli/tests/cli_jmeter.rs, and the hosted round trip with Apache JMeter 5.6.3 (.github/workflows/jmeter.yml, tests/jmeter_roundtrip.rs): JMeter runs the exported plans against the loopback fixture server, its results import with the fixture's request counts and the native engine's unit counts, it completes requests against an untrusted certificate (the evidence for refusing strict TLS) and a plan without its secret properties sends nothing."
  },
  "PROTO-004": {
   "status": "verified_test",

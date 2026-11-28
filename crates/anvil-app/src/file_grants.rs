@@ -83,6 +83,14 @@ pub enum FilePurpose {
     /// Write a description revised with contract-drift suggestions, or its
     /// JSON Patch.
     SpecRevisionExport,
+    /// Write a JMeter test plan (`.jmx`) and, beside it, its dataset as
+    /// `<name>.dataset.csv` (the backend derives that name).
+    JmeterExport,
+    /// Write the secrets of a JMeter export (a properties file for
+    /// `jmeter -q`), readable only by its owner.
+    JmeterSecretsExport,
+    /// Read a JMeter result file (JTL), streamed rather than read whole.
+    JtlImport,
     /// Bind a JWT-SVID token file that the backend reads at send time.
     JwtSvidFile,
     /// Bind a linked local file that a saved request or dataset names, so
@@ -112,7 +120,9 @@ impl FilePurpose {
             | FilePurpose::LoadReportExport
             | FilePurpose::RunReportExport
             | FilePurpose::LintReportExport
-            | FilePurpose::SpecRevisionExport => Access::Write,
+            | FilePurpose::SpecRevisionExport
+            | FilePurpose::JmeterExport
+            | FilePurpose::JmeterSecretsExport => Access::Write,
             FilePurpose::BundleImport
             | FilePurpose::Attachment
             | FilePurpose::PemCertificate
@@ -120,15 +130,16 @@ impl FilePurpose {
             | FilePurpose::Pkcs12File
             | FilePurpose::SpecSource
             | FilePurpose::Dataset
-            | FilePurpose::Ruleset => Access::Read,
+            | FilePurpose::Ruleset
+            | FilePurpose::JtlImport => Access::Read,
             FilePurpose::JwtSvidFile | FilePurpose::LinkedFile | FilePurpose::LinkedFileRelocate => Access::Bind,
         }
     }
 
     /// Whether a written file is created readable only by its owner (Unix):
-    /// bundles and backups can carry secrets.
+    /// bundles, backups and a JMeter export's secrets file carry secrets.
     pub fn owner_only(self) -> bool {
-        matches!(self, FilePurpose::BundleExport)
+        matches!(self, FilePurpose::BundleExport | FilePurpose::JmeterSecretsExport)
     }
 
     /// Largest file read for this purpose (0 for write purposes).
@@ -141,11 +152,15 @@ impl FilePurpose {
             FilePurpose::SpecSource => 32 * MIB,
             FilePurpose::Dataset => 64 * MIB,
             FilePurpose::Ruleset => MIB,
+            // Streamed (`FileGrants::open_read`); the importer bounds it again.
+            FilePurpose::JtlImport => 4 * 1024 * MIB,
             FilePurpose::BundleExport
             | FilePurpose::LoadReportExport
             | FilePurpose::RunReportExport
             | FilePurpose::LintReportExport
             | FilePurpose::SpecRevisionExport
+            | FilePurpose::JmeterExport
+            | FilePurpose::JmeterSecretsExport
             | FilePurpose::JwtSvidFile
             | FilePurpose::LinkedFile
             | FilePurpose::LinkedFileRelocate => 0,
@@ -371,13 +386,26 @@ impl FileGrants {
         let (Some(parent), Some(name)) = (picked.parent(), picked.file_name()) else {
             return Err(GrantError::Invalid("choose a file name, not a folder".into()));
         };
+        if is_reserved_export_lock_name(name) {
+            return Err(GrantError::Invalid(format!(
+                "'{}' is reserved for Anvil's export lock; choose another filename",
+                crate::no_follow::EXPORT_LOCK_NAME
+            )));
+        }
         let not_folder = || GrantError::Invalid("the destination folder is not a folder".into());
         let dir = std::fs::canonicalize(parent).map_err(io)?;
         if !std::fs::metadata(&dir).map_err(io)?.is_dir() {
             return Err(not_folder());
         }
         // The folder chosen, which a write must still find at its path.
-        let id = Dir::open(&dir).map_err(io)?.ok_or_else(not_folder)?.id().map_err(io)?;
+        let folder = Dir::open(&dir).map_err(io)?.ok_or_else(not_folder)?;
+        if folder.entry_aliases_export_lock(name).map_err(io)? {
+            return Err(GrantError::Invalid(format!(
+                "'{}' is reserved for Anvil's export lock; choose another filename",
+                crate::no_follow::EXPORT_LOCK_NAME
+            )));
+        }
+        let id = folder.id().map_err(io)?;
         refuse_directory(&dir.join(name))?;
         let file_name = display_name(Some(name));
         self.insert(purpose, Target::Write { dir, id, name: name.to_owned() }, file_name, generation, None)
@@ -387,10 +415,607 @@ impl FileGrants {
     /// stays usable until it expires or the app locks. Private-key grants are
     /// refused here and served only by one-shot vault ingestion.
     pub fn read(&self, token: &str, purpose: FilePurpose) -> Result<ReadFile, GrantError> {
-        if purpose.access() != Access::Read || purpose == FilePurpose::PemPrivateKey {
+        if purpose.access() != Access::Read || matches!(purpose, FilePurpose::PemPrivateKey | FilePurpose::JtlImport) {
             return Err(GrantError::WrongPurpose);
         }
         self.read_file(self.lookup(token, purpose)?, purpose)
+    }
+
+    /// Open the file behind a JTL grant for streaming, with its name. The
+    /// same checks as [`FileGrants::read`] apply (still the chosen file, not
+    /// reached through a link, within the purpose's size limit); the caller
+    /// reads it with its own bounds.
+    pub fn open_read(&self, token: &str, purpose: FilePurpose) -> Result<(File, String), GrantError> {
+        if purpose != FilePurpose::JtlImport {
+            return Err(GrantError::WrongPurpose);
+        }
+        let entry = self.lookup(token, purpose)?;
+        let Target::Read { path, id } = entry.target else {
+            return Err(GrantError::WrongPurpose);
+        };
+        if std::fs::canonicalize(&path).map_err(io)? != path {
+            return Err(GrantError::Changed);
+        }
+        let Some((file, meta)) = open_regular(&path).map_err(io)? else {
+            return Err(GrantError::Changed);
+        };
+        if file_id(&file, &meta).map_err(io)? != id {
+            return Err(GrantError::Changed);
+        }
+        if meta.len() > purpose.max_read_bytes() {
+            return Err(GrantError::TooLarge(size_label(purpose.max_read_bytes())));
+        }
+        Ok((file, entry.file_name))
+    }
+
+    /// The name chosen for a write grant (without its folder), so a command
+    /// can name a file it writes beside it before writing.
+    pub fn chosen_name(&self, token: &str, purpose: FilePurpose) -> Result<String, GrantError> {
+        if purpose.access() != Access::Write {
+            return Err(GrantError::WrongPurpose);
+        }
+        let entry = self.lookup(token, purpose)?;
+        match entry.target {
+            Target::Write { name, .. } => Ok(display_name(Some(&name))),
+            Target::Read { .. } => Err(GrantError::WrongPurpose),
+        }
+    }
+
+    /// The chosen destination of a write grant (its pinned folder and name),
+    /// for a command that must keep several destinations apart. Never sent
+    /// to the renderer.
+    pub fn destination(&self, token: &str, purpose: FilePurpose) -> Result<PathBuf, GrantError> {
+        match self.lookup(token, purpose)?.target {
+            Target::Write { dir, name, .. } => Ok(dir.join(name)),
+            Target::Read { .. } => Err(GrantError::WrongPurpose),
+        }
+    }
+
+    /// [`FileGrants::write`] for a JMeter export: the test plan to the chosen
+    /// file and, when given, its dataset beside it as
+    /// `<chosen stem>.dataset.csv` in the same chosen folder (owner-only when
+    /// it holds secrets). The sibling's name is derived here, never supplied
+    /// by the renderer, and an existing sibling (which the save dialog never
+    /// confirmed) is replaced only with `replace_dataset`, the user's
+    /// explicit choice; nothing is written otherwise.
+    pub fn write_with_dataset(
+        &self,
+        token: &str,
+        bytes: &[u8],
+        dataset: Option<(&[u8], bool)>,
+        replace_dataset: bool,
+    ) -> Result<usize, GrantError> {
+        self.write_jmeter_export(token, bytes, dataset, replace_dataset, None).map(|(n, _)| n)
+    }
+
+    /// Stage and publish a JMeter export (plan, optional sibling dataset, and
+    /// optional separate secrets file) as one coordinated operation:
+    ///
+    /// 1. Validates platform owner-only support and claims both grants under
+    ///    one lock so an expired secrets grant fails before touching disk.
+    /// 2. Stages every temporary file in its pinned folder before publishing
+    ///    any destination.
+    /// 3. Publishes no-clobber destinations first (secrets, then an unconfirmed
+    ///    dataset) via atomic no-clobber linking before replacing the plan.
+    /// 4. On any pre-publish error, cleans up all staged temporaries and
+    ///    restores the grants; on an unavoidable mid-publish error, reports
+    ///    which files were already published.
+    pub fn write_jmeter_export(
+        &self,
+        plan_token: &str,
+        jmx_bytes: &[u8],
+        dataset: Option<(&[u8], bool)>,
+        replace_dataset: bool,
+        secrets: Option<(&str, &[u8])>,
+    ) -> Result<(usize, Vec<String>), GrantError> {
+        let plan_purpose = FilePurpose::JmeterExport;
+        let secrets_purpose = FilePurpose::JmeterSecretsExport;
+        if (dataset.is_some_and(|(_, owner_only)| owner_only) || secrets.is_some()) && !OWNER_ONLY_FILES {
+            return Err(GrantError::Invalid(OWNER_ONLY_UNAVAILABLE.into()));
+        }
+        // Claim both grants atomically under one state lock so an invalid or
+        // expired secrets grant fails before anything is staged or written.
+        let (plan_entry, secrets_entry, generation) = {
+            let mut g = self.state.lock();
+            self.prune(&mut g.entries);
+            let generation = g.generation;
+            let plan_entry = match g.entries.get(plan_token) {
+                Some(e) if e.purpose == plan_purpose => e.clone(),
+                Some(_) => return Err(GrantError::WrongPurpose),
+                None => return Err(GrantError::Unknown),
+            };
+            let secrets_entry = match secrets {
+                Some((sec_tok, _)) => match g.entries.get(sec_tok) {
+                    Some(e) if e.purpose == secrets_purpose => Some((sec_tok.to_owned(), e.clone())),
+                    Some(_) => return Err(GrantError::WrongPurpose),
+                    None => return Err(GrantError::Unknown),
+                },
+                None => None,
+            };
+            g.entries.remove(plan_token);
+            if let Some((ref sec_tok, _)) = secrets_entry {
+                g.entries.remove(sec_tok);
+            }
+            (plan_entry, secrets_entry, generation)
+        };
+        let restore_grants = |plan_entry: Entry, secrets_entry: Option<(String, Entry)>| {
+            let mut g = self.state.lock();
+            if g.generation == generation {
+                self.admit(&mut g, plan_token.to_owned(), plan_entry);
+                if let Some((sec_tok, sec_entry)) = secrets_entry {
+                    self.admit(&mut g, sec_tok, sec_entry);
+                }
+            }
+        };
+
+        let Target::Write { dir: plan_dir, id: plan_id, name: plan_name } = &plan_entry.target else {
+            restore_grants(plan_entry, secrets_entry);
+            return Err(GrantError::WrongPurpose);
+        };
+        let sibling_name = dataset.map(|_| dataset_name(plan_name));
+        if is_reserved_export_lock_name(plan_name)
+            || sibling_name.as_deref().is_some_and(is_reserved_export_lock_name)
+            || secrets_entry
+                .as_ref()
+                .is_some_and(|(_, e)| matches!(&e.target, Target::Write { name, .. } if is_reserved_export_lock_name(name)))
+        {
+            restore_grants(plan_entry, secrets_entry);
+            return Err(GrantError::Invalid(format!(
+                "'{}' is reserved for Anvil's export lock; choose another filename. Nothing was written",
+                crate::no_follow::EXPORT_LOCK_NAME
+            )));
+        }
+
+        // Early existence check for an unconfirmed sibling dataset (enforced
+        // again atomically at publication via publish_no_clobber).
+        if let Some(ref sibling) = sibling_name
+            && !replace_dataset
+            && std::fs::symlink_metadata(plan_dir.join(sibling)).is_ok()
+        {
+            let label = display_name(Some(sibling));
+            restore_grants(plan_entry, secrets_entry);
+            return Err(GrantError::Invalid(format!(
+                "{label} already exists beside the chosen file; choose to replace it, or choose another name. Nothing was written"
+            )));
+        }
+
+        // Open and verify pinned folder(s) and stage every file before
+        // publishing any destination.
+        let plan_folder = match open_pinned_write_dir(plan_dir, *plan_id) {
+            Ok(f) => f,
+            Err(e) => {
+                restore_grants(plan_entry, secrets_entry);
+                return Err(e);
+            }
+        };
+        let reliable_identity = match plan_folder.supports_reliable_identity() {
+            Ok(v) => v,
+            Err(e) => {
+                restore_grants(plan_entry, secrets_entry);
+                return Err(io(e));
+            }
+        };
+        if replace_dataset && sibling_name.is_some() && !reliable_identity {
+            restore_grants(plan_entry, secrets_entry);
+            return Err(GrantError::Io(
+                "cannot safely replace an existing dataset file on a filesystem without reliable file identity or atomic exclusive rename"
+                    .into(),
+            ));
+        }
+        if let Err(e) = refuse_directory(&plan_dir.join(plan_name)) {
+            restore_grants(plan_entry, secrets_entry);
+            return Err(e);
+        }
+        if let Some(ref sibling) = sibling_name
+            && let Err(e) = refuse_directory(&plan_dir.join(sibling))
+        {
+            restore_grants(plan_entry, secrets_entry);
+            return Err(e);
+        }
+        let secrets_target = match (&secrets_entry, secrets) {
+            (Some((_, se)), Some((_, sec_bytes))) => {
+                let Target::Write { dir: sec_dir, id: sec_id, name: sec_name } = &se.target else {
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(GrantError::WrongPurpose);
+                };
+                if std::fs::symlink_metadata(sec_dir.join(sec_name)).is_ok() {
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(GrantError::Invalid(
+                        "the secrets file already exists; it is never written over an existing file. Nothing was written".into(),
+                    ));
+                }
+                let sec_folder = match open_pinned_write_dir(sec_dir, *sec_id) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        restore_grants(plan_entry, secrets_entry);
+                        return Err(e);
+                    }
+                };
+                if let Err(e) = refuse_directory(&sec_dir.join(sec_name)) {
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(e);
+                }
+                Some((sec_folder, sec_name.clone(), sec_bytes))
+            }
+            _ => None,
+        };
+
+        // Stage all temporary files first. Keep the dataset's live handle open
+        // through settlement so its OS identity cannot be recycled before JMX
+        // commit or quarantine verification.
+        let (jmx_tmp, _, jmx_live) = match stage_in(&plan_folder, jmx_bytes, plan_purpose.owner_only(), false) {
+            Ok(t) => t,
+            Err(e) => {
+                restore_grants(plan_entry, secrets_entry);
+                return Err(e);
+            }
+        };
+        drop(jmx_live);
+        let dataset_tmp = match dataset {
+            Some((csv, owner_only)) => match stage_in(&plan_folder, csv, owner_only, reliable_identity) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    plan_folder.cleanup_staged(&jmx_tmp);
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let secrets_tmp = match &secrets_target {
+            Some((sec_folder, _, sec_bytes)) => match stage_in(sec_folder, sec_bytes, true, false) {
+                Ok((tmp, id, live)) => {
+                    drop(live);
+                    Some((tmp, id))
+                }
+                Err(e) => {
+                    plan_folder.cleanup_staged(&jmx_tmp);
+                    if let Some((dt, _, live)) = dataset_tmp {
+                        drop(live);
+                        plan_folder.cleanup_staged(&dt);
+                    }
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+
+        // Publish no-clobber files first, then the plan. Track every published
+        // filename and OS file identity (both staged and post-publish, so
+        // filesystems such as FAT32/exFAT where rename changes file IDs stay
+        // protected) so an unavoidable mid-publish error reports what landed
+        // and a Unicode-normalization alias (e.g. APFS NFC/NFD) can never
+        // replace a newly published sibling file.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum PublishedRole {
+            Secrets,
+            Dataset,
+        }
+        let mut published: Vec<(PublishedRole, String)> = Vec::new();
+        let format_published = |items: &[(PublishedRole, String)]| items.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join(", ");
+        let mut protected: Vec<FileId> = Vec::new();
+        let cleanup_remaining = |jmx_t: Option<&crate::no_follow::StagedFile>,
+                                 ds_t: Option<(crate::no_follow::StagedFile, FileId, Option<File>)>,
+                                 sec_t: Option<&crate::no_follow::StagedFile>| {
+            if let Some(t) = jmx_t {
+                plan_folder.cleanup_staged(t);
+            }
+            if let Some((t, _, live)) = ds_t {
+                drop(live);
+                plan_folder.cleanup_staged(&t);
+            }
+            if let (Some((sf, _, _)), Some(t)) = (&secrets_target, sec_t) {
+                sf.cleanup_staged(t);
+            }
+        };
+        let mut sec_tmp = secrets_tmp;
+        let mut ds_tmp = dataset_tmp;
+        let mut jmx_t = Some(jmx_tmp);
+
+        if let (Some((sec_folder, sec_name, _)), Some((tmp, staged_id))) = (&secrets_target, sec_tmp.take()) {
+            let sec_alias = match sec_folder.entry_aliases_export_lock(sec_name) {
+                Ok(true) => Some(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("secrets destination aliases reserved '{}'", crate::no_follow::EXPORT_LOCK_NAME),
+                )),
+                Ok(false) => None,
+                Err(err) => Some(err),
+            };
+            let sec_res = match sec_alias {
+                Some(err) => Err(err),
+                None => sec_folder.publish_staged_no_clobber(&tmp, sec_name),
+            };
+            if let Err(err) = sec_res {
+                sec_folder.cleanup_staged(&tmp);
+                cleanup_remaining(jmx_t.as_ref(), ds_tmp.take(), None);
+                restore_grants(plan_entry, secrets_entry);
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    return Err(GrantError::Invalid(
+                        "the secrets file already exists; it is never written over an existing file. Nothing was written".into(),
+                    ));
+                }
+                return Err(io(err));
+            }
+            published.push((PublishedRole::Secrets, display_name(Some(sec_name))));
+            protected.push(staged_id);
+            match sec_folder.entry_identity(sec_name) {
+                Ok(Some((false, pub_id))) => {
+                    if pub_id != staged_id {
+                        protected.push(pub_id);
+                    }
+                }
+                Ok(_) => {
+                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.take(), None);
+                    return Err(GrantError::Io(format!(
+                        "cannot verify published secrets file identity (already written: {}; the remaining files were not written)",
+                        format_published(&published)
+                    )));
+                }
+                Err(err) => {
+                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.take(), None);
+                    return Err(GrantError::Io(format!(
+                        "cannot verify published secrets file identity: {err} (already written: {}; the remaining files were not written)",
+                        format_published(&published)
+                    )));
+                }
+            }
+        }
+
+        // Serialize concurrent dataset+JMX publications targeting the same
+        // directory so two replacements can never interleave and pair one
+        // export's JMX with another export's dataset sidecar. Protect the lock
+        // file's OS identity so no filesystem-equivalent spelling or link can
+        // replace the locked inode.
+        let _plan_dir_lock = if sibling_name.is_some() && ds_tmp.is_some() {
+            match plan_folder.lock_exclusive() {
+                Ok((lock, lock_id)) => {
+                    protected.push(lock_id);
+                    Some(lock)
+                }
+                Err(err) => {
+                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.take(), None);
+                    if published.is_empty() {
+                        restore_grants(plan_entry, secrets_entry);
+                        return Err(io(err));
+                    }
+                    return Err(GrantError::Io(format!(
+                        "{err} (already written: {}; the remaining files were not written)",
+                        format_published(&published)
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut ds_backup: Option<crate::no_follow::ExistingBackup> = None;
+        let mut ds_owned_handle: Option<File> = None;
+        if let (Some(sibling), Some((tmp, staged_id, ds_live))) = (sibling_name.as_ref(), ds_tmp.take()) {
+            let target_blocked = match plan_folder.entry_identity(sibling) {
+                Ok(Some((true, _))) => {
+                    Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "dataset destination is a symbolic link"))
+                }
+                Ok(Some((false, id))) if protected.contains(&id) => Some(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "dataset destination aliases a protected sibling or lock file",
+                )),
+                Ok(_) => match plan_folder.entry_aliases_export_lock(sibling) {
+                    Ok(true) => Some(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("dataset destination aliases reserved '{}'", crate::no_follow::EXPORT_LOCK_NAME),
+                    )),
+                    Ok(false) => None,
+                    Err(err) => Some(err),
+                },
+                Err(err) => Some(err),
+            };
+            let mut abort_recovery = String::new();
+            let res = if let Some(err) = target_blocked {
+                Err(err)
+            } else if replace_dataset {
+                match plan_folder.backup_existing_regular(sibling) {
+                    Ok(backup) => {
+                        ds_backup = backup;
+                        // If backup moved the original aside (or no original
+                        // existed), publish with no-clobber so a concurrent
+                        // file installed in the vacated slot is never
+                        // overwritten.
+                        let use_no_clobber = ds_backup.as_ref().is_none_or(|b| b.is_moved());
+                        let r = if use_no_clobber {
+                            plan_folder.publish_staged_no_clobber(&tmp, sibling)
+                        } else {
+                            plan_folder.rename_staged(&tmp, sibling)
+                        };
+                        if r.is_err()
+                            && let Some(backup) = ds_backup.take()
+                            && let Err((backup_name, restore_err)) = plan_folder.abort_backup(backup, sibling)
+                        {
+                            abort_recovery = format!(
+                                "; could not restore or safely discard dataset backup ({restore_err}), previous dataset backup preserved at {}",
+                                display_name(Some(&backup_name))
+                            );
+                        }
+                        r
+                    }
+                    Err(err) => Err(err),
+                }
+            } else {
+                plan_folder.publish_staged_no_clobber(&tmp, sibling)
+            };
+            if let Err(err) = res {
+                drop(ds_live);
+                plan_folder.cleanup_staged(&tmp);
+                cleanup_remaining(jmx_t.as_ref(), None, None);
+                if published.is_empty() && abort_recovery.is_empty() {
+                    restore_grants(plan_entry, secrets_entry);
+                    if !replace_dataset && err.kind() == std::io::ErrorKind::AlreadyExists {
+                        let label = display_name(Some(sibling));
+                        return Err(GrantError::Invalid(format!(
+                            "{label} already exists beside the chosen file; choose to replace it, or choose another name. Nothing was written"
+                        )));
+                    }
+                    return Err(io(err));
+                }
+                if published.is_empty() {
+                    return Err(GrantError::Io(format!("{err}{abort_recovery}")));
+                }
+                return Err(GrantError::Io(format!(
+                    "{err} (already written: {}; the remaining files were not written{abort_recovery})",
+                    format_published(&published)
+                )));
+            }
+            published.push((PublishedRole::Dataset, display_name(Some(sibling))));
+            protected.push(staged_id);
+            match plan_folder.entry_identity(sibling) {
+                Ok(Some((false, pub_id))) => {
+                    let live_matches =
+                        ds_live.as_ref().and_then(|h| h.metadata().and_then(|m| file_id(h, &m)).ok()).is_some_and(|lid| lid == pub_id);
+                    if live_matches {
+                        ds_owned_handle = ds_live;
+                    } else {
+                        drop(ds_live);
+                        if pub_id != staged_id {
+                            protected.push(pub_id);
+                        }
+                    }
+                }
+                Ok(_) => {
+                    drop(ds_live);
+                    cleanup_remaining(jmx_t.as_ref(), None, None);
+                    // Ownership of `sibling` could not be verified, so do not
+                    // unlink or overwrite it; preserve any backup for recovery.
+                    let recovery = ds_backup
+                        .take()
+                        .map(|b| format!("; previous dataset backup preserved at {}", display_name(Some(b.name()))))
+                        .unwrap_or_default();
+                    return Err(GrantError::Io(format!(
+                        "cannot verify published dataset file identity (already written: {}; the remaining files were not written{recovery})",
+                        format_published(&published)
+                    )));
+                }
+                Err(err) => {
+                    drop(ds_live);
+                    cleanup_remaining(jmx_t.as_ref(), None, None);
+                    let recovery = ds_backup
+                        .take()
+                        .map(|b| format!("; previous dataset backup preserved at {}", display_name(Some(b.name()))))
+                        .unwrap_or_default();
+                    return Err(GrantError::Io(format!(
+                        "cannot verify published dataset file identity: {err} (already written: {}; the remaining files were not written{recovery})",
+                        format_published(&published)
+                    )));
+                }
+            }
+        }
+
+        if let Some(tmp) = jmx_t.take() {
+            // Before committing the JMX, verify the live dataset object we
+            // published is still installed at `sibling` (when reliable identity
+            // is available) so we never pair our JMX with a concurrently
+            // replaced dataset.
+            if let Some(ref sibling) = sibling_name
+                && reliable_identity
+                && !ds_owned_handle.as_ref().is_some_and(|h| plan_folder.verify_live_entry(sibling, h).unwrap_or(false))
+            {
+                plan_folder.cleanup_staged(&tmp);
+                drop(ds_owned_handle);
+                let recovery = ds_backup
+                    .take()
+                    .map(|b| format!("; previous dataset backup preserved at {}", display_name(Some(b.name()))))
+                    .unwrap_or_default();
+                return Err(GrantError::Io(format!(
+                    "published dataset entry changed concurrently before test plan commit (already written: {}; the test plan was not written{recovery})",
+                    format_published(&published)
+                )));
+            }
+            let target_blocked = match plan_folder.entry_identity(plan_name) {
+                Ok(Some((true, _))) => Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "plan destination is a symbolic link")),
+                Ok(Some((false, id))) if protected.contains(&id) => {
+                    Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "plan destination aliases a protected sibling or lock file"))
+                }
+                Ok(_) => match plan_folder.entry_aliases_export_lock(plan_name) {
+                    Ok(true) => Some(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("plan destination aliases reserved '{}'", crate::no_follow::EXPORT_LOCK_NAME),
+                    )),
+                    Ok(false) => None,
+                    Err(err) => Some(err),
+                },
+                Err(err) => Some(err),
+            };
+            let res = match target_blocked {
+                Some(err) => Err(err),
+                None => plan_folder.rename_staged(&tmp, plan_name),
+            };
+            if let Err(err) = res {
+                plan_folder.cleanup_staged(&tmp);
+                // Roll back the companion dataset sidecar ONLY when ownership is
+                // verified against our live staged handle through atomic
+                // quarantine; preserve any backup and report recovery paths
+                // otherwise.
+                let mut recovery = String::new();
+                if let Some(ref sibling) = sibling_name {
+                    if let Some(live_handle) = ds_owned_handle.take() {
+                        match plan_folder.rollback_owned(sibling, live_handle, ds_backup.take()) {
+                            crate::no_follow::RollbackOutcome::Restored => {
+                                published.retain(|(role, _)| *role != PublishedRole::Dataset);
+                            }
+                            crate::no_follow::RollbackOutcome::Skipped { backup_name, quarantine_left } => {
+                                if let Some(name) = backup_name {
+                                    recovery.push_str(&format!(
+                                        "; dataset entry changed concurrently so rollback was skipped, previous dataset backup preserved at {}",
+                                        display_name(Some(&name))
+                                    ));
+                                }
+                                if let Some((q_name, q_err)) = quarantine_left {
+                                    recovery.push_str(&format!(
+                                        "; concurrent dataset entry could not be returned from quarantine ({q_err}), preserved at {}",
+                                        display_name(Some(&q_name))
+                                    ));
+                                }
+                            }
+                            crate::no_follow::RollbackOutcome::Failed { backup_name, err: restore_err } => {
+                                recovery = format!(
+                                    "; dataset rollback failed ({restore_err}), previous dataset backup preserved at {}",
+                                    display_name(Some(&backup_name))
+                                );
+                            }
+                        }
+                    } else if let Some(backup) = ds_backup.take() {
+                        recovery = format!(
+                            "; published dataset ownership could not be verified against the live staged file so rollback was skipped, previous dataset backup preserved at {}",
+                            display_name(Some(backup.name()))
+                        );
+                    }
+                }
+                if published.is_empty() && recovery.is_empty() {
+                    restore_grants(plan_entry, secrets_entry);
+                    return Err(io(err));
+                }
+                if published.is_empty() {
+                    return Err(GrantError::Io(format!("{err} (the test plan was not written{recovery})")));
+                }
+                return Err(GrantError::Io(format!(
+                    "{err} (already written: {}; the test plan was not written{recovery})",
+                    format_published(&published)
+                )));
+            }
+        }
+        if let Some(backup) = ds_backup.take() {
+            plan_folder.discard_backup(backup);
+        }
+        drop(ds_owned_handle);
+
+        let mut written = vec![display_name(Some(plan_name))];
+        if let Some(ref sibling) = sibling_name {
+            written.push(display_name(Some(sibling)));
+        }
+        if let Some((_, sec_name, _)) = &secrets_target {
+            written.push(display_name(Some(sec_name)));
+        }
+        let total = jmx_bytes.len() + dataset.map_or(0, |(csv, _)| csv.len()) + secrets.map_or(0, |(_, s)| s.len());
+        Ok((total, written))
     }
 
     /// [`FileGrants::read`], deciding from the start of the file how much of
@@ -405,7 +1030,7 @@ impl FileGrants {
         prefix: usize,
         limit: impl FnOnce(&[u8], u64) -> Result<u64, String>,
     ) -> Result<ReadFile, GrantError> {
-        if purpose.access() != Access::Read || purpose == FilePurpose::PemPrivateKey {
+        if purpose.access() != Access::Read || matches!(purpose, FilePurpose::PemPrivateKey | FilePurpose::JtlImport) {
             return Err(GrantError::WrongPurpose);
         }
         self.read_file_checked(self.lookup(token, purpose)?, purpose, prefix, limit)
@@ -487,6 +1112,9 @@ impl FileGrants {
     pub fn write(&self, token: &str, purpose: FilePurpose, bytes: &[u8]) -> Result<usize, GrantError> {
         if purpose.access() != Access::Write {
             return Err(GrantError::WrongPurpose);
+        }
+        if purpose == FilePurpose::JmeterSecretsExport && !OWNER_ONLY_FILES {
+            return Err(GrantError::Invalid(OWNER_ONLY_UNAVAILABLE.into()));
         }
         let (entry, generation) = self.take(token, purpose)?;
         let result = write_target(&entry.target, bytes, purpose.owner_only());
@@ -649,6 +1277,452 @@ pub fn open_regular_file(path: &Path) -> std::io::Result<Option<(File, Metadata)
     Ok(meta.is_file().then_some((file, meta)))
 }
 
+fn eq_filename(a: &OsStr, b: &OsStr) -> bool {
+    if cfg!(any(windows, target_os = "macos")) { a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()) } else { a == b }
+}
+
+/// Unicode default-ignorable and HFS+ TN1150 ignorable characters stripped
+/// during filesystem-equivalent filename comparison (macOS HFS+/APFS, Windows).
+fn is_fs_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
+/// Whether `name` matches Anvil's reserved export directory lock filename or
+/// any filesystem-equivalent spelling of it (Unicode/ASCII case folding such as
+/// Kelvin sign `K` -> `k`, HFS+/Unicode default-ignorable characters, and
+/// Windows trailing dots/spaces or NTFS alternate data streams).
+pub fn is_reserved_export_lock_name(name: &OsStr) -> bool {
+    let text = name.to_string_lossy();
+    let base = if cfg!(windows) { text.split(':').next().unwrap_or("").trim_end_matches(['.', ' ']) } else { text.as_ref() };
+    let mut folded = String::with_capacity(base.len());
+    for ch in base.chars() {
+        if is_fs_ignorable(ch) {
+            continue;
+        }
+        match ch {
+            '\u{0130}' | '\u{0131}' => folded.push('i'),
+            '\u{017F}' => folded.push('s'),
+            '\u{212A}' => folded.push('k'),
+            other => {
+                for lc in other.to_lowercase() {
+                    if !is_fs_ignorable(lc) {
+                        folded.push(lc);
+                    }
+                }
+            }
+        }
+    }
+    folded == crate::no_follow::EXPORT_LOCK_NAME
+}
+
+/// An opaque OS file identity (device + inode on Unix, volume serial + file
+/// index on Windows) for checking whether two paths alias the same file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinnedFileId(FileId);
+
+/// Return the OS file identity of an already-opened file handle.
+pub fn opened_file_id(file: &File, meta: &Metadata) -> std::io::Result<PinnedFileId> {
+    file_id(file, meta).map(PinnedFileId)
+}
+
+/// An output destination whose parent folder is pinned via [`Dir`],
+/// so retargeting a parent symlink after validation cannot redirect the final
+/// atomic publish.
+pub struct PinnedOutput {
+    dir: Dir,
+    dir_id: FileId,
+    name: OsString,
+}
+
+impl PinnedOutput {
+    /// Pin `path`'s parent directory without following links, then validate
+    /// relative to the pinned directory that `path`'s leaf is not a symlink.
+    pub fn open(path: &Path) -> std::io::Result<Self> {
+        let name = path
+            .file_name()
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination has no file name"))?
+            .to_os_string();
+        if is_reserved_export_lock_name(&name) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("'{}' is reserved for Anvil's export lock; choose another filename", crate::no_follow::EXPORT_LOCK_NAME),
+            ));
+        }
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let canon_parent = std::fs::canonicalize(parent)?;
+        let dir = Dir::open(&canon_parent)?.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination parent is a symbolic link or not a directory")
+        })?;
+        if dir.entry_aliases_export_lock(&name)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("destination aliases reserved '{}'; choose another filename", crate::no_follow::EXPORT_LOCK_NAME),
+            ));
+        }
+        if matches!(dir.entry_identity(&name)?, Some((true, _))) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "destination is a symbolic link; refusing to write through or replace a symlink",
+            ));
+        }
+        let dir_id = dir.id()?;
+        Ok(Self { dir, dir_id, name })
+    }
+
+    /// Whether this pinned destination aliases an already-opened input file
+    /// (same directory entry, symlink target, or hard link), using no-follow
+    /// metadata lookup that does not require read access to the target.
+    pub fn aliases_file(&self, file: &File, meta: &Metadata, file_path: &Path) -> std::io::Result<bool> {
+        let canon = std::fs::canonicalize(file_path).ok();
+        let same_entry = canon
+            .as_deref()
+            .and_then(|p| p.parent().zip(p.file_name()))
+            .and_then(|(parent, name)| Dir::open(parent).ok().flatten().and_then(|d| d.id().ok()).map(|id| (id, name)))
+            .is_some_and(|(id, name)| id == self.dir_id && eq_filename(name, &self.name));
+        if same_entry {
+            return Ok(true);
+        }
+        if let Some((false, existing_id)) = self.dir.entry_identity(&self.name)? {
+            return Ok(existing_id == file_id(file, meta)?);
+        }
+        Ok(false)
+    }
+
+    /// Whether two pinned destinations target the same directory entry (or
+    /// existing file inode when both already exist).
+    pub fn aliases_output(&self, other: &Self) -> std::io::Result<bool> {
+        if self.dir_id == other.dir_id && eq_filename(&self.name, &other.name) {
+            return Ok(true);
+        }
+        if let (Some((false, aid)), Some((false, bid))) = (self.dir.entry_identity(&self.name)?, other.dir.entry_identity(&other.name)?) {
+            return Ok(aid == bid);
+        }
+        Ok(false)
+    }
+
+    /// Stage `bytes` into a new temporary file inside the pinned directory,
+    /// returning a [`StagedPinnedOutput`] that cleans up on drop unless
+    /// published via [`StagedPinnedOutput::publish_guarded`]. When
+    /// `keep_live_handle` is true and the filesystem supports reliable
+    /// identity, keeps a handle to the staged file object open through
+    /// settlement so its OS identity cannot be recycled before verification.
+    pub fn stage(&self, bytes: &[u8], owner_only: bool) -> std::io::Result<StagedPinnedOutput<'_>> {
+        self.stage_with_options(bytes, owner_only, false)
+    }
+
+    /// Like [`PinnedOutput::stage`], keeping a live OS handle open when the
+    /// directory's filesystem supports reliable identity so dataset ownership
+    /// can be verified against the live file object through JMX commit or
+    /// rollback.
+    pub fn stage_owned(&self, bytes: &[u8], owner_only: bool) -> std::io::Result<StagedPinnedOutput<'_>> {
+        let keep_live = self.dir.supports_reliable_identity().unwrap_or(false);
+        self.stage_with_options(bytes, owner_only, keep_live)
+    }
+
+    fn stage_with_options(&self, bytes: &[u8], owner_only: bool, keep_live: bool) -> std::io::Result<StagedPinnedOutput<'_>> {
+        if owner_only && !OWNER_ONLY_FILES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "secret output is written only where an owner-only file can be created (macOS and Linux)",
+            ));
+        }
+        let (mut f, tmp) = self.dir.stage_new(owner_only)?;
+        let stage = (|| -> std::io::Result<(FileId, Option<File>)> {
+            std::io::Write::write_all(&mut f, bytes)?;
+            f.sync_all()?;
+            let meta = f.metadata()?;
+            let id = file_id(&f, &meta)?;
+            if keep_live {
+                let live = self.dir.into_staged_keepalive(&tmp, f)?;
+                Ok((id, Some(live)))
+            } else {
+                drop(f);
+                Ok((id, None))
+            }
+        })();
+        match stage {
+            Ok((staged_id, live_handle)) => Ok(StagedPinnedOutput { output: self, tmp, staged_id, live_handle, published: false }),
+            Err(err) => {
+                self.dir.cleanup_staged(&tmp);
+                Err(err)
+            }
+        }
+    }
+
+    /// Whether this pinned destination's directory sits on a filesystem with
+    /// reliable file identities across renames and atomic exclusive rename.
+    pub fn supports_reliable_identity(&self) -> std::io::Result<bool> {
+        self.dir.supports_reliable_identity()
+    }
+
+    /// Verify that this pinned destination still names the exact live OS file
+    /// object pinned by `live_handle`.
+    pub fn verify_live_entry(&self, live_handle: &File) -> std::io::Result<bool> {
+        self.dir.verify_live_entry(&self.name, live_handle)
+    }
+
+    /// Acquire an exclusive cross-process lock on this destination's pinned
+    /// directory so multi-file exports sharing a sidecar publish atomically as
+    /// a pair, returning both the lock file handle and its OS file identity so
+    /// callers can protect the locked inode against overwrites.
+    pub fn lock_dir(&self) -> std::io::Result<(File, PinnedFileId)> {
+        self.dir.lock_exclusive().map(|(file, id)| (file, PinnedFileId(id)))
+    }
+
+    /// Roll back this destination only if it still names the live object pinned
+    /// by `live_handle` through atomic quarantine verification, restoring any
+    /// backup via atomic no-clobber rename so concurrent entries are never lost.
+    pub fn rollback_owned(&self, live_handle: File, backup: Option<PinnedBackup<'_>>) -> PinnedRollback {
+        let raw = backup.and_then(|mut b| b.backup.take());
+        match self.dir.rollback_owned(&self.name, live_handle, raw) {
+            crate::no_follow::RollbackOutcome::Restored => PinnedRollback::Restored,
+            crate::no_follow::RollbackOutcome::Skipped { backup_name, quarantine_left } => {
+                PinnedRollback::Skipped { backup_name, quarantine_left }
+            }
+            crate::no_follow::RollbackOutcome::Failed { backup_name, err } => PinnedRollback::Failed { backup_name, err },
+        }
+    }
+
+    /// Back up an existing regular file at this pinned destination after
+    /// verifying it is neither a symlink nor in `protected`, so a companion
+    /// publish failure can restore the previous file.
+    pub fn backup_existing_regular_guarded(&self, protected: &[PinnedFileId]) -> std::io::Result<Option<PinnedBackup<'_>>> {
+        match self.dir.entry_identity(&self.name)? {
+            None => return Ok(None),
+            Some((true, _)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "destination is a symbolic link; refusing to back up or replace a symlink",
+                ));
+            }
+            Some((false, existing_id)) if protected.contains(&PinnedFileId(existing_id)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "destination resolves to a protected input or sibling output file; refusing to overwrite",
+                ));
+            }
+            Some((false, _)) => {}
+        }
+        Ok(self.dir.backup_existing_regular(&self.name)?.map(|backup| PinnedBackup { output: self, backup: Some(backup), replaced: false }))
+    }
+
+    /// Remove a freshly published file at this destination during rollback.
+    pub fn remove_published(&self) -> std::io::Result<()> {
+        self.dir.remove_file(&self.name)
+    }
+
+    /// Stage `bytes` into a new file inside the pinned directory and atomically
+    /// publish it after verifying the leaf is neither a symlink nor any
+    /// `protected` file identity.
+    pub fn write_atomic_guarded(&self, bytes: &[u8], protected: &[PinnedFileId]) -> std::io::Result<PinnedFileId> {
+        self.stage(bytes, false)?.publish_guarded(false, protected).map_err(Into::into)
+    }
+}
+
+/// Outcome of [`PinnedOutput::rollback_owned`].
+pub enum PinnedRollback {
+    Restored,
+    Skipped { backup_name: Option<OsString>, quarantine_left: Option<(OsString, std::io::Error)> },
+    Failed { backup_name: OsString, err: std::io::Error },
+}
+
+/// A backup of a pre-existing file at a [`PinnedOutput`] destination that
+/// aborts safely via no-clobber on drop if replacement never landed, and
+/// preserves the backup on disk if dropped after replacement without settlement.
+pub struct PinnedBackup<'a> {
+    output: &'a PinnedOutput,
+    backup: Option<crate::no_follow::ExistingBackup>,
+    replaced: bool,
+}
+
+impl PinnedBackup<'_> {
+    /// Whether this backup moved the original file aside (leaving the
+    /// destination slot empty so publication must use no-clobber).
+    pub fn is_moved(&self) -> bool {
+        self.backup.as_ref().is_some_and(crate::no_follow::ExistingBackup::is_moved)
+    }
+
+    /// Record that the replacement file has landed at the destination.
+    pub fn mark_replaced(&mut self) {
+        self.replaced = true;
+    }
+
+    /// Abort the backup before replacement landed. When the original entry was
+    /// moved aside, restores it with atomic no-clobber rename; when hard-linked,
+    /// removes the backup only if the destination still names the original file.
+    /// Returns the preserved backup filename on failure.
+    pub fn abort(mut self) -> std::result::Result<(), (OsString, std::io::Error)> {
+        if let Some(backup) = self.backup.take() {
+            self.output.dir.abort_backup(backup, &self.output.name)?;
+        }
+        Ok(())
+    }
+
+    /// Preserve the backup file on disk without restoring or deleting it (used
+    /// when ownership of the published entry could not be verified), returning
+    /// its filename for user recovery.
+    pub fn preserve(mut self) -> Option<OsString> {
+        self.backup.take().map(crate::no_follow::ExistingBackup::into_name)
+    }
+
+    /// Discard the backup after the companion output succeeded.
+    pub fn discard(mut self) {
+        if let Some(backup) = self.backup.take() {
+            self.output.dir.discard_backup(backup);
+        }
+    }
+}
+
+impl Drop for PinnedBackup<'_> {
+    fn drop(&mut self) {
+        if let Some(backup) = self.backup.take()
+            && !self.replaced
+        {
+            let _ = self.output.dir.abort_backup(backup, &self.output.name);
+        }
+    }
+}
+
+/// A staged temporary file inside a [`PinnedOutput`]'s pinned directory.
+pub struct StagedPinnedOutput<'a> {
+    output: &'a PinnedOutput,
+    tmp: crate::no_follow::StagedFile,
+    staged_id: FileId,
+    live_handle: Option<File>,
+    published: bool,
+}
+
+impl StagedPinnedOutput<'_> {
+    /// The OS file identity captured directly from this staged file's handle.
+    pub fn staged_id(&self) -> PinnedFileId {
+        PinnedFileId(self.staged_id)
+    }
+}
+
+impl Drop for StagedPinnedOutput<'_> {
+    fn drop(&mut self) {
+        drop(self.live_handle.take());
+        if !self.published {
+            self.output.dir.cleanup_staged(&self.tmp);
+        }
+    }
+}
+
+/// Error returned by [`StagedPinnedOutput::publish_guarded`], indicating
+/// whether the staged file already landed at the destination before a
+/// post-publish verification step failed.
+#[derive(Debug)]
+pub struct PublishError {
+    pub published: bool,
+    pub source: std::io::Error,
+}
+
+impl std::fmt::Display for PublishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl std::error::Error for PublishError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl From<PublishError> for std::io::Error {
+    fn from(err: PublishError) -> Self {
+        err.source
+    }
+}
+
+impl StagedPinnedOutput<'_> {
+    /// Atomically publish the staged file inside the pinned directory after
+    /// checking via no-follow metadata lookup (`entry_identity`) that the leaf
+    /// is neither a symlink nor any `protected` file identity. Any metadata
+    /// lookup error other than `NotFound` fails closed without publishing.
+    pub fn publish_guarded(self, no_clobber: bool, protected: &[PinnedFileId]) -> Result<PinnedFileId, PublishError> {
+        let (id, live) = self.publish_guarded_owned(no_clobber, protected)?;
+        drop(live);
+        Ok(id)
+    }
+
+    /// Like [`StagedPinnedOutput::publish_guarded`], returning the live file
+    /// handle when the published destination still matches that live object so
+    /// callers can verify ownership before committing a companion file or
+    /// rolling back.
+    pub fn publish_guarded_owned(
+        mut self,
+        no_clobber: bool,
+        protected: &[PinnedFileId],
+    ) -> Result<(PinnedFileId, Option<File>), PublishError> {
+        let pre = |source| PublishError { published: false, source };
+        let post = |source| PublishError { published: true, source };
+        if self.output.dir.entry_aliases_export_lock(&self.output.name).map_err(pre)? {
+            return Err(pre(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("destination aliases reserved '{}'; refusing to overwrite", crate::no_follow::EXPORT_LOCK_NAME),
+            )));
+        }
+        match self.output.dir.entry_identity(&self.output.name).map_err(pre)? {
+            None => {}
+            Some((true, _)) => {
+                return Err(pre(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "destination is a symbolic link; refusing to write through or replace a symlink",
+                )));
+            }
+            Some((false, existing_id)) if protected.contains(&PinnedFileId(existing_id)) => {
+                return Err(pre(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "destination resolves to a protected input or sibling output file; refusing to overwrite",
+                )));
+            }
+            Some((false, _)) => {}
+        }
+        if no_clobber {
+            self.output.dir.publish_staged_no_clobber(&self.tmp, &self.output.name).map_err(pre)?;
+        } else {
+            self.output.dir.rename_staged(&self.tmp, &self.output.name).map_err(pre)?;
+        }
+        self.published = true;
+        let live_handle = self.live_handle.take();
+        // Re-read the published entry's file identity so filesystems where
+        // rename changes FileId (e.g. FAT32/exFAT) still protect the published
+        // sibling from subsequent aliasing writes; fail closed if identity
+        // verification fails rather than falling back to a potentially stale ID.
+        match self.output.dir.entry_identity(&self.output.name).map_err(post)? {
+            Some((false, id)) => {
+                let verified_live = live_handle.and_then(|h| {
+                    let lid = h.metadata().and_then(|m| file_id(&h, &m)).ok()?;
+                    (lid == id).then_some(h)
+                });
+                Ok((PinnedFileId(id), verified_live))
+            }
+            _ => Err(post(std::io::Error::other("cannot verify published file identity"))),
+        }
+    }
+}
+
 fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), GrantError> {
     let Target::Write { dir, id, name } = target else {
         return Err(GrantError::WrongPurpose);
@@ -659,6 +1733,48 @@ fn write_target(target: &Target, bytes: &[u8], owner_only: bool) -> Result<(), G
         return Err(GrantError::Changed);
     }
     write_in(dir, *id, name, bytes, owner_only)
+}
+
+fn open_pinned_write_dir(dir: &Path, id: FileId) -> Result<Dir, GrantError> {
+    if std::fs::canonicalize(dir).map_err(io)? != *dir {
+        return Err(GrantError::Changed);
+    }
+    let Some(folder) = Dir::open(dir).map_err(io)? else {
+        return Err(GrantError::Changed);
+    };
+    if folder.id().map_err(io)? != id {
+        return Err(GrantError::Changed);
+    }
+    Ok(folder)
+}
+
+fn stage_in(
+    folder: &Dir,
+    bytes: &[u8],
+    owner_only: bool,
+    keep_live: bool,
+) -> Result<(crate::no_follow::StagedFile, FileId, Option<File>), GrantError> {
+    let (mut file, tmp) = folder.stage_new(owner_only).map_err(io)?;
+    let res = (|| -> std::io::Result<(FileId, Option<File>)> {
+        std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()?;
+        let meta = file.metadata()?;
+        let id = file_id(&file, &meta)?;
+        if keep_live {
+            let live = folder.into_staged_keepalive(&tmp, file)?;
+            Ok((id, Some(live)))
+        } else {
+            drop(file);
+            Ok((id, None))
+        }
+    })();
+    match res {
+        Ok((id, live)) => Ok((tmp, id, live)),
+        Err(err) => {
+            folder.cleanup_staged(&tmp);
+            Err(io(err))
+        }
+    }
 }
 
 /// Replace `name` in the folder at the canonical `dir`, which must still be
@@ -673,19 +1789,45 @@ fn write_in(dir: &Path, id: FileId, name: &OsStr, bytes: &[u8], owner_only: bool
     if folder.id().map_err(io)? != id {
         return Err(GrantError::Changed);
     }
+    let reserved_err = || {
+        GrantError::Invalid(format!(
+            "'{}' is reserved for Anvil's export lock; choose another filename",
+            crate::no_follow::EXPORT_LOCK_NAME
+        ))
+    };
+    if is_reserved_export_lock_name(name) || folder.entry_aliases_export_lock(name).map_err(io)? {
+        return Err(reserved_err());
+    }
     refuse_directory(&dir.join(name))?;
-    // A fresh, exclusively created file: an existing file or link under the
-    // temporary name is never opened or followed.
-    let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
-    let file = folder.create_new(&tmp, owner_only).map_err(io)?;
+    // A fresh, exclusively created file (staged inside an owner-only private
+    // directory on macOS when `owner_only` is true): an existing file or link
+    // under the temporary name is never opened or followed.
+    let (file, tmp) = folder.stage_new(owner_only).map_err(io)?;
+    if let Err(err) = write_synced(file, bytes) {
+        folder.cleanup_staged(&tmp);
+        return Err(io(err));
+    }
+    // Recheck lock identity right before publication in case an export lock
+    // appeared while staging.
+    match folder.entry_aliases_export_lock(name) {
+        Ok(true) => {
+            folder.cleanup_staged(&tmp);
+            return Err(reserved_err());
+        }
+        Ok(false) => {}
+        Err(err) => {
+            folder.cleanup_staged(&tmp);
+            return Err(io(err));
+        }
+    }
     // Only a file created here is removed when the write fails, never an
     // entry that was already there under the temporary name. Renaming
     // replaces the destination entry itself; a link there is replaced, not
     // followed.
-    match write_synced(file, bytes).and_then(|()| folder.rename(&tmp, name)) {
+    match folder.rename_staged(&tmp, name) {
         Ok(()) => Ok(()),
         Err(err) => {
-            let _ = folder.remove_file(&tmp);
+            folder.cleanup_staged(&tmp);
             Err(io(err))
         }
     }
@@ -703,6 +1845,22 @@ fn refuse_directory(dest: &Path) -> Result<(), GrantError> {
         Ok(m) if m.is_dir() => Err(GrantError::Invalid("the destination is a folder".into())),
         _ => Ok(()),
     }
+}
+
+/// Whether a write creates a file only its owner can read. On Unix the file
+/// is created 0600; elsewhere it inherits its folder's access list, so
+/// secret material that must stay private is refused there.
+pub const OWNER_ONLY_FILES: bool = cfg!(unix);
+const OWNER_ONLY_UNAVAILABLE: &str = "secret output is written only where an owner-only file can be created (macOS and Linux); on this platform a new file inherits its folder's access list, so others could read it";
+
+/// The dataset file written beside a JMeter test plan: `<stem>.dataset.csv`.
+pub fn dataset_name(plan_file: &OsStr) -> OsString {
+    let stem = Path::new(plan_file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "plan".into());
+    OsString::from(format!("{stem}.dataset.csv"))
 }
 
 fn display_name(name: Option<&std::ffi::OsStr>) -> String {

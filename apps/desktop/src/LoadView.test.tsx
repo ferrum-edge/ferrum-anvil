@@ -20,7 +20,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 import { listen } from "@tauri-apps/api/event";
 import type { LoadPlanCheck, LoadPreflight } from "./api";
 import type { Dataset, LatencySummary, LoadPlan, LoadReport, ProtocolLoadMetrics, RequestCounts, UnitSemantics } from "./generated/contracts";
-import { LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox } from "./LoadView";
+import { JmeterExportDialog, JtlImportDialog, LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox, freshJtlName, jmeterCommand, quotePowerShell } from "./LoadView";
 
 const notify = vi.fn();
 
@@ -1217,5 +1217,308 @@ describe("LoadView run start", () => {
     await act(async () => {});
     expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
     expect(screen.queryByText("Confirm load run")).toBeNull();
+  });
+});
+
+// ------------------------------------------------------------ JMeter adapter (LOAD-012)
+
+describe("LOAD-012 JMeter adapter", () => {
+  const httpCheck = (args?: unknown): LoadPlanCheck => {
+    const chain = (args as { plan: LoadPlan }).plan.chain ?? [];
+    return { unit: "http_request", unit_label: "HTTP requests", semantics: sem("request", "requests"), protocols: chain.map((id) => [id, "http"]) };
+  };
+  const exported = {
+    report: {
+      plan_id: "plan-1",
+      plan_name: "Sockets",
+      jmeter_version: "5.6.3",
+      adapter_version: "anvil-jmeter/0.1.9",
+      mapping: [{ anvil: "HTTP request (HTTP/1.1)", jmeter: "HTTP Request sampler" }],
+      differences: ["Dataset rows: JMeter hands rows to threads in the order they ask."],
+      secret_properties: [{ name: "anvil.secret.var.token", purpose: "variable 'token' (workspace)" }],
+      jmeter_properties: [["httpsampler.max_redirects", "10"]],
+      dataset: null,
+      thread_groups: 1,
+      expected_samples: 20,
+      secrets_written: false,
+    },
+    refused: [],
+    written: ["Sockets.jmx"],
+  };
+
+  it("LOAD-012 saves the plan, exports it and lists differences and the secret properties", async () => {
+    invoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      switch (cmd) {
+        case "load_plan_check":
+          return httpCheck(args);
+        case "load_plan_save":
+          return (args as { plan: LoadPlan }).plan;
+        case "file_choose":
+          return [{ token: "fg-jmx", file_name: "Sockets.jmx" }];
+        case "load_export_jmx":
+          return exported;
+        default:
+          throw new Error(`unexpected ${cmd}`);
+      }
+    });
+    render(<PlanEditor plan={plan()} {...editorProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "Export to JMeter…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose file and export…" }));
+    const done = await screen.findByTestId("jmx-exported");
+    expect(calls("load_plan_save")).toHaveLength(1);
+    expect(calls("file_choose")).toEqual([{ purpose: "jmeter_export", options: { file_name: "Sockets.jmx", filters: [{ name: "JMeter test plan", extensions: ["jmx"] }], multiple: false } }]);
+    expect(calls("load_export_jmx")).toEqual([{ planId: "plan-1", grant: "fg-jmx", secretsGrant: null, replaceDataset: false }]);
+    expect(done.textContent).toContain("Exported to Sockets.jmx");
+    const cmd = screen.getByTestId("jmx-command").textContent ?? "";
+    expect(cmd).toMatch(/^jmeter -n -t 'Sockets\.jmx' -l 'Sockets-results-\d{8}-\d{6}-[0-9a-f-]{16,36}\.jtl' '-Jhttpsampler\.max_redirects=10'$/);
+    expect(done.textContent).toContain("anvil.secret.var.token");
+    expect(screen.getByTestId("jmx-differences").textContent).toContain("Dataset rows");
+  });
+
+  it("LOAD-012 asks for the secrets file only when the user chooses to write it", async () => {
+    let n = 0;
+    invoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      switch (cmd) {
+        case "load_plan_check":
+          return httpCheck(args);
+        case "load_plan_save":
+          return (args as { plan: LoadPlan }).plan;
+        case "file_choose":
+          return [{ token: n++ === 0 ? "fg-jmx" : "fg-secrets", file_name: "x" }];
+        case "load_export_jmx":
+          return { ...exported, report: { ...exported.report, secrets_written: true }, written: ["Sockets.jmx", "Sockets.secrets.properties"] };
+        default:
+          throw new Error(`unexpected ${cmd}`);
+      }
+    });
+    render(<PlanEditor plan={plan()} {...editorProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "Export to JMeter…" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: /secrets to a separate properties file/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Replace the dataset file/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose file and export…" }));
+    await screen.findByTestId("jmx-exported");
+    expect(calls("file_choose").map((c) => c.purpose)).toEqual(["jmeter_export", "jmeter_secrets_export"]);
+    expect(calls("load_export_jmx")).toEqual([{ planId: "plan-1", grant: "fg-jmx", secretsGrant: "fg-secrets", replaceDataset: true }]);
+    // The secrets file can be in another folder: a quoted placeholder for its full path.
+    expect(screen.getByTestId("jmx-command").textContent).toContain("-q '<full path of Sockets.secrets.properties>'");
+  });
+
+  it("LOAD-012 shows every refusal (strict TLS among them) and that nothing was written", async () => {
+    invoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      switch (cmd) {
+        case "load_plan_check":
+          return httpCheck(args);
+        case "load_plan_save":
+          return (args as { plan: LoadPlan }).plan;
+        case "file_choose":
+          return [{ token: "fg-jmx", file_name: "Sockets.jmx" }];
+        case "load_export_jmx":
+          return {
+            report: null,
+            refused: [
+              { request: "Echo", code: "strict_tls", message: "JMeter's HTTP samplers accept any certificate" },
+              { request: null, code: "abort_rule", message: "the plan has an abort rule" },
+            ],
+            written: [],
+          };
+        default:
+          throw new Error(`unexpected ${cmd}`);
+      }
+    });
+    render(<PlanEditor plan={plan()} {...editorProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "Export to JMeter…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Choose file and export…" }));
+    const refused = await screen.findByTestId("jmx-refused");
+    expect(refused.textContent).toContain("nothing was written");
+    expect(refused.textContent).toContain("Echo: JMeter's HTTP samplers accept any certificate (strict_tls)");
+    expect(refused.textContent).toContain("(abort_rule)");
+    expect(screen.queryByTestId("jmx-exported")).toBeNull();
+  });
+
+  it("LOAD-012 does not export a plan of another workspace", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      throw new Error(`unexpected ${cmd}`);
+    });
+    render(<PlanEditor plan={{ ...plan(), chain: [] }} {...editorProps} workspaceId="ws-2" />);
+    const b = screen.getByRole("button", { name: "Export to JMeter…" }) as HTMLButtonElement;
+    expect(b.disabled).toBe(true);
+    fireEvent.click(b);
+    await act(async () => {});
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("LOAD-012 imports JMeter results for a plan and opens the report", async () => {
+    let imported = false;
+    backend({
+      file_choose: () => [{ token: "fg-jtl", file_name: "results.jtl" }],
+      load_import_jtl: () => {
+        imported = true;
+        return "run-j";
+      },
+      load_reports: () =>
+        imported
+          ? [
+              {
+                run_id: "run-j",
+                plan_id: "pa",
+                plan_name: "Plan A",
+                started_at: "2026-09-26T00:00:00Z",
+                completion: "completed",
+                partial: false,
+                achieved_rate_per_sec: 4,
+                started: 20,
+                failures: 5,
+                p95_us: 2000,
+                unit: "http_request",
+              },
+            ]
+          : [],
+      load_report: () => ({ ...sampleReport(), run_id: "run-j", engine: "apache-jmeter", engine_version: "jmeter/5.6.3+jtl-csv", plan: loadPlan("pa", "A", "Plan A") }),
+    });
+    render(view("A"));
+    await screen.findByText("Plan A");
+    fireEvent.click(button("Import"));
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "pa" } });
+    fireEvent.click(button("Choose results file…"));
+    await waitFor(() => expect(calls("load_import_jtl")).toEqual([{ workspaceId: "A", grant: "fg-jtl", planId: "pa", jmeterVersion: null }]));
+    expect(calls("file_choose")[0].purpose).toBe("jtl_import");
+    expect(await screen.findByText("imported from JMeter")).toBeTruthy();
+    expect(notify).toHaveBeenCalledWith("JMeter results imported as a report.");
+  });
+
+  it("LOAD-012 cancels in-flight JTL import on unmount across both file picker and import awaits", async () => {
+    // 1. Unmount while file picker is pending -> load_import_jtl must never be called.
+    let resolvePicker!: (v: unknown) => void;
+    backend({
+      file_choose: () => new Promise((r) => { resolvePicker = r; }),
+      load_import_jtl: () => "run-should-not-run",
+    });
+    const onImported = vi.fn();
+    const first = render(<JtlImportDialog workspaceId="A" plans={[loadPlan("pa", "A", "Plan A")]} onClose={vi.fn()} onImported={onImported} />);
+    fireEvent.click(button("Choose results file…"));
+    await act(async () => {});
+    first.unmount();
+    resolvePicker([{ token: "fg-jtl", file_name: "results.jtl" }]);
+    await act(async () => {});
+    expect(calls("load_import_jtl")).toEqual([]);
+    expect(onImported).not.toHaveBeenCalled();
+
+    // 2. Unmount while load_import_jtl is pending -> onImported must never be called.
+    let resolveImport!: (v: unknown) => void;
+    backend({
+      file_choose: () => [{ token: "fg-jtl-2", file_name: "results2.jtl" }],
+      load_import_jtl: () => new Promise((r) => { resolveImport = r; }),
+    });
+    const second = render(<JtlImportDialog workspaceId="A" plans={[loadPlan("pa", "A", "Plan A")]} onClose={vi.fn()} onImported={onImported} />);
+    fireEvent.click(button("Choose results file…"));
+    await waitFor(() => expect(calls("load_import_jtl")).toHaveLength(1));
+    second.unmount();
+    resolveImport("run-late");
+    await act(async () => {});
+    expect(onImported).not.toHaveBeenCalled();
+  });
+
+  it("LOAD-012 cancels in-flight JMX export on unmount across save and file picker awaits", async () => {
+    // 1. Unmount while save() is pending -> file picker must never open.
+    let resolveSave!: (p: LoadPlan | null) => void;
+    backend({
+      file_choose: () => [{ token: "fg-jmx", file_name: "plan.jmx" }],
+      load_export_jmx: () => ({ written: ["plan.jmx"], refused: [], report: null }),
+    });
+    const first = render(
+      <JmeterExportDialog
+        workspaceId="A"
+        planName="Plan A"
+        save={() => new Promise<LoadPlan | null>((r) => { resolveSave = r; })}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(button("Choose file and export…"));
+    await act(async () => {});
+    first.unmount();
+    resolveSave(loadPlan("pa", "A", "Plan A"));
+    await act(async () => {});
+    expect(calls("file_choose")).toEqual([]);
+    expect(calls("load_export_jmx")).toEqual([]);
+
+    // 2. Unmount while file picker is pending -> load_export_jmx must never be called.
+    let resolvePicker!: (v: unknown) => void;
+    backend({
+      file_choose: () => new Promise((r) => { resolvePicker = r; }),
+      load_export_jmx: () => ({ written: ["plan.jmx"], refused: [], report: null }),
+    });
+    const second = render(
+      <JmeterExportDialog
+        workspaceId="A"
+        planName="Plan A"
+        save={async () => loadPlan("pa", "A", "Plan A")}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(button("Choose file and export…"));
+    await waitFor(() => expect(calls("file_choose")).toHaveLength(1));
+    second.unmount();
+    resolvePicker([{ token: "fg-jmx", file_name: "plan.jmx" }]);
+    await act(async () => {});
+    expect(calls("load_export_jmx")).toEqual([]);
+  });
+
+  it("LOAD-012 displays plan save errors inside the JMX export dialog", async () => {
+    render(
+      <JmeterExportDialog
+        workspaceId="A"
+        planName="Plan A"
+        save={async () => {
+          throw new Error("plan name cannot be blank");
+        }}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(button("Choose file and export…"));
+    expect((await screen.findByRole("alert")).textContent).toContain("plan name cannot be blank");
+  });
+});
+
+describe("LOAD-012 jmeterCommand", () => {
+  it("LOAD-012 quotes file names verbatim for POSIX sh and PowerShell without expanding $ expressions", () => {
+    const o = {
+      report: { secrets_written: true, jmeter_properties: [] as [string, string][] },
+      refused: [],
+      written: ["Checkout $HOME 'run'.jmx", 'odd "$(whoami)" `x` \'s\'.properties'],
+    } as unknown as Parameters<typeof jmeterCommand>[0];
+    const posix = jmeterCommand(o, "checkout-results-20261128-000000.jtl", "posix");
+    expect(posix).toBe(
+      `jmeter -n -t 'Checkout $HOME '\\''run'\\''.jmx' -l 'checkout-results-20261128-000000.jtl' -q '<full path of odd "$(whoami)" \`x\` '\\''s'\\''.properties>'`,
+    );
+    const pwshBin =
+      "& java -jar $(if ($env:JMETER_HOME) { Join-Path $env:JMETER_HOME 'bin\\ApacheJMeter.jar' } else { Join-Path (Split-Path -Parent (Get-Command jmeter -ErrorAction Stop).Source) 'ApacheJMeter.jar' })";
+    const pwsh = jmeterCommand(o, "checkout-results-20261128-000000.jtl", "powershell");
+    expect(pwsh).toBe(
+      `${pwshBin} -n -t 'Checkout $HOME ''run''.jmx' -l 'checkout-results-20261128-000000.jtl' -q '<full path of odd "$(whoami)" \`x\` ''s''.properties>'`,
+    );
+    const meta = {
+      report: { secrets_written: false, jmeter_properties: [] as [string, string][] },
+      refused: [],
+      written: ["a & %TEMP% ^ !x!.jmx"],
+    } as unknown as Parameters<typeof jmeterCommand>[0];
+    expect(jmeterCommand(meta, "r.jtl", "powershell")).toBe(
+      `${pwshBin} -n -t 'a & %TEMP% ^ !x!.jmx' -l 'r.jtl'`,
+    );
+    // PowerShell also treats typographic single quotes as string delimiters.
+    expect(quotePowerShell("a\u2018b\u2019c\u201ad\u201be")).toBe("'a\u2018\u2018b\u2019\u2019c\u201a\u201ad\u201b\u201be'");
+    // Two exports of the same stem in the same second produce distinct JTL names.
+    const same = new Date("2026-11-28T12:00:00Z");
+    expect(freshJtlName("plan.jmx", same)).not.toBe(freshJtlName("plan.jmx", same));
+    // Fallback when crypto.randomUUID is unavailable still yields a fixed 16-hex-digit suffix
+    // even for short binary fractions like Math.random() === 0.5.
+    const origCrypto = globalThis.crypto;
+    const randSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      Object.defineProperty(globalThis, "crypto", { value: {}, configurable: true });
+      expect(freshJtlName("plan.jmx", same)).toBe("plan-results-20261128-120000-8000000080000000.jtl");
+    } finally {
+      randSpy.mockRestore();
+      Object.defineProperty(globalThis, "crypto", { value: origCrypto, configurable: true });
+    }
   });
 });

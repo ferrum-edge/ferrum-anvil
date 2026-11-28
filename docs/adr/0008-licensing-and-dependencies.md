@@ -27,6 +27,11 @@
   - The OS keychain is used through `keyring` 4 (Keychain, Credential
     Manager, Secret Service). On Linux without a Secret Service, the
     passphrase vault is used, never plaintext.
-- wrk and JMeter are not bundled; the JMeter adapter is not implemented (see
-  `docs/load.md`). wrk's modified Apache licence was noted and wrk is not
-  used.
+- wrk and Apache JMeter are not bundled or redistributed. The JMeter
+  adapter (`crates/anvil-jmeter`, see `docs/load.md`) writes test plans for
+  a JMeter the user installs and reads its result files; only CI downloads
+  JMeter (Apache-2.0), pinned and checksum-verified, to test the round trip.
+  Its XML result files are read with `quick-xml` (MIT), a streaming parser
+  already in the dependency graph, because the workspace's DOM parser
+  (`roxmltree`) would hold a multi-gigabyte file in memory. wrk's modified
+  Apache licence was noted and wrk is not used.

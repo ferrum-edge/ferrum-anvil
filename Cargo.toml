@@ -19,6 +19,7 @@ members = [
     "crates/anvil-identity",
     "crates/anvil-contract",
     "crates/anvil-xml-limits",
+    "crates/anvil-jmeter",
 ]
 # Vendored third-party crates are patched in below, not Anvil workspace members.
 exclude = ["vendor"]
@@ -46,6 +47,7 @@ anvil-import = { path = "crates/anvil-import" }
 anvil-identity = { path = "crates/anvil-identity" }
 anvil-contract = { path = "crates/anvil-contract" }
 anvil-xml-limits = { path = "crates/anvil-xml-limits" }
+anvil-jmeter = { path = "crates/anvil-jmeter" }
 
 anyhow = "1.0.104"
 thiserror = "2.0.21"
@@ -112,6 +114,8 @@ aws-lc-rs = { version = "1.18.2", features = ["prebuilt-nasm"] }
 p256 = { version = "0.14.0", features = ["ecdsa", "pem", "pkcs8"] }
 serde_norway = "0.9.42"
 roxmltree = "0.21.1"
+# Streaming XML reader (JMeter XML result files); already in the graph through plist.
+quick-xml = { version = "0.42.0", default-features = false }
 jsonschema = { version = "0.61.2", default-features = false }
 serde_json_path = "0.7.2"
 csv = "1.4.0"

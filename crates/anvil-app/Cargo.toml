@@ -14,6 +14,7 @@ anvil-engine.workspace = true
 anvil-transport.workspace = true
 anvil-portability.workspace = true
 anvil-load.workspace = true
+anvil-jmeter.workspace = true
 anvil-import.workspace = true
 anvil-contract.workspace = true
 url.workspace = true

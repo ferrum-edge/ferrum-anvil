@@ -1251,8 +1251,8 @@ impl Metrics {
         if let Some(c) = &o.category {
             self.add_category(c, 1, o.example.iter().cloned());
         }
-        self.bytes_sent += o.bytes_sent;
-        self.bytes_received += o.bytes_received;
+        self.bytes_sent = self.bytes_sent.saturating_add(o.bytes_sent);
+        self.bytes_received = self.bytes_received.saturating_add(o.bytes_received);
         if let Some(p) = &o.protocol
             && (self.protocols.contains_key(p) || self.protocols.len() < MAX_PROTOCOLS)
         {
@@ -1302,8 +1302,8 @@ impl Metrics {
         for (name, c) in &o.categories {
             self.add_category(name, c.count, c.examples.iter().cloned());
         }
-        self.bytes_sent += o.bytes_sent;
-        self.bytes_received += o.bytes_received;
+        self.bytes_sent = self.bytes_sent.saturating_add(o.bytes_sent);
+        self.bytes_received = self.bytes_received.saturating_add(o.bytes_received);
         for (p, n) in &o.protocols {
             if self.protocols.contains_key(p) || self.protocols.len() < MAX_PROTOCOLS {
                 *self.protocols.entry(p.clone()).or_default() += n;

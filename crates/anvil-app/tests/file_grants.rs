@@ -604,3 +604,169 @@ fn a_fifo_is_never_granted_or_read_and_never_blocks() {
     let read = within_seconds(move || grants.read(&g.token, FilePurpose::Dataset).map(|f| f.bytes));
     assert_eq!(read.unwrap_err(), GrantError::Changed);
 }
+
+#[test]
+fn load_012_a_jmeter_export_writes_the_plan_and_its_dataset_beside_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("checkout.jmx");
+    let grants = FileGrants::default();
+    let g = grants.grant_write(FilePurpose::JmeterExport, &dest).unwrap();
+    assert_eq!(grants.chosen_name(&g.token, FilePurpose::JmeterExport).unwrap(), "checkout.jmx");
+    assert_eq!(anvil_app::file_grants::dataset_name(std::ffi::OsStr::new("checkout.jmx")), "checkout.dataset.csv");
+    assert_eq!(grants.write_with_dataset(&g.token, b"<jmeterTestPlan/>", Some((b"\"a\"\n", false)), false).unwrap(), 21);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"<jmeterTestPlan/>");
+    assert_eq!(std::fs::read(dir.path().join("checkout.dataset.csv")).unwrap(), b"\"a\"\n");
+    assert!(partial_files(dir.path()).is_empty());
+    // Spent, like any write grant; a grant of another purpose is refused.
+    assert_eq!(grants.write_with_dataset(&g.token, b"x", None, false).unwrap_err(), GrantError::Unknown);
+    let other = grants.grant_write(FilePurpose::LoadReportExport, &dir.path().join("r.html")).unwrap();
+    assert_eq!(grants.write_with_dataset(&other.token, b"x", None, false).unwrap_err(), GrantError::WrongPurpose);
+    assert_eq!(FilePurpose::JmeterExport.access(), Access::Write);
+    assert!(FilePurpose::JmeterSecretsExport.owner_only() && !FilePurpose::JmeterExport.owner_only());
+}
+
+#[cfg(unix)]
+#[test]
+fn load_012_the_jmeter_secrets_file_and_a_sensitive_dataset_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let grants = FileGrants::default();
+    let secrets = dir.path().join("plan.secrets.properties");
+    let g = grants.grant_write(FilePurpose::JmeterSecretsExport, &secrets).unwrap();
+    grants.write(&g.token, FilePurpose::JmeterSecretsExport, b"anvil.secret.var.token=x\n").unwrap();
+    assert_eq!(std::fs::metadata(&secrets).unwrap().permissions().mode() & 0o777, 0o600);
+    let g = grants.grant_write(FilePurpose::JmeterExport, &dir.path().join("plan.jmx")).unwrap();
+    grants.write_with_dataset(&g.token, b"<jmeterTestPlan/>", Some((b"\"secret\"\n", true)), false).unwrap();
+    assert_eq!(std::fs::metadata(dir.path().join("plan.dataset.csv")).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+#[test]
+fn load_012_a_jtl_grant_is_opened_for_streaming_and_never_read_whole() {
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let src = file(dir.path(), "results.jtl", b"timeStamp,elapsed\n");
+    let grants = FileGrants::default();
+    let g = grants.grant_read(FilePurpose::JtlImport, &src).unwrap();
+    assert_eq!(grants.read(&g.token, FilePurpose::JtlImport).unwrap_err(), GrantError::WrongPurpose);
+    let g = grants.grant_read(FilePurpose::JtlImport, &src).unwrap();
+    let (mut f, name) = grants.open_read(&g.token, FilePurpose::JtlImport).unwrap();
+    let mut text = String::new();
+    f.read_to_string(&mut text).unwrap();
+    assert_eq!((name.as_str(), text.as_str()), ("results.jtl", "timeStamp,elapsed\n"));
+    // A file replaced after it was chosen is refused.
+    std::fs::remove_file(&src).unwrap();
+    std::fs::write(&src, b"other").unwrap();
+    assert_eq!(grants.open_read(&g.token, FilePurpose::JtlImport).unwrap_err(), GrantError::Changed);
+    let d = grants.grant_read(FilePurpose::Dataset, &src).unwrap();
+    assert_eq!(grants.open_read(&d.token, FilePurpose::Dataset).unwrap_err(), GrantError::WrongPurpose);
+}
+
+#[test]
+fn load_012_an_existing_dataset_beside_the_plan_is_replaced_only_when_chosen() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("plan.jmx");
+    let sibling = file(dir.path(), "plan.dataset.csv", b"unrelated");
+    let grants = FileGrants::default();
+    let g = grants.grant_write(FilePurpose::JmeterExport, &dest).unwrap();
+    let canonical = std::fs::canonicalize(dir.path()).unwrap().join("plan.jmx");
+    assert_eq!(grants.destination(&g.token, FilePurpose::JmeterExport).unwrap(), canonical);
+    let e = grants.write_with_dataset(&g.token, b"<jmeterTestPlan/>", Some((b"\"a\"\n", false)), false).unwrap_err();
+    assert!(matches!(e, GrantError::Invalid(ref m) if m.contains("plan.dataset.csv already exists")), "{e}");
+    // Nothing was written, and the grant stays usable for the explicit choice.
+    assert!(!dest.exists());
+    assert_eq!(std::fs::read(&sibling).unwrap(), b"unrelated");
+    grants.write_with_dataset(&g.token, b"<jmeterTestPlan/>", Some((b"\"a\"\n", false)), true).unwrap();
+    assert_eq!(std::fs::read(&sibling).unwrap(), b"\"a\"\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn load_012_write_jmeter_export_preserves_existing_plan_when_secrets_grant_invalid_or_occupied() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = file(dir.path(), "plan.jmx", b"working-plan");
+    let grants = FileGrants::default();
+    let g = grants.grant_write(FilePurpose::JmeterExport, &plan_path).unwrap();
+    // Invalid/expired secrets token must fail before touching the existing plan.
+    let err = grants.write_jmeter_export(&g.token, b"replacement-plan", None, false, Some(("expired-token", b"k=v\n"))).unwrap_err();
+    assert_eq!(err, GrantError::Unknown);
+    assert_eq!(std::fs::read(&plan_path).unwrap(), b"working-plan");
+
+    // Occupied secrets file must also fail before touching the existing plan.
+    let occupied = file(dir.path(), "plan.secrets.properties", b"existing-secrets");
+    let sg = grants.grant_write(FilePurpose::JmeterSecretsExport, &occupied).unwrap();
+    let err = grants.write_jmeter_export(&g.token, b"replacement-plan", None, false, Some((&sg.token, b"k=v\n"))).unwrap_err();
+    assert!(matches!(err, GrantError::Invalid(ref m) if m.contains("already exists")), "{err}");
+    assert_eq!(std::fs::read(&plan_path).unwrap(), b"working-plan");
+    assert_eq!(std::fs::read(&occupied).unwrap(), b"existing-secrets");
+}
+
+#[cfg(unix)]
+#[test]
+fn load_012_write_jmeter_export_rolls_back_dataset_when_plan_publish_fails() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = file(dir.path(), "plan.jmx", b"original-plan");
+    let dataset_path = file(dir.path(), "plan.dataset.csv", b"\"old\"\n");
+    let grants = FileGrants::default();
+    let g = grants.grant_write(FilePurpose::JmeterExport, &plan_path).unwrap();
+    // Swap the plan destination to a symlink after granting so publishing the
+    // plan fails after the dataset sidecar is staged and replaced.
+    std::fs::remove_file(&plan_path).unwrap();
+    let elsewhere = file(dir.path(), "elsewhere.jmx", b"other");
+    symlink(&elsewhere, &plan_path).unwrap();
+    let err = grants.write_jmeter_export(&g.token, b"replacement-plan", Some((b"\"new\"\n", false)), true, None).unwrap_err();
+    assert!(matches!(err, GrantError::Io(_)), "{err:?}");
+    assert_eq!(std::fs::read(&dataset_path).unwrap(), b"\"old\"\n", "existing dataset must be restored on plan failure");
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), b"other");
+    assert!(partial_files(dir.path()).is_empty());
+
+    // The export lock filename is reserved across FileGrants and PinnedOutput
+    // including Unicode case-folded and HFS+/Unicode default-ignorable spellings.
+    assert!(matches!(grants.grant_write(FilePurpose::JmeterExport, &dir.path().join(".anvil-export.lock")), Err(GrantError::Invalid(_))));
+    assert!(anvil_app::file_grants::PinnedOutput::open(&dir.path().join(".anvil-export.lock")).is_err());
+    assert!(anvil_app::file_grants::PinnedOutput::open(&dir.path().join(".ANVIL-EXPORT.LOCK")).is_err());
+    assert!(anvil_app::file_grants::is_reserved_export_lock_name(std::ffi::OsStr::new(".anvil-export.loc\u{212a}")));
+    assert!(anvil_app::file_grants::is_reserved_export_lock_name(std::ffi::OsStr::new(".anvil-export.\u{200c}lock")));
+    assert!(anvil_app::file_grants::is_reserved_export_lock_name(std::ffi::OsStr::new("\u{feff}.anvil-export.lock")));
+}
+
+#[cfg(target_vendor = "apple")]
+#[test]
+fn load_012_macos_owner_only_export_strips_inherited_acl() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let dir = tempfile::tempdir().unwrap();
+    let status =
+        Command::new("/bin/chmod").args(["+a", "everyone allow read,file_inherit"]).arg(dir.path()).status().expect("run chmod +a");
+    assert!(status.success(), "chmod +a on tempdir failed");
+
+    let plan_path = dir.path().join("plan.jmx");
+    let sec_path = dir.path().join("plan.secrets.properties");
+    let grants = FileGrants::default();
+    let g = grants.grant_write(FilePurpose::JmeterExport, &plan_path).unwrap();
+    let sg = grants.grant_write(FilePurpose::JmeterSecretsExport, &sec_path).unwrap();
+    grants
+        .write_jmeter_export(&g.token, b"<jmeterTestPlan/>", None, false, Some((&sg.token, b"k=secret\n")))
+        .expect("export with secrets into ACL-inheriting directory");
+
+    let meta = std::fs::metadata(&sec_path).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o7777, 0o600);
+    let ls = Command::new("/bin/ls").args(["-le"]).arg(&sec_path).output().expect("ls -le");
+    let stdout = String::from_utf8_lossy(&ls.stdout);
+    assert!(!stdout.contains("everyone allow read"), "inherited macOS ACL must be cleared from owner-only secrets file: {stdout}");
+}
+
+#[cfg(not(unix))]
+#[test]
+fn load_012_secret_output_is_refused_where_no_owner_only_file_can_be_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let grants = FileGrants::default();
+    let secrets = dir.path().join("plan.secrets.properties");
+    let g = grants.grant_write(FilePurpose::JmeterSecretsExport, &secrets).unwrap();
+    assert!(matches!(grants.write(&g.token, FilePurpose::JmeterSecretsExport, b"x=y\n"), Err(GrantError::Invalid(_))));
+    assert!(!secrets.exists());
+    let g = grants.grant_write(FilePurpose::JmeterExport, &dir.path().join("plan.jmx")).unwrap();
+    assert!(matches!(grants.write_with_dataset(&g.token, b"<j/>", Some((b"s", true)), false), Err(GrantError::Invalid(_))));
+    const { assert!(!anvil_app::file_grants::OWNER_ONLY_FILES) };
+}

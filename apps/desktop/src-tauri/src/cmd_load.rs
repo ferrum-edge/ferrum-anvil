@@ -314,6 +314,106 @@ pub fn load_report_export(st: State<'_, DesktopState>, run_id: String, format: S
     st.file_grants.write(&grant, FilePurpose::LoadReportExport, text.as_bytes()).map_err(|x| x.to_string())
 }
 
+/// What Export to JMeter… produced: the export report and the files
+/// written, or every reason the plan was refused (nothing was written).
+#[derive(Serialize)]
+pub struct JmxExportOutcome {
+    pub report: Option<anvil_app::jmeter::ExportReport>,
+    pub refused: Vec<anvil_app::jmeter::Reason>,
+    /// Names of the files written: the test plan, its dataset, the secrets file.
+    pub written: Vec<String>,
+}
+
+/// Export a saved plan as a JMeter test plan to the destination chosen in
+/// the save dialog (`grant`, purpose `jmeter_export`), with its dataset
+/// beside it as `<name>.dataset.csv`. Secret values are written only when
+/// the user chose a secrets file too (`secrets_grant`, purpose
+/// `jmeter_secrets_export`, owner-only); otherwise the test plan names them
+/// as JMeter properties (LOAD-012).
+#[tauri::command]
+pub async fn load_export_jmx(
+    handle: AppHandle,
+    plan_id: String,
+    grant: String,
+    secrets_grant: Option<String>,
+    replace_dataset: bool,
+) -> R<JmxExportOutcome> {
+    blocking(&handle, move |st| {
+        if secrets_grant.is_some() && !anvil_app::file_grants::OWNER_ONLY_FILES {
+            return Err("writing the secrets file is refused on this platform: a new file inherits its folder's access list here, so others could read it. Export without it and set the properties another way".into());
+        }
+        let app = st.app()?;
+        let plan = app.load_plan(&id(&plan_id)?).map_err(e)?;
+        let chosen = st.file_grants.chosen_name(&grant, FilePurpose::JmeterExport).map_err(|x| x.to_string())?;
+        let dataset_file = anvil_app::file_grants::dataset_name(std::ffi::OsStr::new(&chosen)).to_string_lossy().into_owned();
+        let secrets_name = match &secrets_grant {
+            Some(g) => {
+                // Three distinct files: the plan, its dataset, the secrets.
+                let plan_dest = st.file_grants.destination(&grant, FilePurpose::JmeterExport).map_err(|x| x.to_string())?;
+                let secrets_dest = st.file_grants.destination(g, FilePurpose::JmeterSecretsExport).map_err(|x| x.to_string())?;
+                let dataset_dest = plan_dest.with_file_name(&dataset_file);
+                let same = |a: &std::path::Path, b: &std::path::Path| a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase();
+                if same(&plan_dest, &secrets_dest) || same(&dataset_dest, &secrets_dest) {
+                    return Err("the secrets file must be another file than the test plan and its dataset; nothing was written".into());
+                }
+                Some(st.file_grants.chosen_name(g, FilePurpose::JmeterSecretsExport).map_err(|x| x.to_string())?)
+            }
+            None => None,
+        };
+        let opts = anvil_app::jmeter::ExportOptions { include_secrets: secrets_grant.is_some(), dataset_file: dataset_file.clone() };
+        let export = match app.load_export_jmx(&plan, &opts).map_err(e)? {
+            Ok(x) => x,
+            Err(refused) => return Ok(JmxExportOutcome { report: None, refused: refused.reasons, written: vec![] }),
+        };
+        let sensitive = export.report.dataset.as_ref().is_some_and(|d| !d.sensitive_columns.is_empty());
+        let dataset = export.dataset_csv.as_deref().map(|csv| (csv, sensitive));
+        let secrets = match (&secrets_grant, &export.secrets_properties) {
+            (Some(g), Some(props)) => Some((g.as_str(), props.as_bytes())),
+            _ => None,
+        };
+        let _ = secrets_name;
+        let (_, written) = st
+            .file_grants
+            .write_jmeter_export(&grant, export.jmx.as_bytes(), dataset, replace_dataset, secrets)
+            .map_err(|x| x.to_string())?;
+        Ok(JmxExportOutcome { report: Some(export.report), refused: vec![], written })
+    })
+    .await
+}
+
+/// Import a JMeter result file chosen in the open dialog (`grant`, purpose
+/// `jtl_import`, streamed) as a load report of the workspace, optionally of
+/// the plan it was exported from. Returns the new report's run id.
+#[tauri::command]
+pub async fn load_import_jtl(
+    handle: AppHandle,
+    workspace_id: String,
+    grant: String,
+    plan_id: Option<String>,
+    jmeter_version: Option<String>,
+) -> R<String> {
+    blocking(&handle, move |st| {
+        let app = st.app()?;
+        let ws = id(&workspace_id)?;
+        let plan = match plan_id.filter(|p| !p.is_empty()) {
+            Some(p) => Some(app.load_plan(&id(&p)?).map_err(e)?),
+            None => None,
+        };
+        let (file, source_name) = st.file_grants.open_read(&grant, FilePurpose::JtlImport).map_err(|x| x.to_string())?;
+        let opts = anvil_app::jmeter::JtlOptions {
+            workspace_id: ws,
+            plan,
+            source_name,
+            jmeter_version: jmeter_version.filter(|v| !v.trim().is_empty()),
+            warmup_secs: None,
+            limits: anvil_app::jmeter::JtlLimits::default(),
+        };
+        let report = app.import_jtl(&ws, file, opts).map_err(e)?;
+        Ok(report.run_id.to_string())
+    })
+    .await
+}
+
 #[tauri::command]
 pub fn load_compare(st: State<'_, DesktopState>, a: String, b: String) -> R<anvil_load::Comparison> {
     let app = st.app()?;
