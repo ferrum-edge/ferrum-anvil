@@ -787,4 +787,101 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
         anvil_domain::load::WeightedStep { request_id: idb, weight: 1 },
     ];
     assert_eq!(export_codes(&fx), ["mix_weight_range"]);
+
+    // Cross-request secret variable isolation: step 0 overrides workspace `token`
+    // in a folder layer; step 1 uses workspace `token`. Both properties must
+    // resolve to their own layer's value (never shadowed by step 0's folder).
+    let mut st0 = RequestSpec::http("GET", "http://127.0.0.1:8080/step0");
+    st0.headers.push(KeyValue::new("X-Token", "{{token}}"));
+    st0.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_st0, mut c_st0) = step(st0);
+    c_st0.var_layers.push(layer("workspace", &[("token", "workspace-SECRET-val", true)]));
+    c_st0.var_layers.push(layer("folder", &[("token", "folder-OVERRIDE-val", true)]));
+
+    let mut st1 = RequestSpec::http("GET", "http://127.0.0.1:8080/step1");
+    st1.headers.push(KeyValue::new("X-Token", "{{token}}"));
+    st1.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_st1, mut c_st1) = step(st1);
+    c_st1.var_layers.push(layer("workspace", &[("token", "workspace-SECRET-val", true)]));
+
+    let out_iso = Fx::new(iterations(1, 1), vec![(id_st0, c_st0, "step0"), (id_st1, c_st1, "step1")], None)
+        .export(&ExportOptions { include_secrets: true, ..ExportOptions::default() })
+        .expect("exported");
+    let props_iso = out_iso.secrets_properties.as_deref().expect("secrets written");
+    assert!(props_iso.contains("=folder-OVERRIDE-val\n"), "step 0 folder override missing: {props_iso}");
+    assert!(props_iso.contains("=workspace-SECRET-val\n"), "step 1 workspace secret overwritten by step 0 folder: {props_iso}");
+    assert_eq!(out_iso.report.secret_properties.len(), 2, "distinct secret properties required");
+
+    // Templated header name resolving to `Authorization` is overridden by Basic/Bearer auth.
+    let mut tmpl_auth_hdr = RequestSpec::http("GET", "http://127.0.0.1:8080/auth/tmpl");
+    tmpl_auth_hdr.auth = AuthConfig::Bearer { token: SensitiveValue::template("tok"), prefix: "Bearer".into() };
+    tmpl_auth_hdr.headers.push(KeyValue::new("{{hdr_name}}", "stale-{{anvil.iteration}}"));
+    tmpl_auth_hdr.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_tah, mut c_tah) = step(tmpl_auth_hdr);
+    c_tah.var_layers.push(layer("workspace", &[("hdr_name", "Authorization", false)]));
+    assert!(
+        Fx::new(iterations(1, 1), vec![(id_tah, c_tah, "tmpl-auth")], None).export(&ExportOptions::default()).is_ok(),
+        "templated header resolving to Authorization must not trigger secret_mixed when overridden by Bearer auth"
+    );
+
+    // CounterConfig and RandomVariableConfig stay out of SetupThreadGroup:
+    // - single load group: scoped inside the load ThreadGroup with start 0;
+    // - multi-stage closed workload with secrets: TestPlan CounterConfig starts at -1
+    //   so SetupThreadGroup consumes -1 and load traffic starts at 0.
+    let mut iter_sec = RequestSpec::http("GET", "http://127.0.0.1:8080/i/{{anvil.iteration}}");
+    iter_sec.auth = AuthConfig::Bearer { token: SensitiveValue::template("tok"), prefix: "Bearer".into() };
+    iter_sec.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_is, c_is) = step(iter_sec.clone());
+    let out_single_iter =
+        Fx::new(iterations(2, 1), vec![(id_is, c_is.clone(), "iter-sec")], None).export(&ExportOptions::default()).expect("exported");
+    let doc_single = Doc::parse(&out_single_iter.jmx);
+    let counter_single = doc_single.first("CounterConfig");
+    assert_eq!(doc_single.prop(counter_single, "CounterConfig.start"), "0");
+    let counter_parent_tag = counter_single.parent().and_then(|ht| ht.prev_sibling_element()).map(|el| el.tag_name().name().to_string());
+    assert_eq!(counter_parent_tag.as_deref(), Some("ThreadGroup"), "single-group CounterConfig must live inside ThreadGroup");
+
+    let multi_closed = Workload::ClosedVirtualUsers {
+        stages: vec![Stage { duration_secs: 0, target: 1 }, Stage { duration_secs: 2, target: 3 }],
+        think_time_ms: 0,
+    };
+    let out_multi_iter = Fx::new(multi_closed, vec![(id_is, c_is, "iter-sec")], None).export(&ExportOptions::default()).expect("exported");
+    let doc_multi = Doc::parse(&out_multi_iter.jmx);
+    assert_eq!(doc_multi.prop(doc_multi.first("CounterConfig"), "CounterConfig.start"), "-1");
+
+    // Open workload whose stages round down to 0 arrivals in JMeter (e.g., 0 -> 1 over 1 s = 0.5 -> 0) is refused.
+    let mut open_zero_req = RequestSpec::http("GET", "http://127.0.0.1:8080/open");
+    open_zero_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_oz, c_oz) = step(open_zero_req);
+    let mut fx_oz = Fx::new(
+        Workload::OpenArrivalRate { stages: vec![Stage { duration_secs: 1, target: 1 }], max_in_flight: 10 },
+        vec![(id_oz, c_oz, "open-zero")],
+        None,
+    );
+    fx_oz.plan.connection_mode = ConnectionMode::Fresh;
+    assert_eq!(export_codes(&fx_oz), ["workload"]);
+
+    // Unspecified/reserved IP literal is refused with `destination_policy`, and
+    // ordinary exports note that JMeter resolves DNS without Anvil's destination-zone checks.
+    let mut unspec_req = RequestSpec::http("GET", "http://0.0.0.0:8080/items");
+    unspec_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_unspec, c_unspec) = step(unspec_req);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_unspec, c_unspec, "unspec")], None)), ["destination_policy"]);
+    assert!(
+        exported_no_redir.report.differences.iter().any(|d| d.contains("Destination policy")),
+        "{:?}",
+        exported_no_redir.report.differences
+    );
+
+    // Non-canonical Host port (leading zero) and explicit Transfer-Encoding are refused.
+    let mut host_zero_port = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    host_zero_port.headers.push(KeyValue::new("Host", "api.example.test:08080"));
+    host_zero_port.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_hzp, c_hzp) = step(host_zero_port);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_hzp, c_hzp, "host-08080")], None)), ["host_header"]);
+
+    let mut te_req = RequestSpec::http("POST", "http://127.0.0.1:8080/items");
+    te_req.headers.push(KeyValue::new("Transfer-Encoding", "chunked"));
+    te_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_te, c_te) = step(te_req);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_te, c_te, "te")], None)), ["transfer_encoding_header"]);
 }

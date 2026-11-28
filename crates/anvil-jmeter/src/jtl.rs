@@ -1020,11 +1020,12 @@ fn detect<R: Read>(r: &mut R) -> Result<JtlFormat, JtlError> {
     let mut head = [0u8; 4096];
     let mut n = 0;
     while n < head.len() {
-        let k = r.read(&mut head[n..])?;
-        if k == 0 {
-            break;
+        match r.read(&mut head[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
         }
-        n += k;
     }
     let mut s = &head[..n];
     if s.starts_with(&[0xEF, 0xBB, 0xBF]) {

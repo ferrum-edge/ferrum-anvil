@@ -136,6 +136,12 @@ fn load_012_cli_exports_a_plan_refuses_strict_tls_and_imports_results() {
     let o = anvil(data, &["load", "export-jmx", "Shop", "withdata", "--out", with_data.to_str().unwrap(), "--force"]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "\"user\"\n\"alice\"\n");
+    let ds_txt = text(&o);
+    if cfg!(windows) {
+        assert!(ds_txt.contains("Push-Location ") && ds_txt.contains("jmeter -n -t d.jmx"), "{ds_txt}");
+    } else {
+        assert!(ds_txt.contains("(cd ") && ds_txt.contains("&& jmeter -n -t d.jmx"), "{ds_txt}");
+    }
 
     // Two destinations naming one file are refused before anything is written.
     let same = out.path().join("same.jmx");

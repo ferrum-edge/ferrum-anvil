@@ -212,6 +212,25 @@ async fn load_012_jmeter_runs_the_exported_chain_and_the_import_matches_anvil() 
     assert_eq!(anvil.status_distribution, vec![(200, 15), (404, 5)]);
     assert_eq!(received(&f, "/echo").len(), 10);
 
+    // A 1-iteration run with secrets + dataset + {{anvil.iteration}} proves
+    // SetupThreadGroup neither advances CSVDataSet past row 0 (`alice`) nor
+    // advances CounterConfig past iteration `0`.
+    let mut one_req = RequestSpec::http("GET", &f.url("/echo"));
+    one_req.params.push(KeyValue::new("user", "{{user}}"));
+    one_req.headers.push(KeyValue::new("X-Iter", "{{anvil.iteration}}"));
+    one_req.auth = AuthConfig::Bearer { token: SensitiveValue::template("{{token}}"), prefix: "Bearer".into() };
+    one_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    let (one_id, mut one_c) = step(one_req);
+    one_c.var_layers.push(layer("workspace", &[("token", SECRET, true)]));
+    let one_fx = Fx::new(iterations(1, 1), vec![(one_id, one_c, "one")], Some(dataset("user\nalice\nbob\n")));
+    let one_out = one_fx.export(&export_opts(true)).expect("exported");
+    f.log.clear();
+    let _one_run = run_jmeter(&one_out, "xml", true).await;
+    let one_got = received(&f, "/echo");
+    assert_eq!(one_got.len(), 1, "{one_got:?}");
+    assert_eq!(one_got[0].0, "/echo?user=alice", "SetupThreadGroup must not consume CSV row 0");
+    assert_eq!(header(&one_got[0].1, "x-iter"), Some("0"), "SetupThreadGroup must not advance anvil.iteration past 0");
+
     // Different engines: compared, with the difference named and latency deltas withheld.
     let f2 = std::fs::File::open(run_jmeter(&out, "csv", true).await.jtl()).unwrap();
     let jmeter = import_jtl(

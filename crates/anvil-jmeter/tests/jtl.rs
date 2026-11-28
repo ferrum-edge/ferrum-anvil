@@ -430,11 +430,14 @@ fn load_012_jtl_url_credentials_are_never_retained_and_empty_depth_and_overflow_
     let err = import(&ovf, &opts()).unwrap_err().to_string();
     assert!(err.contains("overflows"), "{err}");
 
-    // An interrupted read during UTF-8 BOM top-up retries without losing the buffered BOM prefix.
+    // An interrupted read during BOTH format detection (`detect`) and UTF-8
+    // BOM top-up (`Guard::read`) retries without losing the buffered BOM prefix.
     struct BomInterruptedReader {
         data: Vec<u8>,
         pos: usize,
-        interrupted_once: bool,
+        seeks_to_zero: usize,
+        interrupted_detect: bool,
+        interrupted_guard_bom: bool,
     }
     impl std::io::Read for BomInterruptedReader {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -446,9 +449,13 @@ fn load_012_jtl_url_credentials_are_never_retained_and_empty_depth_and_overflow_
                 self.pos = 1;
                 return Ok(1);
             }
-            if self.pos == 1 && !self.interrupted_once {
-                self.interrupted_once = true;
-                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "EINTR during BOM"));
+            if self.pos == 1 && self.seeks_to_zero == 1 && !self.interrupted_detect {
+                self.interrupted_detect = true;
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "EINTR during detect"));
+            }
+            if self.pos == 1 && self.seeks_to_zero == 2 && !self.interrupted_guard_bom {
+                self.interrupted_guard_bom = true;
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "EINTR during Guard BOM top-up"));
             }
             let n = buf.len().min(self.data.len() - self.pos);
             buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
@@ -459,7 +466,12 @@ fn load_012_jtl_url_credentials_are_never_retained_and_empty_depth_and_overflow_
     impl std::io::Seek for BomInterruptedReader {
         fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
             let next = match pos {
-                std::io::SeekFrom::Start(p) => p as i64,
+                std::io::SeekFrom::Start(p) => {
+                    if p == 0 {
+                        self.seeks_to_zero += 1;
+                    }
+                    p as i64
+                }
                 std::io::SeekFrom::End(d) => self.data.len() as i64 + d,
                 std::io::SeekFrom::Current(d) => self.pos as i64 + d,
             };
@@ -470,8 +482,12 @@ fn load_012_jtl_url_credentials_are_never_retained_and_empty_depth_and_overflow_
     let mut bom_bytes = vec![0xEF, 0xBB, 0xBF];
     bom_bytes.extend_from_slice(CSV_HEADER.as_bytes());
     bom_bytes.extend_from_slice(format!("{T0},5,a,200,OK,t,text,true,,1,1,1,1,http://127.0.0.1:8080/,1,0,0\n").as_bytes());
-    let r_bom = anvil_jmeter::import_jtl(BomInterruptedReader { data: bom_bytes, pos: 0, interrupted_once: false }, &opts()).unwrap();
+    let mut bom_reader =
+        BomInterruptedReader { data: bom_bytes, pos: 0, seeks_to_zero: 0, interrupted_detect: false, interrupted_guard_bom: false };
+    let r_bom = anvil_jmeter::import_jtl(&mut bom_reader, &opts()).unwrap();
     assert_eq!(r_bom.requests.started, 1);
+    assert!(bom_reader.interrupted_detect, "must exercise EINTR retry inside detect()");
+    assert!(bom_reader.interrupted_guard_bom, "must exercise EINTR retry inside Guard::read BOM top-up");
 
     // An in-place edit between pass 1 and pass 2 that keeps the same sample count
     // is rejected via the streaming SHA-256 fingerprint mismatch.

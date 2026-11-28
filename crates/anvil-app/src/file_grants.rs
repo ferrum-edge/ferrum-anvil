@@ -613,7 +613,7 @@ impl FileGrants {
             Some((csv, owner_only)) => match stage_in(&plan_folder, csv, owner_only) {
                 Ok(t) => Some(t),
                 Err(e) => {
-                    let _ = plan_folder.remove_file(&jmx_tmp);
+                    plan_folder.cleanup_staged(&jmx_tmp);
                     restore_grants(plan_entry, secrets_entry);
                     return Err(e);
                 }
@@ -624,9 +624,9 @@ impl FileGrants {
             Some((sec_folder, _, sec_bytes)) => match stage_in(sec_folder, sec_bytes, true) {
                 Ok(t) => Some(t),
                 Err(e) => {
-                    let _ = plan_folder.remove_file(&jmx_tmp);
+                    plan_folder.cleanup_staged(&jmx_tmp);
                     if let Some((ref dt, _)) = dataset_tmp {
-                        let _ = plan_folder.remove_file(dt);
+                        plan_folder.cleanup_staged(dt);
                     }
                     restore_grants(plan_entry, secrets_entry);
                     return Err(e);
@@ -636,20 +636,24 @@ impl FileGrants {
         };
 
         // Publish no-clobber files first, then the plan. Track every published
-        // filename and OS file identity so an unavoidable mid-publish error
-        // reports what landed and a Unicode-normalization alias (e.g. APFS
-        // NFC/NFD) can never replace a newly published sibling file.
+        // filename and OS file identity (both staged and post-publish, so
+        // filesystems such as FAT32/exFAT where rename changes file IDs stay
+        // protected) so an unavoidable mid-publish error reports what landed
+        // and a Unicode-normalization alias (e.g. APFS NFC/NFD) can never
+        // replace a newly published sibling file.
         let mut published: Vec<String> = Vec::new();
         let mut protected: Vec<FileId> = Vec::new();
-        let cleanup_remaining = |jmx_t: Option<&OsStr>, ds_t: Option<&OsStr>, sec_t: Option<&OsStr>| {
+        let cleanup_remaining = |jmx_t: Option<&crate::no_follow::StagedFile>,
+                                 ds_t: Option<&crate::no_follow::StagedFile>,
+                                 sec_t: Option<&crate::no_follow::StagedFile>| {
             if let Some(t) = jmx_t {
-                let _ = plan_folder.remove_file(t);
+                plan_folder.cleanup_staged(t);
             }
             if let Some(t) = ds_t {
-                let _ = plan_folder.remove_file(t);
+                plan_folder.cleanup_staged(t);
             }
             if let (Some((sf, _, _)), Some(t)) = (&secrets_target, sec_t) {
-                let _ = sf.remove_file(t);
+                sf.cleanup_staged(t);
             }
         };
         let mut sec_tmp = secrets_tmp;
@@ -657,9 +661,9 @@ impl FileGrants {
         let mut jmx_t = Some(jmx_tmp);
 
         if let (Some((sec_folder, sec_name, _)), Some((tmp, staged_id))) = (&secrets_target, sec_tmp.take()) {
-            if let Err(err) = sec_folder.publish_no_clobber(&tmp, sec_name) {
-                let _ = sec_folder.remove_file(&tmp);
-                cleanup_remaining(jmx_t.as_deref(), ds_tmp.as_ref().map(|(t, _)| t.as_os_str()), None);
+            if let Err(err) = sec_folder.publish_staged_no_clobber(&tmp, sec_name) {
+                sec_folder.cleanup_staged(&tmp);
+                cleanup_remaining(jmx_t.as_ref(), ds_tmp.as_ref().map(|(t, _)| t), None);
                 restore_grants(plan_entry, secrets_entry);
                 if err.kind() == std::io::ErrorKind::AlreadyExists {
                     return Err(GrantError::Invalid(
@@ -669,6 +673,11 @@ impl FileGrants {
                 return Err(io(err));
             }
             protected.push(staged_id);
+            if let Ok(Some((false, pub_id))) = sec_folder.entry_identity(sec_name)
+                && pub_id != staged_id
+            {
+                protected.push(pub_id);
+            }
             published.push(display_name(Some(sec_name)));
         }
 
@@ -687,13 +696,13 @@ impl FileGrants {
             let res = if let Some(err) = target_blocked {
                 Err(err)
             } else if replace_dataset {
-                plan_folder.rename(&tmp, sibling)
+                plan_folder.rename_staged(&tmp, sibling)
             } else {
-                plan_folder.publish_no_clobber(&tmp, sibling)
+                plan_folder.publish_staged_no_clobber(&tmp, sibling)
             };
             if let Err(err) = res {
-                let _ = plan_folder.remove_file(&tmp);
-                cleanup_remaining(jmx_t.as_deref(), None, None);
+                plan_folder.cleanup_staged(&tmp);
+                cleanup_remaining(jmx_t.as_ref(), None, None);
                 if published.is_empty() {
                     restore_grants(plan_entry, secrets_entry);
                     if !replace_dataset && err.kind() == std::io::ErrorKind::AlreadyExists {
@@ -710,6 +719,11 @@ impl FileGrants {
                 )));
             }
             protected.push(staged_id);
+            if let Ok(Some((false, pub_id))) = plan_folder.entry_identity(sibling)
+                && pub_id != staged_id
+            {
+                protected.push(pub_id);
+            }
             published.push(display_name(Some(sibling)));
         }
 
@@ -724,10 +738,10 @@ impl FileGrants {
             };
             let res = match target_blocked {
                 Some(err) => Err(err),
-                None => plan_folder.rename(&tmp, plan_name),
+                None => plan_folder.rename_staged(&tmp, plan_name),
             };
             if let Err(err) = res {
-                let _ = plan_folder.remove_file(&tmp);
+                plan_folder.cleanup_staged(&tmp);
                 if published.is_empty() {
                     restore_grants(plan_entry, secrets_entry);
                     return Err(io(err));
@@ -1094,18 +1108,18 @@ impl PinnedOutput {
                 "secret output is written only where an owner-only file can be created (macOS and Linux)",
             ));
         }
-        let tmp = OsString::from(format!(".anvil-{}.partial", Id::new()));
-        let stage = || -> std::io::Result<PinnedFileId> {
-            let mut f = self.dir.create_new(&tmp, owner_only)?;
+        let (mut f, tmp) = self.dir.stage_new(owner_only)?;
+        let stage = (|| -> std::io::Result<PinnedFileId> {
             std::io::Write::write_all(&mut f, bytes)?;
             f.sync_all()?;
             let meta = f.metadata()?;
             file_id(&f, &meta).map(PinnedFileId)
-        };
-        match stage() {
+        })();
+        drop(f);
+        match stage {
             Ok(staged_id) => Ok(StagedPinnedOutput { output: self, tmp, staged_id, published: false }),
             Err(err) => {
-                let _ = self.dir.remove_file(&tmp);
+                self.dir.cleanup_staged(&tmp);
                 Err(err)
             }
         }
@@ -1122,7 +1136,7 @@ impl PinnedOutput {
 /// A staged temporary file inside a [`PinnedOutput`]'s pinned directory.
 pub struct StagedPinnedOutput<'a> {
     output: &'a PinnedOutput,
-    tmp: OsString,
+    tmp: crate::no_follow::StagedFile,
     staged_id: PinnedFileId,
     published: bool,
 }
@@ -1130,7 +1144,7 @@ pub struct StagedPinnedOutput<'a> {
 impl Drop for StagedPinnedOutput<'_> {
     fn drop(&mut self) {
         if !self.published {
-            let _ = self.output.dir.remove_file(&self.tmp);
+            self.output.dir.cleanup_staged(&self.tmp);
         }
     }
 }
@@ -1158,12 +1172,19 @@ impl StagedPinnedOutput<'_> {
             Some((false, _)) => {}
         }
         if no_clobber {
-            self.output.dir.publish_no_clobber(&self.tmp, &self.output.name)?;
+            self.output.dir.publish_staged_no_clobber(&self.tmp, &self.output.name)?;
         } else {
-            self.output.dir.rename(&self.tmp, &self.output.name)?;
+            self.output.dir.rename_staged(&self.tmp, &self.output.name)?;
         }
         self.published = true;
-        Ok(self.staged_id)
+        // Re-read the published entry's file identity so filesystems where
+        // rename changes FileId (e.g. FAT32/exFAT) still protect the published
+        // sibling from subsequent aliasing writes.
+        let published_id = match self.output.dir.entry_identity(&self.output.name) {
+            Ok(Some((false, id))) => PinnedFileId(id),
+            _ => self.staged_id,
+        };
+        Ok(published_id)
     }
 }
 
@@ -1192,9 +1213,8 @@ fn open_pinned_write_dir(dir: &Path, id: FileId) -> Result<Dir, GrantError> {
     Ok(folder)
 }
 
-fn stage_in(folder: &Dir, bytes: &[u8], owner_only: bool) -> Result<(OsString, FileId), GrantError> {
-    let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
-    let mut file = folder.create_new(&tmp, owner_only).map_err(io)?;
+fn stage_in(folder: &Dir, bytes: &[u8], owner_only: bool) -> Result<(crate::no_follow::StagedFile, FileId), GrantError> {
+    let (mut file, tmp) = folder.stage_new(owner_only).map_err(io)?;
     let res = (|| -> std::io::Result<FileId> {
         std::io::Write::write_all(&mut file, bytes)?;
         file.sync_all()?;
@@ -1205,7 +1225,7 @@ fn stage_in(folder: &Dir, bytes: &[u8], owner_only: bool) -> Result<(OsString, F
     match res {
         Ok(id) => Ok((tmp, id)),
         Err(err) => {
-            let _ = folder.remove_file(&tmp);
+            folder.cleanup_staged(&tmp);
             Err(io(err))
         }
     }
@@ -1224,18 +1244,18 @@ fn write_in(dir: &Path, id: FileId, name: &OsStr, bytes: &[u8], owner_only: bool
         return Err(GrantError::Changed);
     }
     refuse_directory(&dir.join(name))?;
-    // A fresh, exclusively created file: an existing file or link under the
-    // temporary name is never opened or followed.
-    let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
-    let file = folder.create_new(&tmp, owner_only).map_err(io)?;
+    // A fresh, exclusively created file (staged inside an owner-only private
+    // directory on macOS when `owner_only` is true): an existing file or link
+    // under the temporary name is never opened or followed.
+    let (file, tmp) = folder.stage_new(owner_only).map_err(io)?;
     // Only a file created here is removed when the write fails, never an
     // entry that was already there under the temporary name. Renaming
     // replaces the destination entry itself; a link there is replaced, not
     // followed.
-    match write_synced(file, bytes).and_then(|()| folder.rename(&tmp, name)) {
+    match write_synced(file, bytes).and_then(|()| folder.rename_staged(&tmp, name)) {
         Ok(()) => Ok(()),
         Err(err) => {
-            let _ = folder.remove_file(&tmp);
+            folder.cleanup_staged(&tmp);
             Err(io(err))
         }
     }

@@ -304,14 +304,16 @@ impl Tmpl {
 /// Where secret values come from (resolved only for used properties, and
 /// only on the secret-export path).
 enum SecretSource {
-    /// `{{name}}` through the step's own resolver with its vault.
-    Variable { step: usize, name: String },
+    /// A specific non-literal variable entry in a step's layers, resolved via
+    /// that step's own layers and vault without re-looking up by variable name
+    /// (so another step's or higher layer's override can never shadow it).
+    VariableEntry { step: usize, layer: usize, var: usize },
     /// A whole field's template through the step's own resolver.
     Template { step: usize, template: String },
     /// A vault reference.
     Vault { step: usize, secret: SecretRef },
-    /// A literal credential fragment (e.g., an unrecognized Bearer auth prefix)
-    /// that must never be copied into the JMX.
+    /// A literal credential value or fragment that must never be copied into
+    /// the JMX.
     Literal(String),
 }
 
@@ -695,13 +697,26 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
     let uses_vu = used_marks.iter().any(|m| matches!(m, Mark::Vu));
 
     let mut plan_children = Vec::new();
+    let secret_properties: Vec<SecretProperty> = used_secrets
+        .iter()
+        .map(|i| SecretProperty { name: t.secrets.props[*i].name.clone(), purpose: t.secrets.props[*i].purpose.clone() })
+        .collect();
+    let has_secrets_guard = !secret_properties.is_empty();
+    let single_group = group_nodes.len() == 1;
     if uses_iteration {
-        plan_children.push(Node::new(
+        // Scope CounterConfig inside the sole load thread group when there is
+        // only one so the SetupThreadGroup secrets check never advances
+        // `anvil.iteration` before iteration 0. For multi-stage closed
+        // workloads that share one TestPlan-scoped counter across groups,
+        // start at -1 when SetupThreadGroup is present so the setup iteration
+        // consumes -1 and load traffic starts at 0.
+        let start = if !single_group && has_secrets_guard { "-1" } else { "0" };
+        let counter = Node::new(
             "CounterConfig",
             "CounterConfigGui",
             "anvil.iteration",
             vec![
-                Prop::s("CounterConfig.start", "0"),
+                Prop::s("CounterConfig.start", start),
                 Prop::s("CounterConfig.end", ""),
                 Prop::s("CounterConfig.incr", "1"),
                 Prop::s("CounterConfig.name", ITERATION_VAR),
@@ -709,7 +724,12 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
                 Prop::Bool("CounterConfig.per_user", false),
                 Prop::Bool("CounterConfig.reset_on_tg_iteration", false),
             ],
-        ));
+        );
+        if single_group {
+            group_nodes[0].children.insert(0, counter);
+        } else {
+            plan_children.push(counter);
+        }
         t.map("{{anvil.iteration}}", "Counter shared by all threads (from 0, one per iteration)");
     }
     if uses_vu {
@@ -719,19 +739,26 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
         }
     }
     if !chain {
-        plan_children.push(Node::new(
-            "RandomVariableConfig",
-            "TestBeanGUI",
-            "Anvil weighted mix",
-            vec![
-                Prop::s("variableName", PICK_VAR),
-                Prop::s("outputFormat", ""),
-                Prop::s("minimumValue", "1"),
-                Prop::s("maximumValue", total_weight.to_string()),
-                Prop::s("randomSeed", (plan.seed as i64).to_string()),
-                Prop::Bool("perThread", false),
-            ],
-        ));
+        // Scope RandomVariableConfig inside each load thread group so the
+        // SetupThreadGroup secrets check never draws from the mix RNG.
+        for (gi, group_node) in group_nodes.iter_mut().enumerate() {
+            group_node.children.insert(
+                0,
+                Node::new(
+                    "RandomVariableConfig",
+                    "TestBeanGUI",
+                    "Anvil weighted mix",
+                    vec![
+                        Prop::s("variableName", PICK_VAR),
+                        Prop::s("outputFormat", ""),
+                        Prop::s("minimumValue", "1"),
+                        Prop::s("maximumValue", total_weight.to_string()),
+                        Prop::s("randomSeed", (plan.seed.wrapping_add(gi as u64) as i64).to_string()),
+                        Prop::Bool("perThread", false),
+                    ],
+                ),
+            );
+        }
         t.map("weighted mix", "Random Variable (1 to the total weight, per iteration) and one If Controller per request");
         t.note("Weighted mix: Anvil picks each iteration's request with a seeded function of the iteration number; JMeter draws a random number per iteration. The proportions match the weights in expectation, not iteration by iteration.");
     } else if specs.len() > 1 {
@@ -740,11 +767,7 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             "samplers in order; each later one inside an If Controller that runs only after the previous sample got an HTTP status",
         );
     }
-    let secret_properties: Vec<SecretProperty> = used_secrets
-        .iter()
-        .map(|i| SecretProperty { name: t.secrets.props[*i].name.clone(), purpose: t.secrets.props[*i].purpose.clone() })
-        .collect();
-    if !secret_properties.is_empty() {
+    if has_secrets_guard {
         plan_children.push(secrets_guard(&secret_properties));
         t.map(
             "secrets (vault values, secret variables, credential fields)",
@@ -924,16 +947,19 @@ fn step_layers(t: &mut Translator<'_>, pos: usize, ctx: &ExecutionContext, per_r
             let credential = anvil_domain::credential_names::is_export_secret_name(&e.name, &ctx.redaction_names)
                 && classify_template_value(&e.value, TemplateSyntax::Nunjucks) == TemplateKind::Literal;
             if e.secret || vault.is_some() || e.value == DEFERRED_SECRET_VALUE || credential {
-                let key = match &vault {
-                    Some(r) => format!("vault:{}", r.id),
-                    None => format!("var:{}:{}:{}", layer.label, e.name, hex::encode(Sha256::digest(e.value.as_bytes()))),
+                let (key, source) = match &vault {
+                    Some(r) => (format!("vault:{}", r.id), SecretSource::Vault { step: pos, secret: r.clone() }),
+                    None if e.value != DEFERRED_SECRET_VALUE
+                        && (e.literal || classify_template_value(&e.value, TemplateSyntax::Nunjucks) == TemplateKind::Literal) =>
+                    {
+                        (
+                            format!("var:{}:{}:{}", layer.label, e.name, hex::encode(Sha256::digest(e.value.as_bytes()))),
+                            SecretSource::Literal(e.value.clone()),
+                        )
+                    }
+                    None => (format!("var-tmpl:{pos}:{li}:{vi}"), SecretSource::VariableEntry { step: pos, layer: li, var: vi }),
                 };
-                let idx = t.secrets.add(
-                    key,
-                    format!("var.{}", slug(&e.name)),
-                    format!("variable '{}' ({})", e.name, layer.label),
-                    SecretSource::Variable { step: pos, name: e.name.clone() },
-                );
+                let idx = t.secrets.add(key, format!("var.{}", slug(&e.name)), format!("variable '{}' ({})", e.name, layer.label), source);
                 vars.push(VarEntry { name: e.name.clone(), value: t.markers.add(Mark::Secret(idx)), secret: false, literal: true });
             } else if e.literal {
                 vars.push(e.clone());
@@ -1215,12 +1241,13 @@ fn translate_step(
             Err(r) => rs.push(r),
         }
     }
-    let auth_overrides_authorization = matches!(ctx.effective_auth(), AuthConfig::Basic { .. } | AuthConfig::Bearer { .. });
+    let auth_overrides_authorization = matches!(auth, AuthConfig::Basic { .. } | AuthConfig::Bearer { .. });
     for (i, h) in spec.headers.iter_mut().enumerate().filter(|(_, h)| h.enabled) {
         let original = h.value.clone();
-        let overridden_auth = auth_overrides_authorization && h.name.trim().eq_ignore_ascii_case("authorization");
         h.name = mask_helpers(&h.name, &mut t.markers);
         h.value = mask_helpers(&h.value, &mut t.markers);
+        let overridden_auth = auth_overrides_authorization
+            && resolver.resolve(h.name.trim(), "header").is_ok_and(|n| n.eq_ignore_ascii_case("authorization"));
         if !overridden_auth {
             match credential_field(t, pos, ctx, &resolver, name, "header", i, &h.name, &h.value, &original, h.sensitive) {
                 Ok(Some(m)) => h.value = m,
@@ -1266,6 +1293,17 @@ fn translate_step(
         ));
         return Err(rs);
     }
+    if !anvil_transport::destination::permitted_literal(&target.host) {
+        rs.push(reason(
+            rq,
+            "destination_policy",
+            format!(
+                "the target host '{}' is an unspecified, multicast, or reserved IP literal that Anvil's destination policy refuses; JMeter does not enforce Anvil's destination network-zone checks",
+                target.host
+            ),
+        ));
+    }
+    t.note("Destination policy: Anvil checks resolved IP addresses against its destination network-zone policy before connecting; JMeter uses the JVM's own DNS resolution without Anvil's destination-zone checks.");
 
     // ---- TLS (LOAD-012) ----
     let profile = settings.tls_profile_id.and_then(|id| ctx.tls_profiles.iter().find(|p| p.id == id));
@@ -1577,6 +1615,13 @@ fn translate_step(
             "the request sets an explicit Content-Length header; JMeter's HttpClient 4 sampler discards Content-Length from the HTTP Header Manager and computes it from the request body. Remove the explicit Content-Length header to export it",
         ));
     }
+    if headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("transfer-encoding")) {
+        rs.push(reason(
+            rq,
+            "transfer_encoding_header",
+            "the request sets an explicit Transfer-Encoding header; JMeter's HttpClient 4 sampler manages transfer framing itself and rejects or rewrites an explicit Transfer-Encoding header. Remove the explicit Transfer-Encoding header to export it",
+        ));
+    }
     if headers.iter().any(|(n, v)| {
         n.eq_ignore_ascii_case("host")
             && (v.0.iter().any(|(s, _)| t.markers.has_marks(s))
@@ -1593,7 +1638,7 @@ fn translate_step(
         rs.push(reason(
             rq,
             "redirect_credentials",
-            "the request follows redirects and carries credentials; Anvil never forwards them to another origin, but JMeter's header manager sends its headers to every redirect target. Turn off following redirects for this request (or allow cross-origin credential forwarding) to export it",
+            "the request follows redirects and carries credentials; Anvil never forwards them to another origin, but JMeter's header manager sends its headers to every redirect target. Turn off following redirects for this request to export it",
         ));
     }
     if follow {
@@ -1653,7 +1698,7 @@ fn translate_step(
             rs.push(reason(
                 rq,
                 "redirect_tls",
-                "the request follows redirects, and a redirect can lead to an https URL: Anvil verifies that certificate (and may negotiate HTTP/2), JMeter would accept any certificate over HTTP/1.1. Turn off following redirects for this request, or (only for a test system you deliberately do not verify) select a TLS profile with verification off and the HTTP/1.1-only version",
+                "the request follows redirects, and a redirect can lead to an https URL: Anvil verifies that certificate (and may negotiate HTTP/2), JMeter would accept any certificate over HTTP/1.1. Turn off following redirects for this request to export it",
             ));
         }
         let max = settings.redirects.max.to_string();
@@ -1666,13 +1711,6 @@ fn translate_step(
             Some(_) => {}
             None => t.jmeter_properties.push(("httpsampler.max_redirects".into(), max)),
         }
-        t.map(
-            "redirects of GET and HEAD (followed inside one request)",
-            "Follow Redirects (one sample with sub-results; httpsampler.max_redirects)",
-        );
-        t.note(
-            "Redirect limit: when a request exceeds the redirect cap (httpsampler.max_redirects), Anvil returns the last 3xx response, whereas JMeter records an IOException (imported as a transport failure) and skips subsequent steps in a chain.",
-        );
     }
 
     // ---- timeouts and limits ----
@@ -2138,13 +2176,23 @@ fn thread_groups(t: &mut Translator<'_>) -> Vec<Group> {
             // duration.
             let mut prev_rate = 0u128;
             let mut total_arrivals = 0u128;
+            let mut jmeter_arrivals = 0u128;
             for s in stages {
                 let target = u128::from(s.target);
                 let dur = u128::from(s.duration_secs);
                 if dur > 0 {
-                    total_arrivals = total_arrivals.saturating_add(prev_rate.saturating_add(target).saturating_mul(dur).div_ceil(2));
+                    let area_twice = prev_rate.saturating_add(target).saturating_mul(dur);
+                    total_arrivals = total_arrivals.saturating_add(area_twice.div_ceil(2));
+                    jmeter_arrivals = jmeter_arrivals.saturating_add(area_twice / 2);
                 }
                 prev_rate = target;
+            }
+            if jmeter_arrivals == 0 {
+                t.reasons.push(reason(
+                    None,
+                    "workload",
+                    "JMeter's Open Model Thread Group rounds each stage's arrivals down to a whole number, so this schedule would start 0 arrivals in JMeter (empty JTL). Raise a stage's rate or duration so at least one whole arrival is scheduled",
+                ));
             }
             if u128::from(*max_in_flight) < total_arrivals {
                 t.reasons.push(reason(
@@ -2472,9 +2520,17 @@ fn secrets_guard(props: &[SecretProperty]) -> Node {
 fn resolve_secret(t: &Translator<'_>, source: &SecretSource) -> Result<Zeroizing<String>, String> {
     let real = |ctx: &ExecutionContext| Resolver::new(ctx.var_layers.clone(), None).with_secrets(ctx.secrets.clone());
     match source {
-        SecretSource::Variable { step, name } => {
+        SecretSource::VariableEntry { step, layer, var } => {
             let ctx = t.contexts[*step];
-            real(ctx).resolve(&format!("{{{{{name}}}}}"), "variables").map(Zeroizing::new).map_err(|f| f.message)
+            let entry = &ctx.var_layers[*layer].vars[*var];
+            if entry.value == DEFERRED_SECRET_VALUE {
+                return Err(format!("variable '{}' references an unavailable secret", entry.name));
+            }
+            if entry.literal {
+                Ok(Zeroizing::new(entry.value.clone()))
+            } else {
+                real(ctx).resolve(&entry.value, "variables").map(Zeroizing::new).map_err(|f| f.message)
+            }
         }
         SecretSource::Template { step, template } => {
             let ctx = t.contexts[*step];
@@ -2487,24 +2543,29 @@ fn resolve_secret(t: &Translator<'_>, source: &SecretSource) -> Result<Zeroizing
 
 /// Whether JMeter's HttpClient 4 sampler would rewrite an explicit static
 /// `Host` header value (appending a non-default sampler port when the header
-/// has no port, or stripping an explicit default port `:80`/`:443`).
+/// has no port, stripping an explicit default port `:80`/`:443`, or
+/// normalizing non-canonical port text such as `:08080` or `:+8080`).
 fn host_header_rewritten_by_hc4(raw: &str, scheme: &str, target_port: u16) -> bool {
     let s = raw.trim();
     if s.is_empty() {
         return true;
     }
+    let parse_canonical_port = |p: &str| -> Option<u16> {
+        let port = p.parse::<u16>().ok()?;
+        (port.to_string() == p).then_some(port)
+    };
     let explicit_port: Option<u16> = if let Some(rest) = s.strip_prefix('[') {
         let Some((_, after)) = rest.split_once(']') else { return true };
         if after.is_empty() {
             None
         } else if let Some(p) = after.strip_prefix(':') {
-            let Ok(port) = p.parse::<u16>() else { return true };
+            let Some(port) = parse_canonical_port(p) else { return true };
             Some(port)
         } else {
             return true;
         }
     } else if let Some((_, p)) = s.split_once(':') {
-        let Ok(port) = p.parse::<u16>() else { return true };
+        let Some(port) = parse_canonical_port(p) else { return true };
         Some(port)
     } else {
         None

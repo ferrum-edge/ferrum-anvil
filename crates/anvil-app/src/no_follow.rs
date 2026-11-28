@@ -33,7 +33,7 @@
 //! other than Linux and macOS, one it can list.
 
 use crate::file_grants::{FileId, file_id};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io;
 #[cfg(any(unix, windows))]
@@ -55,6 +55,20 @@ pub(crate) struct Dir {
     /// open so none can be renamed, removed or replaced until this is dropped.
     #[cfg(windows)]
     held: Vec<File>,
+}
+
+/// A staged temporary file inside a [`Dir`]. On macOS, owner-only files are
+/// created inside a freshly created `0o700` ACL-cleared private staging
+/// directory so the file is born with mode `0o600` and zero ACL entries
+/// (eliminating any inheritance TOCTOU window before publish).
+pub(crate) enum StagedFile {
+    Direct(OsString),
+    #[cfg(target_vendor = "apple")]
+    ApplePrivateDir {
+        dir_name: OsString,
+        dir_fd: File,
+        file_name: OsString,
+    },
 }
 
 fn not_absolute() -> io::Error {
@@ -210,6 +224,96 @@ impl Dir {
         Ok(rustix::fs::unlinkat(&self.fd, name, rustix::fs::AtFlags::empty())?)
     }
 
+    /// Stage a new temporary file inside this folder. On macOS, when
+    /// `owner_only` is true, creates an empty `0o700` private subdirectory,
+    /// strips and verifies zero extended ACL entries on that empty directory,
+    /// and creates the `0o600` file inside it so the file never inherits a
+    /// parent ACL even momentarily before `publish_staged_no_clobber` or
+    /// `rename_staged`.
+    pub(crate) fn stage_new(&self, owner_only: bool) -> io::Result<(File, StagedFile)> {
+        #[cfg(target_vendor = "apple")]
+        if owner_only {
+            use rustix::fs::{AtFlags, Mode, OFlags};
+            let dir_name = OsString::from(format!(".anvil-stage-{}", uuid::Uuid::new_v4().simple()));
+            rustix::fs::mkdirat(&self.fd, &dir_name, Mode::from_raw_mode(0o700))?;
+            let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let dir_fd = match rustix::fs::openat(&self.fd, &dir_name, dir_flags, Mode::empty()) {
+                Ok(fd) => File::from(fd),
+                Err(err) => {
+                    let _ = rustix::fs::unlinkat(&self.fd, &dir_name, AtFlags::REMOVEDIR);
+                    return Err(err.into());
+                }
+            };
+            if let Err(err) = enforce_owner_only_mode(&dir_fd, 0o700) {
+                drop(dir_fd);
+                let _ = rustix::fs::unlinkat(&self.fd, &dir_name, AtFlags::REMOVEDIR);
+                return Err(err);
+            }
+            let file_name = OsString::from("staged");
+            let file_flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let file = match rustix::fs::openat(&dir_fd, &file_name, file_flags, Mode::from_raw_mode(0o600)) {
+                Ok(fd) => File::from(fd),
+                Err(err) => {
+                    drop(dir_fd);
+                    let _ = rustix::fs::unlinkat(&self.fd, &dir_name, AtFlags::REMOVEDIR);
+                    return Err(err.into());
+                }
+            };
+            if let Err(err) = enforce_owner_only_mode(&file, 0o600) {
+                drop(file);
+                let _ = rustix::fs::unlinkat(&dir_fd, &file_name, AtFlags::empty());
+                drop(dir_fd);
+                let _ = rustix::fs::unlinkat(&self.fd, &dir_name, AtFlags::REMOVEDIR);
+                return Err(err);
+            }
+            return Ok((file, StagedFile::ApplePrivateDir { dir_name, dir_fd, file_name }));
+        }
+        let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
+        let file = self.create_new(&tmp, owner_only)?;
+        Ok((file, StagedFile::Direct(tmp)))
+    }
+
+    pub(crate) fn publish_staged_no_clobber(&self, staged: &StagedFile, to: &OsStr) -> io::Result<()> {
+        match staged {
+            StagedFile::Direct(from) => self.publish_no_clobber(from, to),
+            #[cfg(target_vendor = "apple")]
+            StagedFile::ApplePrivateDir { dir_name, dir_fd, file_name } => {
+                use rustix::fs::AtFlags;
+                rustix::fs::linkat(dir_fd, file_name, &self.fd, to, AtFlags::empty())?;
+                let _ = rustix::fs::unlinkat(dir_fd, file_name, AtFlags::empty());
+                let _ = rustix::fs::unlinkat(&self.fd, dir_name, AtFlags::REMOVEDIR);
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn rename_staged(&self, staged: &StagedFile, to: &OsStr) -> io::Result<()> {
+        match staged {
+            StagedFile::Direct(from) => self.rename(from, to),
+            #[cfg(target_vendor = "apple")]
+            StagedFile::ApplePrivateDir { dir_name, dir_fd, file_name } => {
+                use rustix::fs::AtFlags;
+                rustix::fs::renameat(dir_fd, file_name, &self.fd, to)?;
+                let _ = rustix::fs::unlinkat(&self.fd, dir_name, AtFlags::REMOVEDIR);
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn cleanup_staged(&self, staged: &StagedFile) {
+        match staged {
+            StagedFile::Direct(name) => {
+                let _ = self.remove_file(name);
+            }
+            #[cfg(target_vendor = "apple")]
+            StagedFile::ApplePrivateDir { dir_name, dir_fd, file_name } => {
+                use rustix::fs::AtFlags;
+                let _ = rustix::fs::unlinkat(dir_fd, file_name, AtFlags::empty());
+                let _ = rustix::fs::unlinkat(&self.fd, dir_name, AtFlags::REMOVEDIR);
+            }
+        }
+    }
+
     /// No-follow metadata lookup of `name` inside this opened folder
     /// (`fstatat` with `AT_SYMLINK_NOFOLLOW`, requiring no read permission on
     /// the entry itself). Returns `Ok(None)` only when `name` does not exist;
@@ -236,18 +340,24 @@ impl Dir {
 /// cannot be established.
 #[cfg(unix)]
 fn enforce_owner_only(file: &File) -> io::Result<()> {
+    enforce_owner_only_mode(file, 0o600)
+}
+
+#[cfg(unix)]
+fn enforce_owner_only_mode(file: &File, expected_mode: u32) -> io::Result<()> {
     use rustix::fs::Mode;
     use std::os::unix::fs::PermissionsExt;
 
-    rustix::fs::fchmod(file, Mode::from_raw_mode(0o600))?;
+    #[allow(clippy::unnecessary_cast)]
+    rustix::fs::fchmod(file, Mode::from_raw_mode(expected_mode as rustix::fs::RawMode))?;
     #[cfg(target_vendor = "apple")]
     clear_and_verify_macos_acl(file)?;
 
     let mode = file.metadata()?.permissions().mode() & 0o7777;
-    if mode != 0o600 {
+    if mode != expected_mode {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("cannot verify owner-only permissions on new file (mode {:04o})", mode),
+            format!("cannot verify owner-only permissions on new entry (mode {:04o})", mode),
         ));
     }
     Ok(())
@@ -437,6 +547,32 @@ impl Dir {
         std::fs::remove_file(self.path.join(name))
     }
 
+    pub(crate) fn stage_new(&self, owner_only: bool) -> io::Result<(File, StagedFile)> {
+        let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
+        let file = self.create_new(&tmp, owner_only)?;
+        Ok((file, StagedFile::Direct(tmp)))
+    }
+
+    pub(crate) fn publish_staged_no_clobber(&self, staged: &StagedFile, to: &OsStr) -> io::Result<()> {
+        match staged {
+            StagedFile::Direct(from) => self.publish_no_clobber(from, to),
+        }
+    }
+
+    pub(crate) fn rename_staged(&self, staged: &StagedFile, to: &OsStr) -> io::Result<()> {
+        match staged {
+            StagedFile::Direct(from) => self.rename(from, to),
+        }
+    }
+
+    pub(crate) fn cleanup_staged(&self, staged: &StagedFile) {
+        match staged {
+            StagedFile::Direct(name) => {
+                let _ = self.remove_file(name);
+            }
+        }
+    }
+
     /// No-follow metadata lookup of `name` inside this held folder using
     /// attribute-only access (requiring no read permission on the file data).
     /// Returns `Ok(None)` only when `name` does not exist; otherwise
@@ -524,6 +660,32 @@ impl Dir {
 
     pub(crate) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
         std::fs::remove_file(self.path.join(name))
+    }
+
+    pub(crate) fn stage_new(&self, owner_only: bool) -> io::Result<(File, StagedFile)> {
+        let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
+        let file = self.create_new(&tmp, owner_only)?;
+        Ok((file, StagedFile::Direct(tmp)))
+    }
+
+    pub(crate) fn publish_staged_no_clobber(&self, staged: &StagedFile, to: &OsStr) -> io::Result<()> {
+        match staged {
+            StagedFile::Direct(from) => self.publish_no_clobber(from, to),
+        }
+    }
+
+    pub(crate) fn rename_staged(&self, staged: &StagedFile, to: &OsStr) -> io::Result<()> {
+        match staged {
+            StagedFile::Direct(from) => self.rename(from, to),
+        }
+    }
+
+    pub(crate) fn cleanup_staged(&self, staged: &StagedFile) {
+        match staged {
+            StagedFile::Direct(name) => {
+                let _ = self.remove_file(name);
+            }
+        }
     }
 
     pub(crate) fn entry_identity(&self, name: &OsStr) -> io::Result<Option<(bool, FileId)>> {

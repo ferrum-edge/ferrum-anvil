@@ -270,15 +270,38 @@ pub fn export_jmx(
     }
     let results_file = fresh_results_name(out);
     let shell_label = if cfg!(windows) { "PowerShell" } else { "sh" };
-    let mut cmd = format!("jmeter -n -t {} -l {}", shell_quote(&out.display().to_string()), shell_quote(&results_file));
+    // When the exported plan carries a relative sidecar CSV dataset, launch
+    // JMeter from the JMX's directory (in a subshell / Push-Location block so
+    // the caller's working directory is preserved) so JMeter's FileServer
+    // always resolves the sidecar dataset next to the JMX rather than a
+    // same-named file in an unrelated working directory.
+    let (jmx_arg, prefix, suffix, import_results_file) = if r.dataset.is_some() {
+        let dir = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| out.display().to_string());
+        let import_path = if dir == Path::new(".") { results_file.clone() } else { dir.join(&results_file).display().to_string() };
+        if cfg!(windows) {
+            (
+                name,
+                format!("Push-Location {}; try {{ ", shell_quote(&dir.display().to_string())),
+                " } finally { Pop-Location }".to_string(),
+                import_path,
+            )
+        } else {
+            (name, format!("(cd {} && ", shell_quote(&dir.display().to_string())), ")".to_string(), import_path)
+        }
+    } else {
+        (out.display().to_string(), String::new(), String::new(), results_file.clone())
+    };
+    let mut cmd = format!("{prefix}jmeter -n -t {} -l {}", shell_quote(&jmx_arg), shell_quote(&results_file));
     if written {
         cmd.push_str(&format!(" -q {}", shell_quote("<the --secrets-file you chose>")));
     }
     for (k, v) in &r.jmeter_properties {
         cmd.push_str(&format!(" {}", shell_quote(&format!("-J{k}={v}"))));
     }
+    cmd.push_str(&suffix);
     println!("  run ({shell_label}): {cmd}");
-    println!("  then: anvil load import-jtl <workspace> --file {} --plan {}", shell_quote(&results_file), plan.id);
+    println!("  then: anvil load import-jtl <workspace> --file {} --plan {}", shell_quote(&import_results_file), plan.id);
     Ok(0)
 }
 

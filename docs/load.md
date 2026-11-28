@@ -723,7 +723,6 @@ contains `$` or `\` is escaped for JMeter's function parser.
 | latency assertion | Duration Assertion |
 | JSONPath (simple path), header and status extractions | JSON Extractor; Regular Expression Extractor on the headers or the response code |
 | cookie jar per virtual user | HTTP Cookie Manager per thread, kept across iterations |
-| redirects of GET and HEAD, when every hop behaves alike (see `redirect_tls`) | Follow Redirects, with `-Jhttpsampler.max_redirects=<n>` in the printed command |
 | timeouts | the sampler's connect timeout, and its response timeout set to the larger of Anvil's response-headers and body-idle timeouts |
 | secrets | `${__P(anvil.secret.<name>,)}` properties; a setUp thread group stops the test before any traffic when one is not set (`__isPropDefined`, so a value is never read into an expression) |
 
@@ -741,16 +740,18 @@ contains `$` or `\` is escaped for JMeter's function parser.
 | `auth` | JWT, OAuth 2, HMAC, DPoP, WS-Security, JWT-SVID and multi-auth: Anvil generates them per send, which JMeter core cannot do. |
 | `assertion`, `extraction` | Kinds without an equivalent that judges the same way: patterns (Rust vs Perl 5 regular expressions), XPath, JSON Schema, gRPC, message counts, diagnostics, MCP and JSON-RPC. Comparisons outside the table above. A non-simple JSONPath. |
 | `dynamic_helper` | `{{$isoTimestamp}}` (JMeter formats in local time), `{{$counter}}`, `{{$randomFrom}}`, where a request uses them. |
-| `workload` | A closed workload whose virtual users decrease. JMeter's core thread groups stop all their threads together. |
+| `workload` | A closed workload whose virtual users decrease (JMeter's core thread groups stop all their threads together), or an open workload whose stages round down to 0 arrivals in JMeter. |
 | `abort_rule` | An abort rule: JMeter has no equivalent, and dropping it would remove the target's protection. |
+| `destination_policy` | An unspecified, multicast, or reserved IP literal that Anvil's destination network-zone policy refuses. |
 | `redirect_destination_policy` | A request that follows redirects. Anvil enforces its per-hop destination network-zone policy on every redirect hop (blocking redirects into private, loopback, or other unapproved network zones), whereas JMeter follows redirects to any host without network-zone enforcement. Turn off following redirects for the request. |
 | `redirect_tls` | A cleartext request that follows redirects, unless it uses a TLS profile with verification off and the HTTP/1.1-only version. A redirect can lead to an `https` URL: Anvil verifies that certificate (and may negotiate HTTP/2), JMeter would accept any certificate over HTTP/1.1. Turn off following redirects for the request. The hosted round trip shows the redirect refused, and both engines recording the 302 alike with following off. |
 | `redirect_method` | A request with a method other than GET or HEAD that follows redirects. JMeter re-sends a redirected request as GET without its body; Anvil keeps a 307's or 308's method and body. |
-| `host_header` | An explicit `Host` header whose wire form JMeter's HttpClient 4 sampler would rewrite (appending a non-default sampler port to a portless `Host`, stripping an explicit default port, or resolving a dynamic template). |
+| `content_length_header`, `transfer_encoding_header` | An explicit `Content-Length` or `Transfer-Encoding` header that JMeter's HttpClient 4 sampler discards, rejects, or rewrites. |
+| `host_header` | An explicit `Host` header whose wire form JMeter's HttpClient 4 sampler would rewrite (appending a non-default sampler port to a portless `Host`, stripping an explicit default port, normalizing non-canonical port text, or resolving a dynamic template). |
 | `url_credential` | A credential-named query value written into the URL itself with literal text (`?access_token=…`). The test plan would hold it; move it to the request's query parameters or an API key auth, where it becomes a property. A secret variable there becomes a property. |
 | `open_cap`, `open_connections` | An open workload whose in-flight cap could bind: JMeter's open model has no cap and its socket read timeout does not bound a slow-streaming response, so JMeter would start arrivals Anvil drops. The cap must be at least the schedule's total possible arrivals. In the persistent connection mode Anvil reuses connections and cookies across arrivals, which JMeter's per-arrival threads cannot; choose the fresh mode. |
 | `accept_encoding` | An explicit `Accept-Encoding` offering a coding JMeter 5.6.3 cannot decode (anything but gzip, deflate, br and identity), or asking for compression while Anvil's automatic decompression is off (Anvil keeps the encoded body, JMeter decodes it). |
-| `redirect_credentials` | A request that follows redirects while it carries credentials in headers or its body. JMeter's Header Manager sends them to every redirect target, and Anvil never forwards them to another origin. Turn off following redirects or allow cross-origin forwarding. |
+| `redirect_credentials` | A request that follows redirects while it carries credentials in headers or its body. JMeter's Header Manager sends them to every redirect target, and Anvil never forwards them to another origin. Turn off following redirects for the request. |
 | `cookies` | Requests that differ in cookie handling, or a manual `Cookie` header while cookies are on. |
 | `dataset`, `dataset_secret`, `scope` | A dataset row without a value for a column, a cell with a line break, sensitive columns without the secret path, or steps of an unopened import root. |
 | `secret_mixed` | A credential field that mixes literal text with a per-iteration value. |
@@ -759,9 +760,8 @@ contains `$` or `\` is escaped for JMeter's function parser.
 **Listed** in the export report (`--report FILE`, and printed): dataset row
 order, ramp timing (JMeter starts a ramp's first thread at its start), the
 open model's per-stage rounding and per-arrival cookie jars, weighted-mix
-randomness, redirect-limit handling (Anvil returns the last 3xx response when
-the cap is reached, whereas JMeter records an `IOException` and skips later
-chain steps), redirect responses without `Location` (301, 302, 303, 308, and
+randomness, DNS resolution without Anvil's destination network-zone checks,
+redirect responses without `Location` (301, 302, 303, 308, and
 307 on GET/HEAD: Anvil keeps the completed response, whereas JMeter records a
 transport failure and skips later chain steps even with Follow Redirects off),
 `Connection: close` in fresh mode, timeouts and response limits

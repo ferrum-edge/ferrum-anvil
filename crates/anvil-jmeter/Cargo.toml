@@ -11,6 +11,7 @@ publish.workspace = true
 anvil-domain.workspace = true
 anvil-engine.workspace = true
 anvil-load.workspace = true
+anvil-transport.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
