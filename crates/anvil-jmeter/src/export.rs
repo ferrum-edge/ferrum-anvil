@@ -1465,6 +1465,7 @@ fn translate_step(
                     } else {
                         format!("{}://{host}:{}/", target.scheme, target.port)
                     };
+                    headers.retain(|(n, _)| !n.eq_ignore_ascii_case("authorization"));
                     basic = Some((url, Tmpl::raw(user), Tmpl::raw(pass)));
                     t.map("Basic auth", "HTTP Authorization Manager (Basic, preemptive), scoped to the sampler and its origin");
                     t.note("Basic auth: JMeter's HttpClient encodes the user name and password as ASCII; Anvil encodes them as UTF-8 (identical for ASCII values).");
@@ -1986,7 +1987,7 @@ fn extraction_node(t: &mut Translator<'_>, e: &anvil_domain::assertions::Extract
     t.note("When an extraction matches nothing, Anvil leaves the variable unset (a later step that uses it fails to prepare and is not sent); JMeter sets it to an empty value.");
     let name = format!("extract {}", e.variable);
     Ok(match &e.source {
-        ExtractionSource::JsonPath { path } if simple_json_path(path) => {
+        ExtractionSource::JsonPath { path } if simple_json_path(path) && !path.contains(';') => {
             t.map("JSONPath extraction", "JSON Extractor");
             let node = Node::new(
                 "JSONPostProcessor",

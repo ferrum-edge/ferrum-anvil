@@ -292,12 +292,14 @@ impl<R: Read> Read for Guard<R> {
         let before = self.total;
         let mut n = self.inner.read(buf)?;
         // `csv-core` only strips a leading UTF-8 BOM when all three bytes
-        // arrive in the first buffer. Top up short initial reads matching the
-        // BOM prefix so `Guard` and `csv-core` agree even on short-reading streams.
+        // arrive in the first buffer, and returns EOF if only the 3 BOM bytes
+        // are present in that buffer. Top up short initial reads matching the
+        // BOM prefix to at least 4 bytes (BOM + first CSV byte) so `Guard` and
+        // `csv-core` agree even on short-reading streams.
         const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
-        if self.track_csv_records && before == 0 && n > 0 && n < 3 && buf.len() >= 3 && buf[..n] == BOM[..n] {
-            while n < 3 && buf[..n] == BOM[..n] {
-                let k = self.inner.read(&mut buf[n..3])?;
+        if self.track_csv_records && before == 0 && n > 0 && n < 4 && buf.len() >= 4 {
+            while n < 4 && buf[..n.min(3)] == BOM[..n.min(3)] {
+                let k = self.inner.read(&mut buf[n..4])?;
                 if k == 0 {
                     break;
                 }

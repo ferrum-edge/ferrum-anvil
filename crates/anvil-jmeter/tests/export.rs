@@ -657,6 +657,29 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
         exported_redir.report.differences
     );
 
+    // Basic auth replaces any explicit Authorization header in Anvil; JMeter's
+    // HttpClient skips AuthManager if Authorization is present, so the export omits it.
+    let mut basic_override = RequestSpec::http("GET", "http://127.0.0.1:8080/auth/basic");
+    basic_override.auth = AuthConfig::Basic { username: "ann".into(), password: SensitiveValue::template("pw") };
+    basic_override.headers.push(KeyValue::new("Authorization", "Bearer stale-header"));
+    basic_override.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_bo, c_bo) = step(basic_override);
+    let out_bo =
+        Fx::new(iterations(1, 1), vec![(id_bo, c_bo, "basic-override")], None).export(&ExportOptions::default()).expect("exported");
+    assert!(!out_bo.jmx.contains("stale-header"), "overridden Authorization header must not be exported alongside Basic AuthManager");
+    assert!(out_bo.jmx.contains("AuthManager"));
+
+    // JSONPath extraction with a semicolon is refused because JMeter's JSONPostProcessor
+    // splits jsonPathExprs on ';'.
+    let mut semi_jp = RequestSpec::http("GET", "http://127.0.0.1:8080/data");
+    semi_jp.extractions.push(Extraction {
+        variable: "val".into(),
+        source: ExtractionSource::JsonPath { path: "$['a;b']".into() },
+        sensitive: false,
+    });
+    let (id_jp, c_jp) = step(semi_jp);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_jp, c_jp, "semi-jp")], None)), ["extraction"]);
+
     // Weighted mix whose total weight exceeds i32::MAX (JMeter RandomVariableConfig limit) is refused.
     let mut a = RequestSpec::http("GET", "http://127.0.0.1:8080/a");
     a.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });

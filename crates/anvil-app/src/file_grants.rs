@@ -602,7 +602,7 @@ impl FileGrants {
         };
 
         // Stage all temporary files first.
-        let jmx_tmp = match stage_in(&plan_folder, jmx_bytes, plan_purpose.owner_only()) {
+        let (jmx_tmp, _) = match stage_in(&plan_folder, jmx_bytes, plan_purpose.owner_only()) {
             Ok(t) => t,
             Err(e) => {
                 restore_grants(plan_entry, secrets_entry);
@@ -625,7 +625,7 @@ impl FileGrants {
                 Ok(t) => Some(t),
                 Err(e) => {
                     let _ = plan_folder.remove_file(&jmx_tmp);
-                    if let Some(ref dt) = dataset_tmp {
+                    if let Some((ref dt, _)) = dataset_tmp {
                         let _ = plan_folder.remove_file(dt);
                     }
                     restore_grants(plan_entry, secrets_entry);
@@ -656,11 +656,10 @@ impl FileGrants {
         let mut ds_tmp = dataset_tmp;
         let mut jmx_t = Some(jmx_tmp);
 
-        if let (Some((sec_folder, sec_name, _)), Some(tmp)) = (&secrets_target, sec_tmp.take()) {
-            let staged_id = sec_folder.entry_identity(&tmp).map_err(io)?.map(|(_, id)| id);
+        if let (Some((sec_folder, sec_name, _)), Some((tmp, staged_id))) = (&secrets_target, sec_tmp.take()) {
             if let Err(err) = sec_folder.publish_no_clobber(&tmp, sec_name) {
                 let _ = sec_folder.remove_file(&tmp);
-                cleanup_remaining(jmx_t.as_deref(), ds_tmp.as_deref(), None);
+                cleanup_remaining(jmx_t.as_deref(), ds_tmp.as_ref().map(|(t, _)| t.as_os_str()), None);
                 restore_grants(plan_entry, secrets_entry);
                 if err.kind() == std::io::ErrorKind::AlreadyExists {
                     return Err(GrantError::Invalid(
@@ -669,14 +668,11 @@ impl FileGrants {
                 }
                 return Err(io(err));
             }
-            if let Some(id) = staged_id {
-                protected.push(id);
-            }
+            protected.push(staged_id);
             published.push(display_name(Some(sec_name)));
         }
 
-        if let (Some(sibling), Some(tmp)) = (sibling_name.as_ref(), ds_tmp.take()) {
-            let staged_id = plan_folder.entry_identity(&tmp).map_err(io)?.map(|(_, id)| id);
+        if let (Some(sibling), Some((tmp, staged_id))) = (sibling_name.as_ref(), ds_tmp.take()) {
             let target_blocked = match plan_folder.entry_identity(sibling) {
                 Ok(Some((true, _))) => {
                     Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "dataset destination is a symbolic link"))
@@ -713,9 +709,7 @@ impl FileGrants {
                     published.join(", ")
                 )));
             }
-            if let Some(id) = staged_id {
-                protected.push(id);
-            }
+            protected.push(staged_id);
             published.push(display_name(Some(sibling)));
         }
 
@@ -1198,11 +1192,18 @@ fn open_pinned_write_dir(dir: &Path, id: FileId) -> Result<Dir, GrantError> {
     Ok(folder)
 }
 
-fn stage_in(folder: &Dir, bytes: &[u8], owner_only: bool) -> Result<OsString, GrantError> {
+fn stage_in(folder: &Dir, bytes: &[u8], owner_only: bool) -> Result<(OsString, FileId), GrantError> {
     let tmp = OsString::from(format!(".anvil-{}.partial", uuid::Uuid::new_v4().simple()));
-    let file = folder.create_new(&tmp, owner_only).map_err(io)?;
-    match write_synced(file, bytes) {
-        Ok(()) => Ok(tmp),
+    let mut file = folder.create_new(&tmp, owner_only).map_err(io)?;
+    let res = (|| -> std::io::Result<FileId> {
+        std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()?;
+        let meta = file.metadata()?;
+        file_id(&file, &meta)
+    })();
+    drop(file);
+    match res {
+        Ok(id) => Ok((tmp, id)),
         Err(err) => {
             let _ = folder.remove_file(&tmp);
             Err(io(err))
