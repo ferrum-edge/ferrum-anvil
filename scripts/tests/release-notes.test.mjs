@@ -472,8 +472,7 @@ test("only bundle-windows can request an OIDC token, and it runs no release chec
   assert.ok(jobs["check-windows"].includes("bash scripts/release/check-artifacts.sh"));
   assert.ok(!/environment:|secrets\./.test(jobs["check-windows"]), "check-windows has no environment and no secret");
   assert.match(jobs["bundle-windows"], /Binaries match the build job's recorded digests/);
-  assert.match(jobs.publish, /needs: \[preflight, build, check-windows\]/);
-  assert.match(jobs.build, /name: compiled-\$\{\{ matrix\.target \}\}[\s\S]*?retention-days: 30/);
+  assert.match(jobs.build, /name: compiled-\$\{\{ matrix\.target \}\}[\s\S]*?retention-days: 35/);
 });
 
 // release.yml's top-level jobs, each with its text, and a job's steps.
@@ -543,4 +542,71 @@ test("every job after preflight checks out github.sha, never a preflight output"
     }
   }
   assert.ok(checkouts >= 4, "build, bundle-windows, check-windows and publish check out the code");
+});
+
+test("the updater private key reaches only sign-updater, which runs no bundler", () => {
+  const jobs = workflowJobs();
+  const holders = Object.entries(jobs)
+    .filter(([, text]) => /secrets\.TAURI_SIGNING_PRIVATE_KEY(?!\s*!=)/.test(text))
+    .map(([name]) => name);
+  assert.deepEqual(holders, ["sign-updater"], "only sign-updater maps the updater key's value; others test only whether it exists");
+  const signer = jobs["sign-updater"];
+  assert.ok(!/tauri (build|bundle)|cargo |\.\/\.github\/actions\/setup/.test(signer), "sign-updater compiles and bundles nothing");
+  assert.match(signer, /npm ci --ignore-scripts/);
+  assert.match(signer, /bash scripts\/release\/sign-updater\.sh dist sigs/);
+  assert.match(jobs.publish, /needs: \[preflight, build, check-windows, sign-updater\]/);
+  assert.match(jobs.publish, /pattern: updater-signatures/);
+  // The updater config gives the bundler the public key only.
+  const config = readFileSync(join(root, "scripts", "release", "updater-config.sh"), "utf8");
+  assert.ok(!config.includes("createUpdaterArtifacts"), "the bundler creates no updater artifact");
+});
+
+test("sign-updater signs or self-tests only when it can: a tagged run without the updater key still reaches the draft", () => {
+  const steps = jobSteps(workflowJobs()["sign-updater"]);
+  const cond = (s) => /\n        if: (.*)\n/.exec(s)?.[1] ?? "";
+  // Each step's condition for the three kinds of run.
+  const runs = { dryRun: { tag: "", updater: "false" }, taggedWithKey: { tag: "anvil-v1.2.3", updater: "true" }, taggedWithoutKey: { tag: "anvil-v1.2.3", updater: "false" } };
+  const evaluate = (expr, run) => {
+    if (!expr) return true;
+    return expr.split(" && ").every((part) => {
+      const m = /^(needs\.preflight\.outputs\.tag|steps\.updater\.outputs\.updater) (==|!=) '([^']*)'$/.exec(part.trim());
+      assert.ok(m, `unexpected condition ${part}`);
+      const value = m[1].endsWith("tag") ? run.tag : run.updater;
+      return m[2] === "==" ? value === m[3] : value !== m[3];
+    });
+  };
+  const ran = (run) => steps.filter((s) => evaluate(cond(s), run));
+  // Ignore 6-space YAML comments attached to the preceding step by jobSteps splitting.
+  const signs = (s) =>
+    /sign-updater\.sh|updater-manifest\.mjs|upload-artifact/.test(
+      s.replace(/^ {6}#.*$/gm, '')
+    );
+  // A tagged run without the key signs nothing, builds no manifest, uploads
+  // nothing and fails no step: publish and the draft release follow.
+  assert.deepEqual(ran(runs.taggedWithoutKey).filter(signs), []);
+  assert.ok(ran(runs.taggedWithoutKey).some((s) => s.includes("::warning::no owner updater key")));
+  // The self-test (throwaway key, all seven entries) runs in every dry run and only there.
+  const selfTest = steps.filter((s) => s.includes("Self-test of signing"));
+  assert.equal(selfTest.length, 1);
+  assert.deepEqual(Object.entries(runs).filter(([, r]) => evaluate(cond(selfTest[0]), r)).map(([n]) => n), ["dryRun"]);
+  // The owner's key signs in a tagged run with the key only.
+  const owner = steps.filter((s) => s.includes("bash scripts/release/sign-updater.sh dist sigs"));
+  assert.equal(owner.length, 1);
+  assert.deepEqual(Object.entries(runs).filter(([, r]) => evaluate(cond(owner[0]), r)).map(([n]) => n), ["taggedWithKey"]);
+  // collect.sh makes the macOS updater archive in the same two cases only.
+  const collect = readFileSync(join(root, "scripts", "release", "collect.sh"), "utf8");
+  assert.match(collect, /\[ "\$\{UPDATER:-false\}" = "true" \] \|\| \[ -z "\$\{TAG:-\}" \]/);
+});
+
+test("check-targets.sh expects exactly the release matrix's targets, and both downloading jobs run it", () => {
+  const jobs = workflowJobs();
+  const matrix = [...jobs.build.matchAll(/^\s+- target: (\S+)$/gm)].map((m) => m[1]).sort();
+  assert.deepEqual(matrix, ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]);
+  const script = readFileSync(join(root, "scripts", "release", "check-targets.sh"), "utf8");
+  const expected = /^expected=\(([^)]*)\)$/m.exec(script)[1].split(/\s+/).sort();
+  assert.deepEqual(expected, matrix);
+  for (const job of ["sign-updater", "publish"]) assert.match(jobs[job], /bash scripts\/release\/check-targets\.sh dist/, `${job} checks the targets`);
+  // Every build artifact outlives the longest approval wait (30 days).
+  const retention = [...readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8").matchAll(/retention-days: (\d+)/g)].map((m) => Number(m[1]));
+  assert.ok(retention.every((d) => d >= 35 || d === 7), `retention days ${retention.join(", ")}`);
 });

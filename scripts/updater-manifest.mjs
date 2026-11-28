@@ -24,6 +24,9 @@
 // are always written. The bare `{os}-{arch}` key is written only for macOS,
 // whose sole updater format is the .app archive: on Linux it would hand the
 // AppImage to .deb/.rpm installs, on Windows the NSIS installer to MSI installs.
+// With any signed artifact the manifest must list exactly RELEASE_PLATFORMS
+// (all seven keys); a release missing an updater file (say the MSI) exits 1
+// and writes nothing, so no install format is left without an update.
 //
 // The manifest is served from releases/latest/download/latest.json, which
 // resolves only once the owner publishes the draft release.
@@ -76,6 +79,33 @@ export function verifyUpdaterSignature(data, sigFileText, pubkey) {
   const trusted = sig[2].slice("trusted comment:".length).trim();
   if (!verify(null, Buffer.concat([signature, Buffer.from(trusted, "utf8")]), pk.key, b64(sig[3]))) throw new Error("trusted comment signature does not verify");
   return trusted;
+}
+
+/**
+ * The platform keys every Anvil release's latest.json carries: both macOS
+ * architectures (installer key and bare key), the AppImage, and both Windows
+ * installers. A release signed with the owner's updater key must list exactly
+ * these, so no install format is left without an update target.
+ */
+export const RELEASE_PLATFORMS = [
+  "darwin-aarch64",
+  "darwin-aarch64-app",
+  "darwin-x86_64",
+  "darwin-x86_64-app",
+  "linux-x86_64-appimage",
+  "windows-x86_64-msi",
+  "windows-x86_64-nsis",
+];
+
+/** Problems with a manifest's platform keys: anything other than exactly RELEASE_PLATFORMS. */
+export function platformSetProblems(keys) {
+  const got = new Set(keys);
+  const missing = RELEASE_PLATFORMS.filter((k) => !got.has(k));
+  const extra = [...got].filter((k) => !RELEASE_PLATFORMS.includes(k)).sort();
+  const problems = [];
+  if (missing.length) problems.push(`latest.json has no entry for ${missing.join(", ")} (every release lists ${RELEASE_PLATFORMS.join(", ")})`);
+  if (extra.length) problems.push(`latest.json lists unexpected platforms ${extra.join(", ")}`);
+  return problems;
 }
 
 /** The `version:` field Tauri writes into the trusted comment, if any. */
@@ -207,6 +237,7 @@ function main() {
     return;
   }
   if (count > 0 && !pubkey) errors.push("updater signatures present but no build recorded the updater public key; cannot verify them");
+  if (count > 0) errors.push(...platformSetProblems(Object.keys(platforms)));
   if (errors.length) {
     console.error("updater manifest not written:\n  " + errors.join("\n  "));
     process.exit(1);

@@ -62,8 +62,9 @@ build produced:
 - The Windows **build** job compiles the app and the CLI and makes the SBOMs.
   It records the two binaries' SHA-256 digests and its `rustc -V` / `cargo -V`
   as job outputs, and uploads the binaries and SBOMs as the
-  `compiled-x86_64-pc-windows-msvc` artifact (kept 30 days, the longest
-  GitHub lets a deployment wait for approval).
+  `compiled-x86_64-pc-windows-msvc` artifact (kept 35 days, like every build
+  artifact of the release workflow: longer than GitHub lets a deployment
+  wait for approval, 30 days, and as long as a workflow run can last).
 - **bundle-windows** (Windows 2025, the `release` environment for a tag) is
   the only job with `id-token: write`, which Azure Artifact Signing's OIDC
   route needs. It checks out the same commit and installs only the toolchain
@@ -75,7 +76,7 @@ build produced:
   and passed to SignTool, never executed) and step 4 (signature
   verification; `build-info.json` records the build job's toolchain). It
   uploads the result as `bundled-x86_64-pc-windows-msvc`. If the compiled
-  artifact is gone (an approval that waited over 30 days, or a deletion), it
+  artifact is gone (expired, or deleted), it
   fails and says to re-run all jobs, not only the failed ones.
 - **check-windows** (no environment, no credential, no OIDC permission) runs
   step 3, the release check whose runtime probe launches the app, on the
@@ -96,12 +97,12 @@ Each build job (bundle-windows and check-windows for Windows):
    it (never into a Linux or Windows step), and the Windows credentials exist
    only in bundle-windows (a `.pfx` imported and removed afterwards, or the
    Artifact Signing sign command written and, for OIDC, the Azure login made
-   and ended). This is defense in depth, not isolation: both steps share the runner, and bundling
-   itself runs third-party tools (the AppImage bundler downloads unpinned
-   `linuxdeploy` plugins and its `AppRun` while the key is present). Signing
-   the updater artifacts in a separate job with `tauri signer sign` would be
-   stronger. With the owner's updater key a tagged release also writes signed
-   updater artifacts (see [In-app updates](#in-app-updates)).
+   and ended). This is defense in depth, not isolation: both steps share the
+   runner, and bundling itself runs third-party tools (the AppImage bundler
+   downloads unpinned `linuxdeploy` plugins and its `AppRun`). The updater key
+   is not among those credentials: the bundle step gets only the updater's
+   public key and creates no updater artifact; the separate **sign-updater**
+   job signs the updater files afterwards (see [In-app updates](#in-app-updates)).
 
    On Linux, `linuxdeploy` itself is pinned: Tauri CLI 2.12 bundles with the
    `linuxdeploy-07333c6` build, which it picks by release tag only and
@@ -131,6 +132,34 @@ Each build job (bundle-windows and check-windows for Windows):
    versions, signing status).
 5. CycloneDX 1.5 SBOMs for `anvil-desktop` and `anvil-cli` for that target
    (`cargo cyclonedx`, build job); the job fails if the desktop SBOM lists the WebDriver plugin.
+
+**sign-updater** (Ubuntu, the `release` environment for a tag) first
+requires all four build targets' artifacts (`scripts/release/check-targets.sh`;
+publish checks the same). With the owner's updater key it signs every updater
+file the build jobs uploaded, requires exactly one of each (both macOS
+archives, the AppImage, the NSIS installer and the MSI), and uploads the
+signatures as `updater-signatures`; it runs no bundler (see
+[In-app updates](#in-app-updates)). Publish writes `latest.json` only with all
+seven platform entries, so a release can never leave an install format
+without an update. In every dry run it runs the same signing on copies of the
+files with a key generated for the run, builds `latest.json` from them
+(again requiring all seven entries), and uploads those throwaway signatures
+as `updater-signatures-selftest`; publish checks that each lands beside its
+file's target folder, then discards them. Nothing of the self-test reaches
+`dist/` or a release, and the throwaway key never leaves the job. A tagged
+run without the owner's updater key signs nothing (the job logs a warning):
+its draft has no `latest.json`, and the app's Upgrade button opens the
+release page.
+
+**If sign-updater's approval is delayed or denied.** GitHub lets a
+deployment wait at most 30 days for approval, and lets a run's jobs be re-run
+only within 30 days of the run's start; the build artifacts it signs are kept
+35 days. A missing input fails it (and publish) with the instruction to re-run
+all jobs, never a release without that platform. A denied, failed or expired
+sign-updater job skips publish and the release job: no draft is created, and
+nothing is half-published. Within 30 days of the run's start, approve it or
+re-run all jobs once the reason is fixed; after that the run cannot be re-run:
+start a fresh full release run from the same tag (Run workflow → *Use workflow from* → Tags → the tag, `dry_run` off, `tag` set to it), which builds, signs and checks every target again.
 
 **Publish** (Ubuntu): an npm SBOM of the UI's production dependencies
 (`@cyclonedx/cyclonedx-npm`), `license-report.json`, the list of GitHub Actions
@@ -619,10 +648,12 @@ route is only for an older certificate you already have.
       credentials themselves.
 - [ ] **First signed release**: push the `anvil-vX.Y.Z` tag as in
       [Cutting a release](#cutting-a-release). The run asks for approval of
-      the `release` environment twice: once for the four build jobs, and
-      again, after the Windows build, for `bundle-windows` (approve it within
-      30 days, while the compiled Windows artifact is kept; `check-windows`
-      needs no approval). Each **Signing
+      the `release` environment three times: for the four build jobs; after
+      the Windows build, for `bundle-windows`; and, once every target is built
+      and checked, for `sign-updater`. Approve each within 30 days of the
+      run's start (GitHub's limit for a pending approval and for re-running a
+      run's jobs). After that, start a fresh full release run from the same tag (Run workflow → *Use workflow from* → Tags → the tag, `dry_run` off, `tag` set to it), which builds, signs and checks every target again. `check-windows` and publish need no
+      approval. Each **Signing
       route** step logs the route chosen per platform within minutes; a
       missing or half-set value fails it there. `bundle-windows` prints its
       OIDC subject before logging in to Azure; if the login fails, compare it
@@ -678,15 +709,27 @@ read again on 2026-11-27):
   `anvil-v*`.
 
 Only a tagged release with both the private key and `ANVIL_UPDATER_PUBKEY`
-passes `bundle.createUpdaterArtifacts: true` and `plugins.updater.pubkey` as an
-extra `--config` (to the build, which compiles the key into the app, and to
-the bundle step); one without the other logs a warning and builds exactly as
-without a key. As defense in depth, the private key is in the environment of
-`tauri bundle` only, not of the compile step (build scripts, proc macros,
-`beforeBuildCommand`); both share the runner, so this narrows exposure rather
-than isolating the key. The job that bundles each target checks that the public key is in the
-built app binary and `build-info.json` records it (`updater.embedded`). Tauri then signs
-(minisign), recording the version in each signature's trusted comment:
+passes `plugins.updater.pubkey` as an extra `--config` (to the build, which
+compiles the key into the app, and to the bundle step); one without the other
+logs a warning and builds exactly as without a key. **The private key never
+reaches a job that compiles or bundles.** The bundle step creates no updater
+artifact; on macOS the collect step archives the `.app` as
+`<Product>_<version>_<arch>.app.tar.gz` with
+`scripts/release/macos-updater-archive.sh`, the way Tauri's bundler does (the
+`.app` as the archive's one top-level folder, symlinks kept, no macOS
+metadata), with the updater key and in every dry run. The macOS updater E2E
+installs an archive made by the same script and signed by `tauri signer
+sign`, so the format releases ship is the one tested. The job that bundles each target checks that the public key is in
+the built app binary and `build-info.json` records it (`updater.embedded`).
+Then the **sign-updater** job, which installs the desktop package's locked
+npm dependencies with `npm ci --ignore-scripts` (no lifecycle script runs;
+the Tauri CLI is the one it executes, for `tauri signer generate` in a dry run
+and `tauri signer sign`) and runs no bundler, compiler or bundler plugin, signs
+each updater file with `tauri signer sign --app-version <version>`
+(`scripts/release/sign-updater.sh`; minisign, recording the version in each
+signature's trusted comment), checks each signature against the compiled-in
+public key and the version, and uploads the `.sig` files, which the publish
+job places beside the files they sign:
 
 | Target | Updater file | `latest.json` keys |
 | --- | --- | --- |
