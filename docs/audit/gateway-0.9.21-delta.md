@@ -7,7 +7,7 @@
 | Contracts | Published `contracts-edge-0.9.21`, `92d8da5be93ea1ece9f47729b1f7aa10ae8a7c3f` |
 | Catalog | [`ferrum-edge-0.9.21/outcomes.json`](../../catalog/ferrum/ferrum-edge-0.9.21/outcomes.json), 629 outcome IDs: the 620 of 0.9.20 − 1 removed + 10 new |
 | Lab selection | `lab/gateway/RELEASE.lock` and `lab/gateway/releases/v0.9.21.lock`; the only supported release. v0.9.20 was retired with this adoption ([why](#v0920-is-retired)) |
-| Hosted qualification | All-profile Lab run 45974458935 on the adoption branch at `db543c01`: Ubuntu 554/0/21, macOS 558/0/19 ([details](#qualification-status)) |
+| Hosted qualification | All-profile Lab run 45974458935 on the adoption branch at `db543c01`: Ubuntu 554/0/21, macOS 558/0/19; with the EXT-E21 scenarios for the new outcomes, run 46069656125 at `59859d06`: Ubuntu 578/0/21, macOS 582/0/19 ([details](#qualification-status)) |
 | Audit date | 2026-11-27 |
 
 The [immutable comparison][compare] spans 837 commits. v0.9.21 follows published v0.9.20 directly,
@@ -192,7 +192,12 @@ On HTTP/1.1 and HTTP/2, gRPC-Web clients get a framed HTTP 200 trailer-frame ref
 native-gRPC header-only status:
 
 - route protocol admission: grpc-status 7, grpc-message `Request protocol not permitted on this
-  route` (`src/proxy/mod.rs:38026`);
+  route` (`src/proxy/mod.rs:38026`). With built-in plugins this is unreachable for gRPC-Web: the
+  gRPC-Web view keeps every HTTP plugin, and route admission refuses gRPC-Web only for a gRPC-only
+  gating plugin other than `grpc_method_router` and `grpc_deadline` (`src/plugin_cache.rs:6751`,
+  exemptions at `:6702`), which are the only built-in gRPC-only plugins. It needs a custom plugin.
+  EXT-E21-GRPC-ADMISSION observed this live: a gRPC-Web call on its route reached
+  `request_deduplication`, which refused it in a trailer frame with grpc-status 3;
 - an open circuit breaker: grpc-status 14, grpc-message `Service temporarily unavailable (circuit
   breaker open)`, keeping `X-Gateway-Error: circuit_breaker_open` (`src/proxy/mod.rs:40678`).
 
@@ -330,7 +335,8 @@ share one signal and name each other. `key_auth` keeps its own body.
   - `response_transformer` replaces such a backend response with 502
     (`src/plugins/response_transformer.rs:265`, `finalize_client_visible_response_body` at `:1580`).
   - The 502's `backend_error` token follows the backend-response builder's ≥500 mapping, as for the
-    other response-side replacements. It was not lab-observed.
+    other response-side replacements. Lab-observed on v0.9.21 (EXT-E21-RESP-DUP; see
+    [Qualification status](#qualification-status)).
   - Two new outcomes. `plugin.request_transformer.no_runtime_failure` is narrowed: the plugin now
     has a runtime refusal.
 - **`body_validator` (GHSA-84xq-rr63-39pw).** The response-side details no longer describe the
@@ -454,9 +460,49 @@ systems.
   - Ubuntu's two extra skips are again AUTH-030 and AUTH-031, whose lab XML signer needs
     `xmllint`, which that runner lacks.
 
-The catalog's new v0.9.21 outcomes have no Lab scenario of their own (`fixture_ids` empty); they
-are source-audited only. Carried outcomes keep their Lab fixtures, and the run above exercises them
-against v0.9.21. No physical-device native acceptance, platform signing, OAuth, provider-account or
+### New outcomes exercised live (EXT-E21)
+
+The adoption left the new v0.9.21 outcomes source-audited only. Fourteen Lab extension scenarios
+(`EXT-E21-*`, branch `claude/v1-no-loose-ends`) now exercise each of them, and the two signals the
+adoption could not settle from source, against the pinned gateway. `fixture_ids` lists
+failure-matrix seeds only, so it stays empty for these outcomes. Evidence: hosted all-profile run
+[46069656125](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/46069656125), head `59859d06`:
+Ubuntu 26.04 **578 passed / 0 failed / 21 skipped**, macOS 15 **582 / 0 / 19** (24 more passes than
+run 45974458935: each of the twelve scenarios then passes trusted and untrusted). After review, the
+gRPC-Web legs of the admission and breaker scenarios, the jwks_auth and oauth2_introspection
+query-token routes, and stricter body and source checks were added: all-profile run
+[46076435648](https://github.com/ferrum-edge/ferrum-anvil/actions/runs/46076435648) (pull_request, head
+`c6b6d4b6`), Ubuntu 26.04 **582 passed / 0 failed / 21 skipped** (four more passes: the two new
+query-token scenarios, trusted and untrusted).
+
+| Outcome or signal | Scenario | What the real gateway sent |
+|---|---|---|
+| `plugin.jwt_auth.ambiguous_query_token`, `plugin.jwks_auth.ambiguous_query_token`, `plugin.oauth2_introspection.ambiguous_query_token` | EXT-E21-QUERY-ALIAS, -JWKS, -INTROSPECT (one route per plugin) | each: 401 `Ambiguous token query parameter`, `Bearer error="invalid_request"`, backend untouched; a trusted diagnosis names all three as candidates |
+| `plugin.request_transformer.ambiguous_json_body` | EXT-E21-REQ-DUP | 400 with the documented error, no `X-Gateway-Error`, backend untouched |
+| `plugin.response_transformer.ambiguous_json_body` | EXT-E21-RESP-DUP | 502 with `X-Gateway-Error: backend_error` after the backend answered: the stamped token is confirmed live |
+| `gateway.routing.grpc_web_untranslated_on_assertion_route` | EXT-E21-GRPCWEB-ASSERT | HTTP 200 with the status in the body trailer frame (status source checked), grpc-status 13, grpc-message from the JSON error |
+| `gateway.routing.grpc_web_relabelled_on_assertion_route` | EXT-E21-GRPCWEB-RELABEL | the JSON 415 for a plain request relabelled by a transformer (a list-valued content-type that publication admits) |
+| `plugin.mcp_gateway.openapi_bridge_outside_route` | EXT-E21-MCP-BRIDGE | JSON-RPC -32603 for a bridge served from a regex route; backend never called |
+| `gateway.routing.protocol_not_permitted.grpc` | EXT-E21-GRPC-ADMISSION | native gRPC: Trailers-Only grpc-status 7, `Request protocol not permitted on this route`. gRPC-Web is not refused by route admission with built-in plugins (the framed form of #7155 needs a custom gRPC-only gating plugin): the gRPC-Web call reached `request_deduplication`, which refused it in a body trailer frame with grpc-status 3, and Anvil did not call it a route-admission refusal |
+| `gateway.admission.circuit_open.grpc` | EXT-E21-GRPC-BREAKER | grpc-status 14 with the breaker message and `X-Gateway-Error: circuit_breaker_open`: native Trailers-Only, and gRPC-Web in a body trailer frame (#7155); operator log `rejection_phase` `circuit_breaker_open` |
+| `plugin.ai_prompt_shield.uninspectable` (duplicate members) | EXT-E21-SHIELD-DUP | 400 with the duplicate-member message |
+| `plugin.body_validator.response_validation_failed` (fixed detail) | EXT-E21-BODYVAL-RESP | 502 `backend_error` with `Response body is missing a required field` |
+| `frontend_parse.protocol_header_violation` (Content-Type singleton) | EXT-E21-CT-LIST | 400 `Content-Type header contains more than one media type` |
+| WebSocket backend refusals relayed (#7414) | EXT-E21-WS-RELAY | the backend's 503 and its body relayed byte for byte with no `X-Gateway-Error`; a trusted diagnosis matches `protocol.ws.backend_connection_limit` only as a candidate (unknown confidence, relayed-backend alternative) |
+
+The real gateway corrected two Lab assumptions and one catalog note:
+
+- Authorize plugins run before the assertion-route refusal. With an OPA that fails closed, the
+  first run (46067252897) got OPA's own 503, framed as grpc-status 14 "authorization service
+  unavailable". The catalog outcome's notes now say so.
+- A regex `listen_path` must match the whole request path.
+- A generated bridge tool is hidden until configured (`discovery.on_new_tool` defaults to
+  `hide_until_configured`), so an unlisted one is refused with -32001 before the route check
+  (run 46068538969).
+
+No catalog signal was proved wrong.
+
+Carried outcomes keep their Lab fixtures, and the runs above exercise them against v0.9.21. No physical-device native acceptance, platform signing, OAuth, provider-account or
 broader performance acceptance is claimed.
 
 [compare]: https://github.com/ferrum-edge/ferrum-edge/compare/e4a606a00352674daaef08636e3e359e6c48ba18...f9915358c8032214f4034a17c28cdf72d14006c3

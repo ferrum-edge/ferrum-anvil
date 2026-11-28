@@ -67,6 +67,7 @@ must make no gateway attribution.
 | MCP-010 | as `mcp-outsider` (no allowed group): `tools/list`, then `tools/call gx.echo` | `gx.echo` not listed to it; `-32001`, `plugin.mcp_gateway.tool_denied`; not forwarded. Recovery: the grantee's call succeeds |
 | MCP-011 | as `mcp-suspended` (an allowed and a denied group) | the denied group wins: not listed, `-32001`, `plugin.mcp_gateway.tool_denied`; not forwarded. Recovery: the grantee's call succeeds |
 | MCP-012 | `tools/call br.echo` on `/echo/mcp` | the bridged `GET /echo/bridge` reached the route's backend exactly once and its JSON is the tool's `structuredContent` (`method` `GET`, `target` `/echo/bridge`); `isError` false; success with no catalog outcome; no MCP server called |
+| EXT-E21-MCP-BRIDGE | `tools/call br.ping` on a second `mcp_gateway` instance whose OpenAPI bridge is served from a regex route (`~/e21-bridge/.*`) | JSON-RPC `-32603` `OpenAPI bridge operation path is outside this proxy's route` (v0.9.21 confines bridged calls to a literal listen prefix, #7410, GHSA-26x8-8jq5-f73p): `plugin.mcp_gateway.openapi_bridge_outside_route`; not forwarded |
 
 Anvil sends MCP requests as `Content-Type: application/json` with no `charset`, so v0.9.10's refusal
 of a non-UTF-8 request charset (`-32600` before routing, GHSA-4f9m-cfqg-fhx9) changes no scenario
