@@ -544,3 +544,455 @@ test("every job after preflight checks out github.sha, never a preflight output"
   }
   assert.ok(checkouts >= 4, "build, bundle-windows, check-windows and publish check out the code");
 });
+
+test("the performance harness takes only its own app's ui_ready line, and buckets launches by index", () => {
+  const script = `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("m", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+log = ('2026-11-27T10:00:00.000Z INFO anvil_desktop: startup milestone milestone="ui_ready" pid=111 startup_ms=500\\n'
+       '2026-11-27T10:00:01.000Z INFO anvil_desktop: startup milestone milestone="ui_ready" pid=222 startup_ms=900\\n')
+runs = [{"run": 1, "error": "timeout"}, {"run": 2, "ready_ms": 10, "attribution": "a"}, {"run": 3, "ready_ms": 30, "attribution": "b"}]
+s = m.summarize(runs)
+print(json.dumps({"own": m.ready_in(log, 222), "other": m.ready_in(log, 333), "first": s["first_run"], "warm": s["warm_runs"]["ready_ms"], "atts": s["warm_attributions"]}))
+`;
+  const r = spawnSync("python3", ["-I", "-c", script, join(root, "scripts", "perf", "measure_desktop.py")], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.own, 900, "the line of the started pid");
+  assert.equal(out.other, null, "another instance's line never counts");
+  assert.deepEqual(out.first, {}, "a failed launch 1 leaves the first-launch column empty");
+  assert.deepEqual(out.warm, { median: 20, min: 10, max: 30, n: 2 }, "every valid later launch is in the later median");
+  assert.deepEqual(out.atts, ["a", "b"]);
+});
+
+test("the performance harness never force-stops provisional helpers, handles early exit and listing failure, and summarizes missing lanes", () => {
+  const script = `
+import importlib.util, json, os, sys, tempfile
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("m", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+
+# 1. PID reuse does not match alive() or force_stop().
+m.processes = lambda: [{"pid": 500, "ppid": 1, "start": "Sat Nov 28 06:00:00 2026", "name": "unrelated", "rss": 1}]
+assert m.alive({(500, "Sat Nov 28 05:00:00 2026", "WebKitWebProcess")}) == set()
+assert m.alive({(500, "Sat Nov 28 06:00:00 2026", "unrelated")}) == {(500, "Sat Nov 28 06:00:00 2026", "unrelated")}
+
+# 2. Windows ancestry rejects pre-existing helpers and earlier-start stale PPIDs.
+m.SYSTEM = "Windows"
+win_before = {(400, "2026-11-28T05:00:00.0000000Z", "msedgewebview2.exe")}
+win_rows = [
+    {"pid": 300, "ppid": 1, "start": "2026-11-28T06:00:00.0000000Z", "name": "anvil-desktop.exe", "rss": 10},
+    {"pid": 400, "ppid": 300, "start": "2026-11-28T05:00:00.0000000Z", "name": "msedgewebview2.exe", "rss": 20},
+    {"pid": 401, "ppid": 300, "start": "2026-11-28T05:59:59.0000000Z", "name": "msedgewebview2.exe", "rss": 20},
+    {"pid": 402, "ppid": 300, "start": "2026-11-28T06:00:01.0000000Z", "name": "msedgewebview2.exe", "rss": 20},
+]
+wfound, _, wverified = m.helpers(win_rows, 300, win_before)
+assert [h["pid"] for h in wfound] == [402] and wverified is True
+
+# 3. macOS shared-responsible-pid and early-exit orphans are provisional and block clean teardown.
+m.SYSTEM = "Darwin"
+m.responsible_pid = lambda pid: 99 if pid in (100, 200) else None
+rows = [
+    {"pid": 100, "ppid": 99, "start": "Sat Nov 28 06:00:00 2026", "name": "anvil-desktop", "rss": 10},
+    {"pid": 200, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.WebContent", "rss": 20},
+]
+found, method, verified = m.helpers(rows, 100, set())
+assert len(found) == 1 and verified is False and "provisional" in method
+
+# Early macOS exit: app is already gone (responsible_pid(101) -> None), helper still has owner 99.
+killed_pids = []
+orig_kill = m.os.kill
+m.os.kill = lambda pid, sig: killed_pids.append((pid, sig))
+m.responsible_pid = lambda pid: 99 if pid == 201 else None
+orphan = {"pid": 201, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.WebContent", "rss": 20}
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: None
+orig_wait_quiet = m._wait_teardown_quiet
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: orig_wait_quiet(before, v, p, timeout=0.01, quiet_seconds=0.0)
+mac_calls = {"n": 0}
+def mac_early_procs():
+    mac_calls["n"] += 1
+    return [] if mac_calls["n"] == 1 else [orphan]
+m.processes = mac_early_procs
+class EarlyProc:
+    pid = 101
+    returncode = 1
+    def poll(self):
+        return 1
+orig_popen = m.subprocess.Popen
+m.subprocess.Popen = lambda *a, **kw: EarlyProc()
+r_mac = m.one_run("/bin/true", 0, 0.05, 1)
+assert r_mac["stopped_cleanly"] is False and r_mac["cleanup_unconfirmed"] is True
+assert r_mac.get("provisional_left_running") == [201]
+assert killed_pids == [], f"provisional macOS helper must never be SIGKILLed: {killed_pids}"
+m.os.kill = orig_kill
+m.subprocess.Popen = orig_popen
+
+# 4. Sampling + teardown listing exception preserves ready_ms and cleanup_error.
+m.SYSTEM = "Linux"
+m.ready_line = lambda sizes, pid: 123
+class LiveProc:
+    pid = 777
+    returncode = None
+    def poll(self):
+        return self.returncode
+    def wait(self, timeout=None):
+        self.returncode = 0
+        return 0
+    def kill(self):
+        self.returncode = -9
+call_n = {"n": 0}
+def flaky_procs():
+    call_n["n"] += 1
+    if call_n["n"] == 1:
+        return []
+    raise RuntimeError("ps failed")
+m.processes = flaky_procs
+m.subprocess.Popen = lambda *a, **kw: LiveProc()
+stopped = []
+orig_stop = m.stop
+m.stop = lambda p, *a: (stopped.append(p.pid) or (True, None))
+r = m.one_run("/bin/true", 0, 0.05, 1)
+assert stopped == [777], f"expected stop() on listing failure, got {stopped}"
+assert r["startup_ms_in_process"] == 123 and "ready_ms" in r
+assert r["stopped_cleanly"] is False and r["cleanup_unconfirmed"] is True and "cleanup_error" in r
+m.stop = orig_stop
+m.subprocess.Popen = orig_popen
+
+# 5. Real Unix stop() terminates a live session process cleanly and never invokes killpg after reap.
+if os.name == "posix":
+    m.SYSTEM = "Linux"
+    real_p = m.subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    ok, err = m.stop(real_p)
+    assert ok is True and err is None and real_p.returncode is not None
+    killpg_calls = []
+    orig_killpg = m.os.killpg
+    m.os.killpg = lambda pgid, sig: killpg_calls.append((pgid, sig))
+    try:
+        ok2, err2 = m.stop(real_p)
+        assert ok2 is True and err2 is None and killpg_calls == []
+    finally:
+        m.os.killpg = orig_killpg
+
+# 5b. Linux early exit (even when app still has a zombie row) catches reparented WebKitGTK orphan and never adopts recycled app PID.
+m.SYSTEM = "Linux"
+zombie_app = {"pid": 101, "ppid": 1, "start": "Sat Nov 28 06:00:00 2026", "name": "unrelated-reused", "rss": 10}
+linux_orphan = {"pid": 901, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "WebKitWebProcess", "rss": 20}
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: None
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: orig_wait_quiet(before, v, p, timeout=0.01, quiet_seconds=0.0)
+lin_calls = {"n": 0}
+def linux_early_procs():
+    lin_calls["n"] += 1
+    return [] if lin_calls["n"] == 1 else [zombie_app, linux_orphan]
+m.processes = linux_early_procs
+m.subprocess.Popen = lambda *a, **kw: EarlyProc()
+r_lin = m.one_run("/bin/true", 0, 0.05, 1)
+assert r_lin["stopped_cleanly"] is False and r_lin["cleanup_unconfirmed"] is True
+assert r_lin.get("provisional_left_running") == [901]
+assert "left_running" not in r_lin, "reused app PID must never enter verified_owned"
+m.subprocess.Popen = orig_popen
+
+# 5c. macOS partial procinfo failure keeps unresolved new WebKit helpers in provisional_out even alongside verified helpers.
+m.SYSTEM = "Darwin"
+m.responsible_pid = lambda pid: 100 if pid in (100, 202) else None
+prov = set()
+mfound, _, mver = m.helpers(
+    [
+        {"pid": 100, "ppid": 99, "start": "Sat Nov 28 06:00:00 2026", "name": "anvil-desktop", "rss": 10},
+        {"pid": 202, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.WebContent", "rss": 20},
+        {"pid": 203, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.Networking", "rss": 20},
+    ],
+    100,
+    set(),
+    known_app_owner=100,
+    provisional_out=prov,
+)
+assert mver is True and [h["pid"] for h in mfound] == [202]
+assert (203, "Sat Nov 28 06:00:01 2026", "com.apple.WebKit.Networking") in prov
+
+# 5d. Linux force_stop signals ONLY already-pinned pidfds and returns False if any survivor is unpinned; non-Linux returns False.
+m.SYSTEM = "Linux"
+m.processes = lambda: [
+    {"pid": 888, "ppid": 1, "start": "T1", "name": "WebKitWebProcess", "rss": 10},
+    {"pid": 889, "ppid": 1, "start": "T1", "name": "WebKitGPUProcess", "rss": 10},
+]
+sent_sigs = []
+orig_pidfd_send = getattr(m.signal, "pidfd_send_signal", None)
+m.signal.pidfd_send_signal = lambda fd, sig: sent_sigs.append((fd, sig))
+try:
+    id_a = (888, "T1", "WebKitWebProcess")
+    id_b = (889, "T1", "WebKitGPUProcess")
+    assert m.force_stop({id_a}, {id_a: 42}) is True
+    assert sent_sigs == [(42, m.signal.SIGKILL)]
+    sent_sigs.clear()
+    assert m.force_stop({id_a, id_b}, {id_a: 42}) is False
+    assert sent_sigs == [(42, m.signal.SIGKILL)]
+finally:
+    if orig_pidfd_send is None:
+        delattr(m.signal, "pidfd_send_signal")
+    else:
+        m.signal.pidfd_send_signal = orig_pidfd_send
+
+m.SYSTEM = "Darwin"
+assert m.force_stop({(888, "T1", "WebKitWebProcess")}) is False
+
+# 5e. Windows job launch failure (both no-job and valid-job-handle suspended launch failure) never falls back to unsuspended Popen.
+m.SYSTEM = "Windows"
+m.processes = lambda: []
+popen_called = []
+m.subprocess.Popen = lambda *a, **kw: popen_called.append(a)
+r_win_fail = m.one_run("anvil-desktop.exe", 0, 0.05, 1)
+assert popen_called == [] and r_win_fail["cleanup_unconfirmed"] is True and "Windows Job Object" in r_win_fail["error"]
+
+orig_win_job = m._WinJob
+class FakeWinJob:
+    def __init__(self):
+        self.handle = 1234
+        self.assigned = False
+        self.closed = False
+        self.last_error = 0
+    def spawn_suspended_and_assign(self, app, env):
+        self.last_error = 5
+        return None
+    def close(self):
+        self.closed = True
+        self.handle = None
+fake_jobs = []
+def make_fake_job():
+    j = FakeWinJob()
+    fake_jobs.append(j)
+    return j
+m._WinJob = make_fake_job
+try:
+    r_win_suspended = m.one_run("anvil-desktop.exe", 0, 0.05, 1)
+    assert popen_called == [] and r_win_suspended["cleanup_unconfirmed"] is True
+    assert "win32 error 5" in r_win_suspended["error"]
+    assert len(fake_jobs) == 1 and fake_jobs[0].closed is True
+finally:
+    m._WinJob = orig_win_job
+m.subprocess.Popen = orig_popen
+
+# 5f. Linux pin_linux_pidfd requires exact /proc starttime ticks observed during ancestry verification and closes recycled-PID fds.
+m.SYSTEM = "Linux"
+closed_fds = []
+orig_pidfd_open = getattr(m.os, "pidfd_open", None)
+orig_os_close = m.os.close
+orig_linux_st = m._linux_proc_starttime
+m.os.pidfd_open = lambda pid, flags: 900 + pid
+m.os.close = lambda fd: closed_fds.append(fd)
+try:
+    pinned = {}
+    # Non-tick start token must never pin.
+    m._linux_proc_starttime = lambda pid: "12345"
+    m.pin_linux_pidfd((10, "Sat Nov 28 06:00:00 2026", "WebKitWebProcess"), pinned)
+    assert pinned == {} and closed_fds == []
+    # Recycled PID whose starttime tick changed between survey and pidfd_open must be rejected and closed.
+    m._linux_proc_starttime = lambda pid: "99999"
+    m.pin_linux_pidfd((11, "ticks:12345", "WebKitWebProcess"), pinned)
+    assert pinned == {} and closed_fds == [911]
+    # Exact matching starttime tick is pinned and kept open.
+    m._linux_proc_starttime = lambda pid: "12345"
+    m.pin_linux_pidfd((12, "ticks:12345", "WebKitWebProcess"), pinned)
+    assert pinned == {(12, "ticks:12345", "WebKitWebProcess"): 912} and closed_fds == [911]
+finally:
+    if orig_pidfd_open is None:
+        delattr(m.os, "pidfd_open")
+    else:
+        m.os.pidfd_open = orig_pidfd_open
+    m.os.close = orig_os_close
+    m._linux_proc_starttime = orig_linux_st
+
+# 5g. Late-appearing WebKit helper discovered during the real quiet-window final survey (after empty polls) prevents false stopped_cleanly=True.
+m.SYSTEM = "Darwin"
+class CleanExitProc:
+    def __init__(self):
+        self.pid = 700
+        self.returncode = None
+    def poll(self):
+        return self.returncode
+    def wait(self, timeout=None):
+        self.returncode = 0
+        return 0
+    def kill(self):
+        self.returncode = -9
+late_calls = {"n": 0}
+late_helper = {"pid": 777, "ppid": 1, "start": "Sat Nov 28 06:00:02 2026", "name": "com.apple.WebKit.WebContent", "rss": 20}
+def late_darwin_procs():
+    late_calls["n"] += 1
+    # Pre-launch (1), pre-stop (2), and first quiet-window teardown poll (3) see no helper;
+    # the quiet confirmation follow-up survey (4+) sees the late WebKit XPC helper.
+    return [] if late_calls["n"] <= 3 else [late_helper]
+orig_stop = m.stop
+orig_quiet_secs = m.UNIX_QUIET_CONFIRM_SECONDS
+m.processes = late_darwin_procs
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: None
+m.stop = lambda proc, *a, **kw: (True, None)
+m.UNIX_QUIET_CONFIRM_SECONDS = 0.05
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: orig_wait_quiet(before, v, p, timeout=0.12, quiet_seconds=quiet_seconds)
+m.subprocess.Popen = lambda *a, **kw: CleanExitProc()
+try:
+    r_late = m.one_run("/bin/true", 0, 0.01, 1)
+    assert late_calls["n"] >= 4, f"expected quiet confirmation follow-up survey, got {late_calls['n']}"
+    assert r_late["stopped_cleanly"] is False and r_late["cleanup_unconfirmed"] is True
+    assert r_late.get("provisional_left_running") == [777]
+finally:
+    m.UNIX_QUIET_CONFIRM_SECONDS = orig_quiet_secs
+    m._wait_teardown_quiet = orig_wait_quiet
+    m.stop = orig_stop
+    m.subprocess.Popen = orig_popen
+
+# 5h. Deadline expiring before Unix quiet confirmation completes reports cleanup_unconfirmed=True and stopped_cleanly=False.
+m.SYSTEM = "Darwin"
+deadline_calls = {"n": 0}
+app_700 = {"pid": 700, "ppid": 1, "start": "Sat Nov 28 06:00:00 2026", "name": "anvil-desktop", "rss": 10}
+wk_701 = {"pid": 701, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.WebContent", "rss": 20}
+def deadline_procs():
+    deadline_calls["n"] += 1
+    # Pre-launch (1) empty; sampling + pre-stop (2, 3) see live app + WebKit helper; teardown survey sees them gone right at deadline.
+    return [app_700, wk_701] if deadline_calls["n"] in (2, 3) else []
+orig_resp = m.responsible_pid
+m.responsible_pid = lambda pid: 700 if pid in (700, 701) else None
+m.processes = deadline_procs
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: 10
+m.stop = lambda proc, *a, **kw: (True, None)
+m.UNIX_QUIET_CONFIRM_SECONDS = 0.2
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: orig_wait_quiet(before, v, p, timeout=0.0, quiet_seconds=quiet_seconds)
+m.subprocess.Popen = lambda *a, **kw: CleanExitProc()
+try:
+    r_deadline = m.one_run("/bin/true", 0, 0.01, 1)
+    assert r_deadline["stopped_cleanly"] is False and r_deadline["cleanup_unconfirmed"] is True
+    assert "quiet confirmation" in r_deadline["error"], f"unexpected error: {r_deadline.get('error')}"
+finally:
+    m.responsible_pid = orig_resp
+    m.UNIX_QUIET_CONFIRM_SECONDS = orig_quiet_secs
+    m._wait_teardown_quiet = orig_wait_quiet
+    m.stop = orig_stop
+    m.subprocess.Popen = orig_popen
+
+# 5i. Overdue poll crossing both quiet window and deadline must NOT confirm quiet,
+# slow survey latency must NOT falsely confirm quiet, and quiet-timeout diagnostics
+# are preserved alongside post-force or stop-error failures.
+m.SYSTEM = "Darwin"
+clock_vals = iter([0.0, 29.8, 29.8, 30.4, 30.4])
+orig_monotonic = m.time.monotonic
+orig_sleep = m.time.sleep
+m.time.monotonic = lambda: next(clock_vals)
+m.time.sleep = lambda _s: None
+m.processes = lambda: []
+try:
+    lv, lp, qok = orig_wait_quiet(set(), set(), set(), timeout=30.0, quiet_seconds=0.5)
+    assert lv == set() and lp == set() and qok is False, f"expected quiet_ok=False for overdue poll, got {(lv, lp, qok)}"
+finally:
+    m.time.monotonic = orig_monotonic
+    m.time.sleep = orig_sleep
+
+# Slow survey started at 0.1s and returned at 0.55s cannot satisfy a 0.5s quiet window from 0.0s;
+# the next poll at 0.55s sees the late helper started at 0.30s.
+m.SYSTEM = "Linux"
+late_helper_702 = {"pid": 702, "ppid": 1, "start": "ticks:102", "name": "WebKitWebProcess", "rss": 10}
+sim_clock = [0.0]
+survey_n = [0]
+def slow_survey_procs():
+    survey_n[0] += 1
+    captured = sim_clock[0]
+    if survey_n[0] == 2:
+        sim_clock[0] += 0.45
+    return [late_helper_702] if captured >= 0.3 else []
+m.time.monotonic = lambda: sim_clock[0]
+m.time.sleep = lambda s: sim_clock.__setitem__(0, sim_clock[0] + s)
+m.processes = slow_survey_procs
+try:
+    lv, lp, qok = orig_wait_quiet(set(), set(), set(), timeout=0.6, quiet_seconds=0.5)
+    assert qok is False and lp == {(702, "ticks:102", "WebKitWebProcess")}, f"slow survey missed late helper: {(lv, lp, qok)}"
+finally:
+    m.time.monotonic = orig_monotonic
+    m.time.sleep = orig_sleep
+
+m.SYSTEM = "Linux"
+pf_calls = {"n": 0}
+app_700_l = {"pid": 700, "ppid": 1, "start": "ticks:100", "name": "anvil-desktop", "rss": 10}
+wk_701_l = {"pid": 701, "ppid": 700, "start": "ticks:101", "name": "WebKitWebProcess", "rss": 20}
+def pf_procs():
+    pf_calls["n"] += 1
+    return [app_700_l, wk_701_l] if pf_calls["n"] in (2, 3) else []
+wait_seq = iter([
+    ({(700, "ticks:100", "anvil-desktop")}, set(), False),
+    (set(), set(), False),
+])
+m.processes = pf_procs
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: 10
+m.stop = lambda proc, *a, **kw: (True, None)
+orig_force_stop = m.force_stop
+m.force_stop = lambda live, pinned: True
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: next(wait_seq)
+m.subprocess.Popen = lambda *a, **kw: CleanExitProc()
+try:
+    r_pf = m.one_run("/bin/true", 0, 0.01, 1)
+    assert r_pf["stopped_cleanly"] is False and r_pf["cleanup_unconfirmed"] is True
+    assert "outlived the app's stop" in r_pf["error"], f"missing survivor cause: {r_pf.get('error')}"
+    assert "quiet confirmation" in r_pf["error"], f"missing quiet timeout cause: {r_pf.get('error')}"
+finally:
+    m.force_stop = orig_force_stop
+    m._wait_teardown_quiet = orig_wait_quiet
+    m.stop = orig_stop
+    m.subprocess.Popen = orig_popen
+
+# Stop raising alongside a quiet timeout still preserves the quiet-timeout diagnostic.
+m.processes = lambda: []
+m.log_size = lambda: {}
+m.ready_line = lambda sizes, pid: None
+def raising_stop(proc, *a, **kw):
+    raise OSError("stop failed")
+m.stop = raising_stop
+m._wait_teardown_quiet = lambda before, v, p, timeout=30, quiet_seconds=None: (set(), set(), False)
+m.subprocess.Popen = lambda *a, **kw: CleanExitProc()
+try:
+    r_se = m.one_run("/bin/true", 0, 0.0, 1)
+    assert r_se["stopped_cleanly"] is False and r_se["cleanup_unconfirmed"] is True
+    assert "quiet confirmation" in r_se["error"], f"stop error hid quiet timeout: {r_se.get('error')}"
+    assert "stop failed" in r_se["cleanup_error"]
+finally:
+    m._wait_teardown_quiet = orig_wait_quiet
+    m.stop = orig_stop
+    m.subprocess.Popen = orig_popen
+
+# 6. summarize.py emits missing-lane rows and --require-expected rejects missing/duplicate/unexpected lanes.
+spec2 = importlib.util.spec_from_file_location("s", sys.argv[2])
+s = importlib.util.module_from_spec(spec2); spec2.loader.exec_module(s)
+import io, contextlib
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc = s.main(["--expect", "Darwin:runner 1", "--expect", "Linux:runner 1"])
+assert rc == 0
+out = buf.getvalue()
+assert "Darwin runner 1 | missing (no result uploaded)" in out
+assert "Linux runner 1 | missing (no result uploaded)" in out
+err_buf = io.StringIO()
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err_buf):
+    rc_req = s.main(["--require-expected", "--expect", "Darwin:runner 1"])
+assert rc_req == 1 and "missing lanes" in err_buf.getvalue()
+with tempfile.TemporaryDirectory() as td:
+    dup_a = Path(td) / "a.json"
+    dup_b = Path(td) / "b.json"
+    sample = json.dumps({"format": "anvil-desktop-perf", "os": "Darwin", "label": "runner 1", "runs": [], "summary": {"runs_ok": 0, "runs_failed": 0, "first_run": {}, "warm_runs": {}}})
+    dup_a.write_text(sample); dup_b.write_text(sample)
+    err_buf2 = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err_buf2):
+        rc_dup = s.main(["--require-expected", "--expect", "Darwin:runner 1", "--expect", "Linux:runner 1", str(dup_a), str(dup_b)])
+    assert rc_dup == 1 and "duplicate lanes" in err_buf2.getvalue() and "missing lanes" in err_buf2.getvalue()
+    err_buf3 = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err_buf3):
+        rc_unexp = s.main(["--require-expected", str(dup_a)])
+    assert rc_unexp == 1 and "unexpected lanes" in err_buf3.getvalue()
+print("OK")
+`;
+  const r = spawnSync("python3", ["-I", "-c", script, join(root, "scripts", "perf", "measure_desktop.py"), join(root, "scripts", "perf", "summarize.py")], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "OK");
+});
