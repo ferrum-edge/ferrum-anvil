@@ -165,6 +165,7 @@ impl Dir {
     /// open: it is opened non-blocking (which does not change how a regular
     /// file reads) and never as a controlling terminal, and the opened handle
     /// is checked.
+    #[cfg(not(target_vendor = "apple"))]
     pub(crate) fn open_regular(&self, name: &OsStr) -> io::Result<Option<(File, Metadata)>> {
         use rustix::fs::{Mode, OFlags};
         let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
