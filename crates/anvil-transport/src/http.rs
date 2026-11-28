@@ -1426,7 +1426,7 @@ impl HttpTransport {
                                 && w.feed(&data)
                                 && !body.is_end_stream()
                             {
-                                let probe_deadline = Instant::now() + Duration::from_millis(20);
+                                let probe_deadline = tokio::time::Instant::now() + Duration::from_millis(20);
                                 loop {
                                     tokio::select! {
                                         biased;

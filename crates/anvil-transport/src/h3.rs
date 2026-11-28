@@ -2036,6 +2036,8 @@ impl H3Transport {
         obs.bytes.response_headers_logical = Some(headers.iter().map(|h| (h.name.len() + h.value.len() + 4) as u64).sum());
         let content_type = resp.headers().get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
         let content_encoding = resp.headers().get(http::header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+        let declared_length =
+            resp.headers().get(http::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|s| s.parse::<u64>().ok());
 
         let b_idx = rec.start(Phase::ResponseBody);
         let mut captured = BytesMut::new();
@@ -2073,7 +2075,7 @@ impl H3Transport {
                         if let Some(w) = watch.as_mut()
                             && w.feed(&data)
                         {
-                            let probe_deadline = Instant::now() + Duration::from_millis(20);
+                            let probe_deadline = tokio::time::Instant::now() + Duration::from_millis(20);
                             loop {
                                 tokio::select! {
                                     biased;
