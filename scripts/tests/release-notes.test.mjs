@@ -575,31 +575,73 @@ spec = importlib.util.spec_from_file_location("m", sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
 # 1. PID reuse does not match alive() or force_stop().
-orig_procs = m.processes
-killed = []
 m.processes = lambda: [{"pid": 500, "ppid": 1, "start": "Sat Nov 28 06:00:00 2026", "name": "unrelated", "rss": 1}]
 assert m.alive({(500, "Sat Nov 28 05:00:00 2026", "WebKitWebProcess")}) == set()
 assert m.alive({(500, "Sat Nov 28 06:00:00 2026", "unrelated")}) == {(500, "Sat Nov 28 06:00:00 2026", "unrelated")}
 
-# 2. macOS shared-responsible-pid and pid-delta helpers are provisional (verified=False).
+# 2. Windows ancestry rejects pre-existing helpers and earlier-start stale PPIDs.
+m.SYSTEM = "Windows"
+win_before = {(400, "2026-11-28T05:00:00.0000000Z", "msedgewebview2.exe")}
+win_rows = [
+    {"pid": 300, "ppid": 1, "start": "2026-11-28T06:00:00.0000000Z", "name": "anvil-desktop.exe", "rss": 10},
+    {"pid": 400, "ppid": 300, "start": "2026-11-28T05:00:00.0000000Z", "name": "msedgewebview2.exe", "rss": 20},
+    {"pid": 401, "ppid": 300, "start": "2026-11-28T05:59:59.0000000Z", "name": "msedgewebview2.exe", "rss": 20},
+    {"pid": 402, "ppid": 300, "start": "2026-11-28T06:00:01.0000000Z", "name": "msedgewebview2.exe", "rss": 20},
+]
+wfound, _, wverified = m.helpers(win_rows, 300, win_before)
+assert [h["pid"] for h in wfound] == [402] and wverified is True
+
+# 3. macOS shared-responsible-pid and early-exit orphans are provisional and block clean teardown.
 m.SYSTEM = "Darwin"
 m.responsible_pid = lambda pid: 99 if pid in (100, 200) else None
 rows = [
-    {"pid": 100, "ppid": 99, "start": "T1", "name": "anvil-desktop", "rss": 10},
-    {"pid": 200, "ppid": 1, "start": "T2", "name": "com.apple.WebKit.WebContent", "rss": 20},
+    {"pid": 100, "ppid": 99, "start": "Sat Nov 28 06:00:00 2026", "name": "anvil-desktop", "rss": 10},
+    {"pid": 200, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.WebContent", "rss": 20},
 ]
 found, method, verified = m.helpers(rows, 100, set())
 assert len(found) == 1 and verified is False and "provisional" in method
 
-# 3. Teardown still calls stop() on early exit and when processes() raises during cleanup.
-stopped = []
-class DummyProc:
-    pid = 777
-    def poll(self):
-        return 1  # already exited early
-m.SYSTEM = "Linux"
+# Early macOS exit: app is already gone (responsible_pid(101) -> None), helper still has owner 99.
+killed_pids = []
+orig_kill = m.os.kill
+m.os.kill = lambda pid, sig: killed_pids.append((pid, sig))
+m.responsible_pid = lambda pid: 99 if pid == 201 else None
+orphan = {"pid": 201, "ppid": 1, "start": "Sat Nov 28 06:00:01 2026", "name": "com.apple.WebKit.WebContent", "rss": 20}
 m.log_size = lambda: {}
 m.ready_line = lambda sizes, pid: None
+m.wait_gone = lambda expected, timeout=30: False if expected else True
+mac_calls = {"n": 0}
+def mac_early_procs():
+    mac_calls["n"] += 1
+    return [] if mac_calls["n"] == 1 else [orphan]
+m.processes = mac_early_procs
+class EarlyProc:
+    pid = 101
+    returncode = 1
+    def poll(self):
+        return 1
+orig_popen = m.subprocess.Popen
+m.subprocess.Popen = lambda *a, **kw: EarlyProc()
+r_mac = m.one_run("/bin/true", 0, 0.05, 1)
+assert r_mac["stopped_cleanly"] is False and r_mac["cleanup_unconfirmed"] is True
+assert r_mac.get("provisional_left_running") == [201]
+assert killed_pids == [], f"provisional macOS helper must never be SIGKILLed: {killed_pids}"
+m.os.kill = orig_kill
+m.subprocess.Popen = orig_popen
+
+# 4. Sampling + teardown listing exception preserves ready_ms and cleanup_error.
+m.SYSTEM = "Linux"
+m.ready_line = lambda sizes, pid: 123
+class LiveProc:
+    pid = 777
+    returncode = None
+    def poll(self):
+        return self.returncode
+    def wait(self, timeout=None):
+        self.returncode = 0
+        return 0
+    def kill(self):
+        self.returncode = -9
 call_n = {"n": 0}
 def flaky_procs():
     call_n["n"] += 1
@@ -607,13 +649,28 @@ def flaky_procs():
         return []
     raise RuntimeError("ps failed")
 m.processes = flaky_procs
-m.subprocess.Popen = lambda *a, **kw: DummyProc()
-m.stop = lambda p: stopped.append(p.pid)
+m.subprocess.Popen = lambda *a, **kw: LiveProc()
+stopped = []
+orig_stop = m.stop
+m.stop = lambda p, *a: (stopped.append(p.pid) or (True, None))
 r = m.one_run("/bin/true", 0, 0.05, 1)
-assert stopped == [777], f"expected stop() on early exit + listing failure, got {stopped}"
-assert r["stopped_cleanly"] is False and r["cleanup_unconfirmed"] is True
+assert stopped == [777], f"expected stop() on listing failure, got {stopped}"
+assert r["startup_ms_in_process"] == 123 and "ready_ms" in r
+assert r["stopped_cleanly"] is False and r["cleanup_unconfirmed"] is True and "cleanup_error" in r
+m.stop = orig_stop
+m.subprocess.Popen = orig_popen
 
-# 4. summarize.py emits explicit missing-lane rows.
+# 5. Real Unix stop() terminates a live session process cleanly and skips killpg after reap.
+if os.name == "posix":
+    m.SYSTEM = "Linux"
+    real_p = m.subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    ok, err = m.stop(real_p)
+    assert ok is True and err is None and real_p.returncode is not None
+    # Calling stop() again after reap must not raise or signal a reused pgid.
+    ok2, err2 = m.stop(real_p)
+    assert ok2 is True and err2 is None
+
+# 6. summarize.py emits missing-lane rows and --require-expected rejects missing/duplicate/unexpected lanes.
 spec2 = importlib.util.spec_from_file_location("s", sys.argv[2])
 s = importlib.util.module_from_spec(spec2); spec2.loader.exec_module(s)
 import io, contextlib
@@ -624,6 +681,19 @@ assert rc == 0
 out = buf.getvalue()
 assert "Darwin runner 1 | missing (no result uploaded)" in out
 assert "Linux runner 1 | missing (no result uploaded)" in out
+err_buf = io.StringIO()
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err_buf):
+    rc_req = s.main(["--require-expected", "--expect", "Darwin:runner 1"])
+assert rc_req == 1 and "missing lanes" in err_buf.getvalue()
+with tempfile.TemporaryDirectory() as td:
+    dup_a = Path(td) / "a.json"
+    dup_b = Path(td) / "b.json"
+    sample = json.dumps({"format": "anvil-desktop-perf", "os": "Darwin", "label": "runner 1", "runs": [], "summary": {"runs_ok": 0, "runs_failed": 0, "first_run": {}, "warm_runs": {}}})
+    dup_a.write_text(sample); dup_b.write_text(sample)
+    err_buf2 = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err_buf2):
+        rc_dup = s.main(["--require-expected", "--expect", "Darwin:runner 1", "--expect", "Linux:runner 1", str(dup_a), str(dup_b)])
+    assert rc_dup == 1 and "duplicate lanes" in err_buf2.getvalue() and "missing lanes" in err_buf2.getvalue()
 print("OK")
 `;
   const r = spawnSync("python3", ["-I", "-c", script, join(root, "scripts", "perf", "measure_desktop.py"), join(root, "scripts", "perf", "summarize.py")], { encoding: "utf8" });

@@ -170,4 +170,12 @@ jobs:
         run: |
           shopt -s nullglob
           files=(results/perf-*.json)
-          [ "${#files[@]}" -eq 6 ] || { echo "::error::expected 6 measurement results, got ${#files[@]}"; exit 1; }
+          python3 -I scripts/perf/summarize.py \
+            --require-expected \
+            --expect "Darwin:runner 1" \
+            --expect "Darwin:runner 2" \
+            --expect "Linux:runner 1" \
+            --expect "Linux:runner 2" \
+            --expect "Windows:runner 1" \
+            --expect "Windows:runner 2" \
+            "${files[@]}" > /dev/null

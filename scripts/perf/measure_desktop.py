@@ -55,6 +55,7 @@ as a whole uses.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import platform
@@ -168,16 +169,168 @@ def processes() -> list[dict]:
     return rows
 
 
-def descendants(rows: list[dict], root: int) -> list[dict]:
+def _parse_start(start: str) -> tuple[int, float | str] | None:
+    if not start:
+        return None
+    if "T" in start and start.endswith("Z"):
+        # Windows Win32_Process CreationDate serialized as UTC ISO-8601 ("o").
+        return (1, start)
+    try:
+        return (0, float(time.mktime(time.strptime(start, "%a %b %d %H:%M:%S %Y"))))
+    except ValueError:
+        return None
+
+
+def _start_not_earlier(child_start: str, parent_start: str) -> bool:
+    c = _parse_start(child_start)
+    p = _parse_start(parent_start)
+    if c is None or p is None or c[0] != p[0]:
+        return False
+    return c[1] >= p[1]
+
+
+class _WinJob:
+    """Kernel-enforced Windows Job Object for launch ownership and tree teardown."""
+
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+    JOB_OBJECT_EXTENDED_LIMIT_INFO = 9
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+    def __init__(self) -> None:
+        self.handle: int | None = None
+        self.assigned: bool = False
+        self._kernel32 = None
+        if SYSTEM != "Windows" or not hasattr(ctypes, "windll"):
+            return
+        k32 = ctypes.windll.kernel32
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        k32.CreateJobObjectW.restype = ctypes.c_void_p
+        k32.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        k32.SetInformationJobObject.restype = ctypes.c_int
+        k32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        k32.AssignProcessToJobObject.restype = ctypes.c_int
+        k32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        k32.TerminateJobObject.restype = ctypes.c_int
+        k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.IsProcessInJob.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+        k32.IsProcessInJob.restype = ctypes.c_int
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        k32.CloseHandle.restype = ctypes.c_int
+
+        class _BasicLimit(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class _ExtendedLimit(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimit),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        h = k32.CreateJobObjectW(None, None)
+        if not h:
+            return
+        info = _ExtendedLimit()
+        info.BasicLimitInformation.LimitFlags = self.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(
+            h, self.JOB_OBJECT_EXTENDED_LIMIT_INFO, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            k32.CloseHandle(h)
+            return
+        self.handle = h
+        self._kernel32 = k32
+
+    def assign(self, proc: subprocess.Popen) -> bool:
+        if not self.handle or self._kernel32 is None:
+            return False
+        proc_handle = getattr(proc, "_handle", None)
+        if not proc_handle:
+            return False
+        ok = bool(self._kernel32.AssignProcessToJobObject(self.handle, ctypes.c_void_p(int(proc_handle))))
+        self.assigned = ok
+        return ok
+
+    def contains(self, pid: int) -> bool | None:
+        if not self.handle or not self.assigned or self._kernel32 is None:
+            return None
+        hproc = self._kernel32.OpenProcess(self.PROCESS_QUERY_LIMITED_INFORMATION, 0, int(pid))
+        if not hproc:
+            return None
+        try:
+            res = ctypes.c_int(0)
+            if not self._kernel32.IsProcessInJob(hproc, self.handle, ctypes.byref(res)):
+                return None
+            return bool(res.value)
+        finally:
+            self._kernel32.CloseHandle(hproc)
+
+    def terminate(self) -> bool:
+        if not self.handle or not self.assigned or self._kernel32 is None:
+            return False
+        return bool(self._kernel32.TerminateJobObject(self.handle, 1))
+
+    def close(self) -> None:
+        if self.handle and self._kernel32 is not None:
+            self._kernel32.CloseHandle(self.handle)
+            self.handle = None
+            self.assigned = False
+
+
+def descendants(
+    rows: list[dict],
+    root: int,
+    before: set[ProcId] | None = None,
+    require_creation_order: bool = False,
+) -> list[dict]:
+    """Descendants of `root`, excluding prelaunch identities and invalid creation-time edges."""
+    by_pid = {r["pid"]: r for r in rows}
+    root_row = by_pid.get(root)
+    if require_creation_order and (root_row is None or _parse_start(str(root_row.get("start") or "")) is None):
+        return []
     children: dict[int, list[dict]] = {}
     for r in rows:
         children.setdefault(r["ppid"], []).append(r)
-    found, todo = [], [root]
+    found: list[dict] = []
+    seen_pids: set[int] = {root}
+    todo: list[tuple[int, str]] = [(root, str((root_row or {}).get("start") or ""))]
     while todo:
-        for c in children.get(todo.pop(), []):
-            if c["pid"] != root and c not in found:
-                found.append(c)
-                todo.append(c["pid"])
+        parent_pid, parent_start = todo.pop()
+        for c in children.get(parent_pid, []):
+            cid = c["pid"]
+            if cid in seen_pids:
+                continue
+            if before is not None and proc_identity(c) in before:
+                continue
+            child_start = str(c.get("start") or "")
+            if require_creation_order and not _start_not_earlier(child_start, parent_start):
+                continue
+            seen_pids.add(cid)
+            found.append(c)
+            todo.append((cid, child_start))
     return found
 
 
@@ -194,15 +347,21 @@ def is_mac_webkit(name: str) -> bool:
     return name.startswith("com.apple.WebKit.")
 
 
-def helpers(rows: list[dict], app_pid: int, before: set[ProcId]) -> tuple[list[dict], str, bool]:
+def helpers(
+    rows: list[dict],
+    app_pid: int,
+    before: set[ProcId],
+    known_app_owner: int | None = None,
+    win_job: _WinJob | None = None,
+) -> tuple[list[dict], str, bool]:
     """The app's webview processes, attribution label, and whether ownership is verified per-launch."""
     if SYSTEM == "Darwin":
         webkit = [r for r in rows if is_mac_webkit(r["name"])]
         owners = {r["pid"]: responsible_pid(r["pid"]) for r in webkit}
-        attributed = [r for r in webkit if owners[r["pid"]] == app_pid]
+        attributed = [r for r in webkit if owners[r["pid"]] == app_pid and proc_identity(r) not in before]
         if attributed:
             return attributed, "launchctl procinfo responsible pid", True
-        app_owner = responsible_pid(app_pid)
+        app_owner = known_app_owner if known_app_owner is not None else responsible_pid(app_pid)
         if app_owner is not None and app_owner != app_pid:
             # When the binary is spawned directly (not through LaunchServices),
             # macOS gives both the app and its XPC WebKit helpers the spawning
@@ -211,50 +370,78 @@ def helpers(rows: list[dict], app_pid: int, before: set[ProcId]) -> tuple[list[d
             shared = [r for r in webkit if owners[r["pid"]] == app_owner and proc_identity(r) not in before]
             if shared:
                 return shared, "launchctl procinfo shared responsible pid + pid delta (provisional)", False
-        if any(o is not None for o in owners.values()):
-            # procinfo works here but names no WebKit service of this app.
+        if app_owner is not None and any(o is not None for o in owners.values()):
+            # procinfo works for both the app and WebKit services, and none belong to this app.
             return [], "launchctl procinfo responsible pid", True
-        # procinfo gives no owner on this runner: provisional pid-delta only, never kill-eligible.
-        return [r for r in webkit if proc_identity(r) not in before], "pid delta (provisional; WebKit services not running before the launch)", False
-    tree = descendants(rows, app_pid)
+        # App ownership could not be queried (e.g. early exit) or procinfo gave no owner:
+        # fall back to provisional pid-delta so surviving helpers are detected without authorizing SIGKILL.
+        return (
+            [r for r in webkit if proc_identity(r) not in before],
+            "pid delta (provisional; WebKit services not running before the launch)",
+            False,
+        )
     if SYSTEM == "Windows":
-        return [r for r in tree if r["name"].lower() == "msedgewebview2.exe"], "process tree (msedgewebview2.exe descendants of the app)", True
+        if win_job is not None and win_job.assigned:
+            in_job = [
+                r
+                for r in rows
+                if r["name"].lower() == "msedgewebview2.exe"
+                and proc_identity(r) not in before
+                and win_job.contains(r["pid"]) is True
+            ]
+            return in_job, "Windows job object (msedgewebview2.exe inside the launch job)", True
+        tree = descendants(rows, app_pid, before=before, require_creation_order=True)
+        return (
+            [r for r in tree if r["name"].lower() == "msedgewebview2.exe"],
+            "process tree (msedgewebview2.exe descendants verified by creation time and prelaunch baseline)",
+            True,
+        )
+    tree = descendants(rows, app_pid, before=before, require_creation_order=True)
     return [r for r in tree if r["name"] in LINUX_WEBVIEW], "process tree (WebKitGTK processes descending from the app)", True
 
 
-def stop(proc: subprocess.Popen) -> None:
-    """Stop the app and its launch process group/tree, even if the app PID already exited."""
+def stop(proc: subprocess.Popen, win_job: _WinJob | None = None) -> tuple[bool, str | None]:
+    """Stop the app and its launch containment group/job without signaling a reaped numeric PID."""
     if SYSTEM == "Windows":
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
-        if proc.poll() is None:
-            try:
-                proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=15)
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        pass
-    if proc.poll() is None:
+        if win_job is not None and win_job.assigned:
+            ok = win_job.terminate()
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=15)
+            win_job.close()
+            return (True, None) if ok else (False, "TerminateJobObject failed")
+        if proc.returncode is None and proc.poll() is None:
+            res = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, text=True)
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=15)
+            if res.returncode != 0 and proc.poll() is None:
+                return False, f"taskkill exited {res.returncode}"
+            return (True, None) if res.returncode == 0 else (False, f"taskkill exited {res.returncode} without a Windows job object")
+        return False, "app exited before stop without a Windows job object"
+    # Unix: only signal the session process group while the leader has not been reaped.
+    if getattr(proc, "returncode", None) is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
         try:
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            proc.kill()
-            proc.wait(timeout=15)
-    else:
-        # Parent already exited: escalate to SIGKILL on the process group after a brief grace
-        # so surviving Linux session children do not linger.
-        time.sleep(0.2)
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+            if getattr(proc, "returncode", None) is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                proc.kill()
+                proc.wait(timeout=15)
+    return True, None
 
 
 def alive(expected: set[ProcId]) -> set[ProcId]:
@@ -282,7 +469,7 @@ def force_stop(verified_expected: set[ProcId]) -> None:
     for pid, _start, _name in sorted(still_live):
         try:
             if SYSTEM == "Windows":
-                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
             else:
                 os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
@@ -302,61 +489,96 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
+    win_job = _WinJob() if SYSTEM == "Windows" else None
     t0 = time.monotonic()
     proc = subprocess.Popen([app], **kwargs)
+    if win_job is not None:
+        win_job.assign(proc)
     result: dict = {"run": index, "pid": proc.pid}
     verified_owned: set[ProcId] = set()
     provisional_owned: set[ProcId] = set()
+    app_responsible_pid: int | None = None
     try:
-        # Capture the app's stable (pid, start, name) as soon as it appears.
-        startup_ms = None
-        while time.monotonic() - t0 < timeout:
-            if not verified_owned:
+        try:
+            # Poll only the log file and process exit so process enumeration never
+            # blocks or inflates the ui_ready startup measurement.
+            startup_ms = None
+            while time.monotonic() - t0 < timeout:
+                startup_ms = ready_line(sizes, proc.pid)
+                if startup_ms is not None or proc.poll() is not None:
+                    break
+                time.sleep(0.02)
+            ready_s = time.monotonic() - t0
+            if startup_ms is None:
+                result["error"] = (
+                    "the app exited before its UI was ready"
+                    if proc.poll() is not None
+                    else f"no ui_ready line from pid {proc.pid} within {timeout:.0f} s"
+                )
+                return result
+            result["ready_ms"] = round(ready_s * 1000)
+            result["startup_ms_in_process"] = startup_ms
+            # Capture the app's stable identity and macOS responsible pid while
+            # it is live, after readiness has already been timed.
+            if proc.poll() is None:
                 try:
-                    app_row = next((r for r in processes() if r["pid"] == proc.pid), None)
-                    if app_row is not None:
+                    post_ready_rows = processes()
+                    app_row = next((r for r in post_ready_rows if r["pid"] == proc.pid), None)
+                    if app_row is not None and proc_identity(app_row) not in before:
                         verified_owned.add(proc_identity(app_row))
                 except Exception:
                     pass
-            startup_ms = ready_line(sizes, proc.pid)
-            if startup_ms is not None or proc.poll() is not None:
-                break
-            time.sleep(0.02)
-        ready_s = time.monotonic() - t0
-        if startup_ms is None:
-            result["error"] = "the app exited before its UI was ready" if proc.poll() is not None else f"no ui_ready line from pid {proc.pid} within {timeout:.0f} s"
+                if SYSTEM == "Darwin":
+                    app_responsible_pid = responsible_pid(proc.pid)
+            time.sleep(idle)
+            if proc.poll() is not None:
+                result["error"] = "the app exited while idle"
+                return result
+            rows = processes()
+            app_row = next((r for r in rows if r["pid"] == proc.pid), None)
+            if SYSTEM == "Darwin" and app_responsible_pid is None and proc.poll() is None:
+                app_responsible_pid = responsible_pid(proc.pid)
+            found, method, verified = helpers(
+                rows,
+                proc.pid,
+                before,
+                known_app_owner=app_responsible_pid,
+                win_job=win_job,
+            )
+            if app_row is not None and proc_identity(app_row) not in before:
+                verified_owned.add(proc_identity(app_row))
+            if verified:
+                verified_owned |= {proc_identity(h) for h in found}
+            else:
+                provisional_owned |= {proc_identity(h) for h in found}
+            result["attribution"] = method
+            result["attribution_verified"] = verified
+            if app_row is None:
+                result["error"] = "the app process was not found in the process list"
+                return result
+            if not any(h["name"] == CONTENT[SYSTEM] for h in found):
+                result["error"] = f"no {CONTENT[SYSTEM]} process could be attributed to the app ({method}); memory not reported"
+                return result
+            result["app_rss_mib"] = round(app_row["rss"] / MIB, 1)
+            result["helpers"] = [
+                {
+                    "name": h["name"],
+                    "pid": h["pid"],
+                    "rss_mib": round(h["rss"] / MIB, 1),
+                    **({"private_mib": round(h["private"] / MIB, 1)} if "private" in h else {}),
+                }
+                for h in found
+            ]
+            result["helpers_rss_mib"] = round(sum(h["rss"] for h in found) / MIB, 1)
+            if SYSTEM == "Windows":
+                result["app_private_mib"] = round((app_row or {}).get("private", 0) / MIB, 1)
+                result["helpers_private_mib"] = round(sum(h.get("private", 0) for h in found) / MIB, 1)
+            result["total_rss_mib"] = round(result["app_rss_mib"] + result["helpers_rss_mib"], 1)
             return result
-        result["ready_ms"] = round(ready_s * 1000)
-        result["startup_ms_in_process"] = startup_ms
-        time.sleep(idle)
-        if proc.poll() is not None:
-            result["error"] = "the app exited while idle"
+        except Exception as exc:
+            result["error"] = result.get("error") or f"unexpected harness error: {exc}"
+            result["cleanup_unconfirmed"] = True
             return result
-        rows = processes()
-        app_row = next((r for r in rows if r["pid"] == proc.pid), None)
-        found, method, verified = helpers(rows, proc.pid, before)
-        if app_row is not None:
-            verified_owned.add(proc_identity(app_row))
-        if verified:
-            verified_owned |= {proc_identity(h) for h in found}
-        else:
-            provisional_owned |= {proc_identity(h) for h in found}
-        result["attribution"] = method
-        result["attribution_verified"] = verified
-        if app_row is None:
-            result["error"] = "the app process was not found in the process list"
-            return result
-        if not any(h["name"] == CONTENT[SYSTEM] for h in found):
-            result["error"] = f"no {CONTENT[SYSTEM]} process could be attributed to the app ({method}); memory not reported"
-            return result
-        result["app_rss_mib"] = round(app_row["rss"] / MIB, 1)
-        result["helpers"] = [{"name": h["name"], "pid": h["pid"], "rss_mib": round(h["rss"] / MIB, 1), **({"private_mib": round(h["private"] / MIB, 1)} if "private" in h else {})} for h in found]
-        result["helpers_rss_mib"] = round(sum(h["rss"] for h in found) / MIB, 1)
-        if SYSTEM == "Windows":
-            result["app_private_mib"] = round((app_row or {}).get("private", 0) / MIB, 1)
-            result["helpers_private_mib"] = round(sum(h.get("private", 0) for h in found) / MIB, 1)
-        result["total_rss_mib"] = round(result["app_rss_mib"] + result["helpers_rss_mib"], 1)
-        return result
     finally:
         cleanup_error = None
         # Discover any additional helpers before stopping, without letting a
@@ -364,9 +586,17 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
         try:
             pre_stop_rows = processes()
             app_row = next((r for r in pre_stop_rows if r["pid"] == proc.pid), None)
-            if app_row is not None:
+            if app_row is not None and proc_identity(app_row) not in before:
                 verified_owned.add(proc_identity(app_row))
-            later, _method, verified = helpers(pre_stop_rows, proc.pid, before)
+            if SYSTEM == "Darwin" and app_responsible_pid is None and getattr(proc, "returncode", None) is None and proc.poll() is None:
+                app_responsible_pid = responsible_pid(proc.pid)
+            later, _method, verified = helpers(
+                pre_stop_rows,
+                proc.pid,
+                before,
+                known_app_owner=app_responsible_pid,
+                win_job=win_job,
+            )
             if verified:
                 verified_owned |= {proc_identity(h) for h in later}
             else:
@@ -374,9 +604,16 @@ def one_run(app: str, idle: float, timeout: float, index: int) -> dict:
         except Exception as exc:
             cleanup_error = f"process listing failed during teardown: {exc}"
         try:
-            stop(proc)
+            stop_res = stop(proc, win_job) if win_job is not None else stop(proc)
+            if isinstance(stop_res, tuple):
+                stop_ok, stop_err = stop_res
+                if not stop_ok:
+                    cleanup_error = cleanup_error or stop_err or "stop failed"
         except Exception as exc:
             cleanup_error = cleanup_error or f"failed to stop app process: {exc}"
+        finally:
+            if win_job is not None:
+                win_job.close()
 
         try:
             verified_gone = wait_gone(verified_owned)

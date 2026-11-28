@@ -297,11 +297,14 @@ describe("startup milestone", () => {
     expect(invoke.mock.calls.filter(([cmd]) => cmd === "app_ui_ready")).toHaveLength(1);
   });
 
-  it("does not report the launch-time auto-open of a single keychain profile as ready", async () => {
+  it("does not report the launch-time auto-open of a single keychain profile as ready even while handoff is pending", async () => {
     backend([{ profile_id: "k1", display_name: "Local", protection: "os_keychain" }], { app_ui_ready: () => null });
     const onUnlocked = vi.fn();
     render(<LockScreen onUnlocked={onUnlocked} />);
     await waitFor(() => expect(onUnlocked).toHaveBeenCalled());
+    // LockScreen remains mounted while App awaits app_status; it must stay on
+    // autoOpening and never steal the single backend ui_ready marker.
+    await new Promise((r) => setTimeout(r, 20));
     expect(invoke).not.toHaveBeenCalledWith("app_ui_ready", undefined);
   });
 

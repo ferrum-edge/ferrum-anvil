@@ -48,9 +48,10 @@ features, no `e2e` hook) six times with a fresh `ANVIL_DATA_DIR`:
 - **Webview helper attribution and isolation:**
   - **Linux (WebKitGTK):** `WebKitWebProcess`, `WebKitNetworkProcess`, and
     `WebKitGPUProcess` descendants of the app PID (verified per-launch process
-    tree). WebKitGTK retains the user's normal XDG disk state across launches
-    unless `XDG_CACHE_HOME` is redirected; `ANVIL_DATA_DIR` isolates Anvil's own
-    storage only.
+    tree). WebKitGTK stores both its cache and data under Tauri's
+    `app_local_data_dir()` (`XDG_DATA_HOME`), so it retains the runner's normal
+    XDG data directory across launches unless `XDG_DATA_HOME` is redirected;
+    `ANVIL_DATA_DIR` isolates Anvil's own storage only.
   - **Windows (WebView2):** `msedgewebview2.exe` descendants of the app PID
     (working set and private bytes). Each launch sets a fresh temporary
     `WEBVIEW2_USER_DATA_FOLDER`, which the desktop shell wires into Tauri's

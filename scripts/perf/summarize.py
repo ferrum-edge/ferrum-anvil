@@ -37,22 +37,33 @@ def fmt(v) -> str:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--expect", action="append", default=[], help="expected lane as OS:label")
+    ap.add_argument(
+        "--require-expected",
+        action="store_true",
+        help="exit non-zero if expected lanes are missing, duplicated, or unexpected lanes are present",
+    )
     ap.add_argument("paths", nargs="*")
     args = ap.parse_args(argv)
 
     results = []
     seen_lanes: set[tuple[str, str]] = set()
+    duplicate_lanes: list[tuple[str, str]] = []
     for p in args.paths:
         d = json.loads(Path(p).read_text())
         if d.get("format") != "anvil-desktop-perf":
             raise SystemExit(f"{p}: not an anvil-desktop-perf result")
         results.append(d)
-        seen_lanes.add((d["os"], d.get("label", "")))
+        lane = (d["os"], d.get("label", ""))
+        if lane in seen_lanes:
+            duplicate_lanes.append(lane)
+        seen_lanes.add(lane)
 
+    expected_lanes: list[tuple[str, str]] = []
     missing_lanes: list[tuple[str, str]] = []
     for spec in args.expect:
         os_name, _, label = spec.partition(":")
         lane = (os_name, label)
+        expected_lanes.append(lane)
         if lane not in seen_lanes:
             missing_lanes.append(lane)
             results.append(
@@ -70,6 +81,7 @@ def main(argv: list[str]) -> int:
                     },
                 }
             )
+    unexpected_lanes = sorted(seen_lanes - set(expected_lanes)) if expected_lanes else []
 
     results.sort(key=lambda d: (d["os"], d.get("label", "")))
     print("| Job | Runs | " + " | ".join(f"{t}: launch 1 / later median" for _, t in COLUMNS) + " | Webview processes (last valid launch) | Attribution: launch 1 / later |")
@@ -113,6 +125,17 @@ def main(argv: list[str]) -> int:
         missing_count = len(ds) - len(present)
         note = f"{len(present)}/{len(ds)} runners" if missing_count else f"{len(ds)} runners"
         print(f"| {os_name} ({note}) | " + " | ".join(cells) + " |")
+    if args.require_expected:
+        problems = []
+        if missing_lanes:
+            problems.append("missing lanes: " + ", ".join(f"{o}:{l}" for o, l in missing_lanes))
+        if duplicate_lanes:
+            problems.append("duplicate lanes: " + ", ".join(f"{o}:{l}" for o, l in sorted(set(duplicate_lanes))))
+        if unexpected_lanes:
+            problems.append("unexpected lanes: " + ", ".join(f"{o}:{l}" for o, l in unexpected_lanes))
+        if problems:
+            print("measurement lane completeness check failed: " + "; ".join(problems), file=sys.stderr)
+            return 1
     return 0
 
 
