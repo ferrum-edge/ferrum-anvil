@@ -20,7 +20,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 import { listen } from "@tauri-apps/api/event";
 import type { LoadPlanCheck, LoadPreflight } from "./api";
 import type { Dataset, LatencySummary, LoadPlan, LoadReport, ProtocolLoadMetrics, RequestCounts, UnitSemantics } from "./generated/contracts";
-import { JtlImportDialog, LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox, freshJtlName, jmeterCommand, quotePowerShell } from "./LoadView";
+import { JmeterExportDialog, JtlImportDialog, LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox, freshJtlName, jmeterCommand, quotePowerShell } from "./LoadView";
 
 const notify = vi.fn();
 
@@ -1416,6 +1416,51 @@ describe("LOAD-012 JMeter adapter", () => {
     resolveImport("run-late");
     await act(async () => {});
     expect(onImported).not.toHaveBeenCalled();
+  });
+
+  it("LOAD-012 cancels in-flight JMX export on unmount across save and file picker awaits", async () => {
+    // 1. Unmount while save() is pending -> file picker must never open.
+    let resolveSave!: (p: LoadPlan | null) => void;
+    backend({
+      file_choose: () => [{ token: "fg-jmx", file_name: "plan.jmx" }],
+      load_export_jmx: () => ({ written: ["plan.jmx"], refused: [], report: null }),
+    });
+    const first = render(
+      <JmeterExportDialog
+        workspaceId="A"
+        planName="Plan A"
+        save={() => new Promise<LoadPlan | null>((r) => { resolveSave = r; })}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(button("Choose file and export…"));
+    await act(async () => {});
+    first.unmount();
+    resolveSave(loadPlan("pa", "A", "Plan A"));
+    await act(async () => {});
+    expect(calls("file_choose")).toEqual([]);
+    expect(calls("load_export_jmx")).toEqual([]);
+
+    // 2. Unmount while file picker is pending -> load_export_jmx must never be called.
+    let resolvePicker!: (v: unknown) => void;
+    backend({
+      file_choose: () => new Promise((r) => { resolvePicker = r; }),
+      load_export_jmx: () => ({ written: ["plan.jmx"], refused: [], report: null }),
+    });
+    const second = render(
+      <JmeterExportDialog
+        workspaceId="A"
+        planName="Plan A"
+        save={async () => loadPlan("pa", "A", "Plan A")}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(button("Choose file and export…"));
+    await waitFor(() => expect(calls("file_choose")).toHaveLength(1));
+    second.unmount();
+    resolvePicker([{ token: "fg-jmx", file_name: "plan.jmx" }]);
+    await act(async () => {});
+    expect(calls("load_export_jmx")).toEqual([]);
   });
 });
 

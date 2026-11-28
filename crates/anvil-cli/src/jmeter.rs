@@ -231,18 +231,66 @@ pub fn export_jmx(
     // Publish no-clobber sidecars first, then the plan and optional report,
     // tracking every published OS file identity so Unicode-normalization
     // aliases (e.g. APFS NFC/NFD) can never replace a newly written sibling.
+    // Back up any pre-existing dataset sidecar before overwriting it so a
+    // failed JMX publish restores the previous dataset (or removes a freshly
+    // created one) and never leaves an existing plan reading new rows.
     let mut published: Vec<String> = Vec::new();
     let mut protected: Vec<anvil_app::file_grants::PinnedFileId> = Vec::new();
+    let mut dataset_backup: Option<anvil_app::file_grants::PinnedBackup<'_>> = None;
+    let mut dataset_published_note: Option<String> = None;
     for (label, dest, item, no_clobber) in staged {
         let note = format!("{label} ({})", dest.display());
+        if label == "the dataset file" && !no_clobber {
+            let (_, ds_pin) = find_pinned("the dataset file");
+            match ds_pin.backup_existing_regular_guarded(&protected) {
+                Ok(backup) => dataset_backup = backup,
+                Err(err) => {
+                    let err = anyhow::Error::new(err).context(format!("backing up {label} ({})", dest.display()));
+                    if published.is_empty() {
+                        return Err(err.context("nothing was written"));
+                    }
+                    return Err(err.context(format!("already written: {}", published.join(", "))));
+                }
+            }
+        }
         match item.publish_guarded(no_clobber, &protected) {
             Ok(id) => {
+                if label == "the dataset file" {
+                    if let Some(backup) = dataset_backup.as_mut() {
+                        backup.mark_replaced();
+                    }
+                    dataset_published_note = Some(note.clone());
+                } else if label == "--out"
+                    && let Some(backup) = dataset_backup.take()
+                {
+                    backup.discard();
+                }
                 protected.push(id);
                 published.push(note);
             }
             Err(err) => {
                 if err.published {
+                    if label == "the dataset file" {
+                        if let Some(backup) = dataset_backup.as_mut() {
+                            backup.mark_replaced();
+                        }
+                        dataset_published_note = Some(note.clone());
+                    }
                     published.push(note);
+                }
+                if (label == "--out" || (label == "the dataset file" && err.published))
+                    && let Some(ds_note) = dataset_published_note.take()
+                {
+                    let (_, ds_pin) = find_pinned("the dataset file");
+                    let rolled_back = match dataset_backup.take() {
+                        Some(backup) => backup.restore().is_ok(),
+                        None => ds_pin.remove_published().is_ok(),
+                    };
+                    if rolled_back {
+                        published.retain(|p| p != &ds_note);
+                    }
+                } else if label == "the dataset file" {
+                    drop(dataset_backup.take());
                 }
                 let err = anyhow::Error::new(err).context(format!("publishing {label} ({})", dest.display()));
                 if published.is_empty() {

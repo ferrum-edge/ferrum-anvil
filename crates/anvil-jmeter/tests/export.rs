@@ -379,7 +379,6 @@ fn load_012_redirects_that_can_reach_https_are_refused_unless_https_behaves_alik
 #[test]
 fn load_012_redirected_methods_other_than_get_and_head_are_refused() {
     let mut spec = RequestSpec::http("POST", "http://127.0.0.1:8080/echo");
-    spec.body = Body::Raw { text: "x".into(), content_type: None };
     following(&mut spec);
     spec.settings.http_version = Some(HttpVersionPolicy::Http1Only);
     let (id, mut c) = step(spec);
@@ -1025,11 +1024,63 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     );
 
     // Paths containing empty segments (`//`) are sent verbatim by Anvil but normalized by
-    // JMeter's HttpClient 4 sampler, so export refuses them with `url_path`.
+    // JMeter's HttpClient 4 sampler, so export refuses them with `url_path` — for static
+    // paths, dataset rows, secret-backed path segments, and unverifiable runtime values.
     let mut dbl_slash = RequestSpec::http("GET", "http://example.test/a//b");
     dbl_slash.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
     let (id_ds, c_ds) = step(dbl_slash);
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_ds, c_ds, "dbl-slash")], None)), ["url_path"]);
+
+    let mut ds_path = RequestSpec::http("GET", "http://example.test/items/{{seg}}/detail");
+    ds_path.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_dsp, c_dsp) = step(ds_path);
+    assert_eq!(
+        export_codes(&Fx::new(iterations(1, 1), vec![(id_dsp, c_dsp.clone(), "ds-dot")], Some(dataset("seg\nok\n..\n")))),
+        ["url_path"]
+    );
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_dsp, c_dsp, "ds-dbl")], Some(dataset("seg\nx//y\n")))), ["url_path"]);
+
+    let mut sec_path = RequestSpec::http("GET", "http://example.test/items/{{sec_seg}}/detail");
+    sec_path.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_sp, mut c_sp) = step(sec_path);
+    c_sp.var_layers.push(layer("env", &[("sec_seg", "..", true)]));
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_sp, c_sp, "sec-dot")], None)), ["url_path"]);
+
+    // Cookie API keys follow RFC 6265 validation just like `anvil-auth` and refuse
+    // invalid names, invalid static/secret values, and dynamic values.
+    let mut bad_ck_name = RequestSpec::http("GET", "http://example.test/items");
+    bad_ck_name.auth =
+        AuthConfig::ApiKey { name: "bad;name".into(), value: SensitiveValue::template("okval"), location: KeyLocation::Cookie };
+    bad_ck_name.settings.cookies = Some(false);
+    bad_ck_name.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_bcn, c_bcn) = step(bad_ck_name);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_bcn, c_bcn, "bad-ck-name")], None)), ["auth"]);
+
+    let mut bad_ck_val = RequestSpec::http("GET", "http://example.test/items");
+    bad_ck_val.auth =
+        AuthConfig::ApiKey { name: "sid".into(), value: SensitiveValue::template("ok;injected=1"), location: KeyLocation::Cookie };
+    bad_ck_val.settings.cookies = Some(false);
+    bad_ck_val.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_bcv, c_bcv) = step(bad_ck_val);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_bcv, c_bcv, "bad-ck-val")], None)), ["auth"]);
+
+    let mut dyn_ck_val = RequestSpec::http("GET", "http://example.test/items");
+    dyn_ck_val.auth = AuthConfig::ApiKey { name: "sid".into(), value: SensitiveValue::template("{{tok}}"), location: KeyLocation::Cookie };
+    dyn_ck_val.settings.cookies = Some(false);
+    dyn_ck_val.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_dcv, c_dcv) = step(dyn_ck_val);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_dcv, c_dcv, "dyn-ck-val")], Some(dataset("tok\nabc\n")))), ["auth"]);
+
+    // JSONPath `NotExists` is refused because JMeter's inverted JSONPathAssertion
+    // passes on malformed non-JSON responses where Anvil fails.
+    let mut jp_not_exists = RequestSpec::http("GET", "http://example.test/items");
+    jp_not_exists.assertions.push(Assertion {
+        kind: AssertionKind::JsonPath { path: "$.error".into(), comparison: Comparison::NotExists, expected: String::new() },
+        enabled: true,
+    });
+    jp_not_exists.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_jpne, c_jpne) = step(jp_not_exists);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_jpne, c_jpne, "jp-not-exists")], None)), ["assertion"]);
 
     // Default jmeter_properties pin start timestamps in epoch milliseconds.
     assert!(

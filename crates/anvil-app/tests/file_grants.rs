@@ -700,6 +700,27 @@ fn load_012_write_jmeter_export_preserves_existing_plan_when_secrets_grant_inval
     assert_eq!(std::fs::read(&occupied).unwrap(), b"existing-secrets");
 }
 
+#[cfg(unix)]
+#[test]
+fn load_012_write_jmeter_export_rolls_back_dataset_when_plan_publish_fails() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = file(dir.path(), "plan.jmx", b"original-plan");
+    let dataset_path = file(dir.path(), "plan.dataset.csv", b"\"old\"\n");
+    let grants = FileGrants::default();
+    let g = grants.grant_write(FilePurpose::JmeterExport, &plan_path).unwrap();
+    // Swap the plan destination to a symlink after granting so publishing the
+    // plan fails after the dataset sidecar is staged and replaced.
+    std::fs::remove_file(&plan_path).unwrap();
+    let elsewhere = file(dir.path(), "elsewhere.jmx", b"other");
+    symlink(&elsewhere, &plan_path).unwrap();
+    let err = grants.write_jmeter_export(&g.token, b"replacement-plan", Some((b"\"new\"\n", false)), true, None).unwrap_err();
+    assert!(matches!(err, GrantError::Io(_)), "{err:?}");
+    assert_eq!(std::fs::read(&dataset_path).unwrap(), b"\"old\"\n", "existing dataset must be restored on plan failure");
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), b"other");
+    assert!(partial_files(dir.path()).is_empty());
+}
+
 #[cfg(target_vendor = "apple")]
 #[test]
 fn load_012_macos_owner_only_export_strips_inherited_acl() {

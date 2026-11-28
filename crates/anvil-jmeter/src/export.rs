@@ -461,6 +461,8 @@ struct Translator<'a> {
     mapping: Vec<Mapping>,
     jmeter_properties: Vec<(String, String)>,
     contexts: Vec<&'a ExecutionContext>,
+    cookie_secret_checks: Vec<(String, String, usize)>,
+    path_secret_checks: Vec<(String, String)>,
 }
 
 impl Translator<'_> {
@@ -564,6 +566,8 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             ("sample_variables".into(), String::new()),
         ],
         contexts: contexts.clone(),
+        cookie_secret_checks: Vec::new(),
+        path_secret_checks: Vec::new(),
     };
     // Markers must be ours alone.
     for (id, ctx) in steps.iter().zip(&contexts) {
@@ -841,6 +845,7 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
 
     // Secret values: only on the explicit path, only for used properties.
     let mut secrets_properties = None;
+    let mut resolved_secret_values: HashMap<usize, Zeroizing<String>> = HashMap::new();
     if opts.include_secrets && !used_secrets.is_empty() {
         let mut out = Zeroizing::new(String::from(
             "# Secrets of an Anvil load plan exported to JMeter. Pass with `jmeter -q <this file>`; keep it private and delete it after the run.\n",
@@ -854,6 +859,7 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
                     out.push('=');
                     out.push_str(&jmx::properties_value(&v));
                     out.push('\n');
+                    resolved_secret_values.insert(*i, v);
                 }
                 Err(r) => errors.push(r),
             }
@@ -862,6 +868,105 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             return Err(ExportRefused { reasons: errors });
         }
         secrets_properties = Some(out);
+    }
+
+    // Validate secret-backed cookie API keys (RFC 6265 cookie-octets) and
+    // secret-bearing URL path segments (no empty `//` or `.`/`..` segments
+    // that JMeter's HttpClient 4 rewrites) without reading the vault unless
+    // `include_secrets` is true.
+    let mut post_reasons = Vec::new();
+    let secret_value_for_check = |idx: usize| -> Option<Zeroizing<String>> {
+        if let Some(v) = resolved_secret_values.get(&idx) {
+            return Some(v.clone());
+        }
+        if opts.include_secrets {
+            return None;
+        }
+        resolve_secret_without_vault(&t, &t.secrets.props[idx].source)
+    };
+    for (rq_name, cookie_name, idx) in &t.cookie_secret_checks {
+        match secret_value_for_check(*idx) {
+            Some(val) => {
+                if let Err(err) = anvil_auth::validate_cookie_value(cookie_name, &val) {
+                    post_reasons.push(reason(Some(rq_name), "auth", err.to_string()));
+                }
+            }
+            None => post_reasons.push(reason(
+                Some(rq_name),
+                "auth",
+                format!(
+                    "the cookie API key '{cookie_name}' is backed by a vault secret whose RFC 6265 cookie-octet validity cannot be verified without reading the secret; export with secrets included or use a header API key"
+                ),
+            )),
+        }
+    }
+    for (rq_name, marked_path) in &t.path_secret_checks {
+        let parts = t.markers.split(marked_path);
+        let mut unreadable_secret = false;
+        let mut secret_vals: HashMap<usize, Zeroizing<String>> = HashMap::new();
+        for part in &parts {
+            if let Part::Mark(mi) = part
+                && let Mark::Secret(idx) = t.markers.list[*mi]
+            {
+                match secret_value_for_check(idx) {
+                    Some(v) => {
+                        secret_vals.insert(idx, v);
+                    }
+                    None => {
+                        unreadable_secret = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if unreadable_secret {
+            post_reasons.push(reason(
+                Some(rq_name),
+                "url_path",
+                "a URL path segment is backed by a vault secret whose shape (empty '//' or dot segments that JMeter's HttpClient 4 rewrites) cannot be verified without reading the secret; export with secrets included or move the credential out of the path",
+            ));
+            continue;
+        }
+        let check_row = |row: Option<&[Option<String>]>| -> bool {
+            let mut rendered = String::new();
+            for part in &parts {
+                match part {
+                    Part::Lit(s) => rendered.push_str(s),
+                    Part::Mark(mi) => match &t.markers.list[*mi] {
+                        Mark::Secret(idx) => {
+                            if let Some(v) = secret_vals.get(idx) {
+                                rendered.push_str(v);
+                            }
+                        }
+                        Mark::Var(v) | Mark::SensitiveVar(v) if v.starts_with("anvil_ds_") => {
+                            if let Some(ci) = v.strip_prefix("anvil_ds_").and_then(|n| n.parse::<usize>().ok())
+                                && let Some(Some(cell)) = row.and_then(|r| r.get(ci))
+                            {
+                                rendered.push_str(cell);
+                            } else {
+                                rendered.push('1');
+                            }
+                        }
+                        _ => rendered.push('1'),
+                    },
+                }
+            }
+            path_has_httpclient4_rewrite(&rendered)
+        };
+        let bad = match dataset {
+            Some(d) if !d.rows.is_empty() => d.rows.iter().any(|r| check_row(Some(r))),
+            _ => check_row(None),
+        };
+        if bad {
+            post_reasons.push(reason(
+                Some(rq_name),
+                "url_path",
+                "a secret or dataset value in the request URL path produces an empty ('//') or dot segment that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler normalizes the path before sending",
+            ));
+        }
+    }
+    if !post_reasons.is_empty() {
+        return Err(ExportRefused { reasons: post_reasons });
     }
 
     let test_plan = Node::new(
@@ -1471,13 +1576,68 @@ fn translate_step(
     let base_query = anvil_engine::prepare::parse_target(&resolved_url, schemes, &mut Vec::new()).map(|b| b.query.len()).unwrap_or(0);
     // JMeter 5.6.3's HttpClient 4 sampler normalizes URI paths by default
     // (`URIUtils.rewriteURI` with `normalizeUri=true`), collapsing empty
-    // segments (`//`) and dot segments that Anvil sends verbatim.
-    if target.path.contains("//") || target.path.split('/').any(|seg| seg == "." || seg == "..") {
+    // segments (`//`) and dot segments that Anvil sends verbatim. Validate
+    // static paths, every rendered dataset row, and any secret/dynamic path
+    // segments whose runtime shape could produce a rewritten path.
+    if path_has_httpclient4_rewrite(&target.path) {
         rs.push(reason(
             rq,
             "url_path",
             "the request URL path contains an empty ('//') or dot segment that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler normalizes the path before sending",
         ));
+    } else if t.markers.has_marks(&target.path) {
+        let parts = t.markers.split(&target.path);
+        let mut has_unverifiable = false;
+        let mut has_secret_mark = false;
+        let mut has_dataset_mark = false;
+        for part in &parts {
+            if let Part::Mark(mi) = part {
+                match &t.markers.list[*mi] {
+                    Mark::Vu => {}
+                    Mark::Var(v) if v == ITERATION_VAR => {}
+                    Mark::Var(v) | Mark::SensitiveVar(v) if v.starts_with("anvil_ds_") => has_dataset_mark = true,
+                    Mark::Helper(expr) if expr == "${__UUID()}" || expr.starts_with("${__time(") || expr.starts_with("${__Random(") => {}
+                    Mark::Secret(_) => has_secret_mark = true,
+                    _ => has_unverifiable = true,
+                }
+            }
+        }
+        if has_unverifiable {
+            rs.push(reason(
+                rq,
+                "url_path",
+                "the request URL path substitutes a runtime value whose shape cannot be verified against empty ('//') or dot segments that JMeter's HttpClient 4 sampler normalizes before sending",
+            ));
+        } else if has_secret_mark {
+            t.path_secret_checks.push((name.to_string(), target.path.clone()));
+        } else if has_dataset_mark
+            && let Some(d) = t.input.job.dataset.as_ref()
+            && d.rows.iter().any(|row| {
+                let mut rendered = String::new();
+                for part in &parts {
+                    match part {
+                        Part::Lit(s) => rendered.push_str(s),
+                        Part::Mark(mi) => match &t.markers.list[*mi] {
+                            Mark::Var(v) | Mark::SensitiveVar(v) if v.starts_with("anvil_ds_") => {
+                                if let Some(ci) = v.strip_prefix("anvil_ds_").and_then(|n| n.parse::<usize>().ok())
+                                    && let Some(Some(cell)) = row.get(ci)
+                                {
+                                    rendered.push_str(cell);
+                                }
+                            }
+                            _ => rendered.push('1'),
+                        },
+                    }
+                }
+                path_has_httpclient4_rewrite(&rendered)
+            })
+        {
+            rs.push(reason(
+                rq,
+                "url_path",
+                "a dataset row produces an empty ('//') or dot segment in the request URL path that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler normalizes the path before sending",
+            ));
+        }
     }
     let mut path = Tmpl::raw(target.path.clone());
     let mut has_query = false;
@@ -1660,6 +1820,39 @@ fn translate_step(
                         if headers.iter().any(|(h, _)| h.eq_ignore_ascii_case("cookie")) {
                             rs.push(reason(rq, "auth", "a cookie API key would be merged into the request's own Cookie header, which the export does not reproduce"));
                         }
+                        if !key.trim().is_empty() && !t.markers.has_marks(&key) {
+                            if let Err(err) = anvil_auth::validate_cookie_name(&key) {
+                                rs.push(reason(rq, "auth", err.to_string()));
+                            }
+                            let parts = t.markers.split(&v);
+                            let non_secret_mark =
+                                parts.iter().any(|p| matches!(p, Part::Mark(mi) if !matches!(t.markers.list[*mi], Mark::Secret(_))));
+                            if non_secret_mark {
+                                rs.push(reason(
+                                    rq,
+                                    "auth",
+                                    format!(
+                                        "the cookie API key '{key}' uses a dynamic value whose RFC 6265 cookie-octet validity cannot be verified at export"
+                                    ),
+                                ));
+                            } else if !t.markers.has_marks(&v) {
+                                if let Err(err) = anvil_auth::validate_cookie_value(&key, &v) {
+                                    rs.push(reason(rq, "auth", err.to_string()));
+                                }
+                            } else if let [Part::Mark(mi)] = parts.as_slice()
+                                && let Mark::Secret(idx) = t.markers.list[*mi]
+                            {
+                                t.cookie_secret_checks.push((name.to_string(), key.clone(), idx));
+                            } else {
+                                rs.push(reason(
+                                    rq,
+                                    "auth",
+                                    format!(
+                                        "the cookie API key '{key}' combines multiple parts whose RFC 6265 cookie-octet validity cannot be verified at export"
+                                    ),
+                                ));
+                            }
+                        }
                         set_header(&mut headers, "Cookie", Tmpl::raw(format!("{key}={v}")));
                         credential_headers = true;
                     }
@@ -1671,7 +1864,7 @@ fn translate_step(
     }
     let query_tail_marked = path.0.iter().any(|(s, enc)| *enc && t.markers.has_marks(s));
     if query_tail_marked || encoded_query_value {
-        t.note("Query parameter values that come from a per-iteration value or a secret are encoded by JMeter's __urlencode (form encoding: a space becomes '+'); Anvil percent-encodes them (a space becomes %20). Other characters are encoded alike.");
+        t.note("Query parameter values that come from a per-iteration value or a secret are encoded by JMeter's __urlencode (application/x-www-form-urlencoded: spaces become '+', '*' stays literal, and '~' becomes %7E); Anvil uses RFC 3986 percent-encoding (spaces become %20, '*' becomes %2A, and '~' stays literal). Other characters are encoded alike.");
     }
     if settings.cookies && headers.iter().any(|(h, _)| h.eq_ignore_ascii_case("cookie")) {
         rs.push(reason(rq, "cookies", "the request sets a Cookie header while cookies are on; Anvil merges the jar's cookies into it, JMeter's cookie manager handles them separately"));
@@ -1764,7 +1957,7 @@ fn translate_step(
             rs.push(reason(
                 rq,
                 "redirect_content_type",
-                "the request follows redirects and sets an explicit Content-Type header; Anvil strips Content-Type on bodyless redirect hops, whereas JMeter's header manager sends it to every redirect target. Remove the Content-Type header or turn off following redirects for this request to export it",
+                "the request follows redirects and sends a Content-Type header (explicit or inferred from its body); Anvil strips Content-Type on bodyless redirect hops, whereas JMeter's header manager sends it to every redirect target. Remove the Content-Type header or turn off following redirects for this request to export it",
             ));
         }
         // JMeter 5.6.3 turns every redirected method except HEAD into GET
@@ -2087,7 +2280,11 @@ fn assertion_node(t: &mut Translator<'_>, a: &anvil_domain::assertions::Assertio
             }
             let (validate, invert, expected, regex) = match comparison {
                 Comparison::Exists => (false, false, String::new(), false),
-                Comparison::NotExists => (false, true, String::new(), false),
+                Comparison::NotExists => {
+                    return Err(format!(
+                        "JSONPath NotExists ('{path}') cannot be reproduced faithfully: JMeter's inverted JSON Assertion treats malformed JSON parse errors as success, whereas Anvil fails on invalid JSON"
+                    ));
+                }
                 Comparison::Equals if value.is_ascii() => (true, false, jmx::regex_literal(value), true),
                 _ => return Err(refuse(&format!("JSONPath {path} {comparison:?}"))),
             };
@@ -2794,6 +2991,41 @@ fn validate_static_secret_template(
         }
         if !newly_expanded {
             return Ok(());
+        }
+    }
+}
+
+fn path_has_httpclient4_rewrite(path: &str) -> bool {
+    path.contains("//") || path.split('/').any(|seg| seg == "." || seg == "..")
+}
+
+/// Resolve a secret source without touching the vault (used for export-time
+/// validation when `include_secrets` is `false`). Returns `None` if resolving
+/// the source would require reading any vault-backed secret.
+fn resolve_secret_without_vault(t: &Translator<'_>, source: &SecretSource) -> Option<Zeroizing<String>> {
+    match source {
+        SecretSource::Literal(s) => Some(Zeroizing::new(s.clone())),
+        SecretSource::Vault { .. } => None,
+        SecretSource::VariableEntry { step, layer, var } => {
+            let ctx = t.contexts[*step];
+            if ctx.secrets.variable_secret(*layer, *var).is_some() {
+                return None;
+            }
+            let r = Resolver::new(ctx.var_layers.clone(), None);
+            let val = r.resolve_entry(*layer, *var, "variables").ok()?;
+            if val.contains(DEFERRED_SECRET_VALUE) {
+                return None;
+            }
+            Some(Zeroizing::new(val))
+        }
+        SecretSource::Template { step, template } => {
+            let ctx = t.contexts[*step];
+            let r = Resolver::new(ctx.var_layers.clone(), None);
+            let val = r.resolve(template, "variables").ok()?;
+            if val.contains(DEFERRED_SECRET_VALUE) {
+                return None;
+            }
+            Some(Zeroizing::new(val))
         }
     }
 }

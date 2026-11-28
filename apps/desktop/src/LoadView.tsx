@@ -3,7 +3,7 @@
 // measures one load unit (HTTP requests, gRPC calls or streams, SSE streams,
 // WebSocket sessions, TCP or UDP/DTLS exchanges); the editor shows which one,
 // or the typed refusal, before anything can run (LOAD-013).
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   onLoadFinished,
@@ -1206,7 +1206,7 @@ export function JmeterExportDialog(props: { workspaceId?: string; planName: stri
   const [outcome, setOutcome] = useState<JmxExportOutcome | null>(null);
   const [resultsFile, setResultsFile] = useState<string>("results.jtl");
   const opRef = useRef(0);
-  useEffect(() => {
+  useLayoutEffect(() => {
     opRef.current += 1;
     return () => {
       opRef.current += 1;
@@ -1346,7 +1346,7 @@ export function JtlImportDialog(props: {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const opRef = useRef(0);
-  useEffect(() => {
+  useLayoutEffect(() => {
     opRef.current += 1;
     return () => {
       opRef.current += 1;

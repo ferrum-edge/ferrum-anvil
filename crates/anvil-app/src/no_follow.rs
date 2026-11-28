@@ -71,6 +71,13 @@ pub(crate) enum StagedFile {
     },
 }
 
+/// A backup of a pre-existing regular file inside a [`Dir`], used to roll back
+/// a sidecar replacement if the companion test plan fails to publish.
+pub(crate) struct ExistingBackup {
+    name: OsString,
+    moved: bool,
+}
+
 fn not_absolute() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, "the path is not absolute and normalized")
 }
@@ -332,21 +339,72 @@ impl Dir {
         }
     }
 
-    /// Acquire an exclusive cross-process `flock` on this pinned directory so
-    /// multi-file exports (dataset + test plan) targeting the same folder
-    /// publish atomically as a pair without interleaving.
+    /// Acquire an exclusive cross-process `flock` on a stable, writable lock
+    /// file opened without following links inside this pinned directory (works
+    /// across Linux NFS where exclusive `flock` requires write access, as well
+    /// as local Unix filesystems).
     pub(crate) fn lock_exclusive(&self) -> io::Result<File> {
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        let file = {
-            use rustix::fs::{Mode, OFlags};
-            // On Linux `self.fd` is opened with `O_PATH`, which rejects
-            // `flock(2)`; reopen `.` relative to the pinned directory fd.
-            File::from(rustix::fs::openat(&self.fd, ".", OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())?)
-        };
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let file = self.fd.try_clone()?;
+        use rustix::fs::{Mode, OFlags};
+        let flags = OFlags::RDWR | OFlags::CREAT | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        #[allow(clippy::unnecessary_cast)]
+        let mode = Mode::from_raw_mode(0o600 as rustix::fs::RawMode);
+        let fd = rustix::fs::openat(&self.fd, ".anvil-export.lock", flags, mode)?;
+        let file = File::from(fd);
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
+        }
         file.lock()?;
         Ok(file)
+    }
+
+    /// Back up an existing regular file `name` inside this folder without
+    /// following symlinks so a subsequent companion-file failure can restore
+    /// it. Prefers an atomic hard link (zero gap while `name` stays live) and
+    /// falls back to an exclusive rename on filesystems without hard links.
+    pub(crate) fn backup_existing_regular(&self, name: &OsStr) -> io::Result<Option<ExistingBackup>> {
+        use rustix::fs::{AtFlags, FileType, statat};
+        use rustix::io::Errno;
+        match statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(Errno::NOENT) => Ok(None),
+            Err(e) => Err(e.into()),
+            Ok(st) => {
+                let ft = FileType::from_raw_mode(st.st_mode);
+                if ft == FileType::Symlink {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "destination is a symbolic link; refusing to back up or replace a symlink",
+                    ));
+                }
+                if ft != FileType::RegularFile {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "destination is not a regular file"));
+                }
+                let backup = OsString::from(format!(".anvil-backup-{}.partial", uuid::Uuid::new_v4().simple()));
+                match rustix::fs::linkat(&self.fd, name, &self.fd, &backup, AtFlags::empty()) {
+                    Ok(()) => Ok(Some(ExistingBackup { name: backup, moved: false })),
+                    Err(Errno::PERM | Errno::OPNOTSUPP | Errno::NOTSUP | Errno::NOSYS | Errno::INVAL | Errno::XDEV | Errno::MLINK) => {
+                        self.publish_no_clobber(name, &backup)?;
+                        Ok(Some(ExistingBackup { name: backup, moved: true }))
+                    }
+                    Err(e) => Err(e.into()),
+                }
+            }
+        }
+    }
+
+    pub(crate) fn abort_backup(&self, backup: ExistingBackup, target: &OsStr) {
+        if backup.moved {
+            let _ = self.rename(&backup.name, target);
+        } else {
+            let _ = self.remove_file(&backup.name);
+        }
+    }
+
+    pub(crate) fn restore_backup(&self, backup: ExistingBackup, target: &OsStr) -> io::Result<()> {
+        self.rename(&backup.name, target)
+    }
+
+    pub(crate) fn discard_backup(&self, backup: ExistingBackup) {
+        let _ = self.remove_file(&backup.name);
     }
 }
 
@@ -638,21 +696,74 @@ impl Dir {
         Ok(Some((meta.file_type().is_symlink(), id)))
     }
 
-    /// Acquire an exclusive cross-process lock scoped to this directory's OS
-    /// identity so multi-file exports (dataset + test plan) targeting the same
-    /// folder publish atomically as a pair without interleaving.
+    /// Acquire an exclusive cross-process lock on a stable, writable lock file
+    /// opened without following links inside this held directory so concurrent
+    /// exports targeting the same folder serialize regardless of `%TMP%`.
     pub(crate) fn lock_exclusive(&self) -> io::Result<File> {
         use std::os::windows::fs::OpenOptionsExt;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        let (vol, idx) = self.id()?;
-        let lock_path = std::env::temp_dir().join(format!("anvil-export-dir-{vol:016x}-{idx:016x}.lock"));
+        let lock_path = self.path.join(".anvil-export.lock");
         let file =
             std::fs::OpenOptions::new().create(true).read(true).write(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(&lock_path)?;
-        if file.metadata()?.file_type().is_symlink() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is a symbolic link"));
+        let meta = file.metadata()?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is a symbolic link or not a regular file"));
         }
         file.lock()?;
         Ok(file)
+    }
+
+    pub(crate) fn backup_existing_regular(&self, name: &OsStr) -> io::Result<Option<ExistingBackup>> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let path = self.path.join(name);
+        let opened = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_ALL)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&path);
+        let file = match opened {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let meta = file.metadata()?;
+        drop(file);
+        if meta.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "destination is a symbolic link; refusing to back up or replace a symlink",
+            ));
+        }
+        if !meta.is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "destination is not a regular file"));
+        }
+        let backup = OsString::from(format!(".anvil-backup-{}.partial", uuid::Uuid::new_v4().simple()));
+        if std::fs::hard_link(&path, self.path.join(&backup)).is_ok() {
+            Ok(Some(ExistingBackup { name: backup, moved: false }))
+        } else {
+            self.publish_no_clobber(name, &backup)?;
+            Ok(Some(ExistingBackup { name: backup, moved: true }))
+        }
+    }
+
+    pub(crate) fn abort_backup(&self, backup: ExistingBackup, target: &OsStr) {
+        if backup.moved {
+            let _ = self.rename(&backup.name, target);
+        } else {
+            let _ = self.remove_file(&backup.name);
+        }
+    }
+
+    pub(crate) fn restore_backup(&self, backup: ExistingBackup, target: &OsStr) -> io::Result<()> {
+        self.rename(&backup.name, target)
+    }
+
+    pub(crate) fn discard_backup(&self, backup: ExistingBackup) {
+        let _ = self.remove_file(&backup.name);
     }
 }
 
@@ -746,7 +857,7 @@ impl Dir {
     }
 
     pub(crate) fn lock_exclusive(&self) -> io::Result<File> {
-        let file = File::open(&self.path)?;
+        let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(self.path.join(".anvil-export.lock"))?;
         file.lock()?;
         Ok(file)
     }
@@ -757,6 +868,47 @@ impl Dir {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    pub(crate) fn backup_existing_regular(&self, name: &OsStr) -> io::Result<Option<ExistingBackup>> {
+        let path = self.path.join(name);
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if meta.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "destination is a symbolic link; refusing to back up or replace a symlink",
+            ));
+        }
+        if !meta.is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "destination is not a regular file"));
+        }
+        let backup = OsString::from(format!(".anvil-backup-{}.partial", uuid::Uuid::new_v4().simple()));
+        if std::fs::hard_link(&path, self.path.join(&backup)).is_ok() {
+            Ok(Some(ExistingBackup { name: backup, moved: false }))
+        } else {
+            self.rename(name, &backup)?;
+            Ok(Some(ExistingBackup { name: backup, moved: true }))
+        }
+    }
+
+    pub(crate) fn abort_backup(&self, backup: ExistingBackup, target: &OsStr) {
+        if backup.moved {
+            let _ = self.rename(&backup.name, target);
+        } else {
+            let _ = self.remove_file(&backup.name);
+        }
+    }
+
+    pub(crate) fn restore_backup(&self, backup: ExistingBackup, target: &OsStr) -> io::Result<()> {
+        self.rename(&backup.name, target)
+    }
+
+    pub(crate) fn discard_backup(&self, backup: ExistingBackup) {
+        let _ = self.remove_file(&backup.name);
     }
 }
 

@@ -719,6 +719,8 @@ impl FileGrants {
             None
         };
 
+        let mut ds_backup: Option<crate::no_follow::ExistingBackup> = None;
+        let mut ds_published_label: Option<String> = None;
         if let (Some(sibling), Some((tmp, staged_id))) = (sibling_name.as_ref(), ds_tmp.take()) {
             let target_blocked = match plan_folder.entry_identity(sibling) {
                 Ok(Some((true, _))) => {
@@ -734,7 +736,19 @@ impl FileGrants {
             let res = if let Some(err) = target_blocked {
                 Err(err)
             } else if replace_dataset {
-                plan_folder.rename_staged(&tmp, sibling)
+                match plan_folder.backup_existing_regular(sibling) {
+                    Ok(backup) => {
+                        ds_backup = backup;
+                        let r = plan_folder.rename_staged(&tmp, sibling);
+                        if r.is_err()
+                            && let Some(backup) = ds_backup.take()
+                        {
+                            plan_folder.abort_backup(backup, sibling);
+                        }
+                        r
+                    }
+                    Err(err) => Err(err),
+                }
             } else {
                 plan_folder.publish_staged_no_clobber(&tmp, sibling)
             };
@@ -756,7 +770,9 @@ impl FileGrants {
                     published.join(", ")
                 )));
             }
-            published.push(display_name(Some(sibling)));
+            let ds_label = display_name(Some(sibling));
+            ds_published_label = Some(ds_label.clone());
+            published.push(ds_label);
             protected.push(staged_id);
             match plan_folder.entry_identity(sibling) {
                 Ok(Some((false, pub_id))) => {
@@ -766,6 +782,17 @@ impl FileGrants {
                 }
                 Ok(_) => {
                     cleanup_remaining(jmx_t.as_ref(), None, None);
+                    let rolled_back = match ds_backup.take() {
+                        Some(backup) => plan_folder.restore_backup(backup, sibling).is_ok(),
+                        None => plan_folder.remove_file(sibling).is_ok(),
+                    };
+                    if rolled_back && let Some(ref label) = ds_published_label {
+                        published.retain(|p| p != label);
+                    }
+                    if published.is_empty() {
+                        restore_grants(plan_entry, secrets_entry);
+                        return Err(GrantError::Io("cannot verify published dataset file identity".into()));
+                    }
                     return Err(GrantError::Io(format!(
                         "cannot verify published dataset file identity (already written: {}; the remaining files were not written)",
                         published.join(", ")
@@ -773,6 +800,17 @@ impl FileGrants {
                 }
                 Err(err) => {
                     cleanup_remaining(jmx_t.as_ref(), None, None);
+                    let rolled_back = match ds_backup.take() {
+                        Some(backup) => plan_folder.restore_backup(backup, sibling).is_ok(),
+                        None => plan_folder.remove_file(sibling).is_ok(),
+                    };
+                    if rolled_back && let Some(ref label) = ds_published_label {
+                        published.retain(|p| p != label);
+                    }
+                    if published.is_empty() {
+                        restore_grants(plan_entry, secrets_entry);
+                        return Err(GrantError::Io(format!("cannot verify published dataset file identity: {err}")));
+                    }
                     return Err(GrantError::Io(format!(
                         "cannot verify published dataset file identity: {err} (already written: {}; the remaining files were not written)",
                         published.join(", ")
@@ -796,12 +834,29 @@ impl FileGrants {
             };
             if let Err(err) = res {
                 plan_folder.cleanup_staged(&tmp);
+                // Roll back the companion dataset sidecar so an existing test
+                // plan is never left reading a replacement dataset (and no
+                // orphaned new dataset is left behind).
+                if let Some(ref sibling) = sibling_name
+                    && ds_published_label.is_some()
+                {
+                    let rolled_back = match ds_backup.take() {
+                        Some(backup) => plan_folder.restore_backup(backup, sibling).is_ok(),
+                        None => plan_folder.remove_file(sibling).is_ok(),
+                    };
+                    if rolled_back && let Some(ref label) = ds_published_label {
+                        published.retain(|p| p != label);
+                    }
+                }
                 if published.is_empty() {
                     restore_grants(plan_entry, secrets_entry);
                     return Err(io(err));
                 }
                 return Err(GrantError::Io(format!("{err} (already written: {}; the test plan was not written)", published.join(", "))));
             }
+        }
+        if let Some(backup) = ds_backup.take() {
+            plan_folder.discard_backup(backup);
         }
 
         let mut written = vec![display_name(Some(plan_name))];
@@ -1184,11 +1239,82 @@ impl PinnedOutput {
         self.dir.lock_exclusive()
     }
 
+    /// Back up an existing regular file at this pinned destination after
+    /// verifying it is neither a symlink nor in `protected`, so a companion
+    /// publish failure can restore the previous file.
+    pub fn backup_existing_regular_guarded(&self, protected: &[PinnedFileId]) -> std::io::Result<Option<PinnedBackup<'_>>> {
+        match self.dir.entry_identity(&self.name)? {
+            None => return Ok(None),
+            Some((true, _)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "destination is a symbolic link; refusing to back up or replace a symlink",
+                ));
+            }
+            Some((false, existing_id)) if protected.contains(&PinnedFileId(existing_id)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "destination resolves to a protected input or sibling output file; refusing to overwrite",
+                ));
+            }
+            Some((false, _)) => {}
+        }
+        Ok(self.dir.backup_existing_regular(&self.name)?.map(|backup| PinnedBackup { output: self, backup: Some(backup), replaced: false }))
+    }
+
+    /// Remove a freshly published file at this destination during rollback.
+    pub fn remove_published(&self) -> std::io::Result<()> {
+        self.dir.remove_file(&self.name)
+    }
+
     /// Stage `bytes` into a new file inside the pinned directory and atomically
     /// publish it after verifying the leaf is neither a symlink nor any
     /// `protected` file identity.
     pub fn write_atomic_guarded(&self, bytes: &[u8], protected: &[PinnedFileId]) -> std::io::Result<PinnedFileId> {
         self.stage(bytes, false)?.publish_guarded(false, protected).map_err(Into::into)
+    }
+}
+
+/// A backup of a pre-existing file at a [`PinnedOutput`] destination that
+/// automatically aborts/restores on drop unless explicitly discarded or
+/// restored.
+pub struct PinnedBackup<'a> {
+    output: &'a PinnedOutput,
+    backup: Option<crate::no_follow::ExistingBackup>,
+    replaced: bool,
+}
+
+impl PinnedBackup<'_> {
+    /// Record that the replacement file has landed at the destination.
+    pub fn mark_replaced(&mut self) {
+        self.replaced = true;
+    }
+
+    /// Restore the backed-up file over the replacement destination.
+    pub fn restore(mut self) -> std::io::Result<()> {
+        if let Some(backup) = self.backup.take() {
+            self.output.dir.restore_backup(backup, &self.output.name)?;
+        }
+        Ok(())
+    }
+
+    /// Discard the backup after the companion output succeeded.
+    pub fn discard(mut self) {
+        if let Some(backup) = self.backup.take() {
+            self.output.dir.discard_backup(backup);
+        }
+    }
+}
+
+impl Drop for PinnedBackup<'_> {
+    fn drop(&mut self) {
+        if let Some(backup) = self.backup.take() {
+            if self.replaced {
+                let _ = self.output.dir.restore_backup(backup, &self.output.name);
+            } else {
+                self.output.dir.abort_backup(backup, &self.output.name);
+            }
+        }
     }
 }
 

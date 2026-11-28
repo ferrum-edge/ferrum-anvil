@@ -719,7 +719,7 @@ contains `$` or `\` is escaped for JMeter's function parser.
 | status assertions (equals, not equals, in) | Response Assertion on the response code |
 | header assertions (exists, not exists, equals, contains) | Response Assertion on the response headers (a pattern; header names case-insensitive) |
 | body assertions (contains, not contains, equals, not equals; ASCII) | Response Assertion on the response text (substring or equality) |
-| JSONPath assertions (exists, not exists, equals) on a simple path (`$` with `.name`, `['name']`, `[index]`) | JSON Assertion |
+| JSONPath assertions (exists, equals) on a simple path (`$` with `.name`, `['name']`, `[index]`) | JSON Assertion |
 | latency assertion | Duration Assertion |
 | JSONPath (simple path), header and status extractions | JSON Extractor; Regular Expression Extractor on the headers or the response code |
 | cookie jar per virtual user | HTTP Cookie Manager per thread, kept across iterations |
@@ -749,7 +749,7 @@ contains `$` or `\` is escaped for JMeter's function parser.
 | `content_length_header`, `transfer_encoding_header` | An explicit `Content-Length` or `Transfer-Encoding` header that JMeter's HttpClient 4 sampler discards, rejects, or rewrites. |
 | `host_header` | An explicit `Host` header whose wire form JMeter's HttpClient 4 sampler would rewrite (appending a non-default sampler port to a portless `Host`, stripping an explicit default port, normalizing non-canonical port text, or resolving a dynamic template). |
 | `url_credential` | A credential-named query value written into the URL itself with literal text (`?access_token=…`), or a dynamic raw URL query name paired with a literal value (`?{{param}}=…`). The test plan would hold it; move it to the request's query parameters or an API key auth, where it becomes a property. A secret variable there becomes a property. |
-| `url_path` | A URL path with an empty (`//`) or dot (`.`/`..`) segment that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler normalizes the path before sending. |
+| `url_path` | A URL path with an empty (`//`) or dot (`.`/`..`) segment (either literal or produced by a dataset/secret/unverified dynamic path segment) that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler normalizes the path before sending. |
 | `open_cap`, `open_connections` | An open workload whose in-flight cap could bind: JMeter's open model has no cap and its socket read timeout does not bound a slow-streaming response, so JMeter would start arrivals Anvil drops. The cap must be at least the schedule's total possible arrivals. In the persistent connection mode Anvil reuses connections and cookies across arrivals, which JMeter's per-arrival threads cannot; choose the fresh mode. |
 | `accept_encoding` | An explicit `Accept-Encoding` offering a coding JMeter 5.6.3 cannot decode (anything but gzip, deflate, br and identity), or automatic decompression turned off (Anvil keeps compressed responses encoded, whereas JMeter's HttpClient 4 sampler automatically decompresses them regardless of the request's `Accept-Encoding` header). |
 | `redirect_credentials` | A request that follows redirects while it carries credentials in headers or its body. JMeter's Header Manager sends them to every redirect target, and Anvil never forwards them to another origin. Turn off following redirects for the request. |
@@ -768,7 +768,10 @@ transport failure and skips later chain steps even with Follow Redirects off),
 `Connection: close` in fresh mode, timeouts and response limits
 JMeter does not enforce, header assertions (any line vs Anvil's first value),
 body evaluation beyond Anvil's 1 MiB load capture, the encoding of
-per-iteration values in queries (`+` vs `%20` for a space), Basic credential
+per-iteration values in queries (JMeter's `__urlencode` uses form encoding:
+spaces become `+`, `*` stays literal, and `~` becomes `%7E`, whereas Anvil's
+RFC 3986 percent-encoding encodes spaces as `%20`, `*` as `%2A`, and leaves
+`~` literal), Basic credential
 encoding, empty values for extractions that match nothing, the inferred
 `Accept-Encoding` without `zstd`, and warmup (JMeter records it, and the import
 excludes it again).

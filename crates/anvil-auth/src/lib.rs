@@ -406,6 +406,28 @@ fn is_cookie_octet(b: u8) -> bool {
     matches!(b, 0x21 | 0x23..=0x2B | 0x2D..=0x3A | 0x3C..=0x5B | 0x5D..=0x7E)
 }
 
+/// Validate an RFC 6265 cookie API key name (RFC 7230 `tchar`, non-empty).
+pub fn validate_cookie_name(name: &str) -> Result<(), AuthError> {
+    if name.is_empty() || !name.bytes().all(is_token_char) {
+        return Err(AuthError::Invalid(format!(
+            "the cookie API key name {name:?} is not a valid cookie name; use letters, digits and !#$%&'*+-.^_`|~ only"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate an RFC 6265 cookie API key value (cookie-octets, optionally
+/// wrapped in double quotes). Never includes the value in its error message.
+pub fn validate_cookie_value(name: &str, value: &str) -> Result<(), AuthError> {
+    let inner = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+    if !inner.bytes().all(is_cookie_octet) {
+        return Err(AuthError::Invalid(format!(
+            "the cookie API key '{name}' has an invalid cookie value (no whitespace, control or non-ASCII characters, \", ; or \\)"
+        )));
+    }
+    Ok(())
+}
+
 /// The request's cookies with `name=value` added, replacing any cookie of
 /// that name. Every `Cookie` header is read, since the result replaces them all.
 /// A name that is not a token or a value that is not cookie-octets (optionally

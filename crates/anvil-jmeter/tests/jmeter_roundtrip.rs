@@ -518,6 +518,33 @@ async fn load_012_default_export_properties_do_not_write_url_credentials_to_jtl(
     let dbl_got = received(&f, "/echo");
     assert_eq!(dbl_got.len(), 1, "{dbl_got:?}");
     assert_eq!(dbl_got[0].0, "/echo//seg", "Anvil sends empty path segments verbatim");
-    let dbl_err = dbl_plan.export(&export_opts(false)).expect_err("empty segment path must be refused");
+    let Err(dbl_err) = dbl_plan.export(&export_opts(false)) else {
+        panic!("empty segment path must be refused");
+    };
     assert!(dbl_err.reasons.iter().any(|r| r.code == "url_path"), "{dbl_err:?}");
+
+    // Wire-level query encoding note coverage: `*` and `~` in a per-iteration
+    // query value are encoded differently by JMeter's __urlencode vs Anvil's
+    // RFC 3986 percent-encoding, and the export report documents both.
+    let mut enc_spec = RequestSpec::http("GET", &f.url("/echo"));
+    enc_spec.params.push(KeyValue::new("v", "{{val}}"));
+    enc_spec.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    let (enc_id, enc_c) = step(enc_spec);
+    let enc_plan = Fx::new(iterations(1, 1), vec![(enc_id, enc_c, "enc")], Some(dataset("val\na*b~c d\n")));
+    let enc_out = enc_plan.export(&export_opts(false)).expect("exported");
+    assert!(
+        enc_out.report.differences.iter().any(|d| d.contains("'*'") && d.contains("'~'") && d.contains("'+'")),
+        "query encoding note must mention space, '*', and '~': {:?}",
+        enc_out.report.differences
+    );
+    f.log.clear();
+    let _ = native(&enc_plan).await;
+    let anvil_enc = received(&f, "/echo");
+    assert_eq!(anvil_enc.len(), 1, "{anvil_enc:?}");
+    assert_eq!(anvil_enc[0].0, "/echo?v=a%2Ab~c%20d", "Anvil RFC 3986 encoding");
+    f.log.clear();
+    let _ = run_jmeter(&enc_out, "xml", false).await;
+    let jmeter_enc = received(&f, "/echo");
+    assert_eq!(jmeter_enc.len(), 1, "{jmeter_enc:?}");
+    assert_eq!(jmeter_enc[0].0, "/echo?v=a*b%7Ec+d", "JMeter __urlencode form encoding");
 }
