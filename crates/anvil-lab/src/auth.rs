@@ -505,7 +505,12 @@ async fn query_alias(env: &Env, route: &str, recovery: String) -> Outcome {
     c.add(
         CheckKind::GroundTruth,
         "gateway challenge uses Bearer scheme with `error=\"invalid_request\"`",
-        chal.as_deref().is_some_and(|v| v.len() >= 7 && v[..7].eq_ignore_ascii_case("bearer ") && v.contains("error=\"invalid_request\"")),
+        chal.as_deref().is_some_and(|v| {
+            let Some((scheme, rest)) = v.trim().split_once(char::is_whitespace) else {
+                return false;
+            };
+            scheme.eq_ignore_ascii_case("bearer") && rest.split(',').any(|param| param.trim() == "error=\"invalid_request\"")
+        }),
         format!("{chal:?}"),
     );
     backend_untouched(&mut c, env, before);

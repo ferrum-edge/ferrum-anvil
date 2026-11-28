@@ -674,12 +674,20 @@ fn e21_ws_relay(env: &Env) -> Fut<'_> {
             format!("{handshake:?} {:?}", header(&o, "x-gateway-error")),
         );
         let reqs = requests_since(&env.fx.echo.log, before);
+        let is_valid_ws_key = |raw: &str| {
+            let b = raw.trim().as_bytes();
+            b.len() == 24
+                && &b[22..] == b"=="
+                && b[..22].iter().all(|&c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/')
+                && matches!(b[21], b'A' | b'Q' | b'g' | b'w')
+        };
         let upgraded = reqs.iter().any(|(path, headers)| {
             let get_hdr = |name: &str| headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str());
-            path.starts_with("/status/503")
-                && get_hdr("upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
-                && get_hdr("connection").is_some_and(|v| v.to_ascii_lowercase().contains("upgrade"))
-                && get_hdr("sec-websocket-key").is_some()
+            let route_path = path.split_once('?').map_or(path.as_str(), |(p, _)| p);
+            route_path == "/status/503"
+                && get_hdr("upgrade").is_some_and(|v| v.trim().eq_ignore_ascii_case("websocket"))
+                && get_hdr("connection").is_some_and(|v| v.split(',').any(|tok| tok.trim().eq_ignore_ascii_case("upgrade")))
+                && get_hdr("sec-websocket-key").is_some_and(is_valid_ws_key)
         });
         c.add(CheckKind::GroundTruth, "the backend received the WebSocket upgrade on /status/503", upgraded, format!("{reqs:?}"));
         let raw = o.decoded_body.as_ref().unwrap_or(&o.body);
