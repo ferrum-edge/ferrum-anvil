@@ -138,6 +138,7 @@ struct Guard<R> {
     exact_max_record: u64,
     hit: Option<Hit>,
     track_csv_records: bool,
+    csv_bom_pos: u8,
     csv_state: CsvState,
     csv_saw_cr: bool,
     csv_record_idx: u64,
@@ -157,6 +158,7 @@ impl<R> Guard<R> {
             exact_max_record: limits.max_record_bytes,
             hit: None,
             track_csv_records: false,
+            csv_bom_pos: 0,
             csv_state: CsvState::FieldStart,
             csv_saw_cr: false,
             csv_record_idx: 0,
@@ -179,6 +181,110 @@ impl<R> Guard<R> {
         self.hit = Some(if self.csv_record_idx == 0 { Hit::HeaderRecord } else { Hit::CsvRecord(self.csv_record_start) });
         std::io::Error::other("record size limit")
     }
+
+    fn step_csv_byte(&mut self, offset: u64, b: u8) -> std::io::Result<()> {
+        // Mirror `csv-core`: a leading UTF-8 BOM (EF BB BF) is stripped before
+        // field parsing, so its bytes count toward header length without
+        // leaving `FieldStart` (allowing a quoted first header field after BOM).
+        const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+        if self.csv_bom_pos < 3 {
+            self.csv_record_bytes += 1;
+            if self.csv_record_bytes > self.exact_max_record {
+                return Err(self.record_csv_hit());
+            }
+            if b == BOM[self.csv_bom_pos as usize] {
+                self.csv_bom_pos += 1;
+                return Ok(());
+            }
+            // Mismatched BOM prefix: any earlier matched BOM bytes (0xEF, 0xBB)
+            // were non-delimiter/non-quote bytes, so the field is already Unquoted.
+            let had_prefix = self.csv_bom_pos > 0;
+            self.csv_bom_pos = 3;
+            if had_prefix {
+                self.csv_state = CsvState::Unquoted;
+            }
+            return self.advance_csv_state(offset, b);
+        }
+        if self.csv_saw_cr {
+            self.csv_saw_cr = false;
+            if b == b'\n' {
+                self.csv_record_bytes += 1;
+                if self.csv_record_bytes > self.exact_max_record {
+                    return Err(self.record_csv_hit());
+                }
+                self.csv_record_idx += 1;
+                self.csv_record_start = offset + 1;
+                self.csv_record_bytes = 0;
+                self.csv_state = CsvState::FieldStart;
+                return Ok(());
+            }
+            // Bare CR ended the previous record; `b` is byte 0 of the next record.
+            self.csv_record_idx += 1;
+            self.csv_record_start = offset;
+            self.csv_record_bytes = 0;
+            self.csv_state = CsvState::FieldStart;
+        }
+        self.csv_record_bytes += 1;
+        if self.csv_record_bytes > self.exact_max_record {
+            return Err(self.record_csv_hit());
+        }
+        self.advance_csv_state(offset, b)
+    }
+
+    fn advance_csv_state(&mut self, offset: u64, b: u8) -> std::io::Result<()> {
+        match self.csv_state {
+            CsvState::FieldStart => match b {
+                b'"' => self.csv_state = CsvState::Quoted,
+                b',' => self.csv_state = CsvState::FieldStart,
+                b'\n' => {
+                    self.csv_record_idx += 1;
+                    self.csv_record_start = offset + 1;
+                    self.csv_record_bytes = 0;
+                    self.csv_state = CsvState::FieldStart;
+                }
+                b'\r' => {
+                    self.csv_saw_cr = true;
+                    self.csv_state = CsvState::FieldStart;
+                }
+                _ => self.csv_state = CsvState::Unquoted,
+            },
+            CsvState::Unquoted => match b {
+                b',' => self.csv_state = CsvState::FieldStart,
+                b'\n' => {
+                    self.csv_record_idx += 1;
+                    self.csv_record_start = offset + 1;
+                    self.csv_record_bytes = 0;
+                    self.csv_state = CsvState::FieldStart;
+                }
+                b'\r' => {
+                    self.csv_saw_cr = true;
+                    self.csv_state = CsvState::FieldStart;
+                }
+                _ => {}
+            },
+            CsvState::Quoted => {
+                if b == b'"' {
+                    self.csv_state = CsvState::QuotedQuote;
+                }
+            }
+            CsvState::QuotedQuote => match b {
+                b'"' => self.csv_state = CsvState::Quoted,
+                b',' => self.csv_state = CsvState::FieldStart,
+                b'\n' => {
+                    self.csv_record_idx += 1;
+                    self.csv_record_start = offset + 1;
+                    self.csv_record_bytes = 0;
+                    self.csv_state = CsvState::FieldStart;
+                }
+                b'\r' => {
+                    self.csv_saw_cr = true;
+                    self.csv_state = CsvState::FieldStart;
+                }
+                _ => self.csv_state = CsvState::Unquoted,
+            },
+        }
+        Ok(())
+    }
 }
 
 impl<R: Read> Read for Guard<R> {
@@ -193,81 +299,7 @@ impl<R: Read> Read for Guard<R> {
         }
         if self.track_csv_records {
             for (i, &b) in buf[..n].iter().enumerate() {
-                let offset = before + i as u64;
-                if self.csv_saw_cr {
-                    self.csv_saw_cr = false;
-                    if b == b'\n' {
-                        self.csv_record_bytes += 1;
-                        if self.csv_record_bytes > self.exact_max_record {
-                            return Err(self.record_csv_hit());
-                        }
-                        self.csv_record_idx += 1;
-                        self.csv_record_start = offset + 1;
-                        self.csv_record_bytes = 0;
-                        self.csv_state = CsvState::FieldStart;
-                        continue;
-                    }
-                    // Bare CR ended the previous record; `b` is byte 0 of the next record.
-                    self.csv_record_idx += 1;
-                    self.csv_record_start = offset;
-                    self.csv_record_bytes = 0;
-                    self.csv_state = CsvState::FieldStart;
-                }
-                self.csv_record_bytes += 1;
-                if self.csv_record_bytes > self.exact_max_record {
-                    return Err(self.record_csv_hit());
-                }
-                match self.csv_state {
-                    CsvState::FieldStart => match b {
-                        b'"' => self.csv_state = CsvState::Quoted,
-                        b',' => self.csv_state = CsvState::FieldStart,
-                        b'\n' => {
-                            self.csv_record_idx += 1;
-                            self.csv_record_start = offset + 1;
-                            self.csv_record_bytes = 0;
-                            self.csv_state = CsvState::FieldStart;
-                        }
-                        b'\r' => {
-                            self.csv_saw_cr = true;
-                            self.csv_state = CsvState::FieldStart;
-                        }
-                        _ => self.csv_state = CsvState::Unquoted,
-                    },
-                    CsvState::Unquoted => match b {
-                        b',' => self.csv_state = CsvState::FieldStart,
-                        b'\n' => {
-                            self.csv_record_idx += 1;
-                            self.csv_record_start = offset + 1;
-                            self.csv_record_bytes = 0;
-                            self.csv_state = CsvState::FieldStart;
-                        }
-                        b'\r' => {
-                            self.csv_saw_cr = true;
-                            self.csv_state = CsvState::FieldStart;
-                        }
-                        _ => {}
-                    },
-                    CsvState::Quoted => {
-                        if b == b'"' {
-                            self.csv_state = CsvState::QuotedQuote;
-                        }
-                    }
-                    CsvState::QuotedQuote => match b {
-                        b'"' => self.csv_state = CsvState::Quoted,
-                        b',' => self.csv_state = CsvState::FieldStart,
-                        b'\n' => {
-                            self.csv_record_idx += 1;
-                            self.csv_record_start = offset + 1;
-                            self.csv_record_bytes = 0;
-                            self.csv_state = CsvState::FieldStart;
-                        }
-                        b'\r' => {
-                            self.csv_saw_cr = true;
-                            self.csv_state = CsvState::FieldStart;
-                        }
-                        _ => self.csv_state = CsvState::Unquoted,
-                    },
-                }
+                self.step_csv_byte(before + i as u64, b)?;
             }
         }
         if self.since_reset > self.max_record {

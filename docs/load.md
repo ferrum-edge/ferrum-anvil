@@ -759,7 +759,9 @@ order, ramp timing (JMeter starts a ramp's first thread at its start), the
 open model's per-stage rounding and per-arrival cookie jars, weighted-mix
 randomness, redirect-limit handling (Anvil returns the last 3xx response when
 the cap is reached, whereas JMeter records an `IOException` and skips later
-chain steps), `Connection: close` in fresh mode, timeouts and response limits
+chain steps), 3xx responses without `Location` (Anvil keeps the completed 3xx
+response, whereas JMeter records a transport failure and skips later chain
+steps even with Follow Redirects off), `Connection: close` in fresh mode, timeouts and response limits
 JMeter does not enforce, header assertions (any line vs Anvil's first value),
 body evaluation beyond Anvil's 1 MiB load capture, the encoding of
 per-iteration values in queries (`+` vs `%20` for a space), Basic credential

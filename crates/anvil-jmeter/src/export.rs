@@ -1556,6 +1556,13 @@ fn translate_step(
                 || v.0.iter().any(|(s, _)| secret_in(s))
         })
         || body.as_ref().is_some_and(|b| b.0.iter().any(|(s, _)| secret_in(s)));
+    if headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-length")) {
+        rs.push(reason(
+            rq,
+            "content_length_header",
+            "the request sets an explicit Content-Length header; JMeter's HttpClient 4 sampler discards Content-Length from the HTTP Header Manager and computes it from the request body. Remove the explicit Content-Length header to export it",
+        ));
+    }
     let follow = settings.redirects.follow;
     if follow && !settings.redirects.forward_credentials_cross_origin && carries_credentials {
         rs.push(reason(
@@ -1565,6 +1572,13 @@ fn translate_step(
         ));
     }
     if follow {
+        if matches!(auth, AuthConfig::Basic { .. }) {
+            rs.push(reason(
+                rq,
+                "redirect_basic_auth",
+                "the request follows redirects and uses Basic auth; JMeter scopes its HTTP Authorization Manager to the initial origin (withholding Basic auth cross-origin and resuming it on return), whereas Anvil either forwards it cross-origin when enabled or strips it for the rest of the chain after leaving the origin. Turn off following redirects for this request to export it",
+            ));
+        }
         if matches!(auth, AuthConfig::ApiKey { location: KeyLocation::Query, .. }) {
             rs.push(reason(
                 rq,
@@ -1586,11 +1600,11 @@ fn translate_step(
                 "the request follows redirects and sets an Mcp-Session-Id header; Anvil withholds Mcp-Session-Id on cross-origin redirects even when credential forwarding is enabled, whereas JMeter's header manager sends it to every redirect target. Turn off following redirects for this request to export it",
             ));
         }
-        if headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type") || n.eq_ignore_ascii_case("content-length")) {
+        if headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("content-type")) {
             rs.push(reason(
                 rq,
-                "redirect_body_header",
-                "the request follows redirects and sets Content-Type or Content-Length; Anvil strips those headers on bodyless redirect hops, whereas JMeter's header manager sends them to every redirect target. Remove the header or turn off following redirects for this request to export it",
+                "redirect_content_type",
+                "the request follows redirects and sets an explicit Content-Type header; Anvil strips Content-Type on bodyless redirect hops, whereas JMeter's header manager sends it to every redirect target. Remove the Content-Type header or turn off following redirects for this request to export it",
             ));
         }
         // JMeter 5.6.3 turns every redirected method except HEAD into GET
@@ -1641,6 +1655,9 @@ fn translate_step(
         t.note("Timeouts: JMeter applies a connect timeout and a socket read timeout (the larger of Anvil's response-headers and body-idle timeouts); Anvil's DNS, TLS handshake, request-write and total deadlines have no per-sample JMeter equivalent.");
     }
     t.note("Limits: Anvil's response size, decoded size and header size limits are not enforced by JMeter.");
+    t.note(
+        "3xx responses without Location: Anvil keeps the completed 3xx response, whereas JMeter's HttpClient 4 sampler records a transport failure (and skips later steps in an exported chain) even when Follow Redirects is off.",
+    );
     if !ctx.integrations.is_empty() {
         t.note("Ferrum gateway profiles: Anvil's gateway diagnostics are not performed by JMeter (they never change what is sent).");
     }

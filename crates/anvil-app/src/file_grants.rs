@@ -976,6 +976,16 @@ fn eq_filename(a: &OsStr, b: &OsStr) -> bool {
     if cfg!(any(windows, target_os = "macos")) { a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()) } else { a == b }
 }
 
+/// An opaque OS file identity (device + inode on Unix, volume serial + file
+/// index on Windows) for checking whether two paths alias the same file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinnedFileId(FileId);
+
+/// Return the OS file identity of an already-opened file handle.
+pub fn opened_file_id(file: &File, meta: &Metadata) -> std::io::Result<PinnedFileId> {
+    file_id(file, meta).map(PinnedFileId)
+}
+
 /// An output destination whose parent folder is pinned via [`Dir`],
 /// so retargeting a parent symlink after validation cannot redirect the final
 /// atomic publish.
@@ -986,17 +996,9 @@ pub struct PinnedOutput {
 }
 
 impl PinnedOutput {
-    /// Validate and pin `path`'s parent directory without following links,
-    /// refusing a symlink at `path` itself.
+    /// Pin `path`'s parent directory without following links, then validate
+    /// relative to the pinned directory that `path`'s leaf is not a symlink.
     pub fn open(path: &Path) -> std::io::Result<Self> {
-        if let Ok(meta) = std::fs::symlink_metadata(path)
-            && meta.file_type().is_symlink()
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "destination is a symbolic link; refusing to write through or replace a symlink",
-            ));
-        }
         let name = path
             .file_name()
             .filter(|n| !n.is_empty())
@@ -1007,6 +1009,12 @@ impl PinnedOutput {
         let dir = Dir::open(&canon_parent)?.ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination parent is a symbolic link or not a directory")
         })?;
+        if dir.entry_is_symlink(&name)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "destination is a symbolic link; refusing to write through or replace a symlink",
+            ));
+        }
         let dir_id = dir.id()?;
         Ok(Self { dir, dir_id, name })
     }
@@ -1029,30 +1037,63 @@ impl PinnedOutput {
         Ok(false)
     }
 
-    /// Whether two pinned destinations target the same directory entry.
+    /// Whether two pinned destinations target the same directory entry (or
+    /// existing file inode when both already exist).
     pub fn aliases_output(&self, other: &Self) -> bool {
-        self.dir_id == other.dir_id && eq_filename(&self.name, &other.name)
+        if self.dir_id == other.dir_id && eq_filename(&self.name, &other.name) {
+            return true;
+        }
+        if let (Ok(Some((a, am))), Ok(Some((b, bm)))) = (self.dir.open_regular(&self.name), other.dir.open_regular(&other.name))
+            && let (Ok(aid), Ok(bid)) = (file_id(&a, &am), file_id(&b, &bm))
+        {
+            return aid == bid;
+        }
+        false
     }
 
-    /// Stage `bytes` into a new file inside the pinned directory and atomically
-    /// rename it into place.
-    pub fn write_atomic(&self, bytes: &[u8]) -> std::io::Result<()> {
+    /// Stage `bytes` into a new file inside the pinned directory, re-verify
+    /// relative to the pinned directory that the target is neither a symlink
+    /// nor any `protected` file identity (catching APFS Unicode normalization
+    /// aliases even for newly created sibling outputs), and atomically rename
+    /// it into place, returning the published file's OS identity.
+    pub fn write_atomic_guarded(&self, bytes: &[u8], protected: &[PinnedFileId]) -> std::io::Result<PinnedFileId> {
         let tmp = OsString::from(format!(".anvil-{}.partial", Id::new()));
-        let write_tmp = || -> std::io::Result<()> {
+        let stage = || -> std::io::Result<PinnedFileId> {
             let mut f = self.dir.create_new(&tmp, false)?;
             std::io::Write::write_all(&mut f, bytes)?;
             f.sync_all()?;
-            Ok(())
+            let meta = f.metadata()?;
+            file_id(&f, &meta).map(PinnedFileId)
         };
-        if let Err(err) = write_tmp() {
+        let staged_id = match stage() {
+            Ok(id) => id,
+            Err(err) => {
+                let _ = self.dir.remove_file(&tmp);
+                return Err(err);
+            }
+        };
+        if self.dir.entry_is_symlink(&self.name)? {
             let _ = self.dir.remove_file(&tmp);
-            return Err(err);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "destination is a symbolic link; refusing to write through or replace a symlink",
+            ));
+        }
+        if let Ok(Some((existing, existing_meta))) = self.dir.open_regular(&self.name) {
+            let existing_id = PinnedFileId(file_id(&existing, &existing_meta)?);
+            if protected.contains(&existing_id) {
+                let _ = self.dir.remove_file(&tmp);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "destination resolves to a protected input or sibling output file; refusing to overwrite",
+                ));
+            }
         }
         if let Err(err) = self.dir.rename(&tmp, &self.name) {
             let _ = self.dir.remove_file(&tmp);
             return Err(err);
         }
-        Ok(())
+        Ok(staged_id)
     }
 }
 

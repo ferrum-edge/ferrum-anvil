@@ -613,15 +613,32 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     with_tls_profile(&mut c_mcp, false);
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_mcp, c_mcp, "mcp-redir")], None)), ["redirect_mcp_session"]);
 
+    // Basic auth with redirects followed is refused because JMeter scopes AuthManager
+    // to the initial origin rather than matching Anvil's cross-origin/sticky stripping rules.
+    let mut basic_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    basic_redir.auth = AuthConfig::Basic { username: "ann".into(), password: SensitiveValue::template("pw") };
+    basic_redir.settings.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
+    basic_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
+    let (id_basic, mut c_basic) = step(basic_redir);
+    with_tls_profile(&mut c_basic, false);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_basic, c_basic, "basic-redir")], None)), ["redirect_basic_auth"]);
+
+    // Explicit Content-Length is discarded by JMeter's HttpClient 4 sampler even with redirects off.
+    let mut cl_no_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    cl_no_redir.headers.push(KeyValue::new("Content-Length", "0"));
+    cl_no_redir.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_cl, c_cl) = step(cl_no_redir);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_cl, c_cl, "cl")], None)), ["content_length_header"]);
+
     let mut ct_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
     ct_redir.headers.push(KeyValue::new("Content-Type", "application/json"));
     ct_redir.settings.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
     ct_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
     let (id_ct, mut c_ct) = step(ct_redir);
     with_tls_profile(&mut c_ct, false);
-    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_ct, c_ct, "ct-redir")], None)), ["redirect_body_header"]);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_ct, c_ct, "ct-redir")], None)), ["redirect_content_type"]);
 
-    // An accepted redirect-following export records the redirect-limit behavioral difference.
+    // An accepted redirect-following export records the redirect-limit and 3xx-without-Location differences.
     let mut ok_redir = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
     ok_redir.settings.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: false });
     ok_redir.settings.http_version = Some(HttpVersionPolicy::Http1Only);
@@ -631,6 +648,11 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
         Fx::new(iterations(1, 1), vec![(id_ok, c_ok, "ok-redir")], None).export(&ExportOptions::default()).expect("exported");
     assert!(
         exported_redir.report.differences.iter().any(|d| d.contains("httpsampler.max_redirects")),
+        "{:?}",
+        exported_redir.report.differences
+    );
+    assert!(
+        exported_redir.report.differences.iter().any(|d| d.contains("3xx responses without Location")),
         "{:?}",
         exported_redir.report.differences
     );

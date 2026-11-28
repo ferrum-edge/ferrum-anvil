@@ -199,6 +199,18 @@ impl Dir {
     pub(crate) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
         Ok(rustix::fs::unlinkat(&self.fd, name, rustix::fs::AtFlags::empty())?)
     }
+
+    /// Whether `name` in this opened folder currently refers to a symbolic link
+    /// (`fstatat` with `AT_SYMLINK_NOFOLLOW`), returning `Ok(false)` when absent.
+    pub(crate) fn entry_is_symlink(&self, name: &OsStr) -> io::Result<bool> {
+        use rustix::fs::{AtFlags, FileType, statat};
+        use rustix::io::Errno;
+        match statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) => Ok(FileType::from_raw_mode(st.st_mode.into()) == FileType::Symlink),
+            Err(Errno::NOENT) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 /// The file just opened without following a link, if it is a regular file;
@@ -306,6 +318,16 @@ impl Dir {
     pub(crate) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
         std::fs::remove_file(self.path.join(name))
     }
+
+    /// Whether `name` in this held folder currently refers to a symbolic link
+    /// or junction, returning `Ok(false)` when absent.
+    pub(crate) fn entry_is_symlink(&self, name: &OsStr) -> io::Result<bool> {
+        match std::fs::symlink_metadata(self.path.join(name)) {
+            Ok(meta) => Ok(meta.file_type().is_symlink()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// Open `path` itself, a link or other reparse point at it included, and hold
@@ -369,6 +391,16 @@ impl Dir {
 
     pub(crate) fn remove_file(&self, name: &OsStr) -> io::Result<()> {
         std::fs::remove_file(self.path.join(name))
+    }
+
+    /// Whether `name` in this held folder currently refers to a symbolic link
+    /// or junction, returning `Ok(false)` when absent.
+    pub(crate) fn entry_is_symlink(&self, name: &OsStr) -> io::Result<bool> {
+        match std::fs::symlink_metadata(self.path.join(name)) {
+            Ok(meta) => Ok(meta.file_type().is_symlink()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 }
 

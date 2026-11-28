@@ -354,14 +354,19 @@ pub fn import_jtl(app: &App, a: ImportArgs<'_>) -> Result<i32> {
         warmup_secs: a.warmup,
         limits: JtlLimits::default(),
     };
+    let source_id = anvil_app::file_grants::opened_file_id(&file, &meta).with_context(|| format!("inspecting {}", a.file.display()))?;
     let report = app.import_jtl(&a.ws, file, opts)?;
+    let mut protected = vec![source_id];
     if let Some((p, pinned)) = &json_out {
-        pinned
-            .write_atomic(anvil_load::report::to_json(&report).as_bytes())
+        let json_id = pinned
+            .write_atomic_guarded(anvil_load::report::to_json(&report).as_bytes(), &protected)
             .with_context(|| format!("writing --json ({})", p.display()))?;
+        protected.push(json_id);
     }
     if let Some((p, pinned)) = &html_out {
-        pinned.write_atomic(anvil_load::html::to_html(&report).as_bytes()).with_context(|| format!("writing --html ({})", p.display()))?;
+        pinned
+            .write_atomic_guarded(anvil_load::html::to_html(&report).as_bytes(), &protected)
+            .with_context(|| format!("writing --html ({})", p.display()))?;
     }
     let q = &report.requests;
     println!(
