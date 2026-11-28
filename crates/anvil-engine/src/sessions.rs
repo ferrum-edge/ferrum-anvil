@@ -1838,8 +1838,7 @@ fn fact_findings(facts: &SessionFacts, protocol: Protocol, status: &ProtocolStat
         } else {
             "Import the service's .proto files or a descriptor set and call it without reflection, or ask the operator to allow reflection for this caller."
         };
-        d = d.var("fix", fix);
-        out.push(d);
+        out.push(d.var("fix", fix));
     }
     if facts.icmp_port_unreachable && protocol == Protocol::Udp {
         let d = Draft::new(
