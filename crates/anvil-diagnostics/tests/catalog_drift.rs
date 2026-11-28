@@ -289,7 +289,7 @@ fn self_worded_codes_are_the_known_adapter_observations() {
     let emitted = scan(&sources());
     let self_worded: BTreeSet<&str> =
         emitted.self_worded.keys().map(String::as_str).filter(|c| !render::catalog().findings.contains_key(*c)).collect();
-    let allowed: BTreeSet<&str> = ["grpc.reflection_unavailable", "udp.icmp_port_unreachable", "udp.repeated_payloads"].into();
+    let allowed: BTreeSet<&str> = BTreeSet::new();
     assert_eq!(
         self_worded, allowed,
         "self-worded finding codes changed; move new wording into catalog/diagnostics/findings.en.json or update this list with a reason"

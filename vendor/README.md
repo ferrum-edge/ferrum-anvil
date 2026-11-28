@@ -169,17 +169,21 @@ from snapview/tungstenite-rs `7f4aeaf0944992c5664c8fb8e0d54577c7e18020`),
 without the published `Cargo.lock` and the registry's `.cargo-ok` marker, and
 with one change: `patches/tungstenite-0.30.0-permessage-deflate.patch`. It
 adds an RFC 7692 `permessage-deflate` codec behind a new, off-by-default
-`deflate` feature (about 330 added lines):
+`deflate` feature (about 830 added lines):
 
 * `src/protocol/deflate.rs` (new): the per-message codec for parameters that
   were already negotiated (`DeflateConfig`: compress or not, the compressor's
-  window, context takeover each way). Outgoing Text/Binary messages are
+  window, the peer's agreed window, context takeover each way). Outgoing Text/Binary messages are
   compressed with a sync flush and the `0x00 0x00 0xff 0xff` tail removed;
   an empty message becomes the single `0x00` octet (§7.2.3.6). Incoming
   compressed messages are inflated fragment by fragment with the tail
   appended; `max_message_size` limits the *decompressed* size, and inflation
   stops as soon as it is passed. A BFINAL block ends the stream for that
-  message. The decompressor keeps a 2^15 window (it decodes any peer window).
+  message. When the peer agreed to a window smaller than 2^15
+  (`decompress_window_bits` 8–14), a streaming RFC 1951 bitstream validator
+  checks every back-reference distance against `2^decompress_window_bits`
+  alongside batched `zlib-rs` inflation, so data referring further back fails
+  as an invalid compressed message.
 * `src/protocol/mod.rs`: `WebSocketConfig::deflate` (default `None`); RSV1 is
   accepted only on the first frame of a data message when a codec is
   configured, as RFC 7692 §6 requires (RSV1 on a control or continuation
