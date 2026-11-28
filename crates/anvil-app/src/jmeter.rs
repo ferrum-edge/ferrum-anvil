@@ -21,7 +21,7 @@ impl App {
     /// with [`ExportOptions::include_secrets`].
     pub fn load_export_jmx(&self, plan: &LoadPlan, opts: &ExportOptions) -> Result<std::result::Result<Export, ExportRefused>> {
         anvil_load::validate_plan(plan).map_err(|e| AppError::Invalid(e.to_string()))?;
-        let job = self.load_job(plan)?;
+        let job = self.load_job_for_export(plan)?;
         let mut names = HashMap::new();
         for id in Self::plan_requests(plan) {
             names.insert(id, self.request(&id)?.name);

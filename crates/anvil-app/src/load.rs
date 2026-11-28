@@ -222,6 +222,14 @@ impl App {
         self.load_job_with_authority(p).map(|(job, _)| job)
     }
 
+    /// Build a [`LoadJob`] for JMeter export with all vault-backed variables
+    /// kept deferred (so vault entries are never decrypted unless explicitly
+    /// exported and reached), while preserving every workspace, dataset, and
+    /// authority check of [`Self::load_job`].
+    pub(crate) fn load_job_for_export(&self, p: &LoadPlan) -> Result<LoadJob> {
+        self.load_job_with_authority_mode(p, true).map(|(job, _)| job)
+    }
+
     /// A stored plan and its authenticated observation, before registration.
     pub fn load_plan_with_authority(&self, id: &Id) -> Result<(LoadPlan, crate::exec::AppContextAuthority)> {
         self.read_context(|read| {
@@ -231,6 +239,10 @@ impl App {
     }
 
     fn load_job_with_authority(&self, p: &LoadPlan) -> Result<(LoadJob, crate::exec::AppContextAuthority)> {
+        self.load_job_with_authority_mode(p, false)
+    }
+
+    fn load_job_with_authority_mode(&self, p: &LoadPlan, defer_vault: bool) -> Result<(LoadJob, crate::exec::AppContextAuthority)> {
         let (mut requests, source, stored, authority) = self.read_context(|read| {
             // A caller may provide an explicitly acknowledged draft plan.
             // Saved-plan callers retain their earlier exact observation.
@@ -243,7 +255,7 @@ impl App {
                 if r.workspace_id != p.workspace_id {
                     return Err(AppError::Invalid(format!("request '{}' in this load plan belongs to another workspace", r.name)));
                 }
-                requests.insert(id, self.build_context_in(read, Some(id), &p.workspace_id, None, &opts)?);
+                requests.insert(id, self.build_context_in_with_vault_mode(read, Some(id), &p.workspace_id, None, &opts, defer_vault)?);
             }
             let (source, stored) = match p.dataset_id {
                 Some(id) => {

@@ -697,6 +697,28 @@ impl FileGrants {
             }
         }
 
+        // Serialize concurrent dataset+JMX publications targeting the same
+        // directory so two replacements can never interleave and pair one
+        // export's JMX with another export's dataset sidecar.
+        let _plan_dir_lock = if sibling_name.is_some() && ds_tmp.is_some() {
+            match plan_folder.lock_exclusive() {
+                Ok(lock) => Some(lock),
+                Err(err) => {
+                    cleanup_remaining(jmx_t.as_ref(), ds_tmp.as_ref().map(|(t, _)| t), None);
+                    if published.is_empty() {
+                        restore_grants(plan_entry, secrets_entry);
+                        return Err(io(err));
+                    }
+                    return Err(GrantError::Io(format!(
+                        "{err} (already written: {}; the remaining files were not written)",
+                        published.join(", ")
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+
         if let (Some(sibling), Some((tmp, staged_id))) = (sibling_name.as_ref(), ds_tmp.take()) {
             let target_blocked = match plan_folder.entry_identity(sibling) {
                 Ok(Some((true, _))) => {
@@ -1153,6 +1175,13 @@ impl PinnedOutput {
                 Err(err)
             }
         }
+    }
+
+    /// Acquire an exclusive cross-process lock on this destination's pinned
+    /// directory so multi-file exports sharing a sidecar publish atomically as
+    /// a pair.
+    pub fn lock_dir(&self) -> std::io::Result<File> {
+        self.dir.lock_exclusive()
     }
 
     /// Stage `bytes` into a new file inside the pinned directory and atomically

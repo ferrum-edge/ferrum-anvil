@@ -331,6 +331,23 @@ impl Dir {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Acquire an exclusive cross-process `flock` on this pinned directory so
+    /// multi-file exports (dataset + test plan) targeting the same folder
+    /// publish atomically as a pair without interleaving.
+    pub(crate) fn lock_exclusive(&self) -> io::Result<File> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let file = {
+            use rustix::fs::{Mode, OFlags};
+            // On Linux `self.fd` is opened with `O_PATH`, which rejects
+            // `flock(2)`; reopen `.` relative to the pinned directory fd.
+            File::from(rustix::fs::openat(&self.fd, ".", OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())?)
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let file = self.fd.try_clone()?;
+        file.lock()?;
+        Ok(file)
+    }
 }
 
 /// Atomically move `from` in `from_dir` to `to` in `to_dir` only when `to`
@@ -620,6 +637,23 @@ impl Dir {
         let id = file_id(&file, &meta)?;
         Ok(Some((meta.file_type().is_symlink(), id)))
     }
+
+    /// Acquire an exclusive cross-process lock scoped to this directory's OS
+    /// identity so multi-file exports (dataset + test plan) targeting the same
+    /// folder publish atomically as a pair without interleaving.
+    pub(crate) fn lock_exclusive(&self) -> io::Result<File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        let (vol, idx) = self.id()?;
+        let lock_path = std::env::temp_dir().join(format!("anvil-export-dir-{vol:016x}-{idx:016x}.lock"));
+        let file =
+            std::fs::OpenOptions::new().create(true).read(true).write(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(&lock_path)?;
+        if file.metadata()?.file_type().is_symlink() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is a symbolic link"));
+        }
+        file.lock()?;
+        Ok(file)
+    }
 }
 
 /// Open `path` itself, a link or other reparse point at it included, and hold
@@ -709,6 +743,12 @@ impl Dir {
                 let _ = self.remove_file(name);
             }
         }
+    }
+
+    pub(crate) fn lock_exclusive(&self) -> io::Result<File> {
+        let file = File::open(&self.path)?;
+        file.lock()?;
+        Ok(file)
     }
 
     pub(crate) fn entry_identity(&self, name: &OsStr) -> io::Result<Option<(bool, FileId)>> {

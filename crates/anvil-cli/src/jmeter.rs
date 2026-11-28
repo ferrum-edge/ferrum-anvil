@@ -219,6 +219,15 @@ pub fn export_jmx(
             false,
         ));
     }
+    // Serialize concurrent exports that publish a dataset sidecar alongside
+    // the plan in the same directory so two `--force` runs can never leave one
+    // export's JMX paired with the other's dataset.
+    let _dir_lock = if export.dataset_csv.is_some() {
+        let (_, out_pin) = find_pinned("--out");
+        Some(out_pin.lock_dir().with_context(|| format!("locking export directory for {}", out.display()))?)
+    } else {
+        None
+    };
     // Publish no-clobber sidecars first, then the plan and optional report,
     // tracking every published OS file identity so Unicode-normalization
     // aliases (e.g. APFS NFC/NFD) can never replace a newly written sibling.

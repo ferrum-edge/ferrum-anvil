@@ -390,6 +390,24 @@ impl App {
         draft: Option<RequestSpec>,
         opts: &SendOptions,
     ) -> Result<ExecutionContext> {
+        self.build_context_in_with_vault_mode(read, request_id, ws_id, draft, opts, false)
+    }
+
+    /// Build an execution context inside an existing snapshot transaction. When
+    /// `defer_vault` is `true` (used by JMeter export so vault secrets are
+    /// never read when `include_secrets` is false and unused/shadowed vault
+    /// entries are never decrypted), all vault-backed variables stay deferred
+    /// and no vault entries are eagerly prefetched, while dependency tracking
+    /// and authority checks remain identical.
+    pub(crate) fn build_context_in_with_vault_mode(
+        &self,
+        read: &ContextRead<'_, '_>,
+        request_id: Option<Id>,
+        ws_id: &Id,
+        draft: Option<RequestSpec>,
+        opts: &SendOptions,
+        defer_vault: bool,
+    ) -> Result<ExecutionContext> {
         // Taken before anything is read for the workspace: a delete of it
         // from here on (or a lock) fences an execution of this context, even
         // one that starts after it, while a delete before this point leaves
@@ -459,7 +477,7 @@ impl App {
         let mut var_layers = Vec::new();
         let mut deferred_variables = HashMap::new();
         let effective_auth = auth_layers.iter().rev().find(|(_, auth)| !matches!(auth, AuthConfig::Inherit));
-        let defer = effective_auth.is_some_and(|(_, auth)| !matches!(auth.oauth_profile(), Ok(None)));
+        let defer = defer_vault || effective_auth.is_some_and(|(_, auth)| !matches!(auth.oauth_profile(), Ok(None)));
         let mut add_layer = |label: String, vars: &[Variable]| -> Result<()> {
             let (layer, deferred) = layer(label, vars, &secrets, defer)?;
             for (variable, reference) in deferred {
@@ -606,7 +624,7 @@ impl App {
         for r in dependency_refs {
             read.depend_secret(&r.id);
         }
-        let refs = prefetch_refs(&ctx, &deferred_variables)?;
+        let refs = if defer_vault { HashSet::new() } else { prefetch_refs(&ctx, &deferred_variables)? };
         let authority = AppContextAuthority {
             store: self.store.clone(),
             scope: read.finish(),

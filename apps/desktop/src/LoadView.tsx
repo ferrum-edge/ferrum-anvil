@@ -901,7 +901,7 @@ export function PlanEditor(props: {
         />
       )}
 
-      {jmxDlg && <JmeterExportDialog planName={p.name} save={() => saveIt()} onClose={() => setJmxDlg(false)} />}
+      {jmxDlg && <JmeterExportDialog key={p.workspace_id} workspaceId={p.workspace_id} planName={p.name} save={() => saveIt()} onClose={() => setJmxDlg(false)} />}
 
       {preflight && (
         <Modal
@@ -1198,35 +1198,44 @@ export function jmeterCommand(
  * plan (and, only when chosen, the owner-only secrets file), and shows what
  * was written and what differs, or every reason the plan was refused.
  */
-export function JmeterExportDialog(props: { planName: string; save: () => Promise<LoadPlan | null>; onClose: () => void }) {
+export function JmeterExportDialog(props: { workspaceId?: string; planName: string; save: () => Promise<LoadPlan | null>; onClose: () => void }) {
   const [secrets, setSecrets] = useState(false);
   const [replaceDataset, setReplaceDataset] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<JmxExportOutcome | null>(null);
   const [resultsFile, setResultsFile] = useState<string>("results.jtl");
+  const opRef = useRef(0);
+  useEffect(() => {
+    opRef.current += 1;
+    return () => {
+      opRef.current += 1;
+    };
+  }, [props.workspaceId]);
   const shell = defaultJmeterShell();
   const base = props.planName.replace(NON_FILE_NAME_CHARS, "_") || "plan";
   const run = async () => {
+    const op = ++opRef.current;
     setErr(null);
     setBusy(true);
     try {
       const saved = await props.save();
-      if (!saved) return;
+      if (!saved || opRef.current !== op) return;
       const file = await api.chooseFile("jmeter_export", { file_name: `${base}.jmx`, filters: [{ name: "JMeter test plan", extensions: ["jmx"] }] });
-      if (!file) return;
+      if (!file || opRef.current !== op) return;
       let secretsFile: FileGrant | null = null;
       if (secrets) {
         secretsFile = await api.chooseFile("jmeter_secrets_export", { file_name: `${base}.secrets.properties` });
-        if (!secretsFile) return;
+        if (!secretsFile || opRef.current !== op) return;
       }
       const res = await api.exportJmx(saved.id, file.token, secretsFile?.token ?? null, replaceDataset);
+      if (opRef.current !== op) return;
       setResultsFile(freshJtlName(res.written[0] ?? `${base}.jmx`));
       setOutcome(res);
     } catch (e) {
-      setErr(String((e as Error).message));
+      if (opRef.current === op) setErr(String((e as Error).message));
     } finally {
-      setBusy(false);
+      if (opRef.current === op) setBusy(false);
     }
   };
   const report = outcome?.report;
@@ -1338,9 +1347,9 @@ export function JtlImportDialog(props: {
   const [err, setErr] = useState<string | null>(null);
   const opRef = useRef(0);
   useEffect(() => {
-    const id = ++opRef.current;
+    opRef.current += 1;
     return () => {
-      opRef.current = id + 1;
+      opRef.current += 1;
     };
   }, [props.workspaceId]);
   const choose = async () => {

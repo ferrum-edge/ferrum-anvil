@@ -748,7 +748,8 @@ contains `$` or `\` is escaped for JMeter's function parser.
 | `redirect_method` | A request with a method other than GET or HEAD that follows redirects. JMeter re-sends a redirected request as GET without its body; Anvil keeps a 307's or 308's method and body. |
 | `content_length_header`, `transfer_encoding_header` | An explicit `Content-Length` or `Transfer-Encoding` header that JMeter's HttpClient 4 sampler discards, rejects, or rewrites. |
 | `host_header` | An explicit `Host` header whose wire form JMeter's HttpClient 4 sampler would rewrite (appending a non-default sampler port to a portless `Host`, stripping an explicit default port, normalizing non-canonical port text, or resolving a dynamic template). |
-| `url_credential` | A credential-named query value written into the URL itself with literal text (`?access_token=…`). The test plan would hold it; move it to the request's query parameters or an API key auth, where it becomes a property. A secret variable there becomes a property. |
+| `url_credential` | A credential-named query value written into the URL itself with literal text (`?access_token=…`), or a dynamic raw URL query name paired with a literal value (`?{{param}}=…`). The test plan would hold it; move it to the request's query parameters or an API key auth, where it becomes a property. A secret variable there becomes a property. |
+| `url_path` | A URL path with an empty (`//`) or dot (`.`/`..`) segment that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler normalizes the path before sending. |
 | `open_cap`, `open_connections` | An open workload whose in-flight cap could bind: JMeter's open model has no cap and its socket read timeout does not bound a slow-streaming response, so JMeter would start arrivals Anvil drops. The cap must be at least the schedule's total possible arrivals. In the persistent connection mode Anvil reuses connections and cookies across arrivals, which JMeter's per-arrival threads cannot; choose the fresh mode. |
 | `accept_encoding` | An explicit `Accept-Encoding` offering a coding JMeter 5.6.3 cannot decode (anything but gzip, deflate, br and identity), or automatic decompression turned off (Anvil keeps compressed responses encoded, whereas JMeter's HttpClient 4 sampler automatically decompresses them regardless of the request's `Accept-Encoding` header). |
 | `redirect_credentials` | A request that follows redirects while it carries credentials in headers or its body. JMeter's Header Manager sends them to every redirect target, and Anvil never forwards them to another origin. Turn off following redirects for the request. |
@@ -820,8 +821,11 @@ millisecond histogram each, about 30 MiB at most. The limits are 4 GiB,
 and an XML depth of 32. XML is read with a pull parser that processes no DTD.
 A `DOCTYPE` is refused, only the predefined entities and character references
 are decoded, and any other entity reference is an error. Entity expansion and
-external entities are therefore impossible. Timestamps must be millisecond
-epochs, and non-HTTP samples are refused. A CSV file names no sampler type
+external entities are therefore impossible. Timestamps must be sample-start
+millisecond epochs (`sampleresult.timestamp.start=true` and
+`jmeter.save.saveservice.timestamp_format=ms`, which Anvil's exported run
+commands pin automatically; external JTL files recorded with end timestamps
+shift warmup cutoffs and duration), and non-HTTP samples are refused. A CSV file names no sampler type
 (a JDBC sample also writes status 200), so every CSV sample needs its HTTP URL
 (the `URL` column, `jmeter.save.saveservice.url=true`); otherwise import the
 XML file, which names each sample's type. An XML file must end with its closing

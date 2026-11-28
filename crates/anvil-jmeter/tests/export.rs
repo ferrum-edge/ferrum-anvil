@@ -986,25 +986,60 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     let (id_rmax, c_rmax) = step(rmax_req);
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_rmax, c_rmax, "rmax")], None)), ["dynamic_helper"]);
 
-    // Repeated request ID in a chain: step 0 extracts `tok` before step 1, so step 1's whole-field
-    // credential template referencing non-literal secret `wrap = "{{tok}}"` sees the extracted `tok`
-    // and must be refused as `secret_mixed` rather than reusing step 0's secret key.
+    // Repeated request ID in a chain: one extraction-bearing context used twice in the chain.
+    // Step 0 sees static `tok` and extracts `tok`; step 1 sees extracted `tok` through non-literal
+    // secret `wrap = "{{tok}}"` and must be refused as `secret_mixed` rather than reusing step 0's key.
     let mut rep_req = RequestSpec::http("GET", "http://example.test/items");
     rep_req.headers.push(KeyValue::new("X-Api-Key", "prefix-{{wrap}}"));
     rep_req.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
-    let mut rep_req_step0 = rep_req.clone();
-    rep_req_step0.extractions.push(Extraction {
+    rep_req.extractions.push(Extraction {
         variable: "tok".into(),
         source: ExtractionSource::Header { name: "X-Next-Token".into() },
         sensitive: false,
     });
-    let (shared_id, mut c_rep0) = step(rep_req_step0);
-    c_rep0.var_layers.push(layer("env", &[("tok", "initial-static", false), ("wrap", "{{tok}}", true)]));
-    let (_, mut c_rep1) = step(rep_req);
-    c_rep1.request_id = Some(shared_id);
-    c_rep1.var_layers.push(layer("env", &[("tok", "initial-static", false), ("wrap", "{{tok}}", true)]));
+    let (shared_id, mut c_rep) = step(rep_req);
+    c_rep.var_layers.push(layer("env", &[("tok", "initial-static", false), ("wrap", "{{tok}}", true)]));
     assert_eq!(
-        export_codes(&Fx::new(iterations(1, 1), vec![(shared_id, c_rep0, "rep-0"), (shared_id, c_rep1, "rep-1")], None)),
+        export_codes(&Fx::new(iterations(1, 1), vec![(shared_id, c_rep.clone(), "rep-0"), (shared_id, c_rep, "rep-1")], None)),
         ["secret_mixed"]
+    );
+
+    // Dynamic query/form field names conservatively protect literal values as secret properties,
+    // and dynamic raw URL query names with literal values are refused as `url_credential`.
+    let mut dyn_param = RequestSpec::http("GET", "http://example.test/search");
+    dyn_param.params.push(KeyValue::new("{{key_name}}", "top-secret-literal"));
+    dyn_param.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_dp, c_dp) = step(dyn_param);
+    let out_dp = Fx::new(iterations(1, 1), vec![(id_dp, c_dp, "dyn-param")], Some(dataset("key_name\napi_key\n")))
+        .export(&ExportOptions::default())
+        .expect("dynamic param name protects literal value as property");
+    assert!(!out_dp.jmx.contains("top-secret-literal"), "literal value under dynamic query name must not appear in JMX");
+    assert_eq!(out_dp.report.secret_properties.len(), 1);
+
+    let mut dyn_raw_q = RequestSpec::http("GET", "http://example.test/search?{{key_name}}=top-secret-literal");
+    dyn_raw_q.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_dq, c_dq) = step(dyn_raw_q);
+    assert_eq!(
+        export_codes(&Fx::new(iterations(1, 1), vec![(id_dq, c_dq, "dyn-raw-q")], Some(dataset("key_name\napi_key\n")))),
+        ["url_credential"]
+    );
+
+    // Paths containing empty segments (`//`) are sent verbatim by Anvil but normalized by
+    // JMeter's HttpClient 4 sampler, so export refuses them with `url_path`.
+    let mut dbl_slash = RequestSpec::http("GET", "http://example.test/a//b");
+    dbl_slash.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (id_ds, c_ds) = step(dbl_slash);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_ds, c_ds, "dbl-slash")], None)), ["url_path"]);
+
+    // Default jmeter_properties pin start timestamps in epoch milliseconds.
+    assert!(
+        out_gd.report.jmeter_properties.iter().any(|(k, v)| k == "sampleresult.timestamp.start" && v == "true"),
+        "missing sampleresult.timestamp.start=true: {:?}",
+        out_gd.report.jmeter_properties
+    );
+    assert!(
+        out_gd.report.jmeter_properties.iter().any(|(k, v)| k == "jmeter.save.saveservice.timestamp_format" && v == "ms"),
+        "missing jmeter.save.saveservice.timestamp_format=ms: {:?}",
+        out_gd.report.jmeter_properties
     );
 }

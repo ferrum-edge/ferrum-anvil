@@ -506,4 +506,18 @@ async fn load_012_default_export_properties_do_not_write_url_credentials_to_jtl(
     let got = received(&f, "/echo/");
     assert_eq!(got.len(), 3);
     assert!(got.iter().all(|(p, _)| p.contains(path_secret) && p.contains(query_secret)), "{got:?}");
+
+    // Wire-level path fidelity: Anvil sends `/echo//seg` verbatim, whereas
+    // JMeter's HttpClient 4 collapses `//`, so export refuses it with `url_path`.
+    let mut dbl_spec = RequestSpec::http("GET", &f.url("/echo//seg"));
+    dbl_spec.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    let (dbl_id, dbl_c) = step(dbl_spec);
+    let dbl_plan = Fx::new(iterations(1, 1), vec![(dbl_id, dbl_c, "dbl")], None);
+    f.log.clear();
+    let _ = native(&dbl_plan).await;
+    let dbl_got = received(&f, "/echo");
+    assert_eq!(dbl_got.len(), 1, "{dbl_got:?}");
+    assert_eq!(dbl_got[0].0, "/echo//seg", "Anvil sends empty path segments verbatim");
+    let dbl_err = dbl_plan.export(&export_opts(false)).expect_err("empty segment path must be refused");
+    assert!(dbl_err.reasons.iter().any(|r| r.code == "url_path"), "{dbl_err:?}");
 }

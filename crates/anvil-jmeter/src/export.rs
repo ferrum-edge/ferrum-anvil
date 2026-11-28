@@ -559,6 +559,8 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             ("jmeter.save.saveservice.samplerData".into(), "false".into()),
             ("jmeter.save.saveservice.requestHeaders".into(), "false".into()),
             ("jmeter.save.saveservice.responseHeaders".into(), "false".into()),
+            ("jmeter.save.saveservice.timestamp_format".into(), "ms".into()),
+            ("sampleresult.timestamp.start".into(), "true".into()),
             ("sample_variables".into(), String::new()),
         ],
         contexts: contexts.clone(),
@@ -1191,11 +1193,13 @@ fn credential_field(
     sensitive: bool,
 ) -> Result<Option<String>, Reason> {
     let Ok(resolved_name) = resolver.resolve(name.trim(), kind) else { return Ok(None) };
-    if !(sensitive || anvil_domain::credential_names::is_export_secret_name(&resolved_name, &ctx.redaction_names)) {
+    let name_is_dynamic = t.markers.has_marks(&resolved_name);
+    if !(sensitive || name_is_dynamic || anvil_domain::credential_names::is_export_secret_name(&resolved_name, &ctx.redaction_names)) {
         return Ok(None);
     }
     let Ok(out) = resolver.resolve(masked_value, kind) else { return Ok(None) };
-    let allow_auth_scheme = kind == "header" && resolved_name.eq_ignore_ascii_case("authorization");
+    let allow_auth_scheme = !name_is_dynamic && kind == "header" && resolved_name.eq_ignore_ascii_case("authorization");
+    let display_name = if name_is_dynamic { name.trim() } else { resolved_name.as_str() };
     match needs_property(&t.markers, &out, allow_auth_scheme) {
         Ok(false) => Ok(None),
         Ok(true) => {
@@ -1203,13 +1207,13 @@ fn credential_field(
             // see different extracted variables, and two fields of one name
             // hold two values.
             let key = format!(
-                "field:{pos}:{}:{kind}:{index}:{resolved_name}",
+                "field:{pos}:{}:{kind}:{index}:{display_name}",
                 ctx.request_id.map(|i| i.to_string()).unwrap_or_else(|| pos.to_string())
             );
             let idx = t.secrets.add(
                 key,
-                format!("{kind}.{}.{}", slug(request), slug(&resolved_name)),
-                format!("{kind} '{resolved_name}' of request '{request}'"),
+                format!("{kind}.{}.{}", slug(request), slug(display_name)),
+                format!("{kind} '{display_name}' of request '{request}'"),
                 SecretSource::Template { step: pos, template: original_value.to_string() },
             );
             Ok(Some(t.markers.add(Mark::Secret(idx))))
@@ -1218,7 +1222,7 @@ fn credential_field(
             Some(request),
             "secret_mixed",
             format!(
-                "the {kind} '{resolved_name}' mixes literal credential text with a per-iteration value; JMeter cannot keep the literal part secret"
+                "the {kind} '{display_name}' mixes literal credential text with a per-iteration value; JMeter cannot keep the literal part secret"
             ),
         )),
     }
@@ -1465,6 +1469,16 @@ fn translate_step(
     // ---- URL ----
     let resolved_url = resolver.resolve(&spec.url, "url").unwrap_or_default();
     let base_query = anvil_engine::prepare::parse_target(&resolved_url, schemes, &mut Vec::new()).map(|b| b.query.len()).unwrap_or(0);
+    // JMeter 5.6.3's HttpClient 4 sampler normalizes URI paths by default
+    // (`URIUtils.rewriteURI` with `normalizeUri=true`), collapsing empty
+    // segments (`//`) and dot segments that Anvil sends verbatim.
+    if target.path.contains("//") || target.path.split('/').any(|seg| seg == "." || seg == "..") {
+        rs.push(reason(
+            rq,
+            "url_path",
+            "the request URL path contains an empty ('//') or dot segment that Anvil sends verbatim, whereas JMeter's HttpClient 4 sampler normalizes the path before sending",
+        ));
+    }
     let mut path = Tmpl::raw(target.path.clone());
     let mut has_query = false;
     if !target.query.is_empty() {
@@ -1475,21 +1489,28 @@ fn translate_step(
     }
     // Credentials written into the URL's own query (not as query
     // parameters) follow the same rule as fields: literal material is never
-    // copied into the test plan.
+    // copied into the test plan. A dynamic query name paired with a literal
+    // value is refused conservatively because it may resolve to a credential
+    // name at runtime.
     for pair in target.query[..base_query.min(target.query.len())].split('&') {
+        if pair.is_empty() {
+            continue;
+        }
         let (raw_name, value) = pair.split_once('=').unwrap_or((pair, ""));
         let qname = percent_decode(raw_name);
-        if anvil_domain::credential_names::is_export_secret_name(&qname, &ctx.redaction_names)
+        let name_is_dynamic = t.markers.has_marks(raw_name) || t.markers.has_marks(&qname);
+        if (name_is_dynamic || anvil_domain::credential_names::is_export_secret_name(&qname, &ctx.redaction_names))
             && needs_property(&t.markers, value, false) != Ok(false)
         {
-            rs.push(reason(
-                rq,
-                "url_credential",
+            let msg = if name_is_dynamic {
+                "the URL's query pairs a dynamic parameter name with a literal value; if that name resolves to a credential parameter, the export would copy the value into the test plan. Move it to the request's query parameters so the literal value becomes a JMeter property".to_string()
+            } else {
                 format!(
                     "the URL's query holds a value for the credential '{}'; the export would copy it into the test plan. Move it to the request's query parameters or an API key auth, where it becomes a JMeter property",
                     qname
-                ),
-            ));
+                )
+            };
+            rs.push(reason(rq, "url_credential", msg));
         }
     }
     if t.markers.has_marks(&target.path) || t.markers.has_marks(&target.query[..base_query.min(target.query.len())]) {
@@ -1774,7 +1795,7 @@ fn translate_step(
                         diffs.push("overrides the server name or expects a SPIFFE identity");
                     }
                     if settings.http_version != HttpVersionPolicy::Http1Only {
-                        diffs.push("may negotiate HTTP/2 or HTTP/3");
+                        diffs.push("may negotiate HTTP/2");
                     }
                     format!(
                         "the request follows redirects, and a redirect can lead to an https URL: its TLS/HTTP settings ({}) differ from JMeter's HTTP/1.1 unverified HTTPS handling. Turn off following redirects for this request to export it",

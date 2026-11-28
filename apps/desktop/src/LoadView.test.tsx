@@ -20,7 +20,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 import { listen } from "@tauri-apps/api/event";
 import type { LoadPlanCheck, LoadPreflight } from "./api";
 import type { Dataset, LatencySummary, LoadPlan, LoadReport, ProtocolLoadMetrics, RequestCounts, UnitSemantics } from "./generated/contracts";
-import { LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox, freshJtlName, jmeterCommand, quotePowerShell } from "./LoadView";
+import { JtlImportDialog, LoadView, PlanEditor, ProtocolCards, ProtocolPanel, ReportView, UnitBox, freshJtlName, jmeterCommand, quotePowerShell } from "./LoadView";
 
 const notify = vi.fn();
 
@@ -1384,6 +1384,38 @@ describe("LOAD-012 JMeter adapter", () => {
     expect(calls("file_choose")[0].purpose).toBe("jtl_import");
     expect(await screen.findByText("imported from JMeter")).toBeTruthy();
     expect(notify).toHaveBeenCalledWith("JMeter results imported as a report.");
+  });
+
+  it("LOAD-012 cancels in-flight JTL import on unmount across both file picker and import awaits", async () => {
+    // 1. Unmount while file picker is pending -> load_import_jtl must never be called.
+    let resolvePicker!: (v: unknown) => void;
+    backend({
+      file_choose: () => new Promise((r) => { resolvePicker = r; }),
+      load_import_jtl: () => "run-should-not-run",
+    });
+    const onImported = vi.fn();
+    const first = render(<JtlImportDialog workspaceId="A" plans={[loadPlan("pa", "A", "Plan A")]} onClose={vi.fn()} onImported={onImported} />);
+    fireEvent.click(button("Choose results file…"));
+    await act(async () => {});
+    first.unmount();
+    resolvePicker([{ token: "fg-jtl", file_name: "results.jtl" }]);
+    await act(async () => {});
+    expect(calls("load_import_jtl")).toEqual([]);
+    expect(onImported).not.toHaveBeenCalled();
+
+    // 2. Unmount while load_import_jtl is pending -> onImported must never be called.
+    let resolveImport!: (v: unknown) => void;
+    backend({
+      file_choose: () => [{ token: "fg-jtl-2", file_name: "results2.jtl" }],
+      load_import_jtl: () => new Promise((r) => { resolveImport = r; }),
+    });
+    const second = render(<JtlImportDialog workspaceId="A" plans={[loadPlan("pa", "A", "Plan A")]} onClose={vi.fn()} onImported={onImported} />);
+    fireEvent.click(button("Choose results file…"));
+    await waitFor(() => expect(calls("load_import_jtl")).toHaveLength(1));
+    second.unmount();
+    resolveImport("run-late");
+    await act(async () => {});
+    expect(onImported).not.toHaveBeenCalled();
   });
 });
 

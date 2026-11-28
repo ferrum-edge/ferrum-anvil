@@ -924,6 +924,13 @@ struct Span {
 
 /// Import a JMeter result file (CSV or XML JTL) as an Anvil load report.
 /// The reader is read twice (it must seek), never more than the limits.
+///
+/// Timestamps (`timeStamp` in CSV, `ts` in XML) are interpreted as sample-start
+/// epoch milliseconds (`sampleresult.timestamp.start=true` and
+/// `jmeter.save.saveservice.timestamp_format=ms`, which Anvil's exported JMeter
+/// commands pin automatically). External JTLs recorded with end timestamps
+/// (`sampleresult.timestamp.start=false`) should be re-run with start
+/// timestamps enabled so warmup cutoffs, elapsed span, and throughput align.
 pub fn import_jtl<R: Read + Seek>(mut r: R, opts: &JtlOptions) -> Result<LoadReport, JtlError> {
     let limits = &opts.limits;
     let len = r.seek(SeekFrom::End(0))?;
