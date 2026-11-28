@@ -289,7 +289,14 @@ pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObse
         if let Some(aux) = &out.session_auxiliary_outcome {
             let aux_terminal = classify_transport(aux.transport, aux.failure.as_ref());
             let apply_aux = aux_terminal != Terminal::Completed
-                && (obs.terminal == Terminal::Completed || aux.exchange == anvil_engine::McpAuxiliaryExchange::InitializedNotification);
+                && match aux.exchange {
+                    anvil_engine::McpAuxiliaryExchange::InitializedNotification => true,
+                    anvil_engine::McpAuxiliaryExchange::SessionClose => {
+                        obs.terminal == Terminal::Completed
+                            && !obs.application_failure
+                            && rec.outcome.application != ApplicationState::NotEvaluated
+                    }
+                };
             if apply_aux {
                 obs.terminal = aux_terminal;
                 obs.application_failure = false;

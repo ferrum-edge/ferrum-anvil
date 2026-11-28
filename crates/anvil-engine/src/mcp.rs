@@ -897,11 +897,25 @@ impl Run<'_> {
             let close = exchange(ctx, "DELETE", None, Some(sid), Some(version), Checks::None);
             let closed = self.exchange(close, events.clone(), None, None).await;
             if closed.record.outcome.transport != anvil_domain::outcome::TransportState::Completed {
-                self.record_auxiliary_failure(
-                    crate::McpAuxiliaryExchange::SessionClose,
-                    closed.record.outcome.transport,
-                    closed.record.attempts.last().and_then(|a| a.failure.clone()),
-                );
+                let (transport, failure) = if closed.record.outcome.transport == anvil_domain::outcome::TransportState::Canceled
+                    && !self.cancel.is_cancelled()
+                    && self.expired()
+                {
+                    (
+                        anvil_domain::outcome::TransportState::Incomplete,
+                        Some(
+                            TransportFailure::new(
+                                Phase::ResponseBody,
+                                FailureKind::TotalTimeout,
+                                self.deadline_note("session close (DELETE)"),
+                            )
+                            .with_deadline(self.total_ms),
+                        ),
+                    )
+                } else {
+                    (closed.record.outcome.transport, closed.record.attempts.last().and_then(|a| a.failure.clone()))
+                };
+                self.record_auxiliary_failure(crate::McpAuxiliaryExchange::SessionClose, transport, failure);
             }
             after.push(close_note(&closed));
         }
@@ -1173,7 +1187,9 @@ async fn execute_session(
                 }
                 let mut out = finish(out, notes, &run, refused.issued.as_deref(), &seen, true);
                 out.session_attempts = run.traffic.get(out.record.attempts.len()..).map(<[_]>::to_vec).unwrap_or_default();
-                out.session_auxiliary_outcome = run.auxiliary_outcome.clone();
+                // The handshake itself was refused: keep the handshake outcome
+                // primary rather than replacing it with a cleanup DELETE outcome.
+                out.session_auxiliary_outcome = None;
                 return vec![(out, None)];
             }
         }
@@ -1181,11 +1197,28 @@ async fn execute_session(
         let out = run.exchange(notify, quiet.clone(), None, None).await;
         notes.before.push(exchange_note("notifications/initialized", &out));
         if out.record.outcome.transport != anvil_domain::outcome::TransportState::Completed {
-            run.record_auxiliary_failure(
-                crate::McpAuxiliaryExchange::InitializedNotification,
-                out.record.outcome.transport,
-                out.record.attempts.last().and_then(|a| a.failure.clone()),
-            );
+            // If the session deadline (+ grace) canceled the child exchange
+            // rather than the caller canceling, classify it as TotalTimeout so
+            // load metrics report a timeout rather than a user cancel.
+            let (transport, failure) = if out.record.outcome.transport == anvil_domain::outcome::TransportState::Canceled
+                && !cancel.is_cancelled()
+                && run.expired()
+            {
+                (
+                    anvil_domain::outcome::TransportState::Incomplete,
+                    Some(
+                        TransportFailure::new(
+                            Phase::ResponseBody,
+                            FailureKind::TotalTimeout,
+                            run.deadline_note("notifications/initialized"),
+                        )
+                        .with_deadline(run.total_ms),
+                    ),
+                )
+            } else {
+                (out.record.outcome.transport, out.record.attempts.last().and_then(|a| a.failure.clone()))
+            };
+            run.record_auxiliary_failure(crate::McpAuxiliaryExchange::InitializedNotification, transport, failure);
         }
         let stop = if cancel.is_cancelled() {
             Some("the execution was canceled".to_string())
