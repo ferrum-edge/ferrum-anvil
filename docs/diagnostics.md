@@ -69,9 +69,9 @@ and every record names the findings catalog and Ferrum catalog it used.
 | `http.*` | 14 | generic status explanations (fallbacks, listed after hop-specific findings), quoting an RFC 9457 problem report when the body is one |
 | `ferrum.*` | 32 | trusted marker tokens, outcome matches, ambiguity, gRPC statuses a gateway outcome also sends, unverified/absent/conflicting/unknown markers, missing release catalog; the gateway's own diagnostic records and their lookup outcomes (`ferrum.detail.*`, G01) |
 | `app.*`, `auth.*` | 13 | gRPC status, SOAP fault, GraphQL errors; locally observed token expiry; JWT-SVID local checks (expired, wrong audience, invalid) and a 401 after sending one |
-| `grpc.*`, `grpc_web.*` | 3 | invalid length-prefixed framing; a gRPC-Web response with no trailer frame; a gRPC message past the local limit |
+| `grpc.*`, `grpc_web.*` | 3 | invalid length-prefixed framing; a gRPC-Web response with no trailer frame; reflection failure |
 | `masque.*` | 5 | CONNECT-UDP tunnel: proxy refused, no extended CONNECT or HTTP/3 datagrams, SETTINGS never arrived, abnormal end |
-| `ws.*`, `sse.*`, `tcp.*`, `udp.*`, `dtls.*` | 22 | close codes, idle/cancel, abnormal close, WebSocket permessage-deflate (offered but not negotiated, a refused extension answer, compressed frames never negotiated, undecodable data, the local limit reached after decompression), an SSE event or WebSocket frame past the local limit, no UDP response observed, PROXY header possibly rejected |
+| `ws.*`, `sse.*`, `tcp.*`, `udp.*`, `dtls.*` | 22 | close codes, idle/cancel, abnormal close, WebSocket permessage-deflate (offered but not negotiated, a refused extension answer, compressed frames never negotiated, undecodable data, the local limit reached after decompression), a WebSocket frame past the local limit, no UDP response observed, ICMP port-unreachable, repeated datagram payloads, PROXY header possibly rejected |
 
 ### RFC 9457 problem reports
 

@@ -169,7 +169,7 @@ from snapview/tungstenite-rs `7f4aeaf0944992c5664c8fb8e0d54577c7e18020`),
 without the published `Cargo.lock` and the registry's `.cargo-ok` marker, and
 with one change: `patches/tungstenite-0.30.0-permessage-deflate.patch`. It
 adds an RFC 7692 `permessage-deflate` codec behind a new, off-by-default
-`deflate` feature (about 810 added lines):
+`deflate` feature (about 830 added lines):
 
 * `src/protocol/deflate.rs` (new): the per-message codec for parameters that
   were already negotiated (`DeflateConfig`: compress or not, the compressor's

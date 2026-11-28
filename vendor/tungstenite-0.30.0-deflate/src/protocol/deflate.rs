@@ -21,6 +21,7 @@
 use crate::error::{CapacityError, Error, ProtocolError, Result};
 use bytes::Bytes;
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
+use std::sync::OnceLock;
 use std::{fmt, io};
 
 /// The end of a sync-flushed DEFLATE block (RFC 7692 §7.2.1 and §7.2.2).
@@ -412,17 +413,23 @@ impl HuffmanTable {
         Ok(HuffmanTable { counts, symbols, fast, max_bits })
     }
 
-    fn fixed_litlen() -> Self {
-        let mut lengths = [0u8; 288];
-        lengths[..144].fill(8);
-        lengths[144..256].fill(9);
-        lengths[256..280].fill(7);
-        lengths[280..288].fill(8);
-        Self::build(&lengths).expect("fixed RFC 1951 lit/len table is valid")
+    fn fixed_litlen() -> &'static Self {
+        static TABLE: OnceLock<HuffmanTable> = OnceLock::new();
+        TABLE.get_or_init(|| {
+            let mut lengths = [0u8; 288];
+            lengths[..144].fill(8);
+            lengths[144..256].fill(9);
+            lengths[256..280].fill(7);
+            lengths[280..288].fill(8);
+            Self::build(&lengths).expect("fixed RFC 1951 lit/len table is valid")
+        })
     }
 
-    fn fixed_dist() -> Self {
-        Self::build(&[5u8; 32]).expect("fixed RFC 1951 distance table is valid")
+    fn fixed_dist() -> &'static Self {
+        static TABLE: OnceLock<HuffmanTable> = OnceLock::new();
+        TABLE.get_or_init(|| {
+            Self::build(&[5u8; 32]).expect("fixed RFC 1951 distance table is valid")
+        })
     }
 }
 
@@ -451,6 +458,7 @@ struct DeflateWindowChecker {
     bitbuf: BitBuf,
     state: CheckerState,
     block_final: bool,
+    use_fixed: bool,
     hlit: usize,
     hdist: usize,
     hclen: usize,
@@ -478,6 +486,7 @@ impl DeflateWindowChecker {
             bitbuf: BitBuf::default(),
             state: CheckerState::BlockHeader,
             block_final: false,
+            use_fixed: false,
             hlit: 0,
             hdist: 0,
             hclen: 0,
@@ -494,6 +503,7 @@ impl DeflateWindowChecker {
         self.bitbuf = BitBuf::default();
         self.state = CheckerState::BlockHeader;
         self.block_final = false;
+        self.use_fixed = false;
     }
 
     fn check(&mut self, mut input: &[u8]) -> Result<()> {
@@ -532,11 +542,11 @@ impl DeflateWindowChecker {
                             self.state = CheckerState::StoredLen;
                         }
                         1 => {
-                            self.litlen = HuffmanTable::fixed_litlen();
-                            self.dist = HuffmanTable::fixed_dist();
+                            self.use_fixed = true;
                             self.state = CheckerState::Symbol;
                         }
                         2 => {
+                            self.use_fixed = false;
                             self.state = CheckerState::DynamicHeader;
                         }
                         _ => return Err(invalid_deflate("invalid DEFLATE block type")),
@@ -633,7 +643,12 @@ impl DeflateWindowChecker {
                 }
                 CheckerState::Symbol => {
                     self.bitbuf.fill(&mut input);
-                    let Some(sym) = self.bitbuf.decode(&self.litlen)? else {
+                    let table = if self.use_fixed {
+                        HuffmanTable::fixed_litlen()
+                    } else {
+                        &self.litlen
+                    };
+                    let Some(sym) = self.bitbuf.decode(table)? else {
                         return Ok(());
                     };
                     match sym {
@@ -665,7 +680,12 @@ impl DeflateWindowChecker {
                 }
                 CheckerState::DistSymbol => {
                     self.bitbuf.fill(&mut input);
-                    let Some(dsym) = self.bitbuf.decode(&self.dist)? else {
+                    let table = if self.use_fixed {
+                        HuffmanTable::fixed_dist()
+                    } else {
+                        &self.dist
+                    };
+                    let Some(dsym) = self.bitbuf.decode(table)? else {
                         return Ok(());
                     };
                     if dsym >= 30 {

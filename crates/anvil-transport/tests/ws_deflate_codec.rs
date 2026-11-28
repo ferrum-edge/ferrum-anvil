@@ -468,4 +468,13 @@ fn window_boundaries_context_takeover_limit_and_bfinal_under_small_windows() {
     let mut ws = client(bfinal, w9, 1024);
     assert_eq!(ws.read().unwrap(), Message::Text("Hello".into()));
     assert_eq!(ws.read().unwrap(), Message::Text("Hello".into()));
+
+    // Nonempty stored block followed by a valid and invalid back-reference under an 8-bit window.
+    let stored = frames(&[
+        &[0xc1, 0x0b, 0x00, 0x05, 0x00, 0xfa, 0xff, 0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x00],
+        &[0xc1, 0x05, 0xf2, 0x00, 0x11, 0x00, 0x00],
+    ]);
+    let mut ws = client(stored, Some(w8), 1024);
+    assert_eq!(ws.read().unwrap(), Message::Text("Hello".into()));
+    assert_eq!(ws.read().unwrap(), Message::Text("Hello".into()));
 }
