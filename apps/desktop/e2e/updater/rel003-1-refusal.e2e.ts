@@ -1,6 +1,8 @@
 // REL-003, built bundle, run 1 of 3: the installed bundle refuses an update
 // signed by another key, one with a corrupted signature and one altered after
-// signing. Each attempt goes through the app's real `update_install` command
+// signing, and a correctly signed one served over TLS with a certificate the
+// system does not trust (the endpoint is HTTPS; its test CA is in the system
+// trust store, as a real CA would be). Each attempt goes through the app's real `update_install` command
 // (pinned tauri-plugin-updater, the bundle's compiled-in test key and
 // endpoint), after the app requested the manifest and the artifact, and
 // leaves the bundle, the reported version and the persistent profile files
@@ -55,6 +57,24 @@ describe("REL-003: the built bundle refuses tampered updates", () => {
     ["with a corrupted signature", () => corruptSignature(signature), () => update, "The signature verification failed"],
     ["altered after signing", () => signature, () => altered(update), "The signature verification failed"],
   ];
+  it("refuses an endpoint whose TLS certificate the system does not trust, and changes nothing", async () => {
+    const bundleBefore = snapshot(installed());
+    const profileBefore = snapshot(required("ANVIL_DATA_DIR"), notShm);
+    server.offer(signature, update);
+    server.untrusted(true);
+    try {
+      const r = await invoke<null>("update_install", { version: OFFERED });
+      expect(r.err?.startsWith("Could not read the update manifest: ")).toBe(true);
+      // The TLS handshake failed: no request reached the endpoint.
+      expect(server.requests).toEqual([]);
+    } finally {
+      server.untrusted(false);
+    }
+    expect(snapshot(installed())).toEqual(bundleBefore);
+    expect(snapshot(required("ANVIL_DATA_DIR"), notShm)).toEqual(profileBefore);
+    expect(await appVersion()).toBe(INSTALLED_VERSION);
+  });
+
   for (const [name, sig, artifact, why] of cases) {
     it(`refuses an update ${name} and changes nothing`, async () => {
       const bundleBefore = snapshot(installed());
