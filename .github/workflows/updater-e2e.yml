@@ -3,8 +3,9 @@
 # Windows (installed silently first; there the plugin starts the update
 # installer and exits the app, and the installer restarts it), built with the test-only `e2e`
 # feature (embedded WebDriver), a minisign key generated for the run and a
-# loopback update endpoint. Only `plugins.updater.pubkey`, its endpoint (plain
-# HTTP on 127.0.0.1) and, for the update build, the version and
+# loopback HTTPS update endpoint (run-local test CA). Only
+# `plugins.updater.pubkey`, its endpoint (HTTPS on 127.0.0.1) and, for the
+# update build, the version and
 # `createUpdaterArtifacts` differ from the shipped config; `requireSignedVersion`
 # stays on. WebdriverIO calls the app's real `update_install` command
 # (apps/desktop/e2e/updater/):
@@ -186,15 +187,32 @@ jobs:
         run: |
           set -euo pipefail
           tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
-          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir "$REL003/published" --clobber
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern latest.json --pattern release-evidence.json --pattern '*.sig' \
+            --dir "$REL003/published" --clobber
           cp "$REL003/published/latest.json" "$REL003/fixtures/published-latest.json"
           TAG="$tag" node --input-type=module -e '
-            import { readFileSync } from "node:fs";
+            import { readdirSync, readFileSync } from "node:fs";
+            import { join } from "node:path";
             import { checkPublishedManifest } from "./scripts/updater-manifest.mjs";
-            const manifest = JSON.parse(readFileSync(`${process.env.REL003}/fixtures/published-latest.json`, "utf8"));
+            const dir = `${process.env.REL003}/published`;
+            const manifest = JSON.parse(readFileSync(join(dir, "latest.json"), "utf8"));
+            const evidence = JSON.parse(readFileSync(join(dir, "release-evidence.json"), "utf8"));
+            const signatures = Object.fromEntries(
+              readdirSync(dir)
+                .filter((name) => name.endsWith(".sig"))
+                .map((name) => [name, readFileSync(join(dir, name), "utf8").trim()]),
+            );
             const tag = process.env.TAG;
-            const keys = checkPublishedManifest(manifest, { repo: process.env.GITHUB_REPOSITORY, tag, version: tag.replace(/^anvil-v/, ""), pubkey: process.env.OWNER_PUBKEY.trim() });
-            console.log(`${tag}: latest.json has ${keys.join(", ")}, each signed by the owner key for its version`);
+            const keys = checkPublishedManifest(manifest, {
+              repo: process.env.GITHUB_REPOSITORY,
+              tag,
+              version: tag.replace(/^anvil-v/, ""),
+              pubkey: process.env.OWNER_PUBKEY.trim(),
+              evidence,
+              signatures,
+            });
+            console.log(`${tag}: latest.json has ${keys.join(", ")}, each bound to release-evidence.json and its published .sig sidecar`);
           '
 
       - name: Build the installed bundle (shipped version, e2e feature, test key)

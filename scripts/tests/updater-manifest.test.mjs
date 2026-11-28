@@ -115,6 +115,21 @@ test("a published latest.json that the app would misread or refuse is rejected",
     [(m) => (m.platforms["linux-x86_64"] = m.platforms["linux-x86_64-appimage"]), /platforms are/],
     [(m) => (m.platforms["linux-x86_64-appimage"].url = m.platforms["linux-x86_64-appimage"].url.replace("anvil-v0.1.9", "anvil-v0.1.8")), /not an asset of anvil-v0\.1\.9/],
     [(m) => (m.platforms["windows-x86_64-msi"].url = m.platforms["windows-x86_64-nsis"].url), /not that platform's updater file/],
+    [(m) => (m.platforms["windows-x86_64-msi"].signature = m.platforms["windows-x86_64-nsis"].signature), /signature signed file .* does not match/],
+    [
+      (m) => {
+        m.platforms["darwin-aarch64"].url = m.platforms["darwin-x86_64"].url;
+        m.platforms["darwin-aarch64-app"].url = m.platforms["darwin-x86_64-app"].url;
+      },
+      /does not match architecture darwin-aarch64/,
+    ],
+    [
+      (m) => {
+        m.platforms["darwin-aarch64"].signature = m.platforms["darwin-x86_64"].signature;
+        m.platforms["darwin-aarch64-app"].signature = m.platforms["darwin-x86_64-app"].signature;
+      },
+      /must not share a url or signature/,
+    ],
     [(m) => (m.platforms["darwin-aarch64"].signature = m.platforms["linux-x86_64-appimage"].signature.slice(0, -8)), /darwin-aarch64:/],
   ];
   for (const [mutate, message] of bad) {
@@ -122,6 +137,20 @@ test("a published latest.json that the app would misread or refuse is rejected",
     mutate(m);
     assert.throws(() => checkPublishedManifest(m, published), message);
   }
+  // Exact sidecar signature binding catches a same-version swap even when
+  // trusted-comment filenames match (as on darwin-aarch64 vs darwin-x86_64).
+  const signatures = Object.fromEntries(
+    Object.values(PUBLISHED.platforms).map((entry) => [`${decodeURIComponent(entry.url.split("/").pop())}.sig`, entry.signature]),
+  );
+  assert.doesNotThrow(() => checkPublishedManifest(PUBLISHED, { ...published, signatures }));
+  const swappedMac = clone();
+  const armSig = swappedMac.platforms["darwin-aarch64"].signature;
+  const x64Sig = swappedMac.platforms["darwin-x86_64"].signature;
+  swappedMac.platforms["darwin-aarch64"].signature = x64Sig;
+  swappedMac.platforms["darwin-aarch64-app"].signature = x64Sig;
+  swappedMac.platforms["darwin-x86_64"].signature = armSig;
+  swappedMac.platforms["darwin-x86_64-app"].signature = armSig;
+  assert.throws(() => checkPublishedManifest(swappedMac, { ...published, signatures }), /inline signature differs from/);
   // Signed by another key, or for another version.
   const other = keyPair();
   const m = clone();

@@ -834,20 +834,20 @@ per-machine install), and the specs run against the installed executable:
 
 `scripts/updater-manifest.mjs` checks that the update's signature verifies and
 records that version, and `tauri signer sign` signs the same artifact with the other
-key. The job also downloads the `latest.json` of the newest published release
-and checks its shape with `checkPublishedManifest`: exactly the seven platform
-keys Anvil publishes, each URL an asset of that tag of the right type, and
-each signature by the owner's key (`ANVIL_UPDATER_PUBKEY`) with a trusted
-comment that records the release's version (the minisign global signature
-covers the comment, so this needs no download of the signed files, whose
-bytes release-evidence.mjs verified when the release was built;
-`scripts/tests/updater-manifest.test.mjs` runs the same check on
-`anvil-v0.1.9`'s manifest and on tampered copies). The specs in
-`apps/desktop/e2e/updater/` then run against the installed bundle through
-`wdio.conf.ts` (one WebdriverIO run each, so the app is relaunched), serve
-from the endpoint a `latest.json` that copies the published one (its fields
-and the platform entry's fields; only the version, URL and signature differ)
-and the artifact, and call the app's `update_install` command:
+key. The job also downloads the `latest.json`, `release-evidence.json`, and
+published `.sig` sidecars of the newest published release and checks them with
+`checkPublishedManifest`: exactly the seven platform keys Anvil publishes,
+each URL matching the exact asset and architecture recorded in
+`release-evidence.json`, and each inline signature matching the published
+`.sig` sidecar and verifying under the owner's key (`ANVIL_UPDATER_PUBKEY`)
+for the release's version and file type (`scripts/tests/updater-manifest.test.mjs`
+runs the same checks on `anvil-v0.1.9`'s manifest and on tampered or swapped
+copies). The specs in `apps/desktop/e2e/updater/` then run against the
+installed bundle through `wdio.conf.ts` (one WebdriverIO run each, so the app
+is relaunched), serve from the endpoint a `latest.json` that copies the
+published one (keeping its top-level fields and selecting only the current
+lane's platform entries, with the offered version, loopback URL, and run-local
+signature) and the artifact, and call the app's `update_install` command:
 
 | Run | Checks |
 | --- | --- |

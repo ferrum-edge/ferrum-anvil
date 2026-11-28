@@ -103,19 +103,34 @@ export const PUBLISHED_PLATFORMS = [
   "windows-x86_64-nsis",
 ];
 const ASSET_FOR = { app: /\.app\.tar\.gz$/, appimage: /\.AppImage$/, nsis: /-setup\.exe$/, msi: /\.msi$/ };
+const ARCH_FOR = {
+  "darwin-aarch64": /(?:_|-)aarch64\./,
+  "darwin-x86_64": /(?:_|-)(?:x64|x86_64)\./,
+  "linux-x86_64": /(?:_|-)(?:amd64|x86_64)\./,
+  "windows-x86_64": /(?:_|-)(?:x64|x86_64)[._-]/,
+};
 const PLATFORM_KEY = /^(darwin|linux|windows)-(x86_64|aarch64)(?:-(app|appimage|nsis|msi))?$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+
+/** The `file:` field minisign / Tauri writes into the trusted comment, if any. */
+export const signedFile = (trusted) =>
+  trusted
+    .split("\t")
+    .find((f) => f.startsWith("file:"))
+    ?.slice("file:".length) ?? null;
 
 /**
  * Check a published latest.json (Tauri static format) as the app's updater
  * reads it: `version`, a `pub_date` and `notes`, exactly the platform keys
  * Anvil publishes, each with an https URL to that platform's asset of `tag`
- * in `repo`, and a signature by `pubkey` whose trusted comment records
- * `version`. The signed files are not downloaded; release-evidence.mjs
- * verified them over their bytes when the release was built. Returns the
- * platform keys.
+ * in `repo` (matching both installer type and architecture), and a signature
+ * by `pubkey` whose trusted comment records `version` and a matching file
+ * type. When `evidence` (`release-evidence.json`) and/or `signatures` (a map
+ * of `<asset>.sig` filename to published `.sig` contents) are provided, also
+ * binds each platform key to the exact asset filename and exact published
+ * `.sig` sidecar recorded by the release build. Returns the platform keys.
  */
-export function checkPublishedManifest(manifest, { repo, tag, version, pubkey }) {
+export function checkPublishedManifest(manifest, { repo, tag, version, pubkey, evidence, signatures } = {}) {
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) throw new Error("latest.json is not a JSON object");
   if (manifest.version !== version) throw new Error(`latest.json version ${JSON.stringify(manifest.version)} is not ${version}`);
   if (typeof manifest.pub_date !== "string" || !ISO_DATE.test(manifest.pub_date)) throw new Error("latest.json pub_date is not an RFC 3339 UTC time");
@@ -124,20 +139,75 @@ export function checkPublishedManifest(manifest, { repo, tag, version, pubkey })
   if (!platforms || typeof platforms !== "object" || Array.isArray(platforms)) throw new Error("latest.json platforms is not an object");
   const keys = Object.keys(platforms).sort();
   if (JSON.stringify(keys) !== JSON.stringify([...PUBLISHED_PLATFORMS].sort())) throw new Error(`latest.json platforms are ${keys.join(", ")}, not ${PUBLISHED_PLATFORMS.join(", ")}`);
+  const expectedByPlatform = new Map();
+  if (evidence) {
+    const pk = decodePublicKey(pubkey);
+    if (evidence.updater?.signed !== true || evidence.updater?.manifest !== "latest.json") {
+      throw new Error("release-evidence.json does not record a signed latest.json");
+    }
+    if (evidence.updater?.key_id !== pk.displayId) {
+      throw new Error(`release-evidence.json key_id ${JSON.stringify(evidence.updater?.key_id)} does not match ${pk.displayId}`);
+    }
+    for (const target of evidence.targets ?? []) {
+      for (const art of target.updater?.artifacts ?? []) {
+        for (const pkey of art.platforms ?? []) {
+          if (expectedByPlatform.has(pkey)) throw new Error(`release-evidence.json lists ${pkey} more than once`);
+          expectedByPlatform.set(pkey, { name: art.name, signature: art.signature });
+        }
+      }
+    }
+  }
   const prefix = `https://github.com/${repo}/releases/download/${encodeURIComponent(tag)}/`;
   for (const key of keys) {
-    const [, os, , installer] = PLATFORM_KEY.exec(key) ?? [];
+    const [, os, arch, installer] = PLATFORM_KEY.exec(key) ?? [];
     const entry = platforms[key];
     if (!entry || typeof entry.url !== "string" || typeof entry.signature !== "string") throw new Error(`latest.json ${key}: needs url and signature strings`);
     if (!entry.url.startsWith(prefix)) throw new Error(`latest.json ${key}: ${entry.url} is not an asset of ${tag}`);
     const asset = decodeURIComponent(entry.url.slice(prefix.length));
     const wanted = ASSET_FOR[installer ?? (os === "darwin" ? "app" : "")];
     if (!wanted || !wanted.test(asset)) throw new Error(`latest.json ${key}: ${asset} is not that platform's updater file`);
+    const wantedArch = ARCH_FOR[`${os}-${arch}`];
+    if (!wantedArch || !wantedArch.test(asset)) throw new Error(`latest.json ${key}: ${asset} does not match architecture ${os}-${arch}`);
+    let trusted;
     try {
-      checkSignedVersion(verifyTrustedComment(entry.signature, pubkey), version);
+      trusted = verifyTrustedComment(entry.signature, pubkey);
+      checkSignedVersion(trusted, version);
     } catch (e) {
       throw new Error(`latest.json ${key}: ${e.message}`);
     }
+    const sf = signedFile(trusted);
+    if (!sf || !wanted.test(sf)) {
+      throw new Error(`latest.json ${key}: signature signed file ${JSON.stringify(sf)} does not match ${asset}`);
+    }
+    if (evidence) {
+      const expected = expectedByPlatform.get(key);
+      if (!expected) throw new Error(`latest.json ${key}: missing from release-evidence.json`);
+      if (asset !== expected.name) throw new Error(`latest.json ${key}: ${asset} does not match release-evidence.json asset ${expected.name}`);
+      if (signatures) {
+        const expectedSig = signatures[expected.signature];
+        if (typeof expectedSig !== "string") throw new Error(`latest.json ${key}: missing sidecar signature ${expected.signature}`);
+        if (entry.signature.trim() !== expectedSig.trim()) {
+          throw new Error(`latest.json ${key}: inline signature differs from ${expected.signature}`);
+        }
+      }
+    } else if (signatures) {
+      const sidecar = `${asset}.sig`;
+      const expectedSig = signatures[sidecar];
+      if (typeof expectedSig !== "string") throw new Error(`latest.json ${key}: missing sidecar signature ${sidecar}`);
+      if (entry.signature.trim() !== expectedSig.trim()) {
+        throw new Error(`latest.json ${key}: inline signature differs from ${sidecar}`);
+      }
+    }
+  }
+  for (const arch of ["aarch64", "x86_64"]) {
+    const bare = platforms[`darwin-${arch}`];
+    const specific = platforms[`darwin-${arch}-app`];
+    if (bare.url !== specific.url || bare.signature !== specific.signature) {
+      throw new Error(`latest.json darwin-${arch} and darwin-${arch}-app must carry the same url and signature`);
+    }
+  }
+  if (platforms["darwin-aarch64"].url === platforms["darwin-x86_64"].url || platforms["darwin-aarch64"].signature === platforms["darwin-x86_64"].signature) {
+    throw new Error("latest.json darwin-aarch64 and darwin-x86_64 must not share a url or signature");
   }
   return keys;
 }

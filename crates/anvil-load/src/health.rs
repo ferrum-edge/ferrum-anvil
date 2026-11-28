@@ -1,7 +1,9 @@
-//! Load-generator self-measurement: process CPU time, peak RSS and open file
-//! descriptors, sampled periodically. Uses `getrusage(RUSAGE_SELF)` and the
-//! `/dev/fd` listing on Unix; on other platforms every value is `None` and the
-//! report says the measurement is unavailable rather than inventing zeros.
+//! Load-generator self-measurement: process CPU time, peak resident memory
+//! and open descriptors, sampled periodically. Uses `getrusage(RUSAGE_SELF)`
+//! and the process fd table on Unix, and `GetProcessTimes`,
+//! `K32GetProcessMemoryInfo` (peak working set) and `GetProcessHandleCount`
+//! on Windows; on any other platform every value is `None` and the report
+//! says the measurement is unavailable rather than inventing zeros.
 
 use std::time::{Duration, Instant};
 
@@ -30,22 +32,73 @@ pub fn sample() -> Option<Sample> {
     Some(Sample { cpu, max_rss_bytes })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[allow(unsafe_code)] // Win32 process counters have no safe std equivalent; see SAFETY notes.
+pub fn sample() -> Option<Sample> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no closing;
+    // the four pointers are to live, properly aligned FILETIMEs.
+    let ok = unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) };
+    if ok == 0 {
+        return None;
+    }
+    // FILETIME counts 100-nanosecond intervals.
+    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    let cpu = Duration::from_nanos((ticks(kernel) + ticks(user)).saturating_mul(100));
+    // SAFETY: PROCESS_MEMORY_COUNTERS is a plain C struct; zeroed is a valid
+    // initial value, `cb` says its size, and the call only writes into it.
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    // SAFETY: valid pointer to a live counters struct of `cb` bytes.
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
+    if ok == 0 {
+        return None;
+    }
+    Some(Sample { cpu, max_rss_bytes: counters.PeakWorkingSetSize as u64 })
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn sample() -> Option<Sample> {
     None
 }
 
-/// Open descriptors of this process (sockets included).
+/// Open descriptors of this process (sockets included): the fd table on
+/// Unix, the handle count on Windows.
 pub fn open_fds() -> Option<u64> {
-    if !cfg!(unix) {
-        return None;
+    #[cfg(windows)]
+    {
+        windows_handle_count()
     }
-    let dir = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
-    // The listing itself holds one descriptor while it is read.
-    std::fs::read_dir(dir).ok().map(|d| d.count().saturating_sub(1) as u64)
+    #[cfg(not(windows))]
+    {
+        if !cfg!(unix) {
+            return None;
+        }
+        let dir = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+        // The listing itself holds one descriptor while it is read.
+        std::fs::read_dir(dir).ok().map(|d| d.count().saturating_sub(1) as u64)
+    }
 }
 
-pub const METHOD_NOTE: &str = "Generator CPU is process user+system time over wall time (100 % = one core) and RSS is the peak resident set, both from getrusage(RUSAGE_SELF); descriptors are counted from the process fd table. They describe the whole process that ran the load engine.";
+#[cfg(windows)]
+#[allow(unsafe_code)] // GetProcessHandleCount has no safe std equivalent; see SAFETY note.
+fn windows_handle_count() -> Option<u64> {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+    let mut count = 0u32;
+    // SAFETY: a pseudo-handle for this process and a pointer to a live u32.
+    let ok = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) };
+    (ok != 0).then_some(u64::from(count))
+}
+
+pub const METHOD_NOTE: &str = if cfg!(windows) {
+    "Generator CPU is process user+kernel time over wall time (100 % = one core), from GetProcessTimes; RSS is the peak working set, from K32GetProcessMemoryInfo; descriptors are the process handle count, from GetProcessHandleCount (handles of every kind, sockets included). They describe the whole process that ran the load engine."
+} else {
+    "Generator CPU is process user+system time over wall time (100 % = one core) and RSS is the peak resident set, both from getrusage(RUSAGE_SELF); descriptors are counted from the process fd table. They describe the whole process that ran the load engine."
+};
 
 pub struct HealthSampler {
     start: Option<(Instant, Sample)>,
@@ -113,8 +166,8 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(unix)]
-    fn unix_sampling_reports_values() {
+    #[cfg(any(unix, windows))]
+    fn unix_and_windows_sampling_report_values() {
         let mut h = HealthSampler::new();
         assert!(h.available());
         let t = Instant::now();
@@ -130,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn other_platforms_report_unavailable_not_zero() {
         let mut h = HealthSampler::new();
         assert!(!h.available());
