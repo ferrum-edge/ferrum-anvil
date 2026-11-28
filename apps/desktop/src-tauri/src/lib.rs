@@ -65,7 +65,17 @@ use state::{DesktopState, LockReason};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{Emitter, Manager};
 
+/// When this process started running Anvil code: startup milestones in the
+/// log are measured from here.
+static STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Time since [`run`] began.
+pub(crate) fn since_start() -> Duration {
+    STARTED.get().map(Instant::elapsed).unwrap_or_default()
+}
+
 pub fn run() {
+    let _ = STARTED.set(Instant::now());
     anvil_transport::init();
     // Give Tauri a runtime whose workers have larger stacks than the default.
     // The runtime must outlive the app, so it is intentionally leaked.
@@ -90,6 +100,18 @@ pub fn run() {
                     }
                 }
                 Err(err) => eprintln!("no log directory: {err}"),
+            }
+            // Build the configured main window here so Windows perf/test runs
+            // can supply a benchmark-owned WebView2 user-data folder via
+            // WEBVIEW2_USER_DATA_FOLDER without sharing the user's session.
+            if let Some(win_cfg) = app.config().app.windows.first() {
+                let win = tauri::WebviewWindowBuilder::from_config(app.handle(), win_cfg)?;
+                #[cfg(target_os = "windows")]
+                let win = match std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").filter(|v| !v.is_empty()) {
+                    Some(dir) => win.data_directory(std::path::PathBuf::from(dir)),
+                    None => win,
+                };
+                win.build()?;
             }
             #[cfg(feature = "e2e")]
             e2e_unlock(&app.state::<DesktopState>());
@@ -151,6 +173,7 @@ pub fn run() {
         .invoke_handler(commands::with_execution_commands(tauri::generate_handler![
             cmd_diagnostic_import::diagnostic_import_preview,
             commands::app_status,
+            commands::app_ui_ready,
             commands::profiles_list,
             commands::profile_create,
             commands::profile_unlock,

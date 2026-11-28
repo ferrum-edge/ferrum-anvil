@@ -405,6 +405,10 @@ async fn load_012_default_export_properties_do_not_write_url_credentials_to_jtl(
     assert!(!raw_jtl.contains(" rm="), "response message attribute leaked into JTL: {raw_jtl}");
     let report = import(&run, &plan);
     assert_eq!((report.requests.started, report.requests.completed), (3, 3));
+    // With `jmeter.save.saveservice.assertions=false`, JMeter omits `<assertionResult>`
+    // so a failed body assertion on HTTP 200 is imported as an application failure.
+    assert_eq!((report.requests.application_failures, report.requests.assertion_failures), (3, 0));
+    assert_eq!(report.status_distribution, vec![(200, 3)]);
     assert!(report.engine_version.ends_with("+jtl-xml"));
     // Ground truth: JMeter actually sent both resolved secrets to the fixture.
     let got = received(&f, "/echo/");

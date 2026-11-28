@@ -292,6 +292,26 @@ fn load_012_jtl_record_limit_is_exact() {
     exact.limits.max_record_bytes = (crlf_hdr.len() - 1) as u64;
     let crlf_csv = format!("{crlf_hdr}{T0},1,a,200,true,http://h/\r\n");
     assert!(matches!(import(&crlf_csv, &exact).unwrap_err(), JtlError::RecordTooLong { .. }));
+    // Split `\r` (byte max_record_bytes) and `\n` (byte max_record_bytes + 1) across two reads
+    // so `headers()` returns before the trailing `\n` is read.
+    struct SplitAt {
+        inner: Cursor<Vec<u8>>,
+        split: u64,
+    }
+    impl std::io::Read for SplitAt {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let pos = self.inner.position();
+            let cap = if pos < self.split { ((self.split - pos) as usize).min(buf.len()) } else { buf.len() };
+            self.inner.read(&mut buf[..cap])
+        }
+    }
+    impl std::io::Seek for SplitAt {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+    let split_reader = SplitAt { inner: Cursor::new(crlf_csv.as_bytes().to_vec()), split: (crlf_hdr.len() - 1) as u64 };
+    assert!(matches!(import_jtl(split_reader, &exact).unwrap_err(), JtlError::RecordTooLong { what: "the CSV header row", .. }));
     exact.limits.max_record_bytes = crlf_hdr.len() as u64;
     assert!(import(&crlf_csv, &exact).is_ok());
 }

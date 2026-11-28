@@ -280,3 +280,44 @@ describe("every screen a lock leaves has a way forward", () => {
     expect(lockScreen(enroll, { type: "enrollBack" }).screen).toEqual({ kind: "form", mode: "create" });
   });
 });
+
+describe("startup milestone", () => {
+  it("reports the UI ready only once the profiles are read and the first-run form is shown", async () => {
+    let answer: (p: Profile[]) => void = () => {};
+    const profiles = new Promise<Profile[]>((resolve) => (answer = resolve));
+    backend([], { profiles_list: () => profiles, app_ui_ready: () => null });
+    render(<LockScreen onUnlocked={vi.fn()} />);
+    // Still waiting for the profile list: nothing usable on screen, no report.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(invoke).not.toHaveBeenCalledWith("app_ui_ready", undefined);
+    expect(screen.queryByRole("button", { name: "Start working" })).toBeNull();
+    answer([]);
+    expect(await screen.findByRole("button", { name: "Start working" })).toBeTruthy();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("app_ui_ready", undefined));
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "app_ui_ready")).toHaveLength(1);
+  });
+
+  it("does not report the launch-time auto-open of a single keychain profile as ready even while handoff is pending", async () => {
+    backend([{ profile_id: "k1", display_name: "Local", protection: "os_keychain" }], { app_ui_ready: () => null });
+    const onUnlocked = vi.fn();
+    render(<LockScreen onUnlocked={onUnlocked} />);
+    await waitFor(() => expect(onUnlocked).toHaveBeenCalled());
+    // LockScreen remains mounted while App awaits app_status; it must stay on
+    // autoOpening and never steal the single backend ui_ready marker.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(invoke).not.toHaveBeenCalledWith("app_ui_ready", undefined);
+  });
+
+  it("reports ready when launch-time auto-open of a single keychain profile fails and falls back to the unlock form", async () => {
+    backend([{ profile_id: "k1", display_name: "Local", protection: "os_keychain" }], {
+      profile_unlock: () => Promise.reject(new Error("keychain unavailable")),
+      app_ui_ready: () => null,
+    });
+    const onUnlocked = vi.fn();
+    render(<LockScreen onUnlocked={onUnlocked} />);
+    await screen.findByText(/keychain unavailable/);
+    expect(onUnlocked).not.toHaveBeenCalled();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("app_ui_ready", undefined));
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "app_ui_ready")).toHaveLength(1);
+  });
+});

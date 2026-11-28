@@ -54,6 +54,31 @@ fn setup(root: &Path) {
         updated_at: now,
     })
     .unwrap();
+    let mut echo_secret = RequestSpec::http("GET", "http://127.0.0.1:9/echo");
+    echo_secret.settings.redirects = Some(RedirectPolicy { follow: false, max: 10, forward_credentials_cross_origin: false });
+    echo_secret.auth = anvil_domain::auth::AuthConfig::Bearer {
+        token: anvil_domain::auth::SensitiveValue::literal("cli-secret-token"),
+        prefix: "Bearer".into(),
+    };
+    let echo_secret = app.create_request(&ws.meta.id, None, "SecretEcho", echo_secret).unwrap();
+    app.save_load_plan(anvil_domain::load::LoadPlan {
+        id: anvil_domain::Id::new(),
+        workspace_id: ws.meta.id,
+        name: "withdata_and_secret".into(),
+        workload: anvil_domain::load::Workload::Iterations { iterations: 2, concurrency: 1 },
+        chain: vec![echo_secret.meta.id],
+        mix: vec![],
+        dataset_id: Some(dataset.meta.id),
+        environment_id: None,
+        connection_mode: Default::default(),
+        warmup_secs: 0,
+        abort: None,
+        seed: 1,
+        trusted: true,
+        created_at: now,
+        updated_at: now,
+    })
+    .unwrap();
     app.create_request(&ws.meta.id, None, "Secure", RequestSpec::http("GET", "https://api.example.test/")).unwrap();
 }
 
@@ -242,7 +267,16 @@ fn load_012_cli_exports_a_plan_refuses_strict_tls_and_imports_results() {
         let secrets = out.path().join("must-not-exist.properties");
         let o = anvil(
             data,
-            &["load", "export-jmx", "Shop", "withdata", "--out", out_dir.to_str().unwrap(), "--secrets-file", secrets.to_str().unwrap()],
+            &[
+                "load",
+                "export-jmx",
+                "Shop",
+                "withdata_and_secret",
+                "--out",
+                out_dir.to_str().unwrap(),
+                "--secrets-file",
+                secrets.to_str().unwrap(),
+            ],
         );
         assert!(!o.status.success() && text(&o).contains("directory"), "{}", text(&o));
         assert!(!secrets.exists(), "invalid --out must not leave secrets sidecar behind");

@@ -1153,11 +1153,12 @@ export function freshJtlName(planFile = "plan.jmx", now = new Date(), nonce?: st
   const stem = planFile.replace(/\.jmx$/i, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "results";
   const pad = (n: number) => String(n).padStart(2, "0");
   const stamp = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}-${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
+  const randomHex32 = () => Math.floor(Math.random() * 0x1_0000_0000).toString(16).padStart(8, "0");
   const unique =
     nonce ??
     (typeof globalThis.crypto?.randomUUID === "function"
       ? globalThis.crypto.randomUUID()
-      : `${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}`);
+      : `${randomHex32()}${randomHex32()}`);
   return `${stem}-results-${stamp}-${unique}.jtl`;
 }
 

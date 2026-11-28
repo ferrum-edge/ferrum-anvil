@@ -1407,5 +1407,16 @@ describe("LOAD-012 jmeterCommand", () => {
     // Two exports of the same stem in the same second produce distinct JTL names.
     const same = new Date("2026-11-28T12:00:00Z");
     expect(freshJtlName("plan.jmx", same)).not.toBe(freshJtlName("plan.jmx", same));
+    // Fallback when crypto.randomUUID is unavailable still yields a fixed 16-hex-digit suffix
+    // even for short binary fractions like Math.random() === 0.5.
+    const origCrypto = globalThis.crypto;
+    const randSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    try {
+      Object.defineProperty(globalThis, "crypto", { value: {}, configurable: true });
+      expect(freshJtlName("plan.jmx", same)).toBe("plan-results-20261128-120000-8000000080000000.jtl");
+    } finally {
+      randSpy.mockRestore();
+      Object.defineProperty(globalThis, "crypto", { value: origCrypto, configurable: true });
+    }
   });
 });

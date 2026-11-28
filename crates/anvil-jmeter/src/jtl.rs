@@ -329,18 +329,25 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
         match rdr.read_record(&mut record) {
             Ok(false) => {
                 // For CRLF headers, `csv::Reader::headers()` stops at `\r` and
-                // consumes the trailing `\n` on the first `read_record` call.
-                if line == 1 && rdr.position().byte() > limits.max_record_bytes {
+                // consumes the trailing `\n` on the first `read_record` call
+                // (including when `\r` and `\n` are split across reads).
+                if line == 1 && rdr.get_ref().header_bytes.max(rdr.position().byte()) > limits.max_record_bytes {
                     return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
                 }
                 break;
             }
             Ok(true) => {
-                if line == 1 && record.position().is_some_and(|p| p.byte() > limits.max_record_bytes) {
+                if line == 1
+                    && (rdr.get_ref().header_bytes > limits.max_record_bytes
+                        || record.position().is_some_and(|p| p.byte() > limits.max_record_bytes))
+                {
                     return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
                 }
             }
             Err(e) => {
+                if line == 1 && rdr.get_ref().header_bytes > limits.max_record_bytes {
+                    return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
+                }
                 return Err(limit_error(rdr.get_ref(), limits, "a CSV record").unwrap_or_else(|| match e.kind() {
                     csv::ErrorKind::Utf8 { .. } => JtlError::Invalid(format!("the CSV record after line {line} is not UTF-8")),
                     csv::ErrorKind::UnequalLengths { .. } => {
