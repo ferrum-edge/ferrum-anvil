@@ -206,7 +206,7 @@ impl Dir {
         use rustix::fs::{AtFlags, FileType, statat};
         use rustix::io::Errno;
         match statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(st) => Ok(FileType::from_raw_mode(st.st_mode.into()) == FileType::Symlink),
+            Ok(st) => Ok(FileType::from_raw_mode(st.st_mode) == FileType::Symlink),
             Err(Errno::NOENT) => Ok(false),
             Err(e) => Err(e.into()),
         }
