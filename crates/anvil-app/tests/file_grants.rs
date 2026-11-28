@@ -711,5 +711,5 @@ fn load_012_secret_output_is_refused_where_no_owner_only_file_can_be_created() {
     assert!(!secrets.exists());
     let g = grants.grant_write(FilePurpose::JmeterExport, &dir.path().join("plan.jmx")).unwrap();
     assert!(matches!(grants.write_with_dataset(&g.token, b"<j/>", Some((b"s", true)), false), Err(GrantError::Invalid(_))));
-    assert!(!anvil_app::file_grants::OWNER_ONLY_FILES);
+    const { assert!(!anvil_app::file_grants::OWNER_ONLY_FILES) };
 }
