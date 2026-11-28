@@ -281,10 +281,33 @@ pub fn observe(out: &ExecutionOutput, wall_us: u64, step: &StepUnit) -> SendObse
     let mut obs = observe_record(rec, wall_us);
     if step.kind == LoadUnitKind::McpSession {
         // The record is one exchange of the session; the unit is all of it:
-        // its time and the traffic of its other exchanges.
+        // its time, the traffic of its other exchanges, and transport
+        // completion of its closing DELETE exchange when closing is on.
         obs.latency_us = wall_us;
         obs.setup_us = 0;
         count_attempts(&mut obs, &out.session_attempts);
+        if obs.terminal == Terminal::Completed
+            && let Some((close_transport, close_failure)) = &out.session_close_outcome
+        {
+            let close_terminal = classify_transport(*close_transport, close_failure.as_ref());
+            if close_terminal != Terminal::Completed {
+                obs.terminal = close_terminal;
+                obs.application_failure = false;
+                obs.assertion_failure = false;
+                obs.deadline_ms =
+                    if close_terminal == Terminal::Timeout { close_failure.as_ref().and_then(|f| f.deadline_ms) } else { None };
+                if obs.is_failure() {
+                    let class = if close_terminal == Terminal::Timeout { "timeout" } else { "transport_failure" };
+                    let kind = close_failure.as_ref().map(|f| snake(&f.kind)).unwrap_or_else(|| "session_close".into());
+                    obs.category = Some(truncate_chars(&format!("{class}: mcp_close.{kind}"), 120));
+                    let detail = close_failure
+                        .as_ref()
+                        .map(|f| format!("{kind}: {}", f.message))
+                        .unwrap_or_else(|| "MCP session close did not complete".into());
+                    obs.example = Some(truncate_chars(&format!("DELETE {} → {detail}", rec.prepared.url), MAX_EXAMPLE_CHARS));
+                }
+            }
+        }
     }
     obs.proto = protocol_obs(out, step, obs.terminal);
     // A datagram exchange whose tunnel never opened sent nothing and had no
@@ -337,20 +360,24 @@ fn not_determined_from_body(rec: &ExecutionRecord, step: &StepUnit) -> bool {
     step.application_from_body && rec.outcome.application == ApplicationState::NotEvaluated
 }
 
+fn classify_transport(transport: TransportState, failure: Option<&anvil_domain::execution::TransportFailure>) -> Terminal {
+    match transport {
+        TransportState::Completed => Terminal::Completed,
+        TransportState::Canceled => Terminal::Canceled,
+        _ => match failure {
+            Some(f) if f.kind == FailureKind::Canceled => Terminal::Canceled,
+            Some(f) if is_timeout(f.kind) => Terminal::Timeout,
+            _ => Terminal::TransportFailure,
+        },
+    }
+}
+
 /// The unit-independent part of [`observe`]: terminal class, application and
 /// assertion state, attempt latency, bytes and connections. Failure samples
 /// are added by [`observe`].
 pub fn observe_record(rec: &ExecutionRecord, wall_us: u64) -> SendObservation {
     let last_failure = rec.attempts.last().and_then(|a| a.failure.as_ref());
-    let terminal = match rec.outcome.transport {
-        TransportState::Completed => Terminal::Completed,
-        TransportState::Canceled => Terminal::Canceled,
-        _ => match last_failure {
-            Some(f) if f.kind == FailureKind::Canceled => Terminal::Canceled,
-            Some(f) if is_timeout(f.kind) => Terminal::Timeout,
-            _ => Terminal::TransportFailure,
-        },
-    };
+    let terminal = classify_transport(rec.outcome.transport, last_failure);
     let application_failure = terminal == Terminal::Completed && rec.outcome.application == ApplicationState::Failure;
     let assertion_failure = terminal == Terminal::Completed && rec.outcome.assertions == AssertionState::Fail;
     let latency_us = exchange_duration_us(&rec.attempts).unwrap_or(0);

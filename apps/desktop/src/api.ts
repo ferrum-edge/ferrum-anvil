@@ -384,6 +384,8 @@ export interface McpDiscovered {
   pages: number;
   /** Why pages the server listed were left unread; null when every page was read. */
   stopped: string | null;
+  /** Why a later page's execution could not be recorded in history; null when none failed. */
+  history_warning?: string | null;
   /** The execution that listed the first page (in history). */
   execution_id: string;
 }

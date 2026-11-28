@@ -498,6 +498,7 @@ pub fn assemble(a: Assembly<'_>) -> ExecutionOutput {
         extracted: extracted_values,
         session_facts: None,
         session_attempts: vec![],
+        session_close_outcome: None,
     }
 }
 
@@ -672,6 +673,7 @@ pub fn local_failure_with(
         extracted: vec![],
         session_facts: None,
         session_attempts: vec![],
+        session_close_outcome: None,
     }
 }
 

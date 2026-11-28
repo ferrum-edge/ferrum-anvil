@@ -735,6 +735,10 @@ function McpEditor(props: {
       if (d.notes_total > 0) parts.push(`Note: ${listed(d.notes, d.notes_total)}.`);
       if (d.pages > 1) parts.push(`Read ${d.pages} tools/list pages.`);
       if (d.stopped) parts.push(`Not every page was read: ${d.stopped.length > 200 ? `${d.stopped.slice(0, 200)}…` : d.stopped}.`);
+      if (d.history_warning)
+        parts.push(
+          `History was not completely recorded: ${d.history_warning.length > 200 ? `${d.history_warning.slice(0, 200)}…` : d.history_warning}.`,
+        );
       setDiscovered(parts.join(" "));
       props.onTreeChanged?.();
     } catch (e) {

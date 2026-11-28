@@ -249,10 +249,11 @@ pub fn body_facts_redacted(content_type: Option<&str>, body: &[u8], redact: Reda
                         first_message: excerpt(redact, errs[0].get("message").and_then(|m| m.as_str()).unwrap_or(""), 300),
                     });
                 }
-            } else if let Some(items) = v.as_array().filter(|a| !a.is_empty() && a.iter().all(is_jsonrpc_response)) {
+            } else if let Some(items) = v.as_array().filter(|a| !a.is_empty() && a.iter().any(is_jsonrpc_response)) {
                 // A JSON-RPC batch answer: its first error, and its first tool
-                // failure, stand for it.
-                let objects = || items.iter().filter_map(|i| i.as_object());
+                // failure, stand for it; an unrelated non-RPC element never
+                // hides a real JSON-RPC error or tool failure.
+                let objects = || items.iter().filter(|i| is_jsonrpc_response(i)).filter_map(|i| i.as_object());
                 f.jsonrpc_error = objects().find_map(|o| jsonrpc_error(o, redact));
                 f.mcp_tool_error = objects().find_map(|o| mcp_tool_error(o, redact));
             }

@@ -480,8 +480,8 @@ pub fn semantics(kind: LoadUnitKind, mode: ConnectionMode) -> UnitSemantics {
         LoadUnitKind::McpSession => s(
             "session",
             "sessions",
-            "The session's last exchange got a complete HTTP response (any status): the operation's, or initialize's when the handshake failed and the operation was not sent. An event stream Anvil stopped reading once the JSON-RPC response had arrived is complete.",
-            "Completed with the operation sent, its JSON-RPC response read with no JSON-RPC error and no tool result marked isError (a notification, or a batch of notifications only, accepted with a 2xx), and every assertion passing. A session whose operation was not sent, or whose answer could not be judged (no JSON-RPC response, or one too large to inspect), is an application failure.",
+            "The session's exchanges completed at the transport level through its last exchange (the closing DELETE when session closing is on, else the operation, or initialize when the handshake failed), each receiving a complete HTTP response (any status). An event stream Anvil stopped reading once the JSON-RPC response had arrived is complete.",
+            "Completed with the operation sent, its JSON-RPC response read with no JSON-RPC error and no tool result marked isError (a notification, or a batch of notifications only, accepted with a 2xx), and every assertion passing. A session whose operation was not sent, ended on a redirect, or whose answer could not be judged (no JSON-RPC response, missing or ambiguous batch replies, or one too large to inspect), is an application failure.",
             "Session duration: from the start of initialize to the end of the session's last exchange (the DELETE when the session is closed), as the step measured it.",
             if persistent {
                 "Persistent: each virtual user keeps pooled connections across its sessions (HTTP/1.1 keep-alive, one multiplexed HTTP/2 or HTTP/3 connection per origin), so a session's exchanges reuse them. An HTTP/1.1 event stream Anvil stopped reading early closes its connection.".into()

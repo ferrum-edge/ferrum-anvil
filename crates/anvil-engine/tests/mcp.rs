@@ -611,3 +611,88 @@ async fn a_batch_is_matched_on_the_ids_actually_sent() {
     assert!(n.contains("MCP JSON-RPC batch: 1 response(s) to 1 request(s): id \"ping-1\": result"), "{n}");
     assert_eq!(o.record.outcome.application, ApplicationState::Success, "{}", o.record.outcome.summary);
 }
+
+/// Unrelated JSON-RPC errors and malformed non-RPC elements in a batch reply
+/// do not fail a successful batch or leak into extractions, while raw response
+/// bytes stay preserved as evidence; when only unrelated/malformed elements
+/// arrive on 2xx, the outcome is NotEvaluated (not a false JSON-RPC error).
+#[tokio::test]
+async fn batch_filters_unrelated_and_malformed_elements_in_json_and_sse() {
+    init();
+    let messages = r#"[{"jsonrpc":"2.0","id":11,"method":"ping"}]"#;
+    let e = Engine::new();
+    for sse in [false, true] {
+        let f = mcp::serve(
+            "127.0.0.1:0",
+            McpOptions { sse, batches: true, hostile: Hostile::BatchExtraUnrelatedAndMalformed, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let mut c = mcp_ctx(&f.url(), batch(messages));
+        c.spec.extractions = vec![Extraction {
+            variable: "first_id".into(),
+            source: ExtractionSource::JsonPath { path: "$[0].id".into() },
+            sensitive: false,
+        }];
+        let o = run(&e, &c).await;
+        assert_eq!(o.record.outcome.application, ApplicationState::Success, "sse {sse}: {}", o.record.outcome.summary);
+        assert!(!codes(&o).contains(&"app.jsonrpc_error".to_string()), "sse {sse}: unrelated id 999 leaked: {:?}", codes(&o));
+        assert_eq!(o.extracted, vec![("first_id".to_string(), "11".to_string(), false)], "sse {sse}: extraction picked unrelated reply");
+        assert!(std::str::from_utf8(&o.body).unwrap_or("").contains("999"), "sse {sse}: raw response body must keep server evidence");
+
+        let only_unrelated = mcp::serve(
+            "127.0.0.1:0",
+            McpOptions { sse, batches: true, hostile: Hostile::BatchOnlyUnrelatedAndMalformed, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        let o = run(&e, &mcp_ctx(&only_unrelated.url(), batch(messages))).await;
+        assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "sse {sse}: {}", o.record.outcome.summary);
+        assert!(!codes(&o).contains(&"app.jsonrpc_error".to_string()), "sse {sse}: unrelated id 999 leaked: {:?}", codes(&o));
+    }
+}
+
+/// A batch whose template parses as JSON with no `id` until a variable in a
+/// member name resolves to `"id"` still derives response expectations from the
+/// prepared bytes (stopping open SSE early and refusing an empty 200).
+#[tokio::test]
+async fn templated_batch_member_name_derives_expectations_from_prepared_bytes() {
+    init();
+    let e = Engine::new();
+    let template = r#"[{"jsonrpc":"2.0","{{member}}":11,"method":"ping"}]"#;
+    let var = || VarLayer {
+        label: "test".into(),
+        vars: vec![VarEntry { name: "member".into(), value: "id".into(), secret: false, literal: false }],
+    };
+
+    let open = mcp::serve("127.0.0.1:0", McpOptions { sse: true, keep_open: true, batches: true, ..Default::default() }).await.unwrap();
+    let mut c = mcp_ctx(&open.url(), batch(template));
+    c.var_layers.push(var());
+    let timeouts = TimeoutOverrides { total_ms: Some(Some(20_000)), ..Default::default() };
+    c.settings_layers.push(("run".into(), SettingsOverrides { timeouts: Some(timeouts), ..Default::default() }));
+    let started = std::time::Instant::now();
+    let o = run(&e, &c).await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "waited for open stream");
+    assert_eq!(o.record.outcome.application, ApplicationState::Success, "{}", o.record.outcome.summary);
+    assert_eq!(o.record.response.as_ref().unwrap().body.completeness, anvil_domain::execution::BodyCompleteness::StoppedAfterAnswer);
+
+    let empty =
+        mcp::serve("127.0.0.1:0", McpOptions { batches: true, hostile: Hostile::BatchEmpty200, ..Default::default() }).await.unwrap();
+    let mut c = mcp_ctx(&empty.url(), batch(template));
+    c.var_layers.push(var());
+    let o = run(&e, &c).await;
+    assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "empty 200 must not count as notification success");
+}
+
+/// A batch that reuses the same request id is ambiguous and must not be
+/// reported as a complete success.
+#[tokio::test]
+async fn duplicate_request_ids_in_batch_are_not_evaluated_as_success() {
+    init();
+    let f = mcp::serve("127.0.0.1:0", McpOptions { batches: true, ..Default::default() }).await.unwrap();
+    let e = Engine::new();
+    let dup = r#"[{"jsonrpc":"2.0","id":11,"method":"ping"},{"jsonrpc":"2.0","id":11,"method":"ping"}]"#;
+    let o = run(&e, &mcp_ctx(&f.url(), batch(dup))).await;
+    assert_eq!(o.record.outcome.application, ApplicationState::NotEvaluated, "{}", o.record.outcome.summary);
+    assert!(o.record.outcome.warnings.iter().any(|w| w.message.contains("reused a request id")), "{:?}", o.record.outcome.warnings);
+}

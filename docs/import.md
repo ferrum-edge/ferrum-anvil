@@ -1097,9 +1097,12 @@ the same folder
   once 500 tools have been listed. A `nextCursor` is sent back only when it is
   plain text (1 to 4096 bytes, no control characters, no `{{` or `}}`, which
   the variable resolver would read as a reference), and reading stops at a
-  cursor the server sent before. A later page that fails, is canceled or
-  cannot be recorded ends the discovery with what the earlier pages listed. The result says how many pages were read
-  and, when pages were left unread, why (`pages`, `stopped`).
+  cursor the server sent before. A later page that fails or is canceled ends
+  the discovery with what the earlier pages listed. The result says how many
+  pages were read and, when pages were left unread, why (`pages`, `stopped`).
+  If a later page's execution cannot be recorded in history after the session
+  finishes, the tools already listed are still saved and the recording error is
+  reported separately (`history_warning`).
 * At most 500 tools are saved. Skipped tools are listed with the reason (the
   first 20; all are counted).
 * A tool's arguments text is at most 64 KiB: when its schema's examples and

@@ -1197,6 +1197,9 @@ async fn mcp_discover(app: &App, a: &McpDiscoverArgs) -> Result<i32> {
         // Server text (a JSON-RPC error summary) may be quoted in it.
         println!("not every page was read: {}", terminal_safe(why));
     }
+    if let Some(why) = &d.history_warning {
+        println!("history warning: {}", terminal_safe(why));
+    }
     Ok(0)
 }
 

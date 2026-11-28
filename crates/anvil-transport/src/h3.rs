@@ -2036,8 +2036,6 @@ impl H3Transport {
         obs.bytes.response_headers_logical = Some(headers.iter().map(|h| (h.name.len() + h.value.len() + 4) as u64).sum());
         let content_type = resp.headers().get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
         let content_encoding = resp.headers().get(http::header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
-        let declared_length =
-            resp.headers().get(http::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|s| s.parse::<u64>().ok());
 
         let b_idx = rec.start(Phase::ResponseBody);
         let mut captured = BytesMut::new();
@@ -2069,13 +2067,52 @@ impl H3Transport {
                             failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::ResponseTooLargeLocal, "stopped reading at the local max_response_bytes limit"));
                             break;
                         }
-                        // A body whose declared length has all arrived is
-                        // complete, not stopped.
+                        // Once the watched answer has arrived, confirm whether
+                        // the peer ended the stream (or sent trailers) rather
+                        // than relying on Content-Length.
                         if let Some(w) = watch.as_mut()
                             && w.feed(&data)
-                            && declared_length.is_none_or(|n| wire < n)
                         {
-                            completeness = BodyCompleteness::StoppedAfterAnswer;
+                            let probe_deadline = Instant::now() + Duration::from_millis(20);
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    next = stream.recv_data() => match next {
+                                        Ok(None) => {
+                                            completeness = BodyCompleteness::Complete;
+                                            break;
+                                        }
+                                        Ok(Some(c)) if c.remaining() == 0 => continue,
+                                        Ok(Some(_)) => {
+                                            completeness = BodyCompleteness::StoppedAfterAnswer;
+                                            break;
+                                        }
+                                        Err(h3::error::StreamError::HeaderTooBig { .. }) => {
+                                            completeness = BodyCompleteness::Incomplete;
+                                            failure = Some(headers_too_large(Phase::ResponseBody, "trailers", &plan.limits));
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            completeness = BodyCompleteness::Incomplete;
+                                            failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::BodyReset, format!("the HTTP/3 response stream ended abnormally: {e}")));
+                                            break;
+                                        }
+                                    },
+                                    _ = tokio::time::sleep_until(probe_deadline) => {
+                                        completeness = BodyCompleteness::StoppedAfterAnswer;
+                                        break;
+                                    }
+                                    _ = sleep_until_opt(total_deadline) => {
+                                        completeness = BodyCompleteness::StoppedAfterAnswer;
+                                        break;
+                                    }
+                                    _ = cancel.cancelled() => {
+                                        completeness = BodyCompleteness::Canceled;
+                                        failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled while reading the body"));
+                                        break;
+                                    }
+                                }
+                            }
                             break;
                         }
                     }

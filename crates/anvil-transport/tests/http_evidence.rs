@@ -613,3 +613,97 @@ async fn stale_pooled_connection_redispatch_is_recorded_as_separate_attempt() {
         }
     }
 }
+
+#[tokio::test]
+async fn body_stop_distinguishes_finite_h2_with_trailers_from_open_ended_h2() {
+    use anvil_transport::http::{BodyStart, BodyStop, BodyWatch};
+    use futures::SinkExt;
+    use http_body_util::StreamBody;
+    use hyper::body::Frame;
+    use hyper::service::service_fn;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use std::convert::Infallible;
+    use std::time::Duration;
+
+    struct StopOnDone;
+    impl BodyWatch for StopOnDone {
+        fn feed(&mut self, chunk: &[u8]) -> bool {
+            chunk.windows(4).any(|w| w == b"done")
+        }
+    }
+
+    init();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_cancel = CancellationToken::new();
+    let c2 = server_cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = tokio::select! {
+                r = listener.accept() => match r { Ok(x) => x, Err(_) => continue },
+                _ = c2.cancelled() => break,
+            };
+            let _ = stream.set_nodelay(true);
+            let c3 = c2.clone();
+            tokio::spawn(async move {
+                let svc = service_fn(|req: http::Request<hyper::body::Incoming>| async move {
+                    let open = req.uri().path() == "/open";
+                    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<Frame<Bytes>, Infallible>>(4);
+                    tokio::spawn(async move {
+                        let _ = tx.send(Ok(Frame::data(Bytes::from_static(b"done")))).await;
+                        if open {
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                        } else {
+                            let mut trailers = http::HeaderMap::new();
+                            trailers.insert("x-done", http::HeaderValue::from_static("yes"));
+                            let _ = tx.send(Ok(Frame::trailers(trailers))).await;
+                        }
+                    });
+                    let resp = http::Response::builder()
+                        .status(200)
+                        .header("content-type", "text/event-stream")
+                        .body(StreamBody::new(rx))
+                        .unwrap();
+                    Ok::<_, Infallible>(resp)
+                });
+                let conn = hyper::server::conn::http2::Builder::new(TokioExecutor::new()).serve_connection(TokioIo::new(stream), svc);
+                tokio::select! {
+                    _ = conn => {}
+                    _ = c3.cancelled() => {}
+                }
+            });
+        }
+    });
+
+    let stop: BodyStop = Arc::new(|_: &BodyStart<'_>| Some(Box::new(StopOnDone) as Box<dyn BodyWatch>));
+    let t = HttpTransport::new();
+
+    // Finite H2 stream whose DATA arrives before the trailing HEADERS+END_STREAM:
+    // must complete cleanly and retain trailers.
+    let mut finite = plan(&format!("http://{addr}/finite"), None);
+    finite.version = HttpVersionPolicy::H2c;
+    finite.body_stop = Some(stop.clone());
+    let a = run(&t, &finite).await;
+    assert!(a.observation.failure.is_none(), "{:?}", a.observation.failure);
+    assert_eq!(a.observation.connection.as_ref().and_then(|c| c.protocol.as_deref()), Some("h2"));
+    let r = a.response.as_ref().expect("finite H2 response");
+    assert_eq!(r.body.completeness, BodyCompleteness::Complete);
+    assert!(r.trailers_received, "finite H2 reply must keep trailers");
+    assert!(r.trailers.iter().any(|h| h.name == "x-done" && h.value == "yes"), "{:?}", r.trailers);
+
+    // Open-ended H2 stream: must stop promptly after the answer instead of
+    // waiting for the 10 s body-idle timeout.
+    let mut open = plan(&format!("http://{addr}/open"), None);
+    open.version = HttpVersionPolicy::H2c;
+    open.timeouts.body_idle_ms = Some(10_000);
+    open.timeouts.total_ms = Some(20_000);
+    open.body_stop = Some(stop);
+    let started = std::time::Instant::now();
+    let a = run(&t, &open).await;
+    assert!(started.elapsed() < Duration::from_secs(3), "open H2 stream waited past answer: {:?}", started.elapsed());
+    assert!(a.observation.failure.is_none(), "{:?}", a.observation.failure);
+    let r = a.response.as_ref().expect("open H2 response");
+    assert_eq!(r.body.completeness, BodyCompleteness::StoppedAfterAnswer);
+
+    server_cancel.cancel();
+}

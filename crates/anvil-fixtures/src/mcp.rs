@@ -123,6 +123,18 @@ pub enum Hostile {
     RedirectInitialize(&'static str),
     /// A JSON-RPC batch is answered without its last request's response.
     BatchDropsLast,
+    /// A JSON-RPC batch answer includes an unrelated JSON-RPC error (id 999)
+    /// and a malformed non-RPC object alongside the real replies.
+    BatchExtraUnrelatedAndMalformed,
+    /// A JSON-RPC batch answer contains only an unrelated JSON-RPC error
+    /// (id 999) and a malformed non-RPC object (no reply to any sent id).
+    BatchOnlyUnrelatedAndMalformed,
+    /// A JSON-RPC batch is answered HTTP 200 with an empty body.
+    BatchEmpty200,
+    /// A paginated `tools/list` call with a cursor is answered `307` to this URL.
+    RedirectPage2(&'static str),
+    /// `DELETE` stalls without answering so the session deadline expires on close.
+    StallDelete,
 }
 
 /// One request the fixture received.
@@ -450,6 +462,9 @@ async fn route(req: Request<Incoming>, log: GroundTruthLog, state: Arc<McpState>
         content_type: content_type.as_deref(),
         echo: echo.as_deref(),
     };
+    if http_method == Method::DELETE && opts.hostile == Hostile::StallDelete {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
     let resp = handle(&state, opts, addr, &asked);
     let status = resp.status().as_u16();
     log.push(GroundTruth::ResponseStarted { status });
@@ -564,6 +579,13 @@ fn handle(state: &McpState, opts: McpOptions, addr: SocketAddr, r: &Asked<'_>) -
             }
             return resp;
         }
+        Hostile::RedirectPage2(to) if method == "tools/list" && r.params.get("cursor").is_some_and(|v| !v.is_null()) => {
+            let mut resp = reply(307, None, "");
+            if let Ok(v) = HeaderValue::from_str(to) {
+                resp.headers_mut().insert("location", v);
+            }
+            return resp;
+        }
         _ => {}
     }
     let answered = match dispatch(method, r.params, session, opts) {
@@ -597,8 +619,22 @@ fn answer_batch(state: &McpState, opts: McpOptions, r: &Asked<'_>, batch: &[Valu
             Err((code, text)) => rpc_error(id, code, &text),
         });
     }
-    if opts.hostile == Hostile::BatchDropsLast {
-        answers.pop();
+    match opts.hostile {
+        Hostile::BatchDropsLast => {
+            answers.pop();
+        }
+        Hostile::BatchExtraUnrelatedAndMalformed => {
+            let mut mixed = vec![rpc_error(&json!(999), -32099, "unrelated request failed"), json!({"not": "jsonrpc"})];
+            mixed.extend(answers);
+            answers = mixed;
+        }
+        Hostile::BatchOnlyUnrelatedAndMalformed => {
+            answers = vec![rpc_error(&json!(999), -32099, "unrelated request failed"), json!({"not": "jsonrpc"})];
+        }
+        Hostile::BatchEmpty200 => {
+            return reply(200, Some("application/json"), "");
+        }
+        _ => {}
     }
     if answers.is_empty() {
         return reply(202, None, "");

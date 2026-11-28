@@ -70,6 +70,11 @@ pub struct ExecutionOutput {
     /// notification, other pages, the close), so a load unit counts the
     /// session's whole traffic. Empty for every other execution.
     pub session_attempts: Vec<anvil_domain::execution::AttemptObservation>,
+    /// For an MCP session whose closing `DELETE` exchange did not complete
+    /// (timed out, was canceled, or failed at the transport layer), its
+    /// transport state and failure, preserved separately from the operation's
+    /// own record so load classification can honor the session's full boundary.
+    pub session_close_outcome: Option<(anvil_domain::outcome::TransportState, Option<TransportFailure>)>,
 }
 
 /// Operational response facts, kept outside the persistable record. Debug

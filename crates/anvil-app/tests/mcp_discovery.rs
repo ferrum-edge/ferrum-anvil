@@ -90,6 +90,28 @@ async fn every_page_of_tools_is_discovered() {
     assert_eq!(f.state.closed.lock().len(), 1, "the session was ended once, after the last page");
 }
 
+/// Discovery pins every paginated request to the issuing endpoint: a redirect
+/// on a later page is refused rather than forwarding the cursor to another origin.
+#[tokio::test]
+async fn discovery_does_not_follow_redirects_with_pagination_cursor() {
+    anvil_fixtures::init();
+    let other = anvil_fixtures::http::serve("127.0.0.1:0", None).await.unwrap();
+    let to: &'static str = Box::leak(other.url("/echo").into_boxed_str());
+    let f = mcp::serve("127.0.0.1:0", McpOptions { page_size: Some(3), hostile: Hostile::RedirectPage2(to), ..Default::default() })
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let app = new_app(root.path());
+    let ws = app.create_workspace("Agents").unwrap().meta.id;
+    let template = app.create_request(&ws, None, "tools", mcp_request(&f.url())).unwrap();
+    let d = app.mcp_discover_tools(&ws, &template.meta.id, SendOptions::default(), CancellationToken::new()).await.unwrap();
+    assert!(other.log.entries().is_empty(), "redirected page must not forward the cursor to another origin");
+    assert_eq!(d.created.len(), 3, "tools from page 1 are kept");
+    assert_eq!(d.pages, 2);
+    assert!(d.stopped.as_deref().is_some_and(|s| s.contains("page 2")), "{:?}", d.stopped);
+    assert!(d.history_warning.is_none());
+}
+
 /// A secret a server echoes in its initialize error is redacted in the
 /// session's notes as history keeps them and as an export carries them.
 #[tokio::test]

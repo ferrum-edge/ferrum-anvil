@@ -48,6 +48,10 @@ pub struct McpDiscovered {
     /// tools listed already, a cursor Anvil does not send back, a repeated
     /// cursor, or a later page that failed); `None` when every page was read.
     pub stopped: Option<String>,
+    /// Why a later page's execution could not be recorded in history (the
+    /// tools already read were still saved); `None` when recording was off or
+    /// every page was recorded.
+    pub history_warning: Option<String>,
     /// The execution that listed the first page (in history when it was
     /// recorded).
     pub execution_id: Id,
@@ -161,8 +165,10 @@ impl App {
         let pages = pages_out.len();
         let first = pages_out.first().map(|p| p.output.record.id).unwrap_or_default();
         let last_summaries: Vec<String> = pages_out.iter().map(|p| p.output.record.outcome.summary.clone()).collect();
-        // Every page sent is history like any send; a page that cannot be
-        // recorded after the first only ends the discovery.
+        let mut history_warning: Option<String> = None;
+        // Every page sent is history like any send; a later page that cannot
+        // be recorded after the session finishes does not discard the tools
+        // already read and is reported separately from unread pages.
         if opts.record_history {
             for (i, p) in std::mem::take(&mut pages_out).into_iter().enumerate() {
                 let (_, recorded) = self.record_off_runtime(p.output).await;
@@ -170,7 +176,7 @@ impl App {
                     Ok(()) => {}
                     Err(e) if i == 0 => return Err(e),
                     Err(e) => {
-                        stopped.get_or_insert_with(|| format!("page {}: not recorded in history: {e}", i + 1));
+                        history_warning.get_or_insert_with(|| format!("page {}: not recorded in history: {e}", i + 1));
                     }
                 }
             }
@@ -206,6 +212,7 @@ impl App {
             notes_total: found.notes_total,
             pages,
             stopped,
+            history_warning,
             execution_id: first,
         })
     }

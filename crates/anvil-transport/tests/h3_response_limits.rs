@@ -558,3 +558,46 @@ async fn a_refusal_body_held_open_or_trickled_stops_at_the_total_deadline() {
         assert!(*elapsed < WITHIN_BUDGET, "the refusal body ran past the total deadline: {elapsed:?}");
     }
 }
+
+#[tokio::test]
+async fn body_stop_distinguishes_finite_h3_with_trailers_from_open_ended_h3() {
+    use anvil_transport::http::{BodyStart, BodyStop, BodyWatch};
+    struct StopOnDone;
+    impl BodyWatch for StopOnDone {
+        fn feed(&mut self, chunk: &[u8]) -> bool {
+            chunk.windows(4).any(|w| w == b"done")
+        }
+    }
+
+    init();
+    let stop: BodyStop = Arc::new(|_: &BodyStart<'_>| Some(Box::new(StopOnDone) as Box<dyn BodyWatch>));
+
+    // Finite reply with no Content-Length and a trailing HEADERS frame: must
+    // stay Complete and preserve trailers instead of stopping early.
+    let mut tr_lines = Vec::new();
+    h3raw::literal_name(&mut tr_lines, b"x-done", b"yes");
+    let finite = origin(vec![answer(&[ok_head(), h3raw::frame(DATA, b"done"), headers(&tr_lines)], End::Finish)]).await;
+    let t = H3Transport::new();
+    let mut p = plan(finite.addr);
+    p.body_stop = Some(stop.clone());
+    let out = send(&t, &p, &CancellationToken::new()).await;
+    assert!(out.observation.failure.is_none(), "{:?}", out.observation.failure);
+    let r = out.response.as_ref().expect("finite H3 response");
+    assert_eq!(r.body.completeness, BodyCompleteness::Complete);
+    assert!(r.trailers_received, "finite H3 reply must read trailers");
+    assert!(r.trailers.iter().any(|h| h.name == "x-done" && h.value == "yes"), "{:?}", r.trailers);
+
+    // Open-ended reply whose declared Content-Length already arrived but whose
+    // stream never ends: must stop promptly after the answer instead of waiting
+    // for the 30 s body-idle timeout.
+    let mut cl_lines = vec![h3raw::indexed(STATUS_200)];
+    h3raw::literal_name(&mut cl_lines, b"content-length", b"4");
+    let open = origin(vec![answer(&[headers(&cl_lines), h3raw::frame(DATA, b"done")], End::Hold)]).await;
+    let mut p = plan(open.addr);
+    p.body_stop = Some(stop);
+    let (out, elapsed) = timed(t.execute(&p, 0, AttemptReason::Initial, &EventCtx::none(), &CancellationToken::new())).await;
+    assert!(elapsed < WITHIN_BUDGET, "open-ended H3 reply waited past answer: {elapsed:?}");
+    assert!(out.observation.failure.is_none(), "{:?}", out.observation.failure);
+    let r = out.response.as_ref().expect("open-ended H3 response");
+    assert_eq!(r.body.completeness, BodyCompleteness::StoppedAfterAnswer);
+}

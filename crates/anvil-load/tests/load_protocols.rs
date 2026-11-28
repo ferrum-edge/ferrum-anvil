@@ -1286,3 +1286,37 @@ async fn load_mcp_sessions_are_one_unit_each() {
     assert_eq!((r.requests.completed, r.requests.application_failures), (2, 2), "{:?}", r.requests);
     assert_eq!(requests_to(&plain.log, "/echo"), 2, "only initialize was sent, once per session");
 }
+
+/// An MCP session whose closing DELETE times out is classified as a timeout
+/// (not a completed success), and a terminal 3xx redirect without an MCP
+/// answer is an application failure (never a success).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn load_mcp_session_classifies_close_timeout_and_terminal_redirect() {
+    use anvil_domain::settings::{RedirectPolicy, SettingsOverrides, TimeoutOverrides};
+    use anvil_fixtures::mcp::{self, Hostile, McpOptions};
+    let _g = serial().await;
+
+    let stall = mcp::serve("127.0.0.1:0", McpOptions { hostile: Hostile::StallDelete, ..Default::default() }).await.unwrap();
+    let echo = serde_json::json!({"kind": "tools_call", "name": "echo", "arguments": "{\"text\":\"hi\"}"});
+    let mut c = mcp_ctx(&stall.url(), echo.clone());
+    let timeouts = TimeoutOverrides { total_ms: Some(Some(800)), ..Default::default() };
+    c.settings_layers.push(("test".into(), SettingsOverrides { timeouts: Some(timeouts), ..Default::default() }));
+    let r = run_one(plan(iterations(2, 1), vec![Id::new()], ConnectionMode::Persistent), c).await;
+    assert_eq!(r.requests.timeouts, 2, "stalled DELETE must classify session as timeout: {:?}", r.requests);
+    assert_eq!(r.requests.completed, 0, "stalled DELETE must not count as completed: {:?}", r.requests);
+    assert_eq!(r.latency_success.count, 0, "stalled DELETE must not contribute to success latency");
+    assert!(r.failure_categories.iter().any(|c| c.category.starts_with("timeout: mcp_close.")), "{:?}", r.failure_categories);
+
+    let other = fx::serve("127.0.0.1:0", None).await.unwrap();
+    let to: &'static str = Box::leak(other.url("/echo").into_boxed_str());
+    let redir = mcp::serve("127.0.0.1:0", McpOptions { hostile: Hostile::RedirectOperation(to), ..Default::default() }).await.unwrap();
+    let mut c = mcp_ctx(&redir.url(), echo);
+    c.settings_layers.push((
+        "test".into(),
+        SettingsOverrides { redirects: Some(RedirectPolicy { follow: false, ..Default::default() }), ..Default::default() },
+    ));
+    let r = run_one(plan(iterations(2, 1), vec![Id::new()], ConnectionMode::Persistent), c).await;
+    assert_eq!(r.requests.completed, 2, "{:?}", r.requests);
+    assert_eq!(r.requests.application_failures, 2, "terminal 3xx redirect must not count as success: {:?}", r.requests);
+    assert_eq!(r.latency_success.count, 0);
+}

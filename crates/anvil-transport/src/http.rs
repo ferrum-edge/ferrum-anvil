@@ -1383,17 +1383,17 @@ impl HttpTransport {
         let mut completeness = BodyCompleteness::Complete;
         let mut last_progress = Instant::now();
         let idle = plan.timeouts.body_idle_ms.map(Duration::from_millis);
-        let mut watch = if no_body {
-            None
-        } else {
-            plan.body_stop.as_ref().and_then(|stop| {
+        let mut watch = plan
+            .body_stop
+            .as_ref()
+            .and_then(|stop| {
                 stop(&BodyStart {
                     request_body: &plan.body,
                     content_type: content_type.as_deref(),
                     content_encoding: content_encoding.as_deref(),
                 })
             })
-        };
+            .filter(|_| !no_body);
         loop {
             let idle_deadline = idle.map(|d| Instant::now() + d);
             tokio::select! {
@@ -1418,12 +1418,67 @@ impl HttpTransport {
                                 break;
                             }
                             // A body that has ended is complete, not stopped:
-                            // its connection stays reusable.
+                            // its connection stays reusable. When end-of-stream
+                            // is not yet set (e.g. a trailing END_STREAM or
+                            // trailers frame right behind the answer), briefly
+                            // confirm whether the peer actually ended it.
                             if let Some(w) = watch.as_mut()
                                 && w.feed(&data)
                                 && !body.is_end_stream()
                             {
-                                completeness = BodyCompleteness::StoppedAfterAnswer;
+                                let probe_deadline = Instant::now() + Duration::from_millis(20);
+                                loop {
+                                    tokio::select! {
+                                        biased;
+                                        next = body.frame() => match next {
+                                            None => {
+                                                completeness = BodyCompleteness::Complete;
+                                                break;
+                                            }
+                                            Some(Ok(next_frame)) => {
+                                                if next_frame.is_data() {
+                                                    let more = next_frame.into_data().unwrap_or_default();
+                                                    if more.is_empty() {
+                                                        if body.is_end_stream() {
+                                                            completeness = BodyCompleteness::Complete;
+                                                            break;
+                                                        }
+                                                        continue;
+                                                    }
+                                                    completeness = BodyCompleteness::StoppedAfterAnswer;
+                                                    break;
+                                                } else if let Ok(t) = next_frame.into_trailers() {
+                                                    trailers_received = true;
+                                                    trailers = t.iter().map(|(n, v)| HeaderEntry { name: n.as_str().to_string(), value: String::from_utf8_lossy(v.as_bytes()).into_owned() }).collect();
+                                                    if body.is_end_stream() {
+                                                        completeness = BodyCompleteness::Complete;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            Some(Err(e)) => {
+                                                completeness = BodyCompleteness::Incomplete;
+                                                let mut f = classify_hyper(&e, HyperStage::Body);
+                                                apply_tls_tap(&mut f, &conn.stats);
+                                                failure = Some(f);
+                                                break;
+                                            }
+                                        },
+                                        _ = tokio::time::sleep_until(probe_deadline) => {
+                                            completeness = BodyCompleteness::StoppedAfterAnswer;
+                                            break;
+                                        }
+                                        _ = sleep_until_opt(total_deadline) => {
+                                            completeness = BodyCompleteness::StoppedAfterAnswer;
+                                            break;
+                                        }
+                                        _ = cancel.cancelled() => {
+                                            completeness = BodyCompleteness::Canceled;
+                                            failure = Some(TransportFailure::new(Phase::ResponseBody, FailureKind::Canceled, "canceled while reading the response body"));
+                                            break;
+                                        }
+                                    }
+                                }
                                 break;
                             }
                         } else if let Ok(t) = frame.into_trailers() {

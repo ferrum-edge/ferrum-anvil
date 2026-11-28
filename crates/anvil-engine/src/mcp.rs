@@ -243,27 +243,46 @@ fn is_event_stream(content_type: Option<&str>) -> bool {
     content_type.and_then(|ct| ct.split(';').next()).is_some_and(|m| m.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
-/// Whether `v` is the JSON-RPC response to request `id`: a result or an
-/// error with that id, or an error with a null id (a server that could not
-/// read the request's id).
+/// Whether `o` has `"jsonrpc": "2.0"` and mutually exclusive `result` or
+/// object `error` (JSON-RPC 2.0 §5).
+fn has_valid_response_shape(o: &serde_json::Map<String, Value>) -> bool {
+    if o.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return false;
+    }
+    let has_result = o.contains_key("result");
+    let has_error_key = o.contains_key("error");
+    let has_error_obj = o.get("error").is_some_and(Value::is_object);
+    (has_result && !has_error_key) || (!has_result && has_error_obj)
+}
+
+/// Whether `v` is the JSON-RPC 2.0 response to request `id`: a result or an
+/// object error with that id, or an object error with a null or absent id (a
+/// server that could not read the request's id).
 pub fn is_response_to(v: &Value, id: i64) -> bool {
     let Some(o) = v.as_object() else { return false };
-    let (result, error) = (o.contains_key("result"), o.contains_key("error"));
+    if !has_valid_response_shape(o) {
+        return false;
+    }
+    let has_error = o.contains_key("error");
     match o.get("id") {
-        Some(Value::Number(n)) => n.as_i64() == Some(id) && (result || error),
-        Some(Value::Null) | None => error && !result,
+        Some(Value::Number(n)) => n.as_i64() == Some(id),
+        Some(Value::Null) | None => has_error,
         _ => false,
     }
 }
 
-/// Whether `v` is a JSON-RPC response to some request: a result or an error
-/// with a number or string id, or an error with a null or no id.
+/// Whether `v` is a JSON-RPC 2.0 response to some request: a result or an
+/// object error with a number or string id, or an object error with a null or
+/// absent id.
 fn is_response(v: &Value) -> bool {
     let Some(o) = v.as_object() else { return false };
-    let (result, error) = (o.contains_key("result"), o.contains_key("error"));
+    if !has_valid_response_shape(o) {
+        return false;
+    }
+    let has_error = o.contains_key("error");
     match o.get("id") {
-        Some(Value::Number(_) | Value::String(_)) => result || error,
-        Some(Value::Null) | None => error && !result,
+        Some(Value::Number(_) | Value::String(_)) => true,
+        Some(Value::Null) | None => has_error,
         _ => false,
     }
 }
@@ -284,13 +303,6 @@ fn stream_values(body: &[u8]) -> (Vec<Value>, usize, Option<String>) {
 fn read_event_stream(body: &[u8], id: Option<i64>) -> (Option<Value>, usize, Option<String>) {
     let (values, events, error) = stream_values(body);
     (id.and_then(|id| values.into_iter().find(|v| is_response_to(v, id))), events, error)
-}
-
-/// The ids of a batch's requests (its messages with a non-null `id`), when
-/// its text is literal JSON; `None` when variables make it unreadable until
-/// it is sent.
-fn batch_ids(messages: &str) -> Option<Vec<Value>> {
-    batch_ids_of(messages.as_bytes())
 }
 
 /// The ids of the requests in a batch body (`None` when it is not a JSON
@@ -326,13 +338,47 @@ fn batch_answer(values: Vec<Value>, ids: Option<&[Value]>) -> Option<Value> {
     }
 }
 
+/// Each sent request id that has no matching response, respecting multiplicity
+/// (two requests with the same id require two matching responses).
+fn batch_missing_ids(sent_ids: &[Value], responses: &[Value]) -> Vec<Value> {
+    let mut used = vec![false; responses.len()];
+    let mut missing = Vec::new();
+    for id in sent_ids {
+        if let Some(pos) = responses.iter().enumerate().position(|(i, r)| !used[i] && r.get("id") == Some(id)) {
+            used[pos] = true;
+        } else {
+            missing.push(id.clone());
+        }
+    }
+    missing
+}
+
+/// Whether `values` contains any value more than once.
+fn has_duplicate_values(values: &[Value]) -> bool {
+    values.iter().enumerate().any(|(i, v)| values[i + 1..].contains(v))
+}
+
+/// Whether `responses` has more replies for some id than were sent (or any
+/// duplicate id when the sent ids are unknown).
+fn batch_has_extra_replies(sent_ids: Option<&[Value]>, responses: &[Value]) -> bool {
+    let reply_ids: Vec<&Value> = responses.iter().filter_map(|r| r.get("id").filter(|id| !id.is_null())).collect();
+    match sent_ids {
+        Some(ids) => reply_ids.iter().any(|rid| {
+            let got = reply_ids.iter().filter(|x| *x == rid).count();
+            let sent = ids.iter().filter(|x| x == *rid).count();
+            got > sent
+        }),
+        None => reply_ids.iter().enumerate().any(|(i, rid)| reply_ids[i + 1..].contains(rid)),
+    }
+}
+
 /// What an exchange's checks read out of its answer.
 #[derive(Clone)]
 enum Wanted {
     /// The JSON-RPC response to this request id.
     Response(i64),
-    /// A batch's responses, with the ids of its requests when its text is
-    /// literal JSON.
+    /// A batch's responses, with the ids of its requests once known from the
+    /// prepared body.
     Batch(Option<Vec<Value>>),
 }
 
@@ -349,9 +395,7 @@ impl Wanted {
     /// a single request, a refused batch, or unknown ids).
     fn unanswered(&self, answer: Option<&Value>) -> Vec<Value> {
         match (self, answer) {
-            (Wanted::Batch(Some(ids)), Some(Value::Array(responses))) => {
-                ids.iter().filter(|id| !responses.iter().any(|r| r.get("id") == Some(*id))).cloned().collect()
-            }
+            (Wanted::Batch(Some(ids)), Some(Value::Array(responses))) => batch_missing_ids(ids, responses),
             _ => Vec::new(),
         }
     }
@@ -362,16 +406,12 @@ impl Wanted {
     fn complete(&self, answer: &Value) -> bool {
         match (self, answer) {
             (Wanted::Response(_), _) => true,
-            (Wanted::Batch(Some(ids)), Value::Array(responses)) => ids.iter().all(|id| responses.iter().any(|r| r.get("id") == Some(id))),
+            (Wanted::Batch(Some(ids)), Value::Array(responses)) => !ids.is_empty() && batch_missing_ids(ids, responses).is_empty(),
             (Wanted::Batch(_), Value::Array(_)) => false,
             (Wanted::Batch(_), _) => true,
         }
     }
 }
-
-/// Most decoded bytes an answer watch reads (the record's own decoding has
-/// its own bound).
-const MAX_WATCH_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Watches one event stream for the answer: its content-coding removed
 /// incrementally and its events parsed across chunk boundaries, as they
@@ -396,10 +436,9 @@ impl BodyWatch for AnswerWatch {
             return false;
         };
         let mut events = Vec::new();
-        if self.parser.feed_limited(&decoded, &mut events, MAX_SSE_EVENTS.saturating_sub(self.events)).is_err() {
-            self.broken = true;
-            return false;
-        }
+        // Evaluate every event dispatched before a trailing line error in the
+        // same chunk so chunk boundaries cannot change early-stop behavior.
+        let parse_err = self.parser.feed_limited(&decoded, &mut events, MAX_SSE_EVENTS.saturating_sub(self.events)).is_err();
         self.events += events.len();
         let values = events.iter().filter_map(|e| serde_json::from_str::<Value>(&e.data).ok());
         let before = self.responses.len();
@@ -411,20 +450,28 @@ impl BodyWatch for AnswerWatch {
                 })
                 .filter(is_response),
         );
-        self.responses.len() > before && self.wanted.pick(self.responses.clone()).is_some_and(|a| self.wanted.complete(&a))
+        let done = self.responses.len() > before && self.wanted.pick(self.responses.clone()).is_some_and(|a| self.wanted.complete(&a));
+        if parse_err {
+            self.broken = true;
+        }
+        done
     }
 }
 
 /// Stop reading a POST's event stream once what the exchange waits for is
 /// in it (see [`Wanted::complete`]): the server may keep the stream open
 /// after answering. A JSON body is read to its end. For a batch, the ids
-/// waited for are those of the body actually sent, recorded in `sent`.
-fn stop_at_answer(wanted: Wanted, sent: SentIds) -> BodyStop {
+/// waited for are always those of the prepared body actually sent, recorded in
+/// `sent`.
+fn stop_at_answer(wanted: Wanted, sent: SentIds, decompress: bool, max_decoded_bytes: u64) -> BodyStop {
     Arc::new(move |start: &BodyStart<'_>| {
         let wanted = match &wanted {
             Wanted::Batch(_) => {
                 let ids = batch_ids_of(start.request_body);
                 *sent.lock() = ids.clone();
+                if ids.as_ref().is_some_and(Vec::is_empty) {
+                    return None;
+                }
                 Wanted::Batch(ids)
             }
             w => w.clone(),
@@ -432,7 +479,13 @@ fn stop_at_answer(wanted: Wanted, sent: SentIds) -> BodyStop {
         if !is_event_stream(start.content_type) {
             return None;
         }
-        let decoder = IncrementalDecoder::new(start.content_encoding, MAX_WATCH_DECODED_BYTES)?;
+        let has_coding = start
+            .content_encoding
+            .is_some_and(|ce| ce.split(',').map(str::trim).any(|c| !c.is_empty() && !c.eq_ignore_ascii_case("identity")));
+        if has_coding && !decompress {
+            return None;
+        }
+        let decoder = IncrementalDecoder::new(start.content_encoding, max_decoded_bytes)?;
         let watch =
             AnswerWatch { wanted, decoder, parser: SseParser::new(MAX_SSE_LINE_BYTES), events: 0, responses: Vec::new(), broken: false };
         Some(Box::new(watch) as Box<dyn BodyWatch>)
@@ -455,9 +508,12 @@ pub fn operation_response(out: &ExecutionOutput) -> Option<Value> {
     response_in(ct, out.decoded_body.as_ref().unwrap_or(&out.body), OPERATION_ID)
 }
 
-/// The view an exchange's checks read: the JSON-RPC response (or a batch's
-/// responses) out of an event stream (a JSON body is read as it is).
-/// Records what the response showed.
+/// The view an exchange's checks and diagnosis read: the correlated JSON-RPC
+/// response (or batch's matched responses) for both JSON and event-stream
+/// replies, while keeping the raw response body on `ExecutionOutput` for
+/// evidence. On a 2xx where a response was expected but none matched, returns
+/// an empty view so unrelated IDs or non-RPC elements cannot trigger false
+/// errors or extractions.
 fn viewer(
     seen: &Mutex<Seen>,
     wanted: Option<Wanted>,
@@ -465,26 +521,33 @@ fn viewer(
 ) -> impl Fn(Option<&ResponseRecord>, &[u8]) -> Option<Bytes> + Sync + '_ {
     move |response: Option<&ResponseRecord>, body: &[u8]| {
         let r = response?;
-        // A batch's answer is read against the ids actually sent.
-        let wanted = wanted.as_ref().map(|w| match w {
-            Wanted::Batch(_) => Wanted::Batch(sent.lock().clone()),
-            w => w.clone(),
+        // A batch's answer is read against the ids actually sent; a batch of
+        // notifications only expects no JSON-RPC response.
+        let wanted = wanted.as_ref().and_then(|w| match w {
+            Wanted::Batch(_) => {
+                let ids = sent.lock().clone();
+                if ids.as_ref().is_some_and(Vec::is_empty) { None } else { Some(Wanted::Batch(ids)) }
+            }
+            w => Some(w.clone()),
         });
         let mut s = seen.lock();
         s.status = Some(r.status);
         s.session_id = r.header_values(SESSION_HEADER).first().map(|v| v.to_string());
-        if !is_event_stream(r.body.content_type.as_deref()) {
+        let message = if !is_event_stream(r.body.content_type.as_deref()) {
             let parsed = serde_json::from_slice::<Value>(body).ok();
-            s.message = wanted.as_ref().zip(parsed).and_then(|(w, v)| w.pick(vec![v]));
-            s.diagnosed_bytes = body.len();
-            return None;
-        }
-        let (values, events, error) = stream_values(body);
-        let message = wanted.as_ref().and_then(|w| w.pick(values));
-        s.events = Some(events);
-        s.stream_error = error;
-        s.stopped = r.body.completeness == BodyCompleteness::StoppedAfterAnswer;
-        let view = message.as_ref().and_then(|m| serde_json::to_vec(m).ok()).map(Bytes::from);
+            wanted.as_ref().zip(parsed).and_then(|(w, v)| w.pick(vec![v]))
+        } else {
+            let (values, events, error) = stream_values(body);
+            s.events = Some(events);
+            s.stream_error = error;
+            s.stopped = r.body.completeness == BodyCompleteness::StoppedAfterAnswer;
+            wanted.as_ref().and_then(|w| w.pick(values))
+        };
+        let view = match (&wanted, &message) {
+            (Some(_), Some(m)) => serde_json::to_vec(m).ok().map(Bytes::from),
+            (Some(_), None) if (200..300).contains(&r.status) => Some(Bytes::new()),
+            _ => None,
+        };
         s.message = message;
         s.diagnosed_bytes = view.as_ref().map_or(body.len(), Bytes::len);
         view
@@ -651,12 +714,8 @@ fn batch_notes(answer: Option<&Value>, ids: Option<&[Value]>, r: &Redactor, note
             let sent = ids.map(|ids| format!(" to {} request(s)", ids.len())).unwrap_or_default();
             notes.push(format!("MCP JSON-RPC batch: {} response(s){sent}: {}", responses.len(), listed.join("; ")));
             if let Some(ids) = ids {
-                let missing: Vec<String> = ids
-                    .iter()
-                    .filter(|id| !responses.iter().any(|x| x.get("id") == Some(*id)))
-                    .take(MAX_BATCH_NOTED)
-                    .map(|id| id_label(Some(id), r))
-                    .collect();
+                let missing: Vec<String> =
+                    batch_missing_ids(ids, responses).iter().take(MAX_BATCH_NOTED).map(|id| id_label(Some(id), r)).collect();
                 if !missing.is_empty() {
                     notes.push(format!("MCP JSON-RPC batch: no response to request id {}", missing.join(", ")));
                 }
@@ -700,6 +759,9 @@ struct Run<'a> {
     /// Every attempt of every exchange, in order (a load unit counts the
     /// session's whole traffic).
     traffic: Vec<anvil_domain::execution::AttemptObservation>,
+    /// Non-completed transport outcome of the closing `DELETE` exchange (when
+    /// closing is on), preserved separately from the operation's record.
+    close_outcome: Option<(anvil_domain::outcome::TransportState, Option<TransportFailure>)>,
 }
 
 impl Run<'_> {
@@ -777,11 +839,33 @@ impl Run<'_> {
             after.push("MCP session left open (closing is off for this request)".into());
         } else if self.cancel.is_cancelled() {
             after.push("MCP session not closed: the execution was canceled".into());
+            self.close_outcome = Some((
+                anvil_domain::outcome::TransportState::Canceled,
+                Some(TransportFailure::new(
+                    Phase::Connect,
+                    FailureKind::Canceled,
+                    "MCP session close (DELETE) was skipped because the execution was canceled",
+                )),
+            ));
         } else if self.expired() {
             after.push("MCP session not closed: the session deadline was reached".into());
+            self.close_outcome = Some((
+                anvil_domain::outcome::TransportState::Incomplete,
+                Some(
+                    TransportFailure::new(
+                        Phase::Connect,
+                        FailureKind::TotalTimeout,
+                        "MCP session close (DELETE) was skipped because the session deadline was reached",
+                    )
+                    .with_deadline(self.total_ms),
+                ),
+            ));
         } else {
             let close = exchange(ctx, "DELETE", None, Some(sid), Some(version), Checks::None);
             let closed = self.exchange(close, events.clone(), None, None).await;
+            if closed.record.outcome.transport != anvil_domain::outcome::TransportState::Completed {
+                self.close_outcome = Some((closed.record.outcome.transport, closed.record.attempts.last().and_then(|a| a.failure.clone())));
+            }
             after.push(close_note(&closed));
         }
     }
@@ -801,6 +885,9 @@ struct Notes {
     not_sent: Option<String>,
     /// Requests of a batch its answer left without a response.
     unanswered: usize,
+    /// Why a batch's response correlation is ambiguous (duplicate request ids
+    /// or extra replies for the same id).
+    ambiguous_batch: Option<String>,
 }
 
 /// The session's result: `out` (the operation's exchange, or the one before
@@ -842,6 +929,17 @@ fn finish(
         let message = format!("The MCP operation was not sent ({why}), so its outcome was not evaluated");
         r.outcome.warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text_any_case(&message) });
         changed = true;
+    } else if let Some(redirect_status) = r.response.as_ref().map(|x| x.status).filter(|s| (300..400).contains(s))
+        && r.outcome.application == ApplicationState::Success
+    {
+        // A terminal 3xx redirect did not reach an MCP answer (Streamable HTTP
+        // requires a 2xx response), so the MCP outcome was not evaluated.
+        r.outcome.application = ApplicationState::NotEvaluated;
+        r.outcome.warnings.push(OutcomeWarning {
+            code: WarningCode::PartialVisibility,
+            message: format!("The MCP request ended on a redirect (HTTP {redirect_status}), so the MCP outcome was not evaluated"),
+        });
+        changed = true;
     } else if expects_response && answered && seen.message.is_none() && r.outcome.application == ApplicationState::Success {
         // A 2xx without the JSON-RPC response says nothing about the call.
         r.outcome.application = ApplicationState::NotEvaluated;
@@ -857,6 +955,13 @@ fn finish(
             code: WarningCode::PartialVisibility,
             message: format!("{} request(s) of the JSON-RPC batch got no response, so the MCP outcome was not evaluated", notes.unanswered),
         });
+        changed = true;
+    } else if let Some(why) = &notes.ambiguous_batch
+        && answered
+        && r.outcome.application == ApplicationState::Success
+    {
+        r.outcome.application = ApplicationState::NotEvaluated;
+        r.outcome.warnings.push(OutcomeWarning { code: WarningCode::PartialVisibility, message: redactor.text_any_case(why) });
         changed = true;
     } else if expects_response && seen.diagnosed_bytes > MAX_PARSE && r.outcome.application == ApplicationState::Success {
         // A JSON-RPC error or tool failure in a response this large is not
@@ -916,6 +1021,16 @@ pub async fn list_tool_pages(
     if let Some(m) = c.spec.mcp.as_mut() {
         m.operation = McpOperation::ToolsList { cursor: None };
     }
+    // Pin every discovery exchange to the issuing endpoint and session so a
+    // redirect cannot supply a cursor for the original endpoint or forward a
+    // cursor to another origin.
+    c.settings_layers.push((
+        "mcp-discover".into(),
+        SettingsOverrides {
+            redirects: Some(anvil_domain::settings::RedirectPolicy { follow: false, ..Default::default() }),
+            ..Default::default()
+        },
+    ));
     let mut next = |page: usize, response: Option<&Value>| -> Option<McpOperation> {
         next_cursor(page, response).map(|cursor| McpOperation::ToolsList { cursor: Some(cursor) })
     };
@@ -955,7 +1070,10 @@ async fn execute_session(
         return vec![(not_sent(ctx, started_at, &format!("{why}; nothing was sent"), field, FailureKind::BodySerialization), None)];
     }
     let method = spec.operation.method().trim().to_string();
-    let total_ms = crate::settings::resolve(&ctx.settings_layers).timeouts.total_ms;
+    let settings = crate::settings::resolve(&ctx.settings_layers);
+    let total_ms = settings.timeouts.total_ms;
+    let decompress = settings.decompress;
+    let max_decoded_bytes = settings.limits.max_decoded_bytes;
     let mut run = Run {
         engine,
         cancel: &cancel,
@@ -964,6 +1082,7 @@ async fn execute_session(
         redactor: Redactor::new(vec![], ctx.redaction_names.clone()),
         timed_out: false,
         traffic: Vec::new(),
+        close_outcome: None,
     };
     // The handshake and the close are not the execution the caller follows:
     // their progress events are not forwarded.
@@ -987,7 +1106,13 @@ async fn execute_session(
         let out = {
             let view = viewer(&seen, Some(Wanted::Response(INITIALIZE_ID)), none_sent.clone());
             let view: BodyView<'_> = &view;
-            run.exchange(init, quiet.clone(), Some(view), Some(stop_at_answer(Wanted::Response(INITIALIZE_ID), none_sent.clone()))).await
+            run.exchange(
+                init,
+                quiet.clone(),
+                Some(view),
+                Some(stop_at_answer(Wanted::Response(INITIALIZE_ID), none_sent.clone(), decompress, max_decoded_bytes)),
+            )
+            .await
         };
         let seen = seen.into_inner();
         match handshake(&seen, &out, spec, &run.redactor) {
@@ -1011,6 +1136,7 @@ async fn execute_session(
                 }
                 let mut out = finish(out, notes, &run, refused.issued.as_deref(), &seen, true);
                 out.session_attempts = run.traffic.get(out.record.attempts.len()..).map(<[_]>::to_vec).unwrap_or_default();
+                out.session_close_outcome = run.close_outcome.clone();
                 return vec![(out, None)];
             }
         }
@@ -1033,6 +1159,7 @@ async fn execute_session(
             let own = run.traffic.len().saturating_sub(out.record.attempts.len())..run.traffic.len();
             let mut out = finish(out, notes, &run, session.as_deref(), &Seen::default(), false);
             out.session_attempts = others(&run.traffic, &own);
+            out.session_close_outcome = run.close_outcome.clone();
             return vec![(out, None)];
         }
         // A server that does not accept the notification may still answer
@@ -1049,16 +1176,15 @@ async fn execute_session(
     let mut events = Some(events);
     loop {
         let method = operation.method().trim().to_string();
-        // A batch of notifications only gets no JSON-RPC response.
-        let batch = match &operation {
-            McpOperation::Batch { messages } => Some(batch_ids(messages)),
-            _ => None,
-        };
-        let wanted = match &batch {
-            Some(Some(ids)) if ids.is_empty() => None,
-            Some(ids) => Some(Wanted::Batch(ids.clone())),
-            None if operation.is_notification() => None,
-            None => Some(Wanted::Response(id)),
+        let is_batch = matches!(&operation, McpOperation::Batch { .. });
+        // Always observe a batch's prepared bytes (variables resolved) so
+        // templated member names or ids determine response expectations.
+        let wanted = if is_batch {
+            Some(Wanted::Batch(None))
+        } else if operation.is_notification() {
+            None
+        } else {
+            Some(Wanted::Response(id))
         };
         let seen = Mutex::new(Seen::default());
         let sent_ids: SentIds = Arc::new(Mutex::new(None));
@@ -1068,7 +1194,13 @@ async fn execute_session(
         let out = {
             let view = viewer(&seen, wanted.clone(), sent_ids.clone());
             let view: BodyView<'_> = &view;
-            run.exchange(op, op_events, Some(view), wanted.clone().map(|w| stop_at_answer(w, sent_ids.clone()))).await
+            run.exchange(
+                op,
+                op_events,
+                Some(view),
+                wanted.clone().map(|w| stop_at_answer(w, sent_ids.clone(), decompress, max_decoded_bytes)),
+            )
+            .await
         };
         let own = run.traffic.len().saturating_sub(out.record.attempts.len())..run.traffic.len();
         let seen = seen.into_inner();
@@ -1076,19 +1208,33 @@ async fn execute_session(
         if !sent.is_empty() {
             op_notes.before.push(format!("MCP {method}: page {} of the same session (request id {id})", sent.len() + 1));
         }
-        stream_notes(&seen, &method, batch.is_some(), &mut op_notes.after);
-        if batch.is_some() {
+        stream_notes(&seen, &method, is_batch, &mut op_notes.after);
+        let expects_response = if is_batch {
             // Judged against the ids actually sent (variables resolved).
             let ids = sent_ids.lock().clone();
             batch_notes(seen.message.as_ref(), ids.as_deref(), &run.redactor, &mut op_notes.after);
             let unanswered = Wanted::Batch(ids.clone()).unanswered(seen.message.as_ref());
             op_notes.unanswered = unanswered.len();
+            if ids.as_deref().is_some_and(has_duplicate_values) {
+                op_notes.ambiguous_batch = Some(
+                    "the JSON-RPC batch reused a request id more than once, so response correlation is ambiguous and the MCP outcome was not evaluated"
+                        .into(),
+                );
+            } else if matches!(seen.message.as_ref(), Some(Value::Array(responses)) if batch_has_extra_replies(ids.as_deref(), responses)) {
+                op_notes.ambiguous_batch = Some(
+                    "the server returned multiple JSON-RPC responses for the same batch request id, so the MCP outcome was not evaluated"
+                        .into(),
+                );
+            }
             if spec.initialize && ids.as_deref().is_some_and(|ids| ids.iter().any(|v| v.as_i64() == Some(INITIALIZE_ID))) {
                 op_notes.warnings.push(format!(
                     "the JSON-RPC batch reuses request id {INITIALIZE_ID}, the id initialize used in this session; a server may refuse a reused id"
                 ));
             }
-        }
+            !ids.as_ref().is_some_and(Vec::is_empty)
+        } else {
+            !operation.is_notification()
+        };
         if session.is_some() && out.record.response.as_ref().is_some_and(|r| r.status == 404) {
             let why = "the server no longer knows the session (it expired or was ended); a new initialize opens another";
             op_notes.after.push(format!("MCP {method}: HTTP 404 in the session: {why}"));
@@ -1103,7 +1249,7 @@ async fn execute_session(
             } else {
                 next(sent.len() + 1, message.as_ref())
             };
-        sent.push(Sent { out, notes: op_notes, seen, expects_response: wanted.is_some(), own });
+        sent.push(Sent { out, notes: op_notes, seen, expects_response, own });
         match more {
             Some(op) => {
                 operation = op;
@@ -1116,11 +1262,17 @@ async fn execute_session(
         run.close(ctx, spec, sid, &version, &quiet, &mut last.notes.after).await;
     }
     let traffic = std::mem::take(&mut run.traffic);
+    let close_outcome = run.close_outcome.clone();
+    let total_sent = sent.len();
     sent.into_iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(i, s)| {
             let message = s.seen.message.clone();
             let mut out = finish(s.out, s.notes, &run, session.as_deref(), &s.seen, s.expects_response);
             out.session_attempts = others(&traffic, &s.own);
+            if i + 1 == total_sent {
+                out.session_close_outcome = close_outcome.clone();
+            }
             (out, message)
         })
         .collect()
@@ -1243,5 +1395,47 @@ mod tests {
         let long = format!("data: {}\n\n", "x".repeat(MAX_SSE_LINE_BYTES + 1));
         let (message, events, error) = read_event_stream(long.as_bytes(), Some(OPERATION_ID));
         assert!(message.is_none() && events == 0 && error.is_some(), "{error:?}");
+    }
+
+    #[test]
+    fn response_validation_requires_jsonrpc_2_0_and_exclusive_result_or_object_error() {
+        assert!(is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"result":{}})));
+        assert!(is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":{"code":-32600}})));
+        assert!(!is_response(&serde_json::json!({"id":2,"result":{}})), "missing jsonrpc 2.0");
+        assert!(!is_response(&serde_json::json!({"jsonrpc":"1.0","id":2,"result":{}})), "wrong version");
+        assert!(!is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"result":{},"error":{"code":-1}})), "both result and error");
+        assert!(!is_response(&serde_json::json!({"jsonrpc":"2.0","id":2,"error":"not-an-object"})), "non-object error");
+        assert!(!is_response_to(&serde_json::json!({"id":2,"result":{}}), 2));
+        assert!(!is_response_to(&serde_json::json!({"jsonrpc":"2.0","id":2,"result":{},"error":{"code":-1}}), 2));
+    }
+
+    #[test]
+    fn batch_completion_respects_id_multiplicity() {
+        let wanted = Wanted::Batch(Some(vec![Value::from(11), Value::from(11)]));
+        let one = serde_json::json!([{"jsonrpc":"2.0","id":11,"result":{}}]);
+        assert!(!wanted.complete(&one), "one reply must not satisfy two requests with id 11");
+        assert_eq!(wanted.unanswered(Some(&one)), vec![Value::from(11)]);
+        let two = serde_json::json!([{"jsonrpc":"2.0","id":11,"result":{}},{"jsonrpc":"2.0","id":11,"result":{}}]);
+        assert!(wanted.complete(&two));
+        assert!(wanted.unanswered(Some(&two)).is_empty());
+    }
+
+    #[test]
+    fn answer_watch_stops_on_dispatched_answer_even_with_trailing_oversized_line_in_same_chunk() {
+        let stop = stop_at_answer(Wanted::Response(OPERATION_ID), Arc::new(Mutex::new(None)), true, 64 * 1024 * 1024);
+        let mut watch = stop(&BodyStart { request_body: b"{}", content_type: Some("text/event-stream"), content_encoding: None })
+            .expect("watch installed");
+        let chunk = format!(
+            "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":{OPERATION_ID},\"result\":{{}}}}\n\ndata: {}\n\n",
+            "x".repeat(MAX_SSE_LINE_BYTES + 16)
+        );
+        assert!(watch.feed(chunk.as_bytes()), "dispatched answer before trailing parse error must still trigger stop");
+    }
+
+    #[test]
+    fn answer_watch_skips_coded_stream_when_decompress_disabled() {
+        let stop = stop_at_answer(Wanted::Response(OPERATION_ID), Arc::new(Mutex::new(None)), false, 64 * 1024);
+        let watch = stop(&BodyStart { request_body: b"{}", content_type: Some("text/event-stream"), content_encoding: Some("gzip") });
+        assert!(watch.is_none(), "coded stream must not be decompressed when decompress is off");
     }
 }
