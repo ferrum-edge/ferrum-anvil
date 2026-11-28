@@ -29,10 +29,9 @@ impl App {
         Ok(anvil_jmeter::export(&ExportInput { plan, job: &job, request_names: &names }, opts))
     }
 
-    /// Import a JMeter result file (CSV or XML JTL) into workspace `ws` and
-    /// save it as a load report. With a plan (which must belong to `ws`), the
-    /// report carries it, so it is compared with that plan's Anvil runs.
-    pub fn import_jtl<R: Read + Seek>(&self, ws: &Id, reader: R, mut opts: JtlOptions) -> Result<LoadReport> {
+    /// Parse and validate a JMeter result file (CSV or XML JTL) against
+    /// workspace `ws` and an optional plan without saving it yet.
+    pub fn parse_jtl<R: Read + Seek>(&self, ws: &Id, reader: R, mut opts: JtlOptions) -> Result<LoadReport> {
         self.workspace(ws)?;
         if let Some(p) = &opts.plan
             && p.workspace_id != *ws
@@ -40,7 +39,14 @@ impl App {
             return Err(AppError::Invalid("the load plan belongs to another workspace".into()));
         }
         opts.workspace_id = *ws;
-        let report = anvil_jmeter::import_jtl(reader, &opts).map_err(|e| AppError::Invalid(e.to_string()))?;
+        anvil_jmeter::import_jtl(reader, &opts).map_err(|e| AppError::Invalid(e.to_string()))
+    }
+
+    /// Import a JMeter result file (CSV or XML JTL) into workspace `ws` and
+    /// save it as a load report. With a plan (which must belong to `ws`), the
+    /// report carries it, so it is compared with that plan's Anvil runs.
+    pub fn import_jtl<R: Read + Seek>(&self, ws: &Id, reader: R, opts: JtlOptions) -> Result<LoadReport> {
+        let report = self.parse_jtl(ws, reader, opts)?;
         self.save_load_report(&report)?;
         Ok(report)
     }

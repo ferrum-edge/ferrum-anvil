@@ -1038,13 +1038,27 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
         export_codes(&Fx::new(iterations(1, 1), vec![(id_dsp, c_dsp.clone(), "ds-dot")], Some(dataset("seg\nok\n..\n")))),
         ["url_path"]
     );
-    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_dsp, c_dsp, "ds-dbl")], Some(dataset("seg\nx//y\n")))), ["url_path"]);
+    assert_eq!(
+        export_codes(&Fx::new(iterations(1, 1), vec![(id_dsp, c_dsp.clone(), "ds-dbl")], Some(dataset("seg\nx//y\n")))),
+        ["url_path"]
+    );
+    assert_eq!(
+        export_codes(&Fx::new(iterations(1, 1), vec![(id_dsp, c_dsp.clone(), "ds-query")], Some(dataset("seg\n..?x=1\n")))),
+        ["url_path"]
+    );
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_dsp, c_dsp, "ds-frag")], Some(dataset("seg\na#b\n")))), ["url_path"]);
 
     let mut sec_path = RequestSpec::http("GET", "http://example.test/items/{{sec_seg}}/detail");
     sec_path.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
-    let (id_sp, mut c_sp) = step(sec_path);
+    let (id_sp, mut c_sp) = step(sec_path.clone());
     c_sp.var_layers.push(layer("env", &[("sec_seg", "..", true)]));
     assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_sp, c_sp, "sec-dot")], None)), ["url_path"]);
+    let (id_spq, mut c_spq) = step(sec_path.clone());
+    c_spq.var_layers.push(layer("env", &[("sec_seg", "..?x=1", true)]));
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_spq, c_spq, "sec-query")], None)), ["url_path"]);
+    let (id_spf, mut c_spf) = step(sec_path);
+    c_spf.var_layers.push(layer("env", &[("sec_seg", "a#b", true)]));
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id_spf, c_spf, "sec-frag")], None)), ["url_path"]);
 
     // Cookie API keys follow RFC 6265 validation just like `anvil-auth` and refuse
     // invalid names, invalid static/secret values, and dynamic values.
@@ -1075,7 +1089,7 @@ fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused()
     // passes on malformed non-JSON responses where Anvil fails.
     let mut jp_not_exists = RequestSpec::http("GET", "http://example.test/items");
     jp_not_exists.assertions.push(Assertion {
-        kind: AssertionKind::JsonPath { path: "$.error".into(), comparison: Comparison::NotExists, expected: String::new() },
+        kind: AssertionKind::JsonPath { path: "$.error".into(), comparison: Comparison::NotExists, value: String::new() },
         enabled: true,
     });
     jp_not_exists.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });

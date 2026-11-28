@@ -71,11 +71,20 @@ pub(crate) enum StagedFile {
     },
 }
 
+/// Reserved advisory lock filename inside an export output directory.
+pub(crate) const EXPORT_LOCK_NAME: &str = ".anvil-export.lock";
+
 /// A backup of a pre-existing regular file inside a [`Dir`], used to roll back
 /// a sidecar replacement if the companion test plan fails to publish.
 pub(crate) struct ExistingBackup {
     name: OsString,
     moved: bool,
+}
+
+impl ExistingBackup {
+    pub(crate) fn name(&self) -> &OsStr {
+        &self.name
+    }
 }
 
 fn not_absolute() -> io::Error {
@@ -339,22 +348,84 @@ impl Dir {
         }
     }
 
-    /// Acquire an exclusive cross-process `flock` on a stable, writable lock
-    /// file opened without following links inside this pinned directory (works
-    /// across Linux NFS where exclusive `flock` requires write access, as well
-    /// as local Unix filesystems).
-    pub(crate) fn lock_exclusive(&self) -> io::Result<File> {
+    /// Acquire an exclusive cross-process `flock` on a stable lock file opened
+    /// without following links inside this pinned directory. Matches the
+    /// directory's group/other write permissions on creation (so shared local
+    /// and NFS directories allow other authorized writers to acquire `RDWR`
+    /// locks), opens existing lock files without `O_CREAT` (avoiding Linux
+    /// `fs.protected_regular` rejections in sticky directories like `/tmp`),
+    /// and falls back to `O_RDONLY` when an existing lock file is read-only to
+    /// the current user.
+    pub(crate) fn lock_exclusive(&self) -> io::Result<(File, FileId)> {
         use rustix::fs::{Mode, OFlags};
-        let flags = OFlags::RDWR | OFlags::CREAT | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        #[allow(clippy::unnecessary_cast)]
-        let mode = Mode::from_raw_mode(0o600 as rustix::fs::RawMode);
-        let fd = rustix::fs::openat(&self.fd, ".anvil-export.lock", flags, mode)?;
-        let file = File::from(fd);
-        if !file.metadata()?.is_file() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
+        use rustix::io::Errno;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir_mode = self.fd.metadata()?.permissions().mode();
+        let mut target_mode: u32 = 0o600;
+        if dir_mode & 0o020 != 0 {
+            target_mode |= 0o060;
         }
-        file.lock()?;
-        Ok(file)
+        if dir_mode & 0o002 != 0 {
+            target_mode |= 0o006;
+        }
+
+        let create_flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let open_rw_flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let open_ro_flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        #[allow(clippy::unnecessary_cast)]
+        let create_mode = Mode::from_raw_mode(target_mode as rustix::fs::RawMode);
+
+        let mut last_err = None;
+        for _ in 0..4 {
+            match rustix::fs::openat(&self.fd, EXPORT_LOCK_NAME, create_flags, create_mode) {
+                Ok(fd) => {
+                    let file = File::from(fd);
+                    #[allow(clippy::unnecessary_cast)]
+                    let _ = rustix::fs::fchmod(&file, Mode::from_raw_mode(target_mode as rustix::fs::RawMode));
+                    let meta = file.metadata()?;
+                    if !meta.is_file() {
+                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
+                    }
+                    let id = file_id(&file, &meta)?;
+                    file.lock()?;
+                    return Ok((file, id));
+                }
+                Err(Errno::EXIST) => match rustix::fs::openat(&self.fd, EXPORT_LOCK_NAME, open_rw_flags, Mode::empty()) {
+                    Ok(fd) => {
+                        let file = File::from(fd);
+                        let meta = file.metadata()?;
+                        if !meta.is_file() {
+                            return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
+                        }
+                        let id = file_id(&file, &meta)?;
+                        file.lock()?;
+                        return Ok((file, id));
+                    }
+                    Err(Errno::NOENT) => continue,
+                    Err(Errno::ACCES) => match rustix::fs::openat(&self.fd, EXPORT_LOCK_NAME, open_ro_flags, Mode::empty()) {
+                        Ok(fd) => {
+                            let file = File::from(fd);
+                            let meta = file.metadata()?;
+                            if !meta.is_file() {
+                                return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is not a regular file"));
+                            }
+                            let id = file_id(&file, &meta)?;
+                            file.lock()?;
+                            return Ok((file, id));
+                        }
+                        Err(Errno::NOENT) => continue,
+                        Err(e) => return Err(e.into()),
+                    },
+                    Err(e) => return Err(e.into()),
+                },
+                Err(e) => {
+                    last_err = Some(e.into());
+                    break;
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| io::Error::other("could not open export directory lock file")))
     }
 
     /// Back up an existing regular file `name` inside this folder without
@@ -381,7 +452,11 @@ impl Dir {
                 let backup = OsString::from(format!(".anvil-backup-{}.partial", uuid::Uuid::new_v4().simple()));
                 match rustix::fs::linkat(&self.fd, name, &self.fd, &backup, AtFlags::empty()) {
                     Ok(()) => Ok(Some(ExistingBackup { name: backup, moved: false })),
-                    Err(Errno::PERM | Errno::OPNOTSUPP | Errno::NOTSUP | Errno::NOSYS | Errno::INVAL | Errno::XDEV | Errno::MLINK) => {
+                    Err(e)
+                        if matches!(e, Errno::PERM | Errno::NOSYS | Errno::INVAL | Errno::XDEV | Errno::MLINK)
+                            || e == Errno::OPNOTSUPP
+                            || e == Errno::NOTSUP =>
+                    {
                         self.publish_no_clobber(name, &backup)?;
                         Ok(Some(ExistingBackup { name: backup, moved: true }))
                     }
@@ -699,18 +774,19 @@ impl Dir {
     /// Acquire an exclusive cross-process lock on a stable, writable lock file
     /// opened without following links inside this held directory so concurrent
     /// exports targeting the same folder serialize regardless of `%TMP%`.
-    pub(crate) fn lock_exclusive(&self) -> io::Result<File> {
+    pub(crate) fn lock_exclusive(&self) -> io::Result<(File, FileId)> {
         use std::os::windows::fs::OpenOptionsExt;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        let lock_path = self.path.join(".anvil-export.lock");
+        let lock_path = self.path.join(EXPORT_LOCK_NAME);
         let file =
             std::fs::OpenOptions::new().create(true).read(true).write(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(&lock_path)?;
         let meta = file.metadata()?;
         if meta.file_type().is_symlink() || !meta.is_file() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "export directory lock is a symbolic link or not a regular file"));
         }
+        let id = file_id(&file, &meta)?;
         file.lock()?;
-        Ok(file)
+        Ok((file, id))
     }
 
     pub(crate) fn backup_existing_regular(&self, name: &OsStr) -> io::Result<Option<ExistingBackup>> {
@@ -856,10 +932,12 @@ impl Dir {
         }
     }
 
-    pub(crate) fn lock_exclusive(&self) -> io::Result<File> {
-        let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(self.path.join(".anvil-export.lock"))?;
+    pub(crate) fn lock_exclusive(&self) -> io::Result<(File, FileId)> {
+        let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(self.path.join(EXPORT_LOCK_NAME))?;
+        let meta = file.metadata()?;
+        let id = file_id(&file, &meta)?;
         file.lock()?;
-        Ok(file)
+        Ok((file, id))
     }
 
     pub(crate) fn entry_identity(&self, name: &OsStr) -> io::Result<Option<(bool, FileId)>> {

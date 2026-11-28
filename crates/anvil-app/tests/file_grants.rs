@@ -719,6 +719,11 @@ fn load_012_write_jmeter_export_rolls_back_dataset_when_plan_publish_fails() {
     assert_eq!(std::fs::read(&dataset_path).unwrap(), b"\"old\"\n", "existing dataset must be restored on plan failure");
     assert_eq!(std::fs::read(&elsewhere).unwrap(), b"other");
     assert!(partial_files(dir.path()).is_empty());
+
+    // The export lock filename is reserved across FileGrants and PinnedOutput.
+    assert!(matches!(grants.grant_write(FilePurpose::JmeterExport, &dir.path().join(".anvil-export.lock")), Err(GrantError::Invalid(_))));
+    assert!(anvil_app::file_grants::PinnedOutput::open(&dir.path().join(".anvil-export.lock")).is_err());
+    assert!(anvil_app::file_grants::PinnedOutput::open(&dir.path().join(".ANVIL-EXPORT.LOCK")).is_err());
 }
 
 #[cfg(target_vendor = "apple")]

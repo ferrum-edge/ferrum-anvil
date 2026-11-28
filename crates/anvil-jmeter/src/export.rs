@@ -2996,7 +2996,7 @@ fn validate_static_secret_template(
 }
 
 fn path_has_httpclient4_rewrite(path: &str) -> bool {
-    path.contains("//") || path.split('/').any(|seg| seg == "." || seg == "..")
+    path.contains(['?', '#']) || path.contains("//") || path.split('/').any(|seg| seg == "." || seg == "..")
 }
 
 /// Resolve a secret source without touching the vault (used for export-time

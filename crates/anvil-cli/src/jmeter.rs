@@ -221,10 +221,14 @@ pub fn export_jmx(
     }
     // Serialize concurrent exports that publish a dataset sidecar alongside
     // the plan in the same directory so two `--force` runs can never leave one
-    // export's JMX paired with the other's dataset.
+    // export's JMX paired with the other's dataset. Protect the lock file's OS
+    // identity so no filesystem-equivalent spelling or link can overwrite it.
+    let mut protected: Vec<anvil_app::file_grants::PinnedFileId> = Vec::new();
     let _dir_lock = if export.dataset_csv.is_some() {
         let (_, out_pin) = find_pinned("--out");
-        Some(out_pin.lock_dir().with_context(|| format!("locking export directory for {}", out.display()))?)
+        let (lock, lock_id) = out_pin.lock_dir().with_context(|| format!("locking export directory for {}", out.display()))?;
+        protected.push(lock_id);
+        Some(lock)
     } else {
         None
     };
@@ -232,12 +236,12 @@ pub fn export_jmx(
     // tracking every published OS file identity so Unicode-normalization
     // aliases (e.g. APFS NFC/NFD) can never replace a newly written sibling.
     // Back up any pre-existing dataset sidecar before overwriting it so a
-    // failed JMX publish restores the previous dataset (or removes a freshly
-    // created one) and never leaves an existing plan reading new rows.
+    // pre-publish JMX failure restores the previous dataset (only after
+    // verifying ownership) and preserves the backup for recovery otherwise.
     let mut published: Vec<String> = Vec::new();
-    let mut protected: Vec<anvil_app::file_grants::PinnedFileId> = Vec::new();
     let mut dataset_backup: Option<anvil_app::file_grants::PinnedBackup<'_>> = None;
     let mut dataset_published_note: Option<String> = None;
+    let mut dataset_published_id: Option<anvil_app::file_grants::PinnedFileId> = None;
     for (label, dest, item, no_clobber) in staged {
         let note = format!("{label} ({})", dest.display());
         if label == "the dataset file" && !no_clobber {
@@ -260,6 +264,7 @@ pub fn export_jmx(
                         backup.mark_replaced();
                     }
                     dataset_published_note = Some(note.clone());
+                    dataset_published_id = Some(id);
                 } else if label == "--out"
                     && let Some(backup) = dataset_backup.take()
                 {
@@ -269,34 +274,72 @@ pub fn export_jmx(
                 published.push(note);
             }
             Err(err) => {
+                let mut recovery = String::new();
                 if err.published {
                     if label == "the dataset file" {
                         if let Some(backup) = dataset_backup.as_mut() {
                             backup.mark_replaced();
                         }
-                        dataset_published_note = Some(note.clone());
+                        // Post-publish identity verification failed, so ownership
+                        // cannot be established; preserve any backup instead of
+                        // modifying the dataset entry.
+                        if let Some(backup) = dataset_backup.take()
+                            && let Some(name) = backup.preserve()
+                        {
+                            let backup_path = dest.parent().map(|p| p.join(&name)).unwrap_or_else(|| PathBuf::from(&name));
+                            recovery = format!("; previous dataset backup preserved at {}", backup_path.display());
+                        }
+                    } else if label == "--out"
+                        && let Some(backup) = dataset_backup.take()
+                    {
+                        // JMX already landed; keep the paired replacement dataset
+                        // and discard the backup.
+                        backup.discard();
                     }
                     published.push(note);
-                }
-                if (label == "--out" || (label == "the dataset file" && err.published))
+                } else if label == "--out"
                     && let Some(ds_note) = dataset_published_note.take()
                 {
-                    let (_, ds_pin) = find_pinned("the dataset file");
-                    let rolled_back = match dataset_backup.take() {
-                        Some(backup) => backup.restore().is_ok(),
-                        None => ds_pin.remove_published().is_ok(),
-                    };
-                    if rolled_back {
-                        published.retain(|p| p != &ds_note);
+                    let (ds_path, ds_pin) = find_pinned("the dataset file");
+                    let still_owned = dataset_published_id.is_some_and(|id| ds_pin.verify_identity(id).unwrap_or(false));
+                    if still_owned {
+                        match dataset_backup.take() {
+                            Some(backup) => match backup.restore() {
+                                Ok(()) => published.retain(|p| p != &ds_note),
+                                Err((name, restore_err)) => {
+                                    let backup_path = ds_path.parent().map(|p| p.join(&name)).unwrap_or_else(|| PathBuf::from(&name));
+                                    recovery = format!(
+                                        "; dataset rollback failed ({restore_err}), previous dataset backup preserved at {}",
+                                        backup_path.display()
+                                    );
+                                }
+                            },
+                            None => {
+                                if ds_pin.remove_published().is_ok() {
+                                    published.retain(|p| p != &ds_note);
+                                }
+                            }
+                        }
+                    } else if let Some(backup) = dataset_backup.take()
+                        && let Some(name) = backup.preserve()
+                    {
+                        let backup_path = ds_path.parent().map(|p| p.join(&name)).unwrap_or_else(|| PathBuf::from(&name));
+                        recovery = format!(
+                            "; dataset entry changed concurrently so rollback was skipped, previous dataset backup preserved at {}",
+                            backup_path.display()
+                        );
                     }
                 } else if label == "the dataset file" {
                     drop(dataset_backup.take());
                 }
                 let err = anyhow::Error::new(err).context(format!("publishing {label} ({})", dest.display()));
-                if published.is_empty() {
+                if published.is_empty() && recovery.is_empty() {
                     return Err(err.context("nothing was written"));
                 }
-                return Err(err.context(format!("already written: {}", published.join(", "))));
+                if published.is_empty() {
+                    return Err(err.context(format!("nothing was written{recovery}")));
+                }
+                return Err(err.context(format!("already written: {}{recovery}", published.join(", "))));
             }
         }
     }
@@ -420,14 +463,19 @@ pub fn import_jtl(app: &App, a: ImportArgs<'_>) -> Result<i32> {
         None => None,
     };
     for (label, out) in [("--json", &json_out), ("--html", &html_out)] {
-        if let Some((p, pinned)) = out
-            && pinned.aliases_file(&file, &meta, a.file)?
-        {
-            bail!(
-                "{label} ({}) resolves to the same path as --file ({}); refusing to overwrite the source JTL. Nothing was imported",
-                p.display(),
-                a.file.display()
-            );
+        if let Some((p, pinned)) = out {
+            if let Ok(m) = std::fs::symlink_metadata(p)
+                && m.is_dir()
+            {
+                bail!("{label} ({}) is a directory; nothing was imported", p.display());
+            }
+            if pinned.aliases_file(&file, &meta, a.file)? {
+                bail!(
+                    "{label} ({}) resolves to the same path as --file ({}); refusing to overwrite the source JTL. Nothing was imported",
+                    p.display(),
+                    a.file.display()
+                );
+            }
         }
     }
     if let (Some((jp, j)), Some((_, h))) = (&json_out, &html_out)
@@ -444,18 +492,41 @@ pub fn import_jtl(app: &App, a: ImportArgs<'_>) -> Result<i32> {
         limits: JtlLimits::default(),
     };
     let source_id = anvil_app::file_grants::opened_file_id(&file, &meta).with_context(|| format!("inspecting {}", a.file.display()))?;
-    let report = app.import_jtl(&a.ws, file, opts)?;
+    // Parse and stage optional output files BEFORE persisting the load report
+    // so output-directory or staging errors fail cleanly without saving a
+    // duplicate report; if final publication fails after save, report the saved
+    // run_id so callers do not re-import blindly.
+    let report = app.parse_jtl(&a.ws, file, opts)?;
+    let staged_json = match &json_out {
+        Some((p, pinned)) => Some((
+            *p,
+            pinned
+                .stage(anvil_load::report::to_json(&report).as_bytes(), false)
+                .with_context(|| format!("staging --json ({}); nothing was imported", p.display()))?,
+        )),
+        None => None,
+    };
+    let staged_html = match &html_out {
+        Some((p, pinned)) => Some((
+            *p,
+            pinned
+                .stage(anvil_load::html::to_html(&report).as_bytes(), false)
+                .with_context(|| format!("staging --html ({}); nothing was imported", p.display()))?,
+        )),
+        None => None,
+    };
+    app.save_load_report(&report)?;
     let mut protected = vec![source_id];
-    if let Some((p, pinned)) = &json_out {
-        let json_id = pinned
-            .write_atomic_guarded(anvil_load::report::to_json(&report).as_bytes(), &protected)
-            .with_context(|| format!("writing --json ({})", p.display()))?;
+    if let Some((p, staged)) = staged_json {
+        let json_id = staged.publish_guarded(false, &protected).map_err(anyhow::Error::new).with_context(|| {
+            format!("writing --json ({}); load report {} was already saved in the workspace", p.display(), report.run_id)
+        })?;
         protected.push(json_id);
     }
-    if let Some((p, pinned)) = &html_out {
-        pinned
-            .write_atomic_guarded(anvil_load::html::to_html(&report).as_bytes(), &protected)
-            .with_context(|| format!("writing --html ({})", p.display()))?;
+    if let Some((p, staged)) = staged_html {
+        staged.publish_guarded(false, &protected).map_err(anyhow::Error::new).with_context(|| {
+            format!("writing --html ({}); load report {} was already saved in the workspace", p.display(), report.run_id)
+        })?;
     }
     let q = &report.requests;
     println!(

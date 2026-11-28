@@ -386,6 +386,12 @@ impl FileGrants {
         let (Some(parent), Some(name)) = (picked.parent(), picked.file_name()) else {
             return Err(GrantError::Invalid("choose a file name, not a folder".into()));
         };
+        if is_reserved_export_lock_name(name) {
+            return Err(GrantError::Invalid(format!(
+                "'{}' is reserved for Anvil's export lock; choose another filename",
+                crate::no_follow::EXPORT_LOCK_NAME
+            )));
+        }
         let not_folder = || GrantError::Invalid("the destination folder is not a folder".into());
         let dir = std::fs::canonicalize(parent).map_err(io)?;
         if !std::fs::metadata(&dir).map_err(io)?.is_dir() {
@@ -540,6 +546,18 @@ impl FileGrants {
             return Err(GrantError::WrongPurpose);
         };
         let sibling_name = dataset.map(|_| dataset_name(plan_name));
+        if is_reserved_export_lock_name(plan_name)
+            || sibling_name.as_deref().is_some_and(is_reserved_export_lock_name)
+            || secrets_entry
+                .as_ref()
+                .is_some_and(|(_, e)| matches!(&e.target, Target::Write { name, .. } if is_reserved_export_lock_name(name)))
+        {
+            restore_grants(plan_entry, secrets_entry);
+            return Err(GrantError::Invalid(format!(
+                "'{}' is reserved for Anvil's export lock; choose another filename. Nothing was written",
+                crate::no_follow::EXPORT_LOCK_NAME
+            )));
+        }
 
         // Early existence check for an unconfirmed sibling dataset (enforced
         // again atomically at publication via publish_no_clobber).
@@ -641,7 +659,13 @@ impl FileGrants {
         // protected) so an unavoidable mid-publish error reports what landed
         // and a Unicode-normalization alias (e.g. APFS NFC/NFD) can never
         // replace a newly published sibling file.
-        let mut published: Vec<String> = Vec::new();
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum PublishedRole {
+            Secrets,
+            Dataset,
+        }
+        let mut published: Vec<(PublishedRole, String)> = Vec::new();
+        let format_published = |items: &[(PublishedRole, String)]| items.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join(", ");
         let mut protected: Vec<FileId> = Vec::new();
         let cleanup_remaining = |jmx_t: Option<&crate::no_follow::StagedFile>,
                                  ds_t: Option<&crate::no_follow::StagedFile>,
@@ -672,7 +696,7 @@ impl FileGrants {
                 }
                 return Err(io(err));
             }
-            published.push(display_name(Some(sec_name)));
+            published.push((PublishedRole::Secrets, display_name(Some(sec_name))));
             protected.push(staged_id);
             match sec_folder.entry_identity(sec_name) {
                 Ok(Some((false, pub_id))) => {
@@ -684,14 +708,14 @@ impl FileGrants {
                     cleanup_remaining(jmx_t.as_ref(), ds_tmp.as_ref().map(|(t, _)| t), None);
                     return Err(GrantError::Io(format!(
                         "cannot verify published secrets file identity (already written: {}; the remaining files were not written)",
-                        published.join(", ")
+                        format_published(&published)
                     )));
                 }
                 Err(err) => {
                     cleanup_remaining(jmx_t.as_ref(), ds_tmp.as_ref().map(|(t, _)| t), None);
                     return Err(GrantError::Io(format!(
                         "cannot verify published secrets file identity: {err} (already written: {}; the remaining files were not written)",
-                        published.join(", ")
+                        format_published(&published)
                     )));
                 }
             }
@@ -699,10 +723,15 @@ impl FileGrants {
 
         // Serialize concurrent dataset+JMX publications targeting the same
         // directory so two replacements can never interleave and pair one
-        // export's JMX with another export's dataset sidecar.
+        // export's JMX with another export's dataset sidecar. Protect the lock
+        // file's OS identity so no filesystem-equivalent spelling or link can
+        // replace the locked inode.
         let _plan_dir_lock = if sibling_name.is_some() && ds_tmp.is_some() {
             match plan_folder.lock_exclusive() {
-                Ok(lock) => Some(lock),
+                Ok((lock, lock_id)) => {
+                    protected.push(lock_id);
+                    Some(lock)
+                }
                 Err(err) => {
                     cleanup_remaining(jmx_t.as_ref(), ds_tmp.as_ref().map(|(t, _)| t), None);
                     if published.is_empty() {
@@ -711,7 +740,7 @@ impl FileGrants {
                     }
                     return Err(GrantError::Io(format!(
                         "{err} (already written: {}; the remaining files were not written)",
-                        published.join(", ")
+                        format_published(&published)
                     )));
                 }
             }
@@ -720,7 +749,7 @@ impl FileGrants {
         };
 
         let mut ds_backup: Option<crate::no_follow::ExistingBackup> = None;
-        let mut ds_published_label: Option<String> = None;
+        let mut ds_published_id: Option<FileId> = None;
         if let (Some(sibling), Some((tmp, staged_id))) = (sibling_name.as_ref(), ds_tmp.take()) {
             let target_blocked = match plan_folder.entry_identity(sibling) {
                 Ok(Some((true, _))) => {
@@ -728,7 +757,7 @@ impl FileGrants {
                 }
                 Ok(Some((false, id))) if protected.contains(&id) => Some(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "dataset destination aliases the newly written secrets file",
+                    "dataset destination aliases a protected sibling or lock file",
                 )),
                 Ok(_) => None,
                 Err(err) => Some(err),
@@ -767,53 +796,40 @@ impl FileGrants {
                 }
                 return Err(GrantError::Io(format!(
                     "{err} (already written: {}; the remaining files were not written)",
-                    published.join(", ")
+                    format_published(&published)
                 )));
             }
-            let ds_label = display_name(Some(sibling));
-            ds_published_label = Some(ds_label.clone());
-            published.push(ds_label);
+            published.push((PublishedRole::Dataset, display_name(Some(sibling))));
             protected.push(staged_id);
             match plan_folder.entry_identity(sibling) {
                 Ok(Some((false, pub_id))) => {
+                    ds_published_id = Some(pub_id);
                     if pub_id != staged_id {
                         protected.push(pub_id);
                     }
                 }
                 Ok(_) => {
                     cleanup_remaining(jmx_t.as_ref(), None, None);
-                    let rolled_back = match ds_backup.take() {
-                        Some(backup) => plan_folder.restore_backup(backup, sibling).is_ok(),
-                        None => plan_folder.remove_file(sibling).is_ok(),
-                    };
-                    if rolled_back && let Some(ref label) = ds_published_label {
-                        published.retain(|p| p != label);
-                    }
-                    if published.is_empty() {
-                        restore_grants(plan_entry, secrets_entry);
-                        return Err(GrantError::Io("cannot verify published dataset file identity".into()));
-                    }
+                    // Ownership of `sibling` could not be verified, so do not
+                    // unlink or overwrite it; preserve any backup for recovery.
+                    let recovery = ds_backup
+                        .take()
+                        .map(|b| format!("; previous dataset backup preserved at {}", display_name(Some(b.name()))))
+                        .unwrap_or_default();
                     return Err(GrantError::Io(format!(
-                        "cannot verify published dataset file identity (already written: {}; the remaining files were not written)",
-                        published.join(", ")
+                        "cannot verify published dataset file identity (already written: {}; the remaining files were not written{recovery})",
+                        format_published(&published)
                     )));
                 }
                 Err(err) => {
                     cleanup_remaining(jmx_t.as_ref(), None, None);
-                    let rolled_back = match ds_backup.take() {
-                        Some(backup) => plan_folder.restore_backup(backup, sibling).is_ok(),
-                        None => plan_folder.remove_file(sibling).is_ok(),
-                    };
-                    if rolled_back && let Some(ref label) = ds_published_label {
-                        published.retain(|p| p != label);
-                    }
-                    if published.is_empty() {
-                        restore_grants(plan_entry, secrets_entry);
-                        return Err(GrantError::Io(format!("cannot verify published dataset file identity: {err}")));
-                    }
+                    let recovery = ds_backup
+                        .take()
+                        .map(|b| format!("; previous dataset backup preserved at {}", display_name(Some(b.name()))))
+                        .unwrap_or_default();
                     return Err(GrantError::Io(format!(
-                        "cannot verify published dataset file identity: {err} (already written: {}; the remaining files were not written)",
-                        published.join(", ")
+                        "cannot verify published dataset file identity: {err} (already written: {}; the remaining files were not written{recovery})",
+                        format_published(&published)
                     )));
                 }
             }
@@ -823,7 +839,7 @@ impl FileGrants {
             let target_blocked = match plan_folder.entry_identity(plan_name) {
                 Ok(Some((true, _))) => Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "plan destination is a symbolic link")),
                 Ok(Some((false, id))) if protected.contains(&id) => {
-                    Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "plan destination aliases a newly written sibling file"))
+                    Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "plan destination aliases a protected sibling or lock file"))
                 }
                 Ok(_) => None,
                 Err(err) => Some(err),
@@ -834,25 +850,51 @@ impl FileGrants {
             };
             if let Err(err) = res {
                 plan_folder.cleanup_staged(&tmp);
-                // Roll back the companion dataset sidecar so an existing test
-                // plan is never left reading a replacement dataset (and no
-                // orphaned new dataset is left behind).
+                // Roll back the companion dataset sidecar ONLY after verifying
+                // we still own the published entry; preserve any backup and
+                // report its recovery name if ownership changed or restore fails.
+                let mut recovery = String::new();
                 if let Some(ref sibling) = sibling_name
-                    && ds_published_label.is_some()
+                    && let Some(expected_id) = ds_published_id
                 {
-                    let rolled_back = match ds_backup.take() {
-                        Some(backup) => plan_folder.restore_backup(backup, sibling).is_ok(),
-                        None => plan_folder.remove_file(sibling).is_ok(),
-                    };
-                    if rolled_back && let Some(ref label) = ds_published_label {
-                        published.retain(|p| p != label);
+                    let still_owned = matches!(plan_folder.entry_identity(sibling), Ok(Some((false, cur))) if cur == expected_id);
+                    if still_owned {
+                        match ds_backup.take() {
+                            Some(backup) => {
+                                let backup_label = display_name(Some(backup.name()));
+                                match plan_folder.restore_backup(backup, sibling) {
+                                    Ok(()) => published.retain(|(role, _)| *role != PublishedRole::Dataset),
+                                    Err(restore_err) => {
+                                        recovery = format!(
+                                            "; dataset rollback failed ({restore_err}), previous dataset backup preserved at {backup_label}"
+                                        );
+                                    }
+                                }
+                            }
+                            None => {
+                                if plan_folder.remove_file(sibling).is_ok() {
+                                    published.retain(|(role, _)| *role != PublishedRole::Dataset);
+                                }
+                            }
+                        }
+                    } else if let Some(backup) = ds_backup.take() {
+                        recovery = format!(
+                            "; dataset entry changed concurrently so rollback was skipped, previous dataset backup preserved at {}",
+                            display_name(Some(backup.name()))
+                        );
                     }
                 }
-                if published.is_empty() {
+                if published.is_empty() && recovery.is_empty() {
                     restore_grants(plan_entry, secrets_entry);
                     return Err(io(err));
                 }
-                return Err(GrantError::Io(format!("{err} (already written: {}; the test plan was not written)", published.join(", "))));
+                if published.is_empty() {
+                    return Err(GrantError::Io(format!("{err} (the test plan was not written{recovery})")));
+                }
+                return Err(GrantError::Io(format!(
+                    "{err} (already written: {}; the test plan was not written{recovery})",
+                    format_published(&published)
+                )));
             }
         }
         if let Some(backup) = ds_backup.take() {
@@ -1133,6 +1175,14 @@ fn eq_filename(a: &OsStr, b: &OsStr) -> bool {
     if cfg!(any(windows, target_os = "macos")) { a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy()) } else { a == b }
 }
 
+/// Whether `name` matches Anvil's reserved export directory lock filename or
+/// any case/trailing-dot/space filesystem-equivalent spelling of it.
+pub fn is_reserved_export_lock_name(name: &OsStr) -> bool {
+    let text = name.to_string_lossy();
+    let trimmed = if cfg!(windows) { text.trim_end_matches(['.', ' ']) } else { text.as_ref() };
+    trimmed.eq_ignore_ascii_case(crate::no_follow::EXPORT_LOCK_NAME)
+}
+
 /// An opaque OS file identity (device + inode on Unix, volume serial + file
 /// index on Windows) for checking whether two paths alias the same file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1161,6 +1211,12 @@ impl PinnedOutput {
             .filter(|n| !n.is_empty())
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination has no file name"))?
             .to_os_string();
+        if is_reserved_export_lock_name(&name) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("'{}' is reserved for Anvil's export lock; choose another filename", crate::no_follow::EXPORT_LOCK_NAME),
+            ));
+        }
         let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
         let canon_parent = std::fs::canonicalize(parent)?;
         let dir = Dir::open(&canon_parent)?.ok_or_else(|| {
@@ -1234,9 +1290,16 @@ impl PinnedOutput {
 
     /// Acquire an exclusive cross-process lock on this destination's pinned
     /// directory so multi-file exports sharing a sidecar publish atomically as
-    /// a pair.
-    pub fn lock_dir(&self) -> std::io::Result<File> {
-        self.dir.lock_exclusive()
+    /// a pair, returning both the lock file handle and its OS file identity so
+    /// callers can protect the locked inode against overwrites.
+    pub fn lock_dir(&self) -> std::io::Result<(File, PinnedFileId)> {
+        self.dir.lock_exclusive().map(|(file, id)| (file, PinnedFileId(id)))
+    }
+
+    /// Verify that the current non-symlink entry at this destination still has
+    /// the expected OS file identity before rolling it back.
+    pub fn verify_identity(&self, expected: PinnedFileId) -> std::io::Result<bool> {
+        Ok(matches!(self.dir.entry_identity(&self.name)?, Some((false, id)) if PinnedFileId(id) == expected))
     }
 
     /// Back up an existing regular file at this pinned destination after
@@ -1290,12 +1353,24 @@ impl PinnedBackup<'_> {
         self.replaced = true;
     }
 
-    /// Restore the backed-up file over the replacement destination.
-    pub fn restore(mut self) -> std::io::Result<()> {
+    /// Restore the backed-up file over the replacement destination. On failure,
+    /// preserves the backup on disk and returns its filename alongside the I/O
+    /// error so callers can report a recovery path.
+    pub fn restore(mut self) -> std::result::Result<(), (OsString, std::io::Error)> {
         if let Some(backup) = self.backup.take() {
-            self.output.dir.restore_backup(backup, &self.output.name)?;
+            let name = backup.name().to_os_string();
+            if let Err(err) = self.output.dir.restore_backup(backup, &self.output.name) {
+                return Err((name, err));
+            }
         }
         Ok(())
+    }
+
+    /// Preserve the backup file on disk without restoring or deleting it (used
+    /// when ownership of the published entry could not be verified), returning
+    /// its filename for user recovery.
+    pub fn preserve(mut self) -> Option<OsString> {
+        self.backup.take().map(|b| b.name().to_os_string())
     }
 
     /// Discard the backup after the companion output succeeded.
