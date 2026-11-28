@@ -613,6 +613,17 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             "the plan's requests differ in cookie handling; JMeter's cookie manager applies to every request of a thread",
         ));
     }
+    let total_weight: u64 = mix.iter().map(|(_, w)| *w as u64).sum();
+    if !chain && total_weight > i32::MAX as u64 {
+        t.reasons.push(reason(
+            None,
+            "mix_weight_range",
+            format!(
+                "the weighted mix's total weight ({total_weight}) exceeds JMeter's Random Variable maximum ({}); scale the weights down to export it",
+                i32::MAX
+            ),
+        ));
+    }
     let groups = thread_groups(&mut t);
     if !t.reasons.is_empty() {
         return Err(ExportRefused { reasons: t.reasons });
@@ -622,7 +633,6 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
     }
 
     // Render every thread group, recording which markers are used.
-    let total_weight: u64 = mix.iter().map(|(_, w)| *w as u64).sum();
     let used: RefCell<BTreeSet<usize>> = RefCell::new(BTreeSet::new());
     let mut group_nodes = Vec::new();
     for (gi, g) in groups.iter().enumerate() {
@@ -1555,6 +1565,13 @@ fn translate_step(
         ));
     }
     if follow {
+        if matches!(spec.auth, AuthConfig::ApiKey { location: KeyLocation::Query, .. }) {
+            rs.push(reason(
+                rq,
+                "redirect_query_auth",
+                "the request follows redirects and sends its API key in the query string; Anvil reapplies query authentication on same-origin redirect hops, whereas JMeter follows the Location URL without re-appending the key. Turn off following redirects for this request to export it",
+            ));
+        }
         // JMeter 5.6.3 turns every redirected method except HEAD into GET
         // and drops the body (HTTPSamplerBase), where Anvil keeps a 307/308's
         // method and body.

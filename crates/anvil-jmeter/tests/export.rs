@@ -559,3 +559,31 @@ fn load_012_bearer_unrecognized_prefix_moves_to_secret_property() {
     let props = out.secrets_properties.as_deref().expect("secrets properties");
     assert!(props.contains("CustomSecretPrefix-SENSITIVE"), "prefix must be resolved into secrets.properties");
 }
+
+#[test]
+fn load_012_query_api_key_with_redirects_and_oversized_mix_weights_are_refused() {
+    // Query API key on a redirect-following request is refused because JMeter
+    // does not reapply query auth on same-origin redirect hops.
+    let mut spec = RequestSpec::http("GET", "http://127.0.0.1:8080/items");
+    spec.auth = AuthConfig::ApiKey { name: "api_key".into(), value: SensitiveValue::template("k"), location: KeyLocation::Query };
+    spec.settings.redirects = Some(RedirectPolicy { follow: true, max: 5, forward_credentials_cross_origin: true });
+    spec.settings.http_version = Some(HttpVersionPolicy::Http1Only);
+    let (id, mut c) = step(spec);
+    with_tls_profile(&mut c, false);
+    assert_eq!(export_codes(&Fx::new(iterations(1, 1), vec![(id, c, "qauth")], None)), ["redirect_query_auth"]);
+
+    // Weighted mix whose total weight exceeds i32::MAX (JMeter RandomVariableConfig limit) is refused.
+    let mut a = RequestSpec::http("GET", "http://127.0.0.1:8080/a");
+    a.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let mut b = RequestSpec::http("GET", "http://127.0.0.1:8080/b");
+    b.settings.redirects = Some(RedirectPolicy { follow: false, max: 0, forward_credentials_cross_origin: false });
+    let (ida, ca) = step(a);
+    let (idb, cb) = step(b);
+    let mut fx = Fx::new(iterations(1, 1), vec![(ida, ca, "a"), (idb, cb, "b")], None);
+    fx.plan.chain.clear();
+    fx.plan.mix = vec![
+        anvil_domain::load::WeightedStep { request_id: ida, weight: i32::MAX as u32 },
+        anvil_domain::load::WeightedStep { request_id: idb, weight: 1 },
+    ];
+    assert_eq!(export_codes(&fx), ["mix_weight_range"]);
+}

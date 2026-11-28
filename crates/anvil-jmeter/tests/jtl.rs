@@ -314,6 +314,39 @@ fn load_012_jtl_record_limit_is_exact() {
     assert!(matches!(import_jtl(split_reader, &exact).unwrap_err(), JtlError::RecordTooLong { what: "the CSV header row", .. }));
     exact.limits.max_record_bytes = crlf_hdr.len() as u64;
     assert!(import(&crlf_csv, &exact).is_ok());
+    // Unterminated final data row right after a CRLF header at exact max_record_bytes must not be
+    // charged for the header's trailing `\n`.
+    let exact_row = format!("{T0},1,{},200,true,http://h/", "x".repeat(crlf_hdr.len() - 35));
+    assert_eq!(exact_row.len(), crlf_hdr.len());
+    assert!(import(&format!("{crlf_hdr}{exact_row}"), &exact).is_ok());
+    assert!(matches!(
+        import(&format!("{crlf_hdr}{exact_row}x"), &exact).unwrap_err(),
+        JtlError::RecordTooLong { what: "a CSV record", .. }
+    ));
+
+    // Warmup override on import is recorded on the report's plan metadata for comparisons.
+    let mut w_opts = opts();
+    let now = anvil_domain::Timestamp::now();
+    w_opts.plan = Some(anvil_domain::load::LoadPlan {
+        id: Id::new(),
+        workspace_id: w_opts.workspace_id,
+        name: "warm".into(),
+        workload: anvil_domain::load::Workload::Iterations { iterations: 1, concurrency: 1 },
+        chain: vec![],
+        mix: vec![],
+        dataset_id: None,
+        environment_id: None,
+        connection_mode: Default::default(),
+        warmup_secs: 5,
+        abort: None,
+        seed: 0,
+        trusted: false,
+        created_at: now,
+        updated_at: now,
+    });
+    w_opts.warmup_secs = Some(0);
+    let r = import(&crlf_csv, &w_opts).unwrap();
+    assert_eq!(r.plan.warmup_secs, 0);
 }
 
 #[test]

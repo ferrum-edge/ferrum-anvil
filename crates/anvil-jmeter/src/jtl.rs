@@ -327,6 +327,7 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
     let mut first_record = true;
     loop {
         rdr.get_mut().reset();
+        let is_first = first_record;
         match rdr.read_record(&mut record) {
             Ok(false) => {
                 // For CRLF headers, `csv::Reader::headers()` stops at `\r` and
@@ -361,7 +362,13 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
         }
         line = record.position().map(|p| p.line()).unwrap_or(line + 1);
         // The record's exact size (the guard allows for read-ahead).
-        let start = record.position().map(|p| p.byte()).unwrap_or(0);
+        // After a CRLF header, `csv::Reader` places the first data record's
+        // position at the header's trailing `\n` (`header_bytes - 1`); clamp
+        // `start` up to `header_bytes` so that byte is not charged to the row.
+        let mut start = record.position().map(|p| p.byte()).unwrap_or(0);
+        if is_first {
+            start = start.max(rdr.get_ref().header_bytes);
+        }
         if rdr.position().byte().saturating_sub(start) > limits.max_record_bytes {
             return Err(JtlError::RecordTooLong { what: "a CSV record", limit: limits.max_record_bytes, position: start });
         }
@@ -921,7 +928,7 @@ fn assemble(
     warmup_sends: u64,
 ) -> LoadReport {
     let now = Timestamp::now();
-    let plan = opts.plan.clone().unwrap_or_else(|| LoadPlan {
+    let mut plan = opts.plan.clone().unwrap_or_else(|| LoadPlan {
         id: Id::new(),
         workspace_id: opts.workspace_id,
         name: format!("JMeter results: {}", bounded(&opts.source_name)),
@@ -938,6 +945,9 @@ fn assemble(
         created_at: now,
         updated_at: now,
     });
+    // Record the effective warmup (including any `--warmup` override) on the
+    // report's plan snapshot so report comparisons detect warmup differences.
+    plan.warmup_secs = warmup_secs;
     let version = opts.jmeter_version.as_deref().map(bounded).filter(|v| !v.is_empty()).unwrap_or_else(|| "unrecorded".into());
     let format_name = match format {
         JtlFormat::Csv => "csv",
