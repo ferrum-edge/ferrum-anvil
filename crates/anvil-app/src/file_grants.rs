@@ -504,7 +504,7 @@ impl FileGrants {
         // expired secrets grant fails before anything is staged or written.
         let (plan_entry, secrets_entry, generation) = {
             let mut g = self.state.lock();
-            self.sweep(&mut g);
+            self.prune(&mut g.entries);
             let generation = g.generation;
             let plan_entry = match g.entries.get(plan_token) {
                 Some(e) if e.purpose == plan_purpose => e.clone(),
@@ -525,7 +525,7 @@ impl FileGrants {
             }
             (plan_entry, secrets_entry, generation)
         };
-        let restore_grants = |plan_entry: GrantEntry, secrets_entry: Option<(String, GrantEntry)>| {
+        let restore_grants = |plan_entry: Entry, secrets_entry: Option<(String, Entry)>| {
             let mut g = self.state.lock();
             if g.generation == generation {
                 self.admit(&mut g, plan_token.to_owned(), plan_entry);

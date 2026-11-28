@@ -390,7 +390,7 @@ async fn load_012_default_export_properties_do_not_write_url_credentials_to_jtl(
     // Also attach a failing body assertion on the echoed response (which echoes
     // both secrets) to prove default XML save properties write neither URLs,
     // response messages, nor assertion failure messages into the JTL.
-    spec.assertions.push(assertion(AssertionKind::BodyContains { value: "NEVER-MATCHES".into(), case_sensitive: true }));
+    spec.assertions.push(assertion(AssertionKind::Body { comparison: Comparison::Contains, value: "NEVER-MATCHES".into() }));
     let (id, mut c) = step(spec);
     c.var_layers.push(layer("workspace", &[("secret_seg", path_secret, true), ("qkey", query_secret, true)]));
     let plan = Fx::new(iterations(3, 1), vec![(id, c, "url-secret")], None);

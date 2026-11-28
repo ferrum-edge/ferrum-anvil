@@ -123,12 +123,27 @@ struct Guard<R> {
     max_total: u64,
     max_record: u64,
     hit: Option<Hit>,
+    header_done: bool,
+    header_in_quotes: bool,
+    header_saw_cr: bool,
+    header_bytes: u64,
 }
 
 impl<R> Guard<R> {
     fn new(inner: R, limits: &JtlLimits) -> Self {
         // A buffered parser reads ahead by one buffer; allow for it.
-        Guard { inner, total: 0, since_reset: 0, max_total: limits.max_bytes, max_record: limits.max_record_bytes + 64 * 1024, hit: None }
+        Guard {
+            inner,
+            total: 0,
+            since_reset: 0,
+            max_total: limits.max_bytes,
+            max_record: limits.max_record_bytes + 64 * 1024,
+            hit: None,
+            header_done: false,
+            header_in_quotes: false,
+            header_saw_cr: false,
+            header_bytes: 0,
+        }
     }
 
     fn reset(&mut self) {
@@ -141,6 +156,29 @@ impl<R: Read> Read for Guard<R> {
         let n = self.inner.read(buf)?;
         self.total += n as u64;
         self.since_reset += n as u64;
+        if !self.header_done {
+            for &b in &buf[..n] {
+                if self.header_saw_cr {
+                    self.header_saw_cr = false;
+                    if b == b'\n' {
+                        self.header_bytes += 1;
+                    }
+                    self.header_done = true;
+                    break;
+                }
+                self.header_bytes += 1;
+                if b == b'"' {
+                    self.header_in_quotes = !self.header_in_quotes;
+                } else if !self.header_in_quotes {
+                    if b == b'\n' {
+                        self.header_done = true;
+                        break;
+                    } else if b == b'\r' {
+                        self.header_saw_cr = true;
+                    }
+                }
+            }
+        }
         if self.total > self.max_total {
             self.hit = Some(Hit::Total);
             return Err(std::io::Error::other("result file size limit"));
@@ -262,7 +300,8 @@ fn csv_samples<R: Read>(r: R, limits: &JtlLimits, f: &mut dyn FnMut(Sample) -> R
                 .unwrap_or_else(|| JtlError::Invalid(format!("the CSV header row: {e}"))));
         }
     };
-    if rdr.position().byte() > limits.max_record_bytes {
+    let header_bytes = rdr.get_ref().header_bytes.max(rdr.position().byte());
+    if header_bytes > limits.max_record_bytes {
         return Err(JtlError::RecordTooLong { what: "the CSV header row", limit: limits.max_record_bytes, position: 0 });
     }
     let col = |name: &str| headers.iter().position(|h| h.trim() == name);

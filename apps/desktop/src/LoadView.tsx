@@ -1156,8 +1156,8 @@ export function freshJtlName(planFile = "plan.jmx", now = new Date(), nonce?: st
   const unique =
     nonce ??
     (typeof globalThis.crypto?.randomUUID === "function"
-      ? globalThis.crypto.randomUUID().slice(-8)
-      : Math.random().toString(16).slice(2, 10));
+      ? globalThis.crypto.randomUUID()
+      : `${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}`);
   return `${stem}-results-${stamp}-${unique}.jtl`;
 }
 

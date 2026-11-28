@@ -542,6 +542,7 @@ pub fn export(input: &ExportInput<'_>, opts: &ExportOptions) -> Result<Export, E
             ("jmeter.save.saveservice.output_format".into(), "xml".into()),
             ("jmeter.save.saveservice.url".into(), "false".into()),
             ("jmeter.save.saveservice.response_message".into(), "false".into()),
+            ("jmeter.save.saveservice.assertions".into(), "false".into()),
             ("jmeter.save.saveservice.assertion_results".into(), "none".into()),
             ("jmeter.save.saveservice.assertion_results_failure_message".into(), "false".into()),
         ],
@@ -1489,6 +1490,8 @@ fn translate_step(
             let key = resolver.resolve(&mask_helpers(key, &mut t.markers), "auth.name").unwrap_or_default();
             if key.trim().is_empty() || t.markers.has_marks(&key) {
                 rs.push(reason(rq, "auth", "the API key name is empty or comes from a per-iteration value or a secret"));
+            } else if matches!(location, KeyLocation::Header) && key.trim().eq_ignore_ascii_case("accept-encoding") {
+                rs.push(reason(rq, "accept_encoding", "the Accept-Encoding header comes from a per-iteration value or a secret"));
             }
             match sensitive_value(t, pos, ctx, &resolver, name, value, "auth.api_key", format!("auth.{request_slug}.api_key")) {
                 Ok(v) => match location {

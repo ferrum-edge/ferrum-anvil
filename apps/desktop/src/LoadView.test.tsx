@@ -1270,7 +1270,7 @@ describe("LOAD-012 JMeter adapter", () => {
     expect(calls("load_export_jmx")).toEqual([{ planId: "plan-1", grant: "fg-jmx", secretsGrant: null, replaceDataset: false }]);
     expect(done.textContent).toContain("Exported to Sockets.jmx");
     const cmd = screen.getByTestId("jmx-command").textContent ?? "";
-    expect(cmd).toMatch(/^jmeter -n -t 'Sockets\.jmx' -l 'Sockets-results-\d{8}-\d{6}-[0-9a-f]{8}\.jtl' '-Jhttpsampler\.max_redirects=10'$/);
+    expect(cmd).toMatch(/^jmeter -n -t 'Sockets\.jmx' -l 'Sockets-results-\d{8}-\d{6}-[0-9a-f-]{16,36}\.jtl' '-Jhttpsampler\.max_redirects=10'$/);
     expect(done.textContent).toContain("anvil.secret.var.token");
     expect(screen.getByTestId("jmx-differences").textContent).toContain("Dataset rows");
   });

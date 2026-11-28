@@ -146,8 +146,8 @@ pub fn shell_quote(s: &str) -> String {
 }
 
 /// A fresh result filename per export so repeated JMeter runs do not append
-/// into the same JTL file. Uses the 48-bit random tail of UUIDv7 so exports in
-/// the same second never collide.
+/// into the same JTL file. Uses a full UUIDv7 (timestamp + counter + random
+/// bits) so exports never collide.
 fn fresh_results_name(out: &Path) -> String {
     let stem: String = out
         .file_stem()
@@ -159,8 +159,7 @@ fn fresh_results_name(out: &Path) -> String {
         .collect();
     let stem = if stem.is_empty() { "results" } else { stem.as_str() };
     let id = Id::new().to_string();
-    let suffix = id.rsplit('-').next().unwrap_or(&id);
-    format!("{stem}-results-{suffix}.jtl")
+    format!("{stem}-results-{id}.jtl")
 }
 
 /// Export `plan` to `out` (and its dataset next to it). Exit code 3 when

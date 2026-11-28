@@ -236,15 +236,16 @@ fn load_012_cli_exports_a_plan_refuses_strict_tls_and_imports_results() {
         let second_jtl = line2.split(" -l ").nth(1).unwrap().split(' ').next().unwrap().to_string();
         assert_ne!(first_jtl, second_jtl, "repeated exports must generate distinct JTL filenames");
 
-        // An invalid --out (an existing directory) must fail BEFORE publishing --secrets-file.
+        // An invalid --out (an existing directory) must fail BEFORE publishing --secrets-file or dataset.
         let out_dir = out.path().join("already-a-dir");
         std::fs::create_dir(&out_dir).unwrap();
         let secrets = out.path().join("must-not-exist.properties");
         let o = anvil(
             data,
-            &["load", "export-jmx", "Shop", "secret", "--out", out_dir.to_str().unwrap(), "--secrets-file", secrets.to_str().unwrap()],
+            &["load", "export-jmx", "Shop", "withdata", "--out", out_dir.to_str().unwrap(), "--secrets-file", secrets.to_str().unwrap()],
         );
         assert!(!o.status.success() && text(&o).contains("directory"), "{}", text(&o));
         assert!(!secrets.exists(), "invalid --out must not leave secrets sidecar behind");
+        assert!(!out.path().join("already-a-dir.dataset.csv").exists(), "invalid --out must not leave dataset behind");
     }
 }
